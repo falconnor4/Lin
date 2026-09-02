@@ -1,0 +1,15 @@
+; recursion (automatic Y)
+
+(define fact (\n (if (is_zero n) 1 (mul n (fact (pred n))))))
+(fact 0)
+; expect => 1
+(fact 5)
+; expect => 120
+
+(define fib (\n (if (leq n 1) n (add (fib (sub n 1)) (fib (sub n 2))))))
+(fib 10)
+; expect => 55
+
+(define double (\n (add n n)))
+(double 21)
+; expect => 42

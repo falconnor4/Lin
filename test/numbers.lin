@@ -1,0 +1,58 @@
+; Church numeral arithmetic
+
+0
+; expect => 0
+
+1
+; expect => 1
+
+42
+; expect => 42
+
+(succ 2)
+; expect => 3
+
+(add 2 3)
+; expect => 5
+
+(mul 3 4)
+; expect => 12
+
+(pow 2 5)
+; expect => 32
+
+(pred 5)
+; expect => 4
+
+(pred 0)
+; expect => 0
+
+(sub 8 3)
+; expect => 5
+
+(sub 3 8)
+; expect => 0
+
+(add (mul 2 3) (sub 10 4))
+; expect => 12
+
+(is_zero 0)
+; expect => true
+
+(is_zero 3)
+; expect => false
+
+(leq 2 5)
+; expect => true
+
+(leq 5 2)
+; expect => false
+
+(eq 4 4)
+; expect => true
+
+(lt 3 3)
+; expect => false
+
+(gt 4 2)
+; expect => true

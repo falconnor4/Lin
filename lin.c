@@ -138,6 +138,26 @@ static void parse_symbol(char* buf, int bufsz) {
   buf[i] = 0;
 }
 
+static int is_all_digits(const char* s) {
+  if (!s || !s[0]) return 0;
+  for (int i = 0; s[i]; i++) if (!isdigit((unsigned char)s[i])) return 0;
+  return 1;
+}
+
+static Term* copy_term(Term* t);
+
+static Term* make_church(int val) {
+  Term* f = term_alloc(0, "_cf", NULL, NULL);
+  Term* x = term_alloc(0, "_cx", NULL, NULL);
+  Term* body = copy_term(x);
+  for (int i = 0; i < val; i++)
+    body = term_alloc(2, "", copy_term(f), body);
+  Term* lx = term_alloc(1, "_cx", body, NULL);
+  Term* lf = term_alloc(1, "_cf", lx, NULL);
+  term_free(f); term_free(x);
+  return lf;
+}
+
 static Term* parse_term(void);
 
 static Term* parse_app(Term* first) {
@@ -193,6 +213,7 @@ static Term* parse_term(void) {
   }
   char buf[NAME_LEN];
   parse_symbol(buf, sizeof(buf));
+  if (is_all_digits(buf)) return term_alloc(3, buf, NULL, NULL);
   return term_alloc(0, buf, NULL, NULL);
 }
 
@@ -300,6 +321,14 @@ static Port compile_term(Term* t, Scope sc, Net* n, Env* e) {
     Port arg_res = compile_term(t->right, sc, n, e);
     wire_connect(n, app_arg, arg_res);
     return app_ret;
+  }
+  if (t->type == 3) {
+    int val = atoi(t->name);
+    if (val < 0 || val > 100000) return PORT_NONE;
+    Term* ct = make_church(val);
+    Port res = compile_term(ct, sc, n, e);
+    term_free(ct);
+    return res;
   }
   return PORT_NONE;
 }
@@ -446,6 +475,36 @@ static int visited_mark(Visited* v, int node) {
 
 static void visited_free(Visited* v) { free(v->visited); free(v); }
 
+static int church_to_int(Net* n, int node) {
+  if (n->tag[node] != LAM) return -1;
+  Port bf = wire_get(n, node, 2);
+  if (bf.node < 0 || n->tag[bf.node] != LAM) return -1;
+  int lam_x = bf.node;
+  Port bx = wire_get(n, lam_x, 2);
+  if (bx.node < 0) return -1;
+  // Church numeral 0: inner body is x (inner LAM's port 1)
+  if (bx.node == lam_x && bx.port == 1) return 0;
+  int count = 0;
+  Port cur = bx;
+  for (int safety = 0; safety < 100000; safety++) {
+    if (cur.node < 0 || n->tag[cur.node] != APP) break;
+    Port fun = wire_get(n, cur.node, 0);
+    Port arg = wire_get(n, cur.node, 2);
+    int found_f = 0;
+    Port fc = fun;
+    for (int d = 0; d < 100; d++) {
+      if (fc.node == node && fc.port == 1) { found_f = 1; break; }
+      if (fc.node < 0 || n->tag[fc.node] != DUP) break;
+      fc = wire_get(n, fc.node, 0);
+    }
+    if (!found_f) return -1;
+    count++;
+    cur = arg;
+  }
+  if (cur.node == lam_x && cur.port == 1) return count;
+  return -1;
+}
+
 static void print_term(Net* n, Port p, Visited* v, FILE* out);
 
 static void print_term(Net* n, Port p, Visited* v, FILE* out) {
@@ -459,6 +518,11 @@ static void print_term(Net* n, Port p, Visited* v, FILE* out) {
   }
   else if (tag == LAM) {
     if (visited_mark(v, node)) { fprintf(out, "%s", n->name[node]); return; }
+    int ci = church_to_int(n, node);
+    if (ci >= 0) {
+      fprintf(out, "#%d", ci);
+      return;
+    }
     if (port == 0) {
       fprintf(out, "(\\%s ", n->name[node]);
       print_term(n, wire_get(n, node, 2), v, out);
@@ -557,8 +621,37 @@ static int64_t goi_det(Net* n) {
 }
 
 // =============================================================================
-// REPL
+// Standard Library (embedded Lin definitions)
 // =============================================================================
+static const char* std_src =
+  "(define true (\\ t (\\ f t)))\n"
+  "(define false (\\ t (\\ f f)))\n"
+  "(define not (\\ b (\\ t (\\ f ((b f) t)))))\n"
+  "(define and (\\ p (\\ q ((p q) false))))\n"
+  "(define or (\\ a (\\ b ((a true) b))))\n"
+  "(define xor (\\ a (\\ b ((a (not b)) b))))\n"
+  "(define if (\\ c (\\ t (\\ e ((c t) e)))))\n"
+  "(define succ (\\ n (\\ f (\\ x (f ((n f) x))))))\n"
+  "(define add (\\ m (\\ n (\\ f (\\ x ((m f) ((n f) x)))))))\n"
+  "(define mul (\\ m (\\ n (\\ f (m (n f))))))\n"
+  "(define pow (\\ m (\\ n (n m))))\n"
+  "(define pred (\\ n (\\ f (\\ x (((n (\\ g (\\ h (h (g f))))) (\\ u x)) (\\ u u))))))\n"
+  "(define sub (\\ m (\\ n ((n pred) m))))\n"
+  "(define is_zero (\\ n ((n (\\ x false)) true)))\n"
+  "(define leq (\\ m (\\ n (is_zero ((sub m) n)))))\n"
+  "(define eq (\\ m (\\ n ((and (leq m n)) (leq n m)))))\n"
+  "(define lt (\\ m (\\ n (not (leq n m)))))\n"
+  "(define gt (\\ m (\\ n (not (leq m n)))))\n"
+  "(define pair (\\ x (\\ y (\\ s ((s x) y)))))\n"
+  "(define fst (\\ p (p (\\ x (\\ y x)))))\n"
+  "(define snd (\\ p (p (\\ x (\\ y y)))))\n"
+  "(define nil (\\ c (\\ n n)))\n"
+  "(define cons (\\ h (\\ t (\\ c (\\ n ((c h) (t c n)))))))\n"
+  "(define head (\\ l (l (\\ h (\\ t h)) nil)))\n"
+  "(define tail (\\ l (l (\\ h (\\ t t)) nil)))\n"
+  "(define is_empty (\\ l (l (\\ h (\\ t false)) true)))\n"
+  "(define Y (\\ f ((\\ x (f (x x))) (\\ x (f (x x))))))\n"
+  ;
 typedef struct { char name[NAME_LEN]; Term* term; } Def;
 static Def defs[1024];
 static int ndefs = 0;
@@ -585,10 +678,51 @@ static Term* expand_defs(Term* t) {
   return t;
 }
 
+static void load_definitions(const char* src) {
+  const char* saved_input = g_input;
+  int saved_pos = g_pos;
+  g_input = src; g_pos = 0;
+  while (1) {
+    parse_skip_ws();
+    if (!g_input[g_pos]) break;
+    Term* t = parse_term();
+    if (!t) break;
+    if (t->type == 100) {
+      t->left = expand_defs(t->left);
+      if (ndefs < 1024) {
+        defs[ndefs].term = t->left;
+        CPY_NAME(defs[ndefs].name, t->name);
+        ndefs++;
+      }
+      free(t);
+    } else {
+      term_free(t);
+    }
+  }
+  g_input = saved_input; g_pos = saved_pos;
+}
+
+static void load_file(const char* path) {
+  FILE* f = fopen(path, "r");
+  if (!f) { printf(":load: cannot open %s\n", path); return; }
+  fseek(f, 0, SEEK_END);
+  long fsize = ftell(f);
+  if (fsize <= 0) { fclose(f); return; }
+  rewind(f);
+  char* buf = malloc(fsize + 1);
+  if (!buf) { fclose(f); return; }
+  fread(buf, 1, fsize, f);
+  fclose(f);
+  buf[fsize] = 0;
+  load_definitions(buf);
+  free(buf);
+}
+
 static void repl(void) {
+  load_definitions(std_src);
   char buf[4096];
   printf("Lin: Non-Abelian Scope Gauge Optimal Reduction Engine\n");
-  printf("     (:q to quit, :goi <expr> for spectral invariant)\n\n");
+  printf("     (:q to quit, :load <file>, :goi <expr>)\n\n");
   while (1) {
     printf("lin> "); fflush(stdout);
     if (!fgets(buf, sizeof(buf), stdin)) break;
@@ -596,6 +730,8 @@ static void repl(void) {
     while (len > 0 && (buf[len-1]=='\n'||buf[len-1]=='\r')) buf[--len]=0;
     if (len == 0) continue;
     if (strcmp(buf, ":q") == 0 || strcmp(buf, ":quit") == 0) break;
+
+    if (strncmp(buf, ":load ", 6) == 0) { load_file(buf + 6); continue; }
 
     if (strncmp(buf, ":goi ", 5) == 0) {
       g_input = buf + 5; g_pos = 0;
@@ -636,4 +772,11 @@ static void repl(void) {
   }
 }
 
-int main(void) { repl(); return 0; }
+int main(int argc, char** argv) {
+  if (argc > 1) {
+    load_definitions(std_src);
+    load_file(argv[1]);
+    return 0;
+  }
+  repl(); return 0;
+}

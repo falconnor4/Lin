@@ -1,0 +1,17 @@
+; let bindings
+
+(let ((x 2)) (add x x))
+; expect => 4
+
+(let ((x 2) (y 3)) (mul x y))
+; expect => 6
+
+(let ((f (\x (add x 1)))) (f 41))
+; expect => 42
+
+(let ((id (\x x))) (id 1))
+; expect => 1
+
+; let-polymorphism: id used at two types
+(let ((id (\x x))) (pair (id 1) (id true)))
+; expect => (\f ((f 1) true))

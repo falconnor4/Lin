@@ -1,0 +1,40 @@
+; booleans
+
+true
+; expect => true
+
+false
+; expect => false
+
+(not true)
+; expect => false
+
+(not false)
+; expect => true
+
+(and true false)
+; expect => false
+
+(and true true)
+; expect => true
+
+(or false true)
+; expect => true
+
+(or false false)
+; expect => false
+
+(xor true true)
+; expect => false
+
+(xor true false)
+; expect => true
+
+(if true 1 2)
+; expect => 1
+
+(if false 1 2)
+; expect => 2
+
+(if (is_zero 0) (add 1 1) 3)
+; expect => 2

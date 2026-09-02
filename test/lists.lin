@@ -1,0 +1,24 @@
+; pairs and lists
+
+(fst (pair 1 2))
+; expect => 1
+
+(snd (pair 1 2))
+; expect => 2
+
+(is_empty nil)
+; expect => true
+
+(is_empty (cons 1 nil))
+; expect => false
+
+(head (cons 1 (cons 2 nil)))
+; expect => 1
+
+(head (tail (cons 1 (cons 2 nil))))
+; expect => 2
+
+; sum a list of length 3
+(define sum3 (\l (add (head l) (add (head (tail l)) (head (tail (tail l)))))))
+(sum3 (cons 1 (cons 2 (cons 3 nil))))
+; expect => 6

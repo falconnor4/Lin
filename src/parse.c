@@ -1,0 +1,283 @@
+#include "lin.h"
+#include <ctype.h>
+#include <setjmp.h>
+#include <stdlib.h>
+#include <string.h>
+
+static const char *S;
+static int P;
+static jmp_buf PJ;
+static char PMSG[128];
+
+static void pfail(const char *msg) {
+  snprintf(PMSG, sizeof PMSG, "%s", msg);
+  longjmp(PJ, 1);
+}
+
+static void skipws(void) {
+  for (;;) {
+    while (S[P] && isspace((unsigned char)S[P])) P++;
+    if (S[P] == ';') {
+      while (S[P] && S[P] != '\n') P++;
+      continue;
+    }
+    break;
+  }
+}
+
+Term *term_new(int type, const char *name, Term *l, Term *r) {
+  Term *t = malloc(sizeof *t);
+  t->type = type;
+  snprintf(t->name, NAME, "%s", name ? name : "");
+  t->l = l;
+  t->r = r;
+  t->annot = NULL;
+  return t;
+}
+
+void term_free(Term *t) {
+  if (!t) return;
+  term_free(t->l);
+  term_free(t->r);
+  free(t);
+}
+
+Term *term_copy(Term *t) {
+  if (!t) return NULL;
+  return term_new(t->type, t->name, term_copy(t->l), term_copy(t->r));
+}
+
+int term_refs(Term *t, const char *name) {
+  if (!t) return 0;
+  switch (t->type) {
+  case TVAR: return !strcmp(t->name, name);
+  case TLAM: return strcmp(t->name, name) && term_refs(t->l, name);
+  case TLET:
+    return term_refs(t->l, name) ||
+           (strcmp(t->name, name) && term_refs(t->r, name));
+  default: return term_refs(t->l, name) || term_refs(t->r, name);
+  }
+}
+
+static int sym(char *buf, int bufsz) {
+  int i = 0;
+  if (S[P] == '\\' || ((unsigned char)S[P] == 0xce && (unsigned char)S[P + 1] == 0xbb)) {
+    int len = S[P] == '\\' ? 1 : 2;
+    if (bufsz > len) memcpy(buf, S + P, len);
+    P += len;
+    buf[len] = 0;
+    return len;
+  }
+  while (S[P] && !isspace((unsigned char)S[P]) && S[P] != '(' && S[P] != ')') {
+    if (i < bufsz - 1) buf[i++] = S[P];
+    P++;
+  }
+  buf[i] = 0;
+  return i;
+}
+
+static int islambda(const char *s) {
+  return !strcmp(s, "\\") || !strcmp(s, "lambda") || !strcmp(s, "lam") ||
+         !strcmp(s, "\xce\xbb");
+}
+
+static int isnum(const char *s) {
+  if (!*s) return 0;
+  for (const char *p = s; *p; p++)
+    if (!isdigit((unsigned char)*p)) return 0;
+  return 1;
+}
+
+static Term *parse_term(void);
+
+/* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'
+   builtins: num = (a->a)->a->a, bool = p->q->p (fresh vars per use) */
+static Type *parse_type(void);
+static char tvn[64][NAME];
+static Type *tvt[64];
+static int tvnn;
+
+static Type *parse_type_atom(void) {
+  skipws();
+  if (S[P] == '(') {
+    P++;
+    Type *t = parse_type();
+    skipws();
+    if (S[P] != ')') pfail("type: missing ')'");
+    P++;
+    return t;
+  }
+  char nm[NAME];
+  if (!sym(nm, NAME)) pfail("type: expected name");
+  if (!strcmp(nm, "num")) {
+    Type *a = type_var();
+    return type_arrow(type_arrow(a, a), type_arrow(a, a));
+  }
+  if (!strcmp(nm, "bool")) {
+    Type *p = type_var(), *q = type_var();
+    return type_arrow(p, type_arrow(q, p));
+  }
+  if (!strcmp(nm, "list")) {
+    Type *e = parse_type_atom();
+    return type_list(e);
+  }
+  for (int i = 0; i < tvnn; i++)
+    if (!strcmp(tvn[i], nm)) return tvt[i];
+  if (tvnn >= 64) pfail("type: too many variables");
+  snprintf(tvn[tvnn], NAME, "%s", nm);
+  tvt[tvnn] = type_var();
+  return tvt[tvnn++];
+}
+
+static Type *parse_type(void) {
+  Type *a = parse_type_atom();
+  skipws();
+  if (S[P] == '-' && S[P + 1] == '>') {
+    P += 2;
+    return type_arrow(a, parse_type());
+  }
+  return a;
+}
+
+static Type *parse_type_top(void) {
+  tvnn = 0;
+  return parse_type();
+}
+
+static Term *parse_tail(Term *f) {
+  for (;;) {
+    skipws();
+    if (S[P] == ')') {
+      P++;
+      return f;
+    }
+    if (!S[P]) pfail("missing ')'");
+    Term *a = parse_term();
+    f = term_new(TAPP, "", f, a);
+  }
+}
+
+static Term *parse_term(void) {
+  skipws();
+  if (!S[P]) pfail("unexpected end of input");
+  if (S[P] == ')') pfail("unexpected ')'");
+  if (S[P] == '(') {
+    P++;
+    skipws();
+    if (S[P] == '(') {
+      Term *f = parse_term();
+      return parse_tail(f);
+    }
+    char kw[NAME];
+    if (!sym(kw, NAME)) pfail("empty '('");
+    if (islambda(kw)) {
+      skipws();
+      char var[NAME];
+      if (!sym(var, NAME)) pfail("lambda: expected binder");
+      Term *body = parse_term();
+      return term_new(TLAM, var, parse_tail(body), NULL);
+    }
+    if (!strcmp(kw, "define")) {
+      skipws();
+      char name[NAME];
+      if (!sym(name, NAME)) pfail("define: expected name");
+      Term *v = parse_term();
+      skipws();
+      if (S[P] != ')') pfail("define: expected ')'");
+      P++;
+      return term_new(TDEF, name, v, NULL);
+    }
+    if (!strcmp(kw, "define!")) {
+      skipws();
+      char name[NAME];
+      if (!sym(name, NAME)) pfail("define!: expected name");
+      Type *ty = parse_type_top();
+      Term *v = parse_term();
+      skipws();
+      if (S[P] != ')') pfail("define!: expected ')'");
+      P++;
+      Term *t = term_new(TDEFX, name, v, NULL);
+      t->annot = ty;
+      return t;
+    }
+    if (!strcmp(kw, "let")) {
+      skipws();
+      if (S[P] != '(') pfail("let: expected '('");
+      P++;
+      char names[64][NAME];
+      Term *vals[64];
+      int nb = 0;
+      for (;;) {
+        skipws();
+        if (S[P] == ')') {
+          P++;
+          break;
+        }
+        if (S[P] != '(') pfail("let: expected binding");
+        P++;
+        skipws();
+        char vn[NAME];
+        if (!sym(vn, NAME)) pfail("let: bad binding");
+        Term *v = parse_term();
+        skipws();
+        if (S[P] != ')') pfail("let: missing ')' in binding");
+        P++;
+        if (nb < 64) {
+          snprintf(names[nb], NAME, "%s", vn);
+          vals[nb] = v;
+          nb++;
+        }
+      }
+      Term *body = parse_tail(parse_term());
+      for (int i = nb - 1; i >= 0; i--)
+        body = term_new(TLET, names[i], vals[i], body);
+      return body;
+    }
+    return parse_tail(term_new(isnum(kw) ? TNUM : TVAR, kw, NULL, NULL));
+  }
+  char kw[NAME];
+  if (!sym(kw, NAME)) pfail("unexpected character");
+  return term_new(isnum(kw) ? TNUM : TVAR, kw, NULL, NULL);
+}
+
+static int resync(int start) {
+  int p = start, depth = 0;
+  while (S[p]) {
+    char c = S[p];
+    if (c == ';') {
+      while (S[p] && S[p] != '\n') p++;
+      continue;
+    }
+    if (c == '(') depth++;
+    else if (c == ')') {
+      depth--;
+      if (depth <= 0) return p + 1;
+    } else if (depth == 0 && !isspace((unsigned char)c)) {
+      while (S[p] && !isspace((unsigned char)S[p]) && S[p] != '(' &&
+             S[p] != ')')
+        p++;
+      return p;
+    }
+    p++;
+  }
+  return p;
+}
+
+void parse_forms(const char *src, FormFn fn, void *ud) {
+  S = src;
+  P = 0;
+  for (;;) {
+    skipws();
+    if (!S[P]) break;
+    int start = P;
+    if (setjmp(PJ)) {
+      char msg[160];
+      snprintf(msg, sizeof msg, "parse error: %s", PMSG);
+      fn(NULL, msg, ud);
+      P = resync(start);
+      continue;
+    }
+    Term *t = parse_term();
+    fn(t, NULL, ud);
+  }
+}

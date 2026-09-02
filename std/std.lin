@@ -1,0 +1,45 @@
+; lin standard library
+; Everything is a lambda encoding: data is its own eliminator.
+; Booleans and numerals use reserved binder names (_bt/_bf, _cf/_cx)
+; so the readback can print them as true/false and digits.
+
+; ---- booleans ----
+(define true (\_bt (\_bf _bt)))
+(define false (\_bt (\_bf _bf)))
+(define not (\b ((b false) true)))
+(define and (\a (\b ((a b) false))))
+(define or (\a (\b ((a true) b))))
+(define xor (\a (\b ((a (not b)) b))))
+(define if (\c (\t (\f ((c t) f)))))
+
+; ---- Church numerals ----
+(define zero 0)
+(define succ (\n (\_cf (\_cx (_cf (((n _cf) _cx)))))))
+(define add (\m (\n (\_cf (\_cx (((m _cf) ((n _cf) _cx))))))))
+(define mul (\m (\n (\_cf (\_cx (((m (n _cf)) _cx)))))))
+(define pow (\m (\n (\_cf (\_cx ((((n m) _cf) _cx)))))))
+; pred/sub/is_zero also carry annotations (num -> num etc.): their inferred
+; types pin the Church numeral carrier to one variable, which makes recursive
+; definitions using them (e.g. fact/fib) hit the occurs check.
+(define! pred (num -> num) (\n (\_cf (\_cx ((((n (\g (\h (h ((g _cf)))))) (\u _cx)) (\u u)))))))
+(define! sub (num -> num -> num) (\m (\n ((n pred) m))))
+(define! is_zero (num -> bool) (\n ((n (\x false)) true)))
+; Comparisons mix leq (iterator-typed) and eq (numeral-typed) uses of the
+; same Church numerals, which HM cannot infer (occurs check), so they carry
+; explicit annotations via define! (trusted definitions).
+(define! leq (num -> num -> bool) (\m (\n (is_zero ((sub m) n)))))
+(define! eq (num -> num -> bool) (\m (\n (and (leq m n) (leq n m)))))
+(define! lt (num -> num -> bool) (\m (\n (and (leq m n) (not (eq m n))))))
+(define! gt (num -> num -> bool) (\m (\n (lt n m))))
+
+; ---- pairs ----
+(define pair (\x (\y (\f ((f x) y)))))
+(define fst (\p (p true)))
+(define snd (\p (p false)))
+
+; ---- lists ----
+(define! nil (list a) (\c (\n true)))
+(define! cons (a -> list a -> list a) (\h (\t (\c (\n ((c h) t))))))
+(define! head (list a -> a) (\l ((l (\h (\t h))) nil)))
+(define! tail (list a -> list a) (\l ((l (\h (\t t))) nil)))
+(define! is_empty (list a -> bool) (\l ((l (\h (\t false))) true)))

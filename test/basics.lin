@@ -1,0 +1,43 @@
+; core lambda calculus
+
+(\x x)
+; expect => (\x x)
+
+(\x (\y y))
+; expect => (\x (\y y))
+
+(\x (\y x))
+; expect => (\x (\y x))
+
+((\x x) (\y y))
+; expect => (\y y)
+
+((\x (\y x)) 1)
+; expect => (\y 1)
+
+((\x (x 2)) (\y (succ y)))
+; expect => 3
+
+; bodies under lambdas are not reduced (weak evaluation)
+(\x 1)
+; expect => (\x 1)
+
+(\ x 1 2 3)
+; expect => (\x ((1 2) 3))
+
+(\f (\x (f x)))
+; expect => (\f (\x (f x)))
+
+(lambda x x)
+; expect => (\x x)
+
+(lam x x)
+; expect => (\x x)
+
+; unused parameters are erased
+((\x (\y y)) 1)
+; expect => (\y y)
+
+; sharing: variable used multiple times
+((\x (add x x)) 21)
+; expect => 42
