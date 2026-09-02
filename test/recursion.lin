@@ -13,3 +13,49 @@
 (define double (\n (add n n)))
 (double 21)
 ; expect => 42
+
+; --- more factorial / fib cases ---
+(fact 1)
+; expect => 1
+
+(fact 4)
+; expect => 24
+
+(fact 6)
+; expect => 720
+
+(fib 0)
+; expect => 0
+
+(fib 1)
+; expect => 1
+
+(fib 5)
+; expect => 5
+
+(fib 12)
+; expect => 144
+
+; --- arithmetic recursion ---
+(define div3? (\n (if (lt n 3) (eq n 0) (div3? (sub n 3)))))
+(div3? 9)
+; expect => true
+
+(div3? 10)
+; expect => false
+
+(define pow2 (\n (if (is_zero n) 1 (mul 2 (pow2 (pred n))))))
+(pow2 10)
+; expect => 1024
+
+(define sumto (\n (if (is_zero n) 0 (add n (sumto (pred n))))))
+(sumto 10)
+; expect => 55
+
+; --- nested double recursion ---
+(define ack (\m (\n (if (is_zero m) (succ n) (if (is_zero n) (ack (pred m) 1) (ack (pred m) (ack m (pred n))))))))
+((ack 2) 2)
+; expect => 7
+
+((ack 2) 3)
+; expect => 9

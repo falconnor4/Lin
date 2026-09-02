@@ -1,0 +1,98 @@
+; higher-order functions and combinators
+
+(define sq (\x (mul x x)))
+(sq 7)
+; expect => 49
+
+(sq 9)
+; expect => 81
+
+(define cube (\x (mul x (sq x))))
+(cube 3)
+; expect => 27
+
+((\x (add x (mul x 3))) 2)
+; expect => 8
+
+; --- combinators ---
+(define const (\x (\y x)))
+((const 7) 9)
+; expect => 7
+
+(((const (const 10)) 20) 21)
+; expect => 10
+
+(define flip (\f (\x (\y (f y x)))))
+(((flip const) 7) 9)
+; expect => 9
+
+(((flip (\x (\y (add x y)))) 4) 5)
+; expect => 9
+
+(define comp (\f (\g (\x (f (g x))))))
+(((comp (\x (succ x))) (\x (succ x))) 5)
+; expect => 7
+
+(((comp sq) sq) 3)
+; expect => 81
+
+(define compose (\f (\g (\x (f (g x))))))
+(((compose succ) succ) 0)
+; expect => 2
+
+(define maybe (\b (\x (\y (if b x y)))))
+((maybe true) 5 6)
+; expect => 5
+
+((maybe false) 5 6)
+; expect => 6
+
+(define plus (\x (\y (add x y))))
+((plus 4) 5)
+; expect => 9
+
+(define myid (\x x))
+(myid 5)
+; expect => 5
+
+(define add2 (\x (add x 2)))
+(add2 (add2 10))
+; expect => 14
+
+(define swap (\p (pair (snd p) (fst p))))
+(fst (swap (pair 5 6)))
+; expect => 6
+
+(snd (swap (pair 5 6)))
+; expect => 5
+
+(define eq2 (\m (\n (eq m n))))
+(eq2 3 3)
+; expect => true
+
+(eq2 3 4)
+; expect => false
+
+; --- anonymous lambdas as arguments ---
+((\f (f 41)) (\x (add x 1)))
+; expect => 42
+
+((\f (\g (f (g 5)))) (\x (mul x 2)) (\x (add x 1)))
+; expect => 12
+
+((\x (\y (\z (add x (add y z))))) 1 2 3)
+; expect => 6
+
+; --- partial application ---
+(define addN (\n (\m (add n m))))
+(((addN 5) 3))
+; expect => 8
+
+((\x x) (\x x))
+; expect => (\x x)
+
+(((\x x) (\x x)) (\x x))
+; expect => (\x x)
+
+(\f (\x (f (f x))))
+; expect => (\f (\x (f (f x))))

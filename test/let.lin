@@ -12,6 +12,86 @@
 (let ((id (\x x))) (id 1))
 ; expect => 1
 
-; let-polymorphism: id used at two types
 (let ((id (\x x))) (pair (id 1) (id true)))
 ; expect => (\f ((f 1) true))
+
+; --- simple bindings ---
+(let ((x 2)) x)
+; expect => 2
+
+(let ((x 2)) (add x 1))
+; expect => 3
+
+(let ((x 2)) (mul x x))
+; expect => 4
+
+(let ((x 2)) (mul x 3))
+; expect => 6
+
+(let ((x 5) (y 6)) (mul x y))
+; expect => 30
+
+(let ((x 3) (y 4)) (add (mul x x) (mul y y)))
+; expect => 25
+
+; --- nested lets ---
+(let ((x 2)) (let ((y 3)) (add x y)))
+; expect => 5
+
+(let ((x 2)) (let ((y (mul x 3))) (add x y)))
+; expect => 8
+
+(let ((x 2)) (let ((x 3)) x))
+; expect => 3
+
+(let ((x 2)) (let ((x (add x 1))) (mul x x)))
+; expect => 9
+
+(let ((x (add 2 3))) (let ((y (mul x x))) (pred y)))
+; expect => 24
+
+; --- let with computed values ---
+(let ((x (mul 2 3))) (mul x x))
+; expect => 36
+
+(let ((x (mul 2 3))) (add x 1))
+; expect => 7
+
+(let ((b (eq 2 2))) (if b 10 20))
+; expect => 10
+
+(let ((x 2)) (add x (mul x 3)))
+; expect => 8
+
+; --- let bound lambdas ---
+(let ((f (\n (mul n 2)))) (f 5))
+; expect => 10
+
+(let ((f (\n (if (eq n 0) 1 (mul n 2))))) (f 5))
+; expect => 10
+
+(let ((f (\x (add x 1)))) (f (f 10)))
+; expect => 12
+
+; --- let with pairs ---
+(let ((p (pair 1 (pair 2 3)))) (fst (snd p)))
+; expect => 2
+
+(let ((p (pair 1 2))) (fst p))
+; expect => 1
+
+; --- let with std values (capture safety) ---
+(let ((x nil)) x)
+; expect => (\c (\n true))
+
+(let ((x cons)) x)
+; expect => (\h (\t (\c (\n ((c h) t)))))
+
+(let ((h (cons 1 nil))) h)
+; expect => (\c (\n ((c 1) (\c (\n true)))))
+
+(let ((h (cons 1 (cons 2 nil)))) (head h))
+; expect => 1
+
+(let ((h (cons 1 nil))) (head h))
+; expect => 1

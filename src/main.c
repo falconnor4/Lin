@@ -36,8 +36,16 @@ Term *expand_defs(Term *t, char guard[][NAME], int ng) {
   Term *c = term_new(t->type, t->name, NULL, NULL);
   int bound = (t->type == TLAM || t->type == TLET) && ng < 63;
   if (bound) snprintf(guard[ng], NAME, "%s", t->name);
-  c->l = expand_defs(t->l, guard, t->type == TLET ? ng : ng + bound);
-  c->r = expand_defs(t->r, guard, ng + bound);
+  if (t->type == TLET) {
+    char saved[NAME];
+    snprintf(saved, NAME, "%s", guard[ng]);
+    c->l = expand_defs(t->l, guard, ng);
+    snprintf(guard[ng], NAME, "%s", saved);
+    c->r = expand_defs(t->r, guard, ng + bound);
+  } else {
+    c->l = expand_defs(t->l, guard, ng + bound);
+    c->r = expand_defs(t->r, guard, ng + bound);
+  }
   return c;
 }
 

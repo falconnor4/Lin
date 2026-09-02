@@ -56,3 +56,114 @@
 
 (gt 4 2)
 ; expect => true
+
+; --- arithmetic edge cases ---
+(add 1000 2000)
+; expect => 3000
+
+(mul 100 5)
+; expect => 500
+
+(mul 0 5)
+; expect => 0
+
+(mul 5 0)
+; expect => 0
+
+(pow 2 0)
+; expect => 1
+
+(pow 0 0)
+; expect => 1
+
+(pow 0 5)
+; expect => 0
+
+(pow 1 10)
+; expect => 1
+
+(pow 3 7)
+; expect => 2187
+
+(pow 10 3)
+; expect => 1000
+
+(sub 100 1)
+; expect => 99
+
+(pred 3)
+; expect => 2
+
+(succ (pred 3))
+; expect => 3
+
+(add 2 (mul 2 3))
+; expect => 8
+
+(sub (mul 6 7) 42)
+; expect => 0
+
+(add (pow 2 10) (pow 3 3))
+; expect => 1051
+
+(mul (add 1 1) (add 2 3))
+; expect => 10
+
+(pow 2 16)
+; expect => 65536
+
+; --- comparison composition ---
+(eq 2 3)
+; expect => false
+
+(eq (mul 2 4) 8)
+; expect => true
+
+(lt 1 2)
+; expect => true
+
+(gt 2 3)
+; expect => false
+
+(leq 5 5)
+; expect => true
+
+(not (eq 3 4))
+; expect => true
+
+(not (is_zero 1))
+; expect => true
+
+(if (eq 1 1) 10 20)
+; expect => 10
+
+(if (lt 5 3) 1 2)
+; expect => 2
+
+(and (lt 1 2) (eq 5 5))
+; expect => true
+
+(or (gt 1 2) (eq 2 2))
+; expect => true
+
+(is_zero (sub 4 4))
+; expect => true
+
+(eq (sub 5 2) 3)
+; expect => true
+
+; --- combination of operations ---
+(eq (add (mul 2 3) 1) 7)
+; expect => true
+
+(if (leq (mul 2 3) (sub 10 1)) 1 2)
+; expect => 1
+
+(pred (pred (pred 6)))
+; expect => 3
+
+(succ (mul 2 2))
+; expect => 5
+
+(add (add 1 2) (add 3 4))
+; expect => 10

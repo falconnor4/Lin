@@ -125,15 +125,6 @@ static T *mkvalthunk(V *val) {
 
 static V *force(T *);
 
-static V *envget(V *env, const char *name) {
-  for (V *e = env; e; e = e->u.env.up) {
-    if (!strcmp(e->u.env.name, name)) return force(e->u.env.val);
-  }
-  if (getenv("LIN_TRACE"))
-    fprintf(stderr, "EVAL unbound var '%s'\n", name);
-  return mktok(name);
-}
-
 static Term *mknumeral(long k, const char *f, const char *x) {
   Term *cxv = term_new(TVAR, x, NULL, NULL);
   Term *cur = cxv;
@@ -142,40 +133,114 @@ static Term *mknumeral(long k, const char *f, const char *x) {
   return term_new(TLAM, f, term_new(TLAM, x, cur, NULL), NULL);
 }
 
-static V *force(T *t) {
-  if (t->memo) return t->memo;
-  Term *e = t->e;
-  V *env = t->env;
-  V *r = NULL;
-  switch (e->type) {
-  case TVAR:
-    r = envget(env, e->name);
-    break;
-  case TLAM:
-    r = mklam(e, env);
-    break;
-  case TAPP: {
-    V *f = force(mkth(e->l, env));
-    T *arg = mkth(e->r, env);
-    if (f->kind == 1) {
-      Term *lam = f->u.t;
-      V *nenv = mkbind(lam->name, arg, f->env);
-      r = force(mkth(lam->l, nenv));
-    } else if (f->kind == 4) {
-      r = mkchain(force(arg));
-    } else {
-      r = mkapp(f, arg);
+/* Call-by-need force implemented on an explicit frame stack so that deeply
+   nested application spines (e.g. a Church numeral of size N) do not
+   overflow the C stack.  Frame kinds: APP = apply inner thunk to the value
+   once obtained; WRAP = wrap the value in a counting chain cell. */
+static V *force(T *t0) {
+  enum { FRAME_APP, FRAME_WRAP };
+  int cap = 4096, sp = 0;
+  unsigned char *kinds = malloc(cap);
+  T **fargs = malloc(sizeof(T *) * cap);
+  if (!kinds || !fargs) { free(kinds); free(fargs); return mktok("?"); }
+#define FGROW()                                                              \
+  do {                                                                       \
+    if (sp >= cap - 1) {                                                     \
+      cap *= 2;                                                              \
+      kinds = realloc(kinds, cap);                                           \
+      fargs = realloc(fargs, sizeof(T *) * cap);                             \
+    }                                                                        \
+  } while (0)
+  T *t = t0;
+  V *val = NULL;
+  for (;;) {
+    /* phase 1: descend to a memoised value */
+    while (t && !t->memo) {
+      Term *e = t->e;
+      V *env = t->env;
+      if (e->type == TAPP) {
+        FGROW();
+        kinds[sp] = FRAME_APP;
+        fargs[sp] = mkth(e->r, env);
+        sp++;
+        t = mkth(e->l, env);
+        continue;
+      }
+      if (e->type == TLET) {
+        Term *lam = term_new(TLAM, e->name, e->r, NULL);
+        T *lt = mkth(lam, env);
+        lt->memo = mklam(lam, env);
+        FGROW();
+        kinds[sp] = FRAME_APP;
+        fargs[sp] = mkth(e->l, env);
+        sp++;
+        t = lt;
+        continue;
+      }
+      V *rv;
+      if (e->type == TVAR) {
+        V *b = NULL;
+        for (V *en = env; en; en = en->u.env.up)
+          if (!strcmp(en->u.env.name, e->name)) { b = en; break; }
+        if (!b) {
+          if (getenv("LIN_TRACE"))
+            fprintf(stderr, "EVAL unbound var '%s'\n", e->name);
+          rv = mktok(e->name);
+          t->memo = rv;
+          val = rv;
+          t = NULL;
+          break;
+        }
+        if (b->u.env.val->memo) {
+          rv = b->u.env.val->memo;
+          t->memo = rv;
+          val = rv;
+          t = NULL;
+          break;
+        }
+        t = b->u.env.val; /* descend into the bound thunk (no recursion) */
+        continue;
+      }
+      else if (e->type == TLAM) rv = mklam(e, env);
+      else if (e->type == TNUM) rv = mklam(mknumeral(atol(e->name), "_cf", "_cx"), env);
+      else rv = mklam(e, env);
+      t->memo = rv;
+      val = rv;
+      t = NULL;
+      break;
     }
-    break;
+    if (t && t->memo) { val = t->memo; t = NULL; }
+    else if (t) continue; /* fresh descender with no memo: loop back */
+    /* phase 2: combine val with pending frames */
+    while (sp > 0) {
+      if (kinds[sp - 1] == FRAME_WRAP) {
+        sp--;
+        val = mkchain(val);
+        continue;
+      }
+      T *arg = fargs[sp - 1];
+      if (val->kind == 1) {
+        Term *lam = val->u.t;
+        sp--;
+        t = mkth(lam->l, mkbind(lam->name, arg, val->env));
+        break;
+      }
+      if (val->kind == 4) {
+        kinds[sp - 1] = FRAME_WRAP;
+        t = arg;
+        break;
+      }
+      sp--;
+      val = mkapp(val, arg);
+    }
+    if (sp == 0 && !t) {
+      if (t0->memo == NULL) t0->memo = val ? val : mktok("?");
+      free(kinds);
+      free(fargs);
+      return t0->memo;
+    }
   }
-  case TNUM:
-    r = mklam(mknumeral(atol(e->name), "_cf", "_cx"), env);
-    break;
-  default:
-    r = mklam(e, env);
-  }
-  t->memo = r;
-  return r;
+#undef FGROW
 }
 
 /* ---------------- printing & detection ---------------- */

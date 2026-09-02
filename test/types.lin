@@ -1,4 +1,6 @@
-; compile-time errors
+; compile-time and parse errors
+; NOTE: an unterminated '(' aborts reading the rest of the file,
+; so those cases are kept at the very end.
 
 (foo 1)
 ; expect error: unbound variable 'foo'
@@ -12,5 +14,50 @@
 99999
 ; expect error: numeral too large (max 5000)
 
+(\x (y x))
+; expect error: unbound variable 'y'
+
+((\x x) x)
+; expect error: unbound variable 'x'
+
+(undefined_fn 5)
+; expect error: unbound variable 'undefined_fn'
+
+(head 5)
+; expect error: type mismatch
+
+(tail true)
+; expect error: type mismatch
+
+(cons 1 2)
+; expect error: type mismatch
+
+(succ true)
+; expect error: infinite type
+
+(pred true)
+; expect error: infinite type
+
+(fst 3)
+; expect error: infinite type
+
+(lambda y (y y))
+; expect error: infinite type
+
+()
+; expect error: parse error: empty '('
+
+()
+; expect error: parse error: empty '('
+
+; a stray ')' after a complete form: the form still evaluates
+(add 1 2))
+; expect => 3
+; expect error: parse error: unexpected ')'
+
+9999
+; expect error: numeral too large (max 5000)
+
+; unterminated forms (must be last -- they abort the rest of the file)
 (1
 ; expect error: parse error: missing ')'

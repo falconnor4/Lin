@@ -1,0 +1,43 @@
+; pairs
+
+(fst (pair 1 2))
+; expect => 1
+
+(snd (pair 1 2))
+; expect => 2
+
+(pair 1 2)
+; expect => (\f ((f 1) 2))
+
+(pair true false)
+; expect => (\f ((f true) false))
+
+(not (snd (pair true false)))
+; expect => true
+
+(fst (pair (add 1 2) (mul 3 3)))
+; expect => 3
+
+(snd (pair (add 1 2) (mul 3 3)))
+; expect => 9
+
+(fst (pair true false))
+; expect => true
+
+(snd (pair 42 7))
+; expect => 7
+
+(fst (snd (pair 1 (pair 2 3))))
+; expect => 2
+
+(snd (snd (pair 1 (pair 2 3))))
+; expect => 3
+
+(eq (fst (pair 5 6)) 5)
+; expect => true
+
+(eq (snd (pair 5 6)) 6)
+; expect => true
+
+(if (fst (pair true false)) 10 20)
+; expect => 10

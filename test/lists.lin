@@ -22,3 +22,52 @@
 (define sum3 (\l (add (head l) (add (head (tail l)) (head (tail (tail l)))))))
 (sum3 (cons 1 (cons 2 (cons 3 nil))))
 ; expect => 6
+
+; --- more list primitives ---
+(cons 1 nil)
+; expect => (\c (\n ((c 1) (\c (\n true)))))
+
+(tail (cons 1 (cons 2 nil)))
+; expect => (\c (\n ((c 2) (\c (\n true)))))
+
+(tail (tail (cons 1 (cons 2 nil))))
+; expect => (\c (\n true))
+
+(is_empty (cons 7 nil))
+; expect => false
+
+(head (tail (tail (cons 1 (cons 2 (cons 3 nil))))))
+; expect => 3
+
+(head (cons (add 1 2) nil))
+; expect => 3
+
+(eq (head (cons 5 nil)) 5)
+; expect => true
+
+; sum of a length-4 list
+(define sum4 (\l (add (head l) (add (head (tail l)) (add (head (tail (tail l))) (head (tail (tail (tail l)))))))))
+(sum4 (cons 1 (cons 2 (cons 3 (cons 4 nil)))))
+; expect => 10
+
+(sum3 (cons 5 (cons 6 (cons 7 nil))))
+; expect => 18
+
+; --- recursive list functions ---
+(define lsum (\l (if (is_empty l) 0 (add (head l) (lsum (tail l))))))
+(lsum (cons 1 (cons 2 (cons 3 (cons 4 nil)))))
+; expect => 10
+
+(define llen (\l (if (is_empty l) 0 (succ (llen (tail l))))))
+(llen (cons 1 (cons 2 nil)))
+; expect => 2
+
+(llen (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil))))))
+; expect => 5
+
+(define lmax (\l (if (is_empty (tail l)) (head l) (if (gt (head l) (head (tail l))) (lmax (cons (head l) (tail (tail l)))) (lmax (tail l))))))
+(lmax (cons 5 (cons 9 (cons 2 (cons 7 nil)))))
+; expect => 9
+
+(lmax (cons 3 nil))
+; expect => 3
