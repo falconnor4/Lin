@@ -1,0 +1,33 @@
+; Advanced libc FFI test suite
+
+(puts "Line 1: Hello from Lin")
+; expect => Line 1: Hello from Lin
+; expect ...
+
+(puts "Line 2: Multi-line FFI output")
+; expect => Line 2: Multi-line FFI output
+; expect ...
+
+; Direct character outputs
+(putchar 87)
+; expect => W87
+
+(putchar 79)
+; expect => O79
+
+(putchar 82)
+; expect => R82
+
+(putchar 76)
+; expect => L76
+
+(putchar 68)
+; expect => D68
+
+(putchar 10)
+; expect => 
+; expect 10
+
+; getenv test with a variable that exists
+(getenv "PATH")
+; expect => /...

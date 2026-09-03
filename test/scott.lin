@@ -1,0 +1,52 @@
+; Scott numerals test suite
+
+zero_s
+; expect => 0
+
+(succ_s zero_s)
+; expect => 1
+
+(succ_s (succ_s zero_s))
+; expect => 2
+
+(succ_s (succ_s (succ_s zero_s)))
+; expect => 3
+
+(pred_s (succ_s zero_s))
+; expect => 0
+
+(pred_s (succ_s (succ_s zero_s)))
+; expect => 1
+
+(pred_s (pred_s (succ_s (succ_s (succ_s zero_s)))))
+; expect => 1
+
+(is_zero_s zero_s)
+; expect => true
+
+(is_zero_s (succ_s zero_s))
+; expect => false
+
+(is_zero_s (pred_s (succ_s zero_s)))
+; expect => true
+
+; Nested Scott arithmetic
+(define s3 (succ_s (succ_s (succ_s zero_s))))
+(define s2 (pred_s s3))
+(define s1 (pred_s s2))
+(define s0 (pred_s s1))
+
+s3
+; expect => 3
+
+s2
+; expect => 2
+
+s1
+; expect => 1
+
+s0
+; expect => 0
+
+(is_zero_s s0)
+; expect => true

@@ -1,0 +1,65 @@
+; Binary Trees test suite (Scott-encoded algebraic data types)
+
+(define leaf (\l (\n l)))
+(define node (\v (\left (\right (\l (\n (((n v) left) right)))))))
+
+(define is_leaf (\t ((t true) (\v (\l (\r false))))))
+(define val (\t ((t 0) (\v (\l (\r v))))))
+(define left (\t ((t leaf) (\v (\l (\r l))))))
+(define right (\t ((t leaf) (\v (\l (\r r))))))
+
+; Leaf tests
+(is_leaf leaf)
+; expect => true
+
+; Single node
+(define t1 (node 42 leaf leaf))
+(is_leaf t1)
+; expect => false
+
+(val t1)
+; expect => 42
+
+(is_leaf (left t1))
+; expect => true
+
+(is_leaf (right t1))
+; expect => true
+
+; 3-node tree:   10
+;               /  \
+;              5    20
+(define t3 (node 10 (node 5 leaf leaf) (node 20 leaf leaf)))
+
+(val t3)
+; expect => 10
+
+(val (left t3))
+; expect => 5
+
+(val (right t3))
+; expect => 20
+
+; Recursive tree size
+(define! tsize (tree -> num) (\t (ifl (is_leaf t) (\_ 0) (\_ (succ (add (tsize (left t)) (tsize (right t))))))))
+
+(tsize leaf)
+; expect => 0
+
+(tsize t1)
+; expect => 1
+
+(tsize t3)
+; expect => 3
+
+; Recursive tree sum
+(define! tsum (tree -> num) (\t (ifl (is_leaf t) (\_ 0) (\_ (add (val t) (add (tsum (left t)) (tsum (right t))))))))
+
+(tsum leaf)
+; expect => 0
+
+(tsum t1)
+; expect => 42
+
+(tsum t3)
+; expect => 35

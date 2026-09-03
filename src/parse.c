@@ -186,7 +186,7 @@ static Term *parse_term(void) {
     if (S[P] != '"') pfail("unterminated string literal");
     int end = P;
     P++;
-    Term *body = term_new(TVAR, "_nl", NULL, NULL);
+    Term *body = term_new(TVAR, "nil", NULL, NULL);
     for (int i = end - 1; i >= start; i--) {
       char c = S[i];
       if (i > start && S[i - 1] == '\\') {
@@ -197,9 +197,9 @@ static Term *parse_term(void) {
         i--;
       }
       Term *ch = church((unsigned char)c);
-      body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "_cl", NULL, NULL), ch), body);
+      body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "cons", NULL, NULL), ch), body);
     }
-    return term_new(TLAM, "_cl", term_new(TLAM, "_nl", body, NULL), NULL);
+    return body;
   }
   if (S[P] == '(') {
     P++;

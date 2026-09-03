@@ -1,0 +1,46 @@
+; strings and character lists test suite
+
+; empty string is empty list
+(is_empty "")
+; expect => true
+
+(is_empty "a")
+; expect => false
+
+(is_empty "hello")
+; expect => false
+
+; head extracts first character numeral (ASCII)
+(head "A")
+; expect => 65
+
+(head "hello")
+; expect => 104
+
+(head (tail "hello"))
+; expect => 101
+
+(head (tail (tail "hello")))
+; expect => 108
+
+(head (tail (tail (tail "hello"))))
+; expect => 108
+
+(head (tail (tail (tail (tail "hello")))))
+; expect => 111
+
+(is_empty (tail (tail (tail (tail (tail "hello"))))))
+; expect => true
+
+; string length
+(length "")
+; expect => 0
+
+(length "a")
+; expect => 1
+
+(length "hello")
+; expect => 5
+
+(length "Lin Language")
+; expect => 12

@@ -1,0 +1,51 @@
+; Combinator calculus test suite (SKI, BCKW)
+
+(define I (\x x))
+(define K (\x (\y x)))
+(define S (\x (\y (\z ((x z) (y z))))))
+
+(define B (\f (\g (\x (f (g x))))))
+(define C (\f (\x (\y ((f y) x)))))
+(define W (\f (\x ((f x) x))))
+
+; Identity
+(I 42)
+; expect => 42
+
+; SKK = I
+(((S K) K) 42)
+; expect => 42
+
+(((S K) K) true)
+; expect => true
+
+; Constant
+((K 10) 20)
+; expect => 10
+
+((K true) false)
+; expect => true
+
+; B combinator: composition
+(((B succ) succ) 5)
+; expect => 7
+
+(((B not) not) true)
+; expect => true
+
+; C combinator: argument flip
+(((C sub) 5) 20)
+; expect => 15
+
+(((C pair) 1) 2)
+; expect => (\f ((f 2) 1))
+
+; W combinator: self-application / duplication
+((W mul) 7)
+; expect => 49
+
+((W add) 21)
+; expect => 42
+
+((W pair) 99)
+; expect => (\f ((f 99) 99))

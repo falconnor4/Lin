@@ -52,3 +52,11 @@
 (define puts (\s (ffi "puts" s)))
 (define putchar (\c (ffi "putchar" c)))
 (define exit (\c (ffi "exit" c)))
+(define getenv (\name (ffi "getenv" name)))
+
+; ---- Scott numerals ----
+(define zero_s (\_sz (\_ss _sz)))
+(define succ_s (\n (\_sz (\_ss (_ss n)))))
+(define pred_s (\n ((n zero_s) (\p p))))
+(define is_zero_s (\n ((n true) (\p false))))
+

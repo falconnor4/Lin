@@ -13,9 +13,44 @@ static inline Port wire(Port p) {
 
 /* --- Geometry of Interaction (GoI) Value Marshaling --- */
 
-/* Follow DUP chains and virtual paths using a pushdown stack to count
-   Church numeral applications directly on the interaction net. */
-long net_read_int(Net *n, Port p) {
+static long read_scott(Net *n, Port p) {
+  N = n;
+  long count = 0;
+  Port cur = p;
+  for (int step = 0; step < 1000000; step++) {
+    while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
+      cur = wire((Port){cur.node, 0});
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
+    if (n->tag[cur.node] != LAM || strncmp(n->name[cur.node], "_sz", 3)) return -1;
+    int sz = cur.node;
+    Port ss_p = wire((Port){sz, 2});
+    while (ss_p.node >= 0 && ss_p.node < n->nn && !n->dead[ss_p.node] && n->tag[ss_p.node] == DUP)
+      ss_p = wire((Port){ss_p.node, 0});
+    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node]) return -1;
+    if (n->tag[ss_p.node] != LAM || strncmp(n->name[ss_p.node], "_ss", 3)) return -1;
+    int ss = ss_p.node;
+
+    Port body = wire((Port){ss, 2});
+    while (body.node >= 0 && body.node < n->nn && !n->dead[body.node] && n->tag[body.node] == DUP)
+      body = wire((Port){body.node, 0});
+    if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return -1;
+    if (body.node == sz && body.port == 1) return count;
+    if (n->tag[body.node] == APP) {
+      Port fn = wire((Port){body.node, 0});
+      while (fn.node >= 0 && fn.node < n->nn && !n->dead[fn.node] && n->tag[fn.node] == DUP)
+        fn = wire((Port){fn.node, 0});
+      if (fn.node == ss && fn.port == 1) {
+        count++;
+        cur = wire((Port){body.node, 2});
+        continue;
+      }
+    }
+    return -1;
+  }
+  return -1;
+}
+
+static long read_church(Net *n, Port p) {
   N = n;
   if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM) return -1;
   if (strncmp(n->name[p.node], "_cf", 3)) return -1;
@@ -59,6 +94,13 @@ long net_read_int(Net *n, Port p) {
   return -1;
 }
 
+long net_read_int(Net *n, Port p) {
+  long s = read_scott(n, p);
+  if (s >= 0) return s;
+  return read_church(n, p);
+}
+
+
 /* Extract Church boolean: _bt / _bf */
 int net_read_bool(Net *n, Port p) {
   N = n;
@@ -82,59 +124,62 @@ int net_read_bool(Net *n, Port p) {
   return -1;
 }
 
-/* Extract Church string (list of character numerals): _cl / _nl */
+/* Extract string from Lin list of characters: cons / nil or _cl / _nl */
 int net_read_string(Net *n, Port p, char *buf, size_t max) {
   N = n;
-  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM) return -1;
-  if (strncmp(n->name[p.node], "_cl", 3)) return -1;
-  Port bn = wire((Port){p.node, 2});
-  if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) return -1;
-  int inner = bn.node;
-  if (strncmp(n->name[inner], "_nl", 3)) return -1;
-
-  Port cur = wire((Port){inner, 2});
   size_t len = 0;
-  int stack[8192];
-  int sp = 0;
+  Port cur = p;
 
-  for (int step = 0; step < 1000000 && len + 1 < max; step++) {
-    if (cur.node < 0 || n->dead[cur.node]) break;
-    if (cur.node == inner && cur.port == 1) {
+  for (int step = 0; step < 100000 && len + 1 < max; step++) {
+    while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
+      cur = wire((Port){cur.node, 0});
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) break;
+    if (n->tag[cur.node] != LAM) break;
+
+    if (n->name[cur.node][0] != 'c' && strncmp(n->name[cur.node], "_cl", 3)) break;
+
+    // Check if nil: \c. \n. true
+    Port bn = wire((Port){cur.node, 2});
+    while (bn.node >= 0 && bn.node < n->nn && !n->dead[bn.node] && n->tag[bn.node] == DUP)
+      bn = wire((Port){bn.node, 0});
+    if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) break;
+    if (n->name[bn.node][0] != 'n' && strncmp(n->name[bn.node], "_nl", 3)) break;
+
+    Port body = wire((Port){bn.node, 2});
+    while (body.node >= 0 && body.node < n->nn && !n->dead[body.node] && n->tag[body.node] == DUP)
+      body = wire((Port){body.node, 0});
+    if (body.node < 0) break;
+
+    // Nil check: body is true (LAM returning its first argument)
+    if (n->tag[body.node] == LAM) {
       buf[len] = 0;
       return (int)len;
     }
-    int tag = n->tag[cur.node];
-    if (tag == ERA) break;
-    if (tag == DUP) {
-      if (cur.port == 1 || cur.port == 2) {
-        if (sp >= 8192) return -1;
-        stack[sp++] = cur.port;
-        cur = wire((Port){cur.node, 0});
-      } else if (cur.port == 0) {
-        if (sp <= 0) return -1;
-        cur = wire((Port){cur.node, stack[--sp]});
-      }
-    } else if (tag == APP) {
-      if (cur.port == 1) {
-        Port inner_app = wire((Port){cur.node, 0});
-        if (inner_app.node >= 0 && n->tag[inner_app.node] == APP && inner_app.port == 1) {
-          Port ch_port = wire((Port){inner_app.node, 2});
-          long ch = net_read_int(n, ch_port);
-          if (ch >= 0 && ch < 256) {
-            buf[len++] = (char)ch;
-          }
+
+    // Cons cell: body is APP ((c h) t)
+    if (n->tag[body.node] == APP) {
+      Port inner_app = wire((Port){body.node, 0});
+      while (inner_app.node >= 0 && n->tag[inner_app.node] == DUP)
+        inner_app = wire((Port){inner_app.node, 0});
+      if (inner_app.node >= 0 && n->tag[inner_app.node] == APP) {
+        Port ch_port = wire((Port){inner_app.node, 2});
+        long ch = net_read_int(n, ch_port);
+        if (ch >= 0 && ch < 256) {
+          buf[len++] = (char)ch;
         }
-        cur = wire((Port){cur.node, 2});
-      } else {
-        break;
       }
-    } else {
-      break;
+      cur = wire((Port){body.node, 2});
+      continue;
     }
+    break;
   }
-  buf[len] = 0;
-  return (int)len;
+  if (len > 0) {
+    buf[len] = 0;
+    return (int)len;
+  }
+  return -1;
 }
+
 
 /* Check if an unresolved DUP is reachable from root */
 static int live_dup_reachable(Net *n) {
@@ -271,12 +316,6 @@ static void print_port(Port p, int depth) {
         fputs(b ? "true" : "false", stdout);
         return;
       }
-      char sbuf[4096];
-      int slen = net_read_string(N, p, sbuf, sizeof(sbuf));
-      if (slen >= 0) {
-        printf("\"%s\"", sbuf);
-        return;
-      }
       fputs("(\\", stdout);
       fputs(N->name[p.node], stdout);
       putchar(' ');
@@ -302,12 +341,6 @@ int net_print(Net *n) {
     int b = net_read_bool(n, r);
     if (b >= 0) {
       fputs(b ? "true" : "false", stdout);
-      return 0;
-    }
-    char sbuf[4096];
-    int slen = net_read_string(n, r, sbuf, sizeof(sbuf));
-    if (slen >= 0) {
-      printf("\"%s\"", sbuf);
       return 0;
     }
   }

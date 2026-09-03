@@ -1,0 +1,48 @@
+; Functional list algorithms test suite (foldr, sum, prod, all, any, count_if)
+
+(define! foldr ((a -> b -> b) -> b -> list a -> b) (\f (\z (\l (ifl (is_empty l) (\_ z) (\_ (f (head l) (foldr f z (tail l)))))))))
+
+(define sum (\l (foldr add 0 l)))
+(define prod (\l (foldr mul 1 l)))
+(define! all ((a -> bool) -> list a -> bool) (\p (\l (foldr (\x (\acc (and (p x) acc))) true l))))
+(define! any ((a -> bool) -> list a -> bool) (\p (\l (foldr (\x (\acc (or (p x) acc))) false l))))
+(define! count_if ((a -> bool) -> list a -> num) (\p (\l (foldr (\x (\acc (if (p x) (succ acc) acc))) 0 l))))
+
+(define l123 (cons 1 (cons 2 (cons 3 nil))))
+
+(sum nil)
+; expect => 0
+
+(sum l123)
+; expect => 6
+
+(prod nil)
+; expect => 1
+
+(prod l123)
+; expect => 6
+
+(define l234 (cons 2 (cons 3 (cons 4 nil))))
+(prod l234)
+; expect => 24
+
+(sum (cons 10 (cons 20 (cons 30 nil))))
+; expect => 60
+
+(all (\x (gt x 0)) l123)
+; expect => true
+
+(all (\x (gt x 1)) l123)
+; expect => false
+
+(any (\x (gt x 2)) l123)
+; expect => true
+
+(any (\x (gt x 5)) l123)
+; expect => false
+
+(count_if (\x (gt x 1)) l123)
+; expect => 2
+
+(count_if (\x (gt x 2)) l123)
+; expect => 1
