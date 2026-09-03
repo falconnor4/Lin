@@ -1,0 +1,9 @@
+; lin standard library: maybe / option type (Scott-encoded)
+(load "bool.lin")
+
+(define nothing (\n (\j n)))
+(define just (\x (\n (\j (j x)))))
+(define is_nothing (\m ((m true) (\_ false))))
+(define is_just (\m ((m false) (\_ true))))
+(define from_maybe (\d (\m ((m d) (\x x)))))
+(define maybe_map (\f (\m ((m nothing) (\x (just (f x)))))))

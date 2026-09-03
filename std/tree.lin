@@ -1,0 +1,10 @@
+; lin standard library: binary trees (Scott-encoded)
+(load "bool.lin")
+
+(define! leaf a (\l (\n l)))
+(define! node (a -> b -> c -> d) (\v (\left (\right (\l (\n (((n v) left) right)))))))
+(define! is_leaf (a -> bool) (\t ((t true) (\_ (\_ (\_ false))))))
+(define! is_node (a -> bool) (\t ((t false) (\_ (\_ (\_ true))))))
+(define! tree_val (a -> b) (\t ((t 0) (\v (\_ (\_ v))))))
+(define! tree_left (a -> b) (\t ((t leaf) (\_ (\left (\_ left))))))
+(define! tree_right (a -> b) (\t ((t leaf) (\_ (\_ (\right right))))))

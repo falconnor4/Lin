@@ -5,7 +5,12 @@ cd "$(dirname "$0")/.." || exit 1
 pass=0
 fail=0
 
-for f in test/*.lin; do
+TESTS="$@"
+if [ -z "$TESTS" ]; then
+  TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin"
+fi
+
+for f in $TESTS; do
   got=$(./lin "$f" 2>&1 | grep -v '^warning')
   want=$(grep '^; expect ' "$f" | sed 's/^; expect //')
   gn=$(printf '%s\n' "$got" | grep -c .)
@@ -31,6 +36,7 @@ for f in test/*.lin; do
   fi
   if [ "$ok" = 1 ]; then
     pass=$((pass + 1))
+    printf "PASS %s\n" "$f"
   else
     fail=$((fail + 1))
     echo "FAIL $f"
@@ -41,5 +47,6 @@ for f in test/*.lin; do
   fi
 done
 
+echo ""
 echo "$pass passed, $fail failed"
-[ "$fail" = 0 ]
+[ "$fail" -eq 0 ]

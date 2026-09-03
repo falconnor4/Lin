@@ -8,3 +8,10 @@
 (define! tail (list a -> list a) (\l ((l (\h (\t t))) nil)))
 (define! is_empty (list a -> bool) (\l ((l (\h (\t false))) true)))
 (define! length (list a -> num) (\l (ifl (is_empty l) (\_ 0) (\_ (succ (length (tail l)))))))
+
+; Direct O(1) positional projections
+(define first head)
+(define second (\l (head (tail l))))
+(define third  (\l (head (tail (tail l)))))
+(define fourth (\l (head (tail (tail (tail l))))))
+(define fifth  (\l (head (tail (tail (tail (tail l)))))))

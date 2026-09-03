@@ -90,3 +90,45 @@
 ; N=3 Unsatisfiable (m=12 clauses at phase transition)
 (exists (\x1 (exists (\x2 (exists (\x3 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((or (not x1)) ((or x3) (not x1)))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x2)) ((or x1) (not x2))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))))))))
 ; expect => false
+
+; -------------------------------------------------------------------
+; 6. 5-Variable Constrained SAT & Verification:
+; (x1 or x2) and (not x2 or x3) and (not x3 or x4) and (not x4 or x5) and (not x5)
+; Solution forced: x5=F, x4=F, x3=F, x2=F, x1=T
+; -------------------------------------------------------------------
+(define f5
+  (\x1 (\x2 (\x3 (\x4 (\x5
+    (and5 (clause2 x1 x2)
+          (clause2 (not x2) x3)
+          (clause2 (not x3) x4)
+          (clause2 (not x4) x5)
+          (not x5))))))))
+
+(define m5 (probe5 f5))
+
+(fst m5)
+; expect => true
+
+; x1 must be true
+(fst (snd m5))
+; expect => true
+
+; x2 must be false
+(fst (snd (snd m5)))
+; expect => false
+
+; x3 must be false
+(fst (snd (snd (snd m5))))
+; expect => false
+
+; x4 must be false
+(fst (snd (snd (snd (snd m5)))))
+; expect => false
+
+; x5 must be false
+(snd (snd (snd (snd (snd m5)))))
+; expect => false
+
+; Verify certificate against original formula
+(verify5 f5 (snd m5))
+; expect => true

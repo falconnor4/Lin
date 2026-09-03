@@ -3,5 +3,8 @@
 (load "num.lin")
 (load "pair.lin")
 (load "list.lin")
+(load "maybe.lin")
+(load "either.lin")
+(load "tree.lin")
 (load "ffi.lin")
 (load "sat.lin")

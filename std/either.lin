@@ -1,0 +1,9 @@
+; lin standard library: either / result type (Scott-encoded)
+(load "bool.lin")
+
+(define left (\x (\l (\r (l x)))))
+(define right (\y (\l (\r (r y)))))
+(define is_left (\e ((e (\_ true)) (\_ false))))
+(define is_right (\e ((e (\_ false)) (\_ true))))
+(define either (\fl (\fr (\e ((e fl) fr)))))
+(define either_map (\f (\e ((e left) (\y (right (f y)))))))

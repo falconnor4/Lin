@@ -62,3 +62,19 @@
 (define! verify3 (a -> b -> bool) (\p (\w ((((p (fst w)) (fst (snd w))) (snd (snd w)))))))
 (define! verify4 (a -> b -> bool)
   (\p (\w ((((p (fst w)) (fst (snd w))) (fst (snd (snd w)))) (snd (snd (snd w)))))))
+
+; 5-variable witness extraction
+(define! probe5 (a -> b)
+  (\p (ifl (exists (\x2 (exists (\x3 (exists (\x4 (exists (\x5 (((((p tru) x2) x3) x4) x5)))))))))
+        (\_ (pair true (pair true (snd (probe4 (p tru))))))
+        (\_ (ifl (exists (\x2 (exists (\x3 (exists (\x4 (exists (\x5 (((((p fls) x2) x3) x4) x5)))))))))
+              (\_ (pair true (pair false (snd (probe4 (p fls))))))
+              (\_ (pair false (pair false (pair false (pair false (pair false false)))))))))))
+
+; 5-variable certificate verifier
+(define! verify5 (a -> b -> bool)
+  (\p (\w ((((((p (fst w))
+                  (fst (snd w)))
+                  (fst (snd (snd w))))
+                  (fst (snd (snd (snd w)))))
+                  (snd (snd (snd (snd w)))))))))

@@ -1,0 +1,96 @@
+; Rich Algebraic Data Types Test Suite (Scott-encoded)
+(load "std/std.lin")
+
+; -------------------------------------------------------------------
+; 1. Maybe / Option Type
+; -------------------------------------------------------------------
+(is_nothing nothing)
+; expect => true
+
+(is_just nothing)
+; expect => false
+
+(is_just (just 42))
+; expect => true
+
+(is_nothing (just 42))
+; expect => false
+
+(from_maybe 99 (just 42))
+; expect => 42
+
+(from_maybe 99 nothing)
+; expect => 99
+
+(from_maybe 0 (maybe_map succ (just 41)))
+; expect => 42
+
+(from_maybe 0 (maybe_map succ nothing))
+; expect => 0
+
+; -------------------------------------------------------------------
+; 2. Either / Result Type
+; -------------------------------------------------------------------
+(is_left (left 10))
+; expect => true
+
+(is_right (left 10))
+; expect => false
+
+(is_right (right 20))
+; expect => true
+
+(is_left (right 20))
+; expect => false
+
+(either (\x (add x 5)) (\y (sub y 5)) (left 10))
+; expect => 15
+
+(either (\x (add x 5)) (\y (sub y 5)) (right 20))
+; expect => 15
+
+; -------------------------------------------------------------------
+; 3. Binary Tree Type
+; -------------------------------------------------------------------
+(is_leaf leaf)
+; expect => true
+
+(is_node leaf)
+; expect => false
+
+(define t1 (node 100 (node 50 leaf leaf) (node 150 leaf leaf)))
+
+(is_leaf t1)
+; expect => false
+
+(is_node t1)
+; expect => true
+
+(tree_val t1)
+; expect => 100
+
+(tree_val (tree_left t1))
+; expect => 50
+
+(tree_val (tree_right t1))
+; expect => 150
+
+; -------------------------------------------------------------------
+; 4. List Positional Projections
+; -------------------------------------------------------------------
+(define l5 (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil))))))
+
+(first l5)
+; expect => 1
+
+(second l5)
+; expect => 2
+
+(third l5)
+; expect => 3
+
+(fourth l5)
+; expect => 4
+
+(fifth l5)
+; expect => 5
