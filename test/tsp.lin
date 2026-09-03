@@ -1,0 +1,91 @@
+; Traveling Salesperson Problem (TSP) test suite
+(load "std/sat.lin")
+(load "std/list.lin")
+(load "std/pair.lin")
+
+; Candidate Tour Encoding via 2 Boolean Decision Variables (b0, b1):
+;   b0 = false, b1 = false  =>  Tour A (cost 27)
+;   b0 = false, b1 = true   =>  Tour B (cost 24, optimal)
+;   b0 = true,  b1 = false  =>  Tour C (cost 33)
+
+(define decode_tour
+  (\w
+    (ifl (fst w)
+      (\_ (cons 0 (cons 2 (cons 1 (cons 3 (cons 0 nil))))))
+      (\_ (ifl (snd w)
+            (\_ (cons 0 (cons 1 (cons 3 (cons 2 (cons 0 nil))))))
+            (\_ (cons 0 (cons 1 (cons 2 (cons 3 (cons 0 nil)))))))))))
+
+(define tour_cost
+  (\w
+    (ifl (fst w)
+      (\_ 33)
+      (\_ (ifl (snd w)
+            (\_ 24)
+            (\_ 27))))))
+
+; TSP Decision Problem: Budget B = 25 (Satisfied only by Tour B)
+(define tsp_b25
+  (\b0 (\b1
+    (and (not b0) b1))))
+
+; TSP Decision Problem: Budget B = 20 (Unsatisfiable)
+(define tsp_b20
+  (\b0 (\b1
+    false)))
+
+; TSP Decision Problem: Budget B = 30 (Satisfied by Tours A and B)
+(define tsp_b30
+  (\b0 (\b1
+    (or (and (not b0) (not b1))
+        (and (not b0) b1)))))
+
+; --- Instance 1: Budget B = 25 ---
+(define m25 (probe2 tsp_b25))
+
+(fst m25)
+; expect => true
+
+(define w25 (snd m25))
+
+; Witness bits: b0 = false, b1 = true
+(fst w25)
+; expect => false
+
+(snd w25)
+; expect => true
+
+; Certificate verification
+(verify2 tsp_b25 w25)
+; expect => true
+
+; Optimal cost
+(tour_cost w25)
+; expect => 24
+
+; Decoded optimal path
+(define tour (decode_tour w25))
+(first tour)
+; expect => 0
+
+(second tour)
+; expect => 1
+
+(third tour)
+; expect => 3
+
+(fourth tour)
+; expect => 2
+
+(fifth tour)
+; expect => 0
+
+; --- Instance 2: Budget B = 20 ---
+(define m20 (probe2 tsp_b20))
+(fst m20)
+; expect => false
+
+; --- Instance 3: Budget B = 30 ---
+(define m30 (probe2 tsp_b30))
+(fst m30)
+; expect => true

@@ -2,3 +2,4 @@ lin
 lin_debug
 __pycache__/
 *.pyc
+scratch/
