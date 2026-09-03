@@ -1,10 +1,10 @@
 ; lin standard library: booleans & conditionals
 
-(define true (\_bt (\_bf _bt)))
-(define false (\_bt (\_bf _bf)))
-(define not (\b ((b false) true)))
-(define and (\a (\b ((a b) false))))
-(define or (\a (\b ((a true) b))))
-(define xor (\a (\b ((a (not b)) b))))
-(define if (\c (\t (\f ((c t) f)))))
-(define ifl (\c (\t (\f (((c t) f) 0)))))
+(define! true bool (\_bt (\_bf _bt)))
+(define! false bool (\_bt (\_bf _bf)))
+(define! not (bool -> bool) (\b ((b false) true)))
+(define! and (bool -> bool -> bool) (\a (\b ((a b) false))))
+(define! or (bool -> bool -> bool) (\a (\b ((a true) b))))
+(define! xor (bool -> bool -> bool) (\a (\b ((a (not b)) b))))
+(define! if (bool -> a -> a -> a) (\c (\t (\f ((c t) f)))))
+(define! ifl (bool -> (a -> b) -> (a -> b) -> b) (\c (\t (\f (((c t) f) 0)))))

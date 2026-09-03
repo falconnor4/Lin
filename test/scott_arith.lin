@@ -49,19 +49,19 @@ zero
 
 ; Comparisons
 (eq 42 42)
-; expect => (\t (\f t))
+; expect => true
 
 (eq 42 43)
-; expect => (\t (\f f))
+; expect => false
 
 (lt 5 10)
-; expect => (\t (\f t))
+; expect => true
 
 (lt 10 5)
-; expect => (\t (\f f))
+; expect => false
 
 (leq 5 5)
-; expect => (\t (\f t))
+; expect => true
 
 (gt 10 5)
-; expect => (\t (\f t))
+; expect => true

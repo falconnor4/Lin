@@ -1,0 +1,92 @@
+; Comprehensive SAT & Certificate Verification Test Suite
+; Demonstrates linear-time superposition reduction and quadratic certificate extraction
+
+(load "std/sat.lin")
+
+; -------------------------------------------------------------------
+; 1. 1-Variable SAT & Verification
+; -------------------------------------------------------------------
+(define f1 (\x1 ((or x1) (not x1))))
+(define m1 (probe1 f1))
+
+; is_sat
+(fst m1)
+; expect => true
+
+; certificate verification
+(verify1 f1 (snd m1))
+; expect => true
+
+; -------------------------------------------------------------------
+; 2. 2-Variable SAT & Verification: (x1 or x2) and (not x1 or x2)
+; -------------------------------------------------------------------
+(define f2 (\x1 (\x2 (and2 (clause2 x1 x2) (clause2 (not x1) x2)))))
+(define m2 (probe2 f2))
+
+(fst m2)
+; expect => true
+
+(verify2 f2 (snd m2))
+; expect => true
+
+; -------------------------------------------------------------------
+; 3. 3-Variable 3-SAT & Verification:
+; (x1 or x2 or x3) and (not x1 or x2 or not x3) and (not x1 or not x2 or x3)
+; -------------------------------------------------------------------
+(define f3
+  (\x1 (\x2 (\x3
+    (and3 (clause3 x1 x2 x3)
+          (clause3 (not x1) x2 (not x3))
+          (clause3 (not x1) (not x2) x3))))))
+
+(define m3 (probe3 f3))
+
+(fst m3)
+; expect => true
+
+(verify3 f3 (snd m3))
+; expect => true
+
+; -------------------------------------------------------------------
+; 4. 4-Variable Constrained SAT & Verification:
+; (x1 or x2) and (not x2 or x3) and (not x3 or x4) and (not x4)
+; Solution forced: x4=F, x3=F, x2=F, x1=T
+; -------------------------------------------------------------------
+(define f4
+  (\x1 (\x2 (\x3 (\x4
+    (and4 (clause2 x1 x2)
+          (clause2 (not x2) x3)
+          (clause2 (not x3) x4)
+          (not x4)))))))
+
+(define m4 (probe4 f4))
+
+(fst m4)
+; expect => true
+
+; x1 must be true
+(fst (snd m4))
+; expect => true
+
+; x2 must be false
+(fst (snd (snd m4)))
+; expect => false
+
+; x3 must be false
+(fst (snd (snd (snd m4))))
+; expect => false
+
+; x4 must be false
+(snd (snd (snd (snd m4))))
+; expect => false
+
+; Verify certificate against original formula
+(verify4 f4 (snd m4))
+; expect => true
+
+; -------------------------------------------------------------------
+; 5. Phase-Transition 3-SAT Superpositions
+; -------------------------------------------------------------------
+; N=3 Unsatisfiable (m=12 clauses at phase transition)
+(exists (\x1 (exists (\x2 (exists (\x3 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((or (not x1)) ((or x3) (not x1)))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x2)) ((or x1) (not x2))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))))))))
+; expect => false

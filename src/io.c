@@ -310,10 +310,10 @@ static int net_try_ffi(Net *n, Port p) {
   if (!strcmp(fn_name, "lin_mul")) { printf("%ld", c_args[0] * c_args[1]); return 1; }
   if (!strcmp(fn_name, "lin_div")) { printf("%ld", c_args[1] ? c_args[0] / c_args[1] : 0); return 1; }
   if (!strcmp(fn_name, "lin_mod")) { printf("%ld", c_args[1] ? c_args[0] % c_args[1] : 0); return 1; }
-  if (!strcmp(fn_name, "lin_eq"))  { printf("(\\t (\\f %s))", c_args[0] == c_args[1] ? "t" : "f"); return 1; }
-  if (!strcmp(fn_name, "lin_lt"))  { printf("(\\t (\\f %s))", c_args[0] < c_args[1] ? "t" : "f"); return 1; }
-  if (!strcmp(fn_name, "lin_leq")) { printf("(\\t (\\f %s))", c_args[0] <= c_args[1] ? "t" : "f"); return 1; }
-  if (!strcmp(fn_name, "lin_gt"))  { printf("(\\t (\\f %s))", c_args[0] > c_args[1] ? "t" : "f"); return 1; }
+  if (!strcmp(fn_name, "lin_eq"))  { fputs(c_args[0] == c_args[1] ? "true" : "false", stdout); return 1; }
+  if (!strcmp(fn_name, "lin_lt"))  { fputs(c_args[0] < c_args[1] ? "true" : "false", stdout); return 1; }
+  if (!strcmp(fn_name, "lin_leq")) { fputs(c_args[0] <= c_args[1] ? "true" : "false", stdout); return 1; }
+  if (!strcmp(fn_name, "lin_gt"))  { fputs(c_args[0] > c_args[1] ? "true" : "false", stdout); return 1; }
 
   if (!strcmp(fn_name, "dlopen")) {
     void *h = dlopen(argc > 0 ? (const char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL);

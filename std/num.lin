@@ -7,13 +7,24 @@
 (define! pred (num -> num) (\n ((n 0) (\p p))))
 (define! is_zero (num -> bool) (\n ((n true) (\p false))))
 
+; Hybrid equality: pure in-net reduction for 0..4, FFI for >= 5
+(define! eq (num -> num -> bool)
+  (\a (\b
+    ((a (is_zero b))
+      (\pa ((b false)
+        (\pb ((pa (is_zero pb))
+          (\ppa ((pb false)
+            (\ppb ((ppa (is_zero ppb))
+              (\pppa ((ppb false)
+                (\pppb ((pppa (is_zero pppb))
+                  (\_ (ccall2 "lin_eq" a b))))))))))))))))))
+
 ; Arithmetic via general FFI
 (define! add (num -> num -> num) (\a (\b (ccall2 "lin_add" a b))))
 (define! sub (num -> num -> num) (\a (\b (ccall2 "lin_sub" a b))))
 (define! mul (num -> num -> num) (\a (\b (ccall2 "lin_mul" a b))))
 (define! div (num -> num -> num) (\a (\b (ccall2 "lin_div" a b))))
 (define! mod (num -> num -> num) (\a (\b (ccall2 "lin_mod" a b))))
-(define! eq  (num -> num -> bool) (\a (\b (ccall2 "lin_eq" a b))))
 (define! lt  (num -> num -> bool) (\a (\b (ccall2 "lin_lt" a b))))
 (define! leq (num -> num -> bool) (\a (\b (ccall2 "lin_leq" a b))))
 (define! gt  (num -> num -> bool) (\a (\b (ccall2 "lin_gt" a b))))
