@@ -104,21 +104,17 @@ void eval_form(Term *t) {
   term_free(ex);
 }
 
-/* Y = \f. ((\x. f (x x)) (\x. f (x x))) */
+/* Z = \_f. ((\_x. _f (\_v. _x _x _v)) (\_x. _f (\_v. _x _x _v))) */
 static Term *y_term(void) {
-  Term *half =
-      term_new(TLAM, "x",
-               term_new(TAPP, "", term_new(TVAR, "f", NULL, NULL),
-                        term_new(TAPP, "", term_new(TVAR, "x", NULL, NULL),
-                                 term_new(TVAR, "x", NULL, NULL))),
-               NULL);
-  Term *half2 =
-      term_new(TLAM, "x",
-               term_new(TAPP, "", term_new(TVAR, "f", NULL, NULL),
-                        term_new(TAPP, "", term_new(TVAR, "x", NULL, NULL),
-                                 term_new(TVAR, "x", NULL, NULL))),
-               NULL);
-  return term_new(TLAM, "f", term_new(TAPP, "", half, half2), NULL);
+  Term *xxv = term_new(TAPP, "",
+                       term_new(TAPP, "", term_new(TVAR, "_x", NULL, NULL),
+                                term_new(TVAR, "_x", NULL, NULL)),
+                       term_new(TVAR, "_v", NULL, NULL));
+  Term *lam_v = term_new(TLAM, "_v", xxv, NULL);
+  Term *half = term_new(TLAM, "_x",
+                        term_new(TAPP, "", term_new(TVAR, "_f", NULL, NULL), lam_v),
+                        NULL);
+  return term_new(TLAM, "_f", term_new(TAPP, "", half, term_copy(half)), NULL);
 }
 
 static void process_def(Term *t) {

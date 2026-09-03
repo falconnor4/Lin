@@ -9,12 +9,12 @@
 (define ccall3 (\fn (\a1 (\a2 (\a3 (ffi fn (cons a1 (cons a2 (cons a3 nil)))))))))
 
 ; Standard C Library Bindings
-(define puts (\s (ffi "puts" s)))
-(define putchar (\c (ffi "putchar" c)))
-(define exit (\c (ffi "exit" c)))
-(define getenv (\name (ffi "getenv" name)))
-(define system (\cmd (ffi "system" cmd)))
-(define load_lib (\lib (ffi "dlopen" lib)))
+(define puts (\s (ccall1 "puts" s)))
+(define putchar (\c (ccall1 "putchar" c)))
+(define exit (\c (ccall1 "exit" c)))
+(define getenv (\name (ccall1 "getenv" name)))
+(define system (\cmd (ccall1 "system" cmd)))
+(define load_lib (\lib (ccall1 "dlopen" lib)))
 
 ; File I/O
 (define fopen (\path (\mode (ccall2 "fopen" path mode))))

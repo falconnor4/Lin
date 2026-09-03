@@ -1,0 +1,67 @@
+; Scott numerals & arithmetic test suite
+
+; Constructors and deconstructors
+zero
+; expect => 0
+
+(succ zero)
+; expect => 1
+
+(succ 41)
+; expect => 42
+
+(pred 42)
+; expect => 41
+
+(pred 0)
+; expect => 0
+
+(is_zero 0)
+; expect => true
+
+(is_zero 1)
+; expect => false
+
+; Arithmetic operations
+(add 10 20)
+; expect => 30
+
+(add 0 42)
+; expect => 42
+
+(sub 50 8)
+; expect => 42
+
+(sub 5 10)
+; expect => 0
+
+(mul 6 7)
+; expect => 42
+
+(mul 0 99)
+; expect => 0
+
+(div 100 5)
+; expect => 20
+
+(mod 23 5)
+; expect => 3
+
+; Comparisons
+(eq 42 42)
+; expect => (\t (\f t))
+
+(eq 42 43)
+; expect => (\t (\f f))
+
+(lt 5 10)
+; expect => (\t (\f t))
+
+(lt 10 5)
+; expect => (\t (\f f))
+
+(leq 5 5)
+; expect => (\t (\f t))
+
+(gt 10 5)
+; expect => (\t (\f t))

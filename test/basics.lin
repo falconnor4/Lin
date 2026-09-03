@@ -23,7 +23,7 @@
 ; expect => (\x 1)
 
 (\ x 1 2 3)
-; expect => (\x ...
+; expect => (\x (\_ss (_ss 2)))
 
 (\f (\x (f x)))
 ; expect => (\f (\x (f x)))

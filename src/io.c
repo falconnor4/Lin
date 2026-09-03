@@ -227,26 +227,7 @@ static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_m
 }
 
 static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], int max_args) {
-  /* 1. Try unpacking arg_p as a string first */
-  int slen = net_read_string(n, arg_p, str_bufs[0], 4096);
-  if (slen > 0) {
-    args[0] = (long)(intptr_t)str_bufs[0];
-    return 1;
-  }
-
-  /* 2. Try unpacking arg_p as an integer or boolean scalar */
-  long v = net_read_int(n, arg_p);
-  if (v >= 0) {
-    args[0] = v;
-    return 1;
-  }
-  int b = net_read_bool(n, arg_p);
-  if (b >= 0) {
-    args[0] = b;
-    return 1;
-  }
-
-  /* 3. Try unpacking arg_p as a list of arguments: (cons a1 (cons a2 ... nil)) */
+  /* Try unpacking arg_p as a list of arguments: (cons a1 (cons a2 ... nil)) */
   int argc = 0;
   Port cur = arg_p;
   while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
@@ -316,18 +297,23 @@ static int net_try_ffi(Net *n, Port p) {
   if (net_read_string(n, wire((Port){app1.node, 2}), fn_name, sizeof(fn_name)) < 0)
     return 0;
 
-  void *sym = dlsym(RTLD_DEFAULT, fn_name);
-  if (!sym && strcmp(fn_name, "dlopen")) {
-    fprintf(stderr, "ffi: symbol '%s' not found\n", fn_name);
-    return 0;
-  }
-
   Port arg_p = wire((Port){app2.node, 2});
   long c_args[8] = {0};
   char str_bufs[8][4096];
   int argc = unpack_args(n, arg_p, c_args, str_bufs, 8);
 
+
   fflush(stdout);
+
+  if (!strcmp(fn_name, "lin_add")) { printf("%ld", c_args[0] + c_args[1]); return 1; }
+  if (!strcmp(fn_name, "lin_sub")) { printf("%ld", c_args[0] >= c_args[1] ? c_args[0] - c_args[1] : 0); return 1; }
+  if (!strcmp(fn_name, "lin_mul")) { printf("%ld", c_args[0] * c_args[1]); return 1; }
+  if (!strcmp(fn_name, "lin_div")) { printf("%ld", c_args[1] ? c_args[0] / c_args[1] : 0); return 1; }
+  if (!strcmp(fn_name, "lin_mod")) { printf("%ld", c_args[1] ? c_args[0] % c_args[1] : 0); return 1; }
+  if (!strcmp(fn_name, "lin_eq"))  { printf("(\\t (\\f %s))", c_args[0] == c_args[1] ? "t" : "f"); return 1; }
+  if (!strcmp(fn_name, "lin_lt"))  { printf("(\\t (\\f %s))", c_args[0] < c_args[1] ? "t" : "f"); return 1; }
+  if (!strcmp(fn_name, "lin_leq")) { printf("(\\t (\\f %s))", c_args[0] <= c_args[1] ? "t" : "f"); return 1; }
+  if (!strcmp(fn_name, "lin_gt"))  { printf("(\\t (\\f %s))", c_args[0] > c_args[1] ? "t" : "f"); return 1; }
 
   if (!strcmp(fn_name, "dlopen")) {
     void *h = dlopen(argc > 0 ? (const char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL);
@@ -351,6 +337,12 @@ static int net_try_ffi(Net *n, Port p) {
     int res = puts(argc > 0 ? (const char *)c_args[0] : "");
     printf("%d", res);
     return 1;
+  }
+
+  void *sym = dlsym(RTLD_DEFAULT, fn_name);
+  if (!sym) {
+    fprintf(stderr, "ffi: symbol '%s' not found\n", fn_name);
+    return 0;
   }
 
   long res = 0;

@@ -6,7 +6,7 @@
 ; expect error: unbound variable 'foo'
 
 (1 true)
-; expect => (\_cx (\_bf _cx))
+; expect => (\_ss (_ss 0))
 
 (\x (x x))
 ; expect error: infinite type

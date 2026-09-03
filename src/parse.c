@@ -85,19 +85,24 @@ static int isnum(const char *s) {
   return 1;
 }
 
-/* numeral k desugars to the Church term \_cf. \_cx. _cf^k _cx */
-static Term *church(long k) {
-  Term *body = term_new(TVAR, "_cx", NULL, NULL);
-  for (long i = 0; i < k; i++)
-    body = term_new(TAPP, "", term_new(TVAR, "_cf", NULL, NULL), body);
-  Term *lamx = term_new(TLAM, "_cx", body, NULL);
-  return term_new(TLAM, "_cf", lamx, NULL);
+/* numeral k desugars to the Scott term \_sz. \_ss. (_ss^k _sz) */
+static Term *scott(long k) {
+  Term *cur = term_new(TLAM, "_sz",
+                       term_new(TLAM, "_ss",
+                                term_new(TVAR, "_sz", NULL, NULL),
+                                NULL),
+                       NULL);
+  for (long i = 0; i < k; i++) {
+    Term *app = term_new(TAPP, "", term_new(TVAR, "_ss", NULL, NULL), cur);
+    cur = term_new(TLAM, "_sz", term_new(TLAM, "_ss", app, NULL), NULL);
+  }
+  return cur;
 }
 
 static Term *parse_term(void);
 
 /* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'
-   builtins: num = (a->a)->a->a, bool = p->q->p (fresh vars per use) */
+   builtins: num = fresh type variable, bool = p->q->p (fresh vars per use) */
 static Type *parse_type(void);
 static char tvn[64][NAME];
 static Type *tvt[64];
@@ -116,8 +121,7 @@ static Type *parse_type_atom(void) {
   char nm[NAME];
   if (!sym(nm, NAME)) pfail("type: expected name");
   if (!strcmp(nm, "num")) {
-    Type *a = type_var();
-    return type_arrow(type_arrow(a, a), type_arrow(a, a));
+    return type_var();
   }
   if (!strcmp(nm, "bool")) {
     Type *p = type_var(), *q = type_var();
@@ -167,7 +171,7 @@ static Term *parse_atom(const char *kw) {
   if (isnum(kw)) {
     long k = atol(kw);
     if (k > 5000) pfail("numeral too large (max 5000)");
-    return church(k);
+    return scott(k);
   }
   return term_new(TVAR, kw, NULL, NULL);
 }
@@ -196,7 +200,7 @@ static Term *parse_term(void) {
         else if (c == '0') c = '\0';
         i--;
       }
-      Term *ch = church((unsigned char)c);
+      Term *ch = scott((unsigned char)c);
       body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "cons", NULL, NULL), ch), body);
     }
     return body;

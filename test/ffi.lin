@@ -1,7 +1,7 @@
 ; libc FFI test
 (puts "Hello from Lin FFI!")
 ; expect => Hello from Lin FFI!
-; expect ...
+; expect 20
 
 (putchar 65)
 ; expect => A65
