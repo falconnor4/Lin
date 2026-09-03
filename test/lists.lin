@@ -54,15 +54,15 @@
 ; expect => 18
 
 ; --- recursive list functions ---
-(define lsum (\l (if (is_empty l) 0 (add (head l) (lsum (tail l))))))
+(define lsum (\l (ifl (is_empty l) (\_ 0) (\_ (add (head l) (lsum (tail l)))))))
 (lsum (cons 1 (cons 2 nil)))
 ; expect => 3
 
-(define llen (\l (if (is_empty l) 0 (add 1 (llen (tail l))))))
+(define llen (\l (ifl (is_empty l) (\_ 0) (\_ (add 1 (llen (tail l)))))))
 (llen (cons 1 (cons 2 nil)))
 ; expect => 2
 
-(define lmax (\l (if (is_empty (tail l)) (head l) (if (gt (head l) (head (tail l))) (lmax (cons (head l) (tail (tail l)))) (lmax (tail l))))))
+(define lmax (\l (ifl (is_empty (tail l)) (\_ (head l)) (\_ (ifl (gt (head l) (head (tail l))) (\_ (lmax (cons (head l) (tail (tail l))))) (\_ (lmax (tail l))))))))
 (lmax (cons 3 nil))
 ; expect => 3
 (lmax (cons 3 (cons 1 nil)))

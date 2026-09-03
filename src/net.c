@@ -189,13 +189,31 @@ long net_reduce(Net *n, long limit) {
   for (int round = 0; round < 100000 && n->steps < limit; round++) {
     int changed = 0;
     n->atop = 0;
+    /* find nodes reachable from root */
+    unsigned char *reach = calloc((size_t)n->nn, 1);
+    int *q = malloc(sizeof(int) * (size_t)(n->nn + 1));
+    int qh = 0, qt = 0;
+    reach[0] = 1;
+    q[qt++] = 0;
+    while (qh < qt) {
+      int u = q[qh++];
+      for (int p = 0; p < 3; p++) {
+        Port w = WIRE(n, ((Port){u, p}));
+        if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && !reach[w.node]) {
+          reach[w.node] = 1;
+          q[qt++] = w.node;
+        }
+      }
+    }
     for (int i = 0; i < n->nn; i++) {
-      if (n->tag[i] == ROOT || n->dead[i]) continue;
+      if (n->tag[i] == ROOT || n->dead[i] || !reach[i]) continue;
       Port w = WIRE(n, ((Port){i, 0}));
       if (w.node < 0 || w.port != 0 || w.node <= i) continue;
-      if (n->dead[w.node]) continue;
+      if (n->dead[w.node] || !reach[w.node]) continue;
       act_push(n, (Port){i, 0}, w);
     }
+    free(reach);
+    free(q);
     reduce_worklist(n, limit, &changed);
     if (getenv("LIN_DUMP")) {
       for (int i = 0; i < n->nn; i++) {

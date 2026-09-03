@@ -176,6 +176,31 @@ static Term *parse_term(void) {
   skipws();
   if (!S[P]) pfail("unexpected end of input");
   if (S[P] == ')') pfail("unexpected ')'");
+  if (S[P] == '"') {
+    P++;
+    int start = P;
+    while (S[P] && S[P] != '"') {
+      if (S[P] == '\\' && S[P + 1]) P++;
+      P++;
+    }
+    if (S[P] != '"') pfail("unterminated string literal");
+    int end = P;
+    P++;
+    Term *body = term_new(TVAR, "_nl", NULL, NULL);
+    for (int i = end - 1; i >= start; i--) {
+      char c = S[i];
+      if (i > start && S[i - 1] == '\\') {
+        if (c == 'n') c = '\n';
+        else if (c == 't') c = '\t';
+        else if (c == 'r') c = '\r';
+        else if (c == '0') c = '\0';
+        i--;
+      }
+      Term *ch = church((unsigned char)c);
+      body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "_cl", NULL, NULL), ch), body);
+    }
+    return term_new(TLAM, "_cl", term_new(TLAM, "_nl", body, NULL), NULL);
+  }
   if (S[P] == '(') {
     P++;
     skipws();

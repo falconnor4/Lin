@@ -11,6 +11,7 @@
 (define or (\a (\b ((a true) b))))
 (define xor (\a (\b ((a (not b)) b))))
 (define if (\c (\t (\f ((c t) f)))))
+(define ifl (\c (\t (\f (((c t) f) 0)))))
 
 ; ---- Church numerals ----
 (define zero 0)
@@ -43,3 +44,11 @@
 (define! head (list a -> a) (\l ((l (\h (\t h))) nil)))
 (define! tail (list a -> list a) (\l ((l (\h (\t t))) nil)))
 (define! is_empty (list a -> bool) (\l ((l (\h (\t false))) true)))
+(define! length (list a -> num) (\l (if (is_empty l) 0 (succ (length (tail l))))))
+
+; ---- FFI (Foreign Function Interface) ----
+; FFI action is encoded as: (\_ffi (\_ret ((_ffi fn) arg)))
+(define ffi (\fn (\arg (\_ffi (\_ret ((_ffi fn) arg))))))
+(define puts (\s (ffi "puts" s)))
+(define putchar (\c (ffi "putchar" c)))
+(define exit (\c (ffi "exit" c)))
