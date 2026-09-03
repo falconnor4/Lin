@@ -90,8 +90,11 @@ static Port ct(Term *t, Scope sc, int depth) {
     } else if (e->count > 1) {
       Port *ts = malloc(sizeof(Port) * (long)e->count);
       ts[0] = N->wire[self.node * 3 + 1];
-      for (int i = 0; i < e->nextra; i++)
+      for (int i = 0; i < e->nextra; i++) {
         ts[i + 1] = N->wire[e->extra[i].node * 3 + 1];
+        N->dead[e->extra[i].node] = 1;
+        N->wire[e->extra[i].node * 3 + 1] = (Port){-1, -1};
+      }
       Port root = dup_tree(ts, e->count, sc);
       net_link(N, (Port){self.node, 1}, root, 0);
       free(ts);

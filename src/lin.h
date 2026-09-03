@@ -70,7 +70,6 @@ long net_read_int(Net *n, Port p);
 int net_read_bool(Net *n, Port p);
 int net_read_string(Net *n, Port p, char *buf, size_t max);
 int net_print(Net *n);
-int term_decode(Term *t);
 
 /* ---------------- goi ---------------- */
 long long goi_det(Net *n);

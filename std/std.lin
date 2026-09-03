@@ -29,7 +29,7 @@
 ; same Church numerals, which HM cannot infer (occurs check), so they carry
 ; explicit annotations via define! (trusted definitions).
 (define! leq (num -> num -> bool) (\m (\n (is_zero ((sub m) n)))))
-(define! eq (num -> num -> bool) (\m (\n (is_zero (add (sub m n) (sub n m))))))
+(define! eq (num -> num -> bool) (\m (\n (and (leq m n) (leq n m)))))
 (define! lt (num -> num -> bool) (\m (\n (not (leq n m)))))
 (define! gt (num -> num -> bool) (\m (\n (lt n m))))
 
@@ -44,19 +44,34 @@
 (define! head (list a -> a) (\l ((l (\h (\t h))) nil)))
 (define! tail (list a -> list a) (\l ((l (\h (\t t))) nil)))
 (define! is_empty (list a -> bool) (\l ((l (\h (\t false))) true)))
-(define! length (list a -> num) (\l (if (is_empty l) 0 (succ (length (tail l))))))
+(define! length (list a -> num) (\l (ifl (is_empty l) (\_ 0) (\_ (succ (length (tail l)))))))
 
 ; ---- FFI (Foreign Function Interface) ----
-; FFI action is encoded as: (\_ffi (\_ret ((_ffi fn) arg)))
-(define ffi (\fn (\arg (\_ffi (\_ret ((_ffi fn) arg))))))
+; FFI action is encoded as: (\_ffi (\_ret ((_ffi fn) args)))
+(define ffi (\fn (\args (\_ffi (\_ret ((_ffi fn) args))))))
+(define ccall0 (\fn (ffi fn nil)))
+(define ccall1 (\fn (\a1 (ffi fn (cons a1 nil)))))
+(define ccall2 (\fn (\a1 (\a2 (ffi fn (cons a1 (cons a2 nil)))))))
+(define ccall3 (\fn (\a1 (\a2 (\a3 (ffi fn (cons a1 (cons a2 (cons a3 nil)))))))))
+
+; Standard C Library Bindings
 (define puts (\s (ffi "puts" s)))
 (define putchar (\c (ffi "putchar" c)))
 (define exit (\c (ffi "exit" c)))
 (define getenv (\name (ffi "getenv" name)))
+(define system (\cmd (ffi "system" cmd)))
+(define load_lib (\lib (ffi "dlopen" lib)))
+
+; File I/O
+(define fopen (\path (\mode (ccall2 "fopen" path mode))))
+(define fclose (\fp (ccall1 "fclose" fp)))
+(define fgetc (\fp (ccall1 "fgetc" fp)))
+(define fputc (\c (\fp (ccall2 "fputc" c fp))))
+
 
 ; ---- Scott numerals ----
-(define zero_s (\_sz (\_ss _sz)))
-(define succ_s (\n (\_sz (\_ss (_ss n)))))
-(define pred_s (\n ((n zero_s) (\p p))))
-(define is_zero_s (\n ((n true) (\p false))))
+(define! zero_s num (\_sz (\_ss _sz)))
+(define! succ_s (num -> num) (\n (\_sz (\_ss (_ss n)))))
+(define! pred_s (num -> num) (\n ((n zero_s) (\p p))))
+(define! is_zero_s (num -> bool) (\n ((n true) (\p false))))
 

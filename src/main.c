@@ -96,10 +96,7 @@ void eval_form(Term *t) {
     }
   }
   printf("=> ");
-  if (net_print(&net)) {
-    /* shared croissant: decode the value from the expanded term */
-    if (term_decode(ex)) printf("?");
-  }
+  net_print(&net);
   putchar('\n');
   net_free(&net);
   term_free(ex);

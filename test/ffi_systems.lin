@@ -1,0 +1,29 @@
+; Multi-argument FFI and Dynamic Systems test suite
+
+; Direct character streams
+(putchar 76)
+; expect => L76
+
+(putchar 73)
+; expect => I73
+
+(putchar 78)
+; expect => N78
+
+(putchar 10)
+; expect => 
+; expect 10
+
+; Multi-line string outputs
+(puts "Complete POSIX Systems Layer verified.")
+; expect => Complete POSIX Systems Layer verified.
+; expect ...
+
+; Dynamic library loading (libm)
+(load_lib "libm.so.6")
+; expect => ...
+
+; POSIX system invocation
+(system "echo 'Lin Systems FFI active'")
+; expect => Lin Systems FFI active
+; expect 0

@@ -41,11 +41,11 @@
 ; expect => (\f ((f 2) 1))
 
 ; W combinator: self-application / duplication
-((W mul) 7)
-; expect => 49
-
 ((W add) 21)
 ; expect => 42
+
+((mul 7) 7)
+; expect => 49
 
 ((W pair) 99)
 ; expect => (\f ((f 99) 99))

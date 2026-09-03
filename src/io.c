@@ -18,6 +18,9 @@ static long read_scott(Net *n, Port p) {
   long count = 0;
   Port cur = p;
   for (int step = 0; step < 1000000; step++) {
+    if (getenv("DBG_SCOTT")) {
+      printf("SCOTT step %d: cur=(%d,%d) tag=%d name=%s\n", step, cur.node, cur.port, cur.node>=0?n->tag[cur.node]:-1, cur.node>=0?n->name[cur.node]:"");
+    }
     while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
       cur = wire((Port){cur.node, 0});
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
@@ -75,10 +78,12 @@ static long read_church(Net *n, Port p) {
         stack[sp++] = cur.port;
         cur = wire((Port){cur.node, 0});
       } else if (cur.port == 0) {
-        if (sp <= 0) return -1;
+        if (sp <= 0) return count > 0 ? count : -1;
         cur = wire((Port){cur.node, stack[--sp]});
       }
     } else if (tag == APP) {
+      Port f0 = wire((Port){cur.node, 0});
+      if (f0.node == inner && f0.port == 1) return count;
       if (cur.port == 1) {
         count++;
         cur = wire((Port){cur.node, 2});
@@ -87,6 +92,8 @@ static long read_church(Net *n, Port p) {
       } else {
         return -1;
       }
+    } else if (tag == LAM && (n->name[cur.node][0] == 'u' || !strncmp(n->name[cur.node], "_u", 2))) {
+      return count;
     } else {
       return -1;
     }
@@ -180,34 +187,121 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
   return -1;
 }
 
+static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_max) {
+  while (p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP)
+    p = wire((Port){p.node, 0});
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
 
-/* Check if an unresolved DUP is reachable from root */
-static int live_dup_reachable(Net *n) {
-  int *q = malloc(sizeof(int) * (size_t)(n->nn + 1));
-  unsigned char *vis = calloc((size_t)n->nn, 1);
-  int qh = 0, qt = 0;
-  Port r = n->wire[0];
-  if (r.node < 0) { free(q); free(vis); return 0; }
-  q[qt++] = r.node;
-  vis[r.node] = 1;
-  while (qh < qt) {
-    int i = q[qh++];
-    if (n->tag[i] == DUP) { free(q); free(vis); return 1; }
-    for (int p = 0; p < 3; p++) {
-      Port w = n->wire[i * 3 + p];
-      if (w.node < 0 || w.node >= n->nn || n->dead[w.node]) continue;
-      if (!vis[w.node]) {
-        vis[w.node] = 1;
-        q[qt++] = w.node;
-      }
+  /* 1. Number check: Church (_cf) or Scott (_sz) */
+  if (!strncmp(n->name[p.node], "_cf", 3) || !strncmp(n->name[p.node], "_sz", 3)) {
+    long v = net_read_int(n, p);
+    if (v >= 0) {
+      *out_val = v;
+      return 1;
     }
   }
-  free(q);
-  free(vis);
+
+  /* 2. Boolean check: _bt */
+  if (!strncmp(n->name[p.node], "_bt", 3)) {
+    int b = net_read_bool(n, p);
+    if (b >= 0) {
+      *out_val = b;
+      return 1;
+    }
+  }
+
+  /* 3. String check: c or _cl */
+  if (n->name[p.node][0] == 'c' || !strncmp(n->name[p.node], "_cl", 3)) {
+    int len = net_read_string(n, p, str_buf, str_max);
+    if (len >= 0) {
+      *out_val = (long)(intptr_t)str_buf;
+      return 1;
+    }
+  }
+
+  /* Fallback */
+  long v = net_read_int(n, p);
+  if (v >= 0) {
+    *out_val = v;
+    return 1;
+  }
   return 0;
 }
 
-/* Check if root is an FFI invocation: \_ffi. \_ret. ((_ffi fn) arg) */
+static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], int max_args) {
+  /* 1. Try unpacking arg_p as a string first */
+  int slen = net_read_string(n, arg_p, str_bufs[0], 4096);
+  if (slen > 0) {
+    args[0] = (long)(intptr_t)str_bufs[0];
+    return 1;
+  }
+
+  /* 2. Try unpacking arg_p as an integer or boolean scalar */
+  long v = net_read_int(n, arg_p);
+  if (v >= 0) {
+    args[0] = v;
+    return 1;
+  }
+  int b = net_read_bool(n, arg_p);
+  if (b >= 0) {
+    args[0] = b;
+    return 1;
+  }
+
+  /* 3. Try unpacking arg_p as a list of arguments: (cons a1 (cons a2 ... nil)) */
+  int argc = 0;
+  Port cur = arg_p;
+  while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
+    cur = wire((Port){cur.node, 0});
+
+  if (cur.node >= 0 && cur.node < n->nn && n->tag[cur.node] == LAM &&
+      (n->name[cur.node][0] == 'c' || !strncmp(n->name[cur.node], "_cl", 3))) {
+    Port bn = wire((Port){cur.node, 2});
+    while (bn.node >= 0 && bn.node < n->nn && !n->dead[bn.node] && n->tag[bn.node] == DUP)
+      bn = wire((Port){bn.node, 0});
+    if (bn.node >= 0 && bn.port == 0 && n->tag[bn.node] == LAM) {
+      for (int step = 0; step < 100000 && argc < max_args; step++) {
+        while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
+          cur = wire((Port){cur.node, 0});
+        if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
+
+        Port inner = wire((Port){cur.node, 2});
+        while (inner.node >= 0 && inner.node < n->nn && !n->dead[inner.node] && n->tag[inner.node] == DUP)
+          inner = wire((Port){inner.node, 0});
+        if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
+
+        Port body = wire((Port){inner.node, 2});
+        while (body.node >= 0 && body.node < n->nn && !n->dead[body.node] && n->tag[body.node] == DUP)
+          body = wire((Port){body.node, 0});
+        if (body.node < 0) break;
+
+        if (n->tag[body.node] == LAM) break; /* nil */
+
+        if (n->tag[body.node] == APP) {
+          Port inner_app = wire((Port){body.node, 0});
+          while (inner_app.node >= 0 && n->tag[inner_app.node] == DUP)
+            inner_app = wire((Port){inner_app.node, 0});
+          if (inner_app.node >= 0 && n->tag[inner_app.node] == APP) {
+            Port elem = wire((Port){inner_app.node, 2});
+            unpack_arg(n, elem, &args[argc], str_bufs[argc], 4096);
+            argc++;
+          }
+          cur = wire((Port){body.node, 2});
+          continue;
+        }
+        break;
+      }
+      if (argc > 0) return argc;
+    }
+  }
+
+  if (unpack_arg(n, arg_p, &args[0], str_bufs[0], 4096)) {
+    return 1;
+  }
+  return 0;
+}
+
+/* Check if root is an FFI invocation: \_ffi. \_ret. ((_ffi fn) args) */
 static int net_try_ffi(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM) return 0;
   if (strcmp(n->name[p.node], "_ffi")) return 0;
@@ -225,51 +319,57 @@ static int net_try_ffi(Net *n, Port p) {
     return 0;
 
   void *sym = dlsym(RTLD_DEFAULT, fn_name);
-  if (!sym) {
+  if (!sym && strcmp(fn_name, "dlopen")) {
     fprintf(stderr, "ffi: symbol '%s' not found\n", fn_name);
     return 0;
   }
 
   Port arg_p = wire((Port){app2.node, 2});
-  char arg_str[4096];
-  int is_str = (net_read_string(n, arg_p, arg_str, sizeof(arg_str)) >= 0);
+  long c_args[8] = {0};
+  char str_bufs[8][4096];
+  int argc = unpack_args(n, arg_p, c_args, str_bufs, 8);
 
-  if (!strcmp(fn_name, "puts")) {
-    int (*fn)(const char *) = (int (*)(const char *))sym;
-    int res = fn(is_str ? arg_str : "");
-    printf("%d", res);
-    return 1;
-  }
-  if (!strcmp(fn_name, "putchar")) {
-    long ch = net_read_int(n, arg_p);
-    int (*fn)(int) = (int (*)(int))sym;
-    int res = fn((int)ch);
-    printf("%d", res);
-    return 1;
-  }
-  if (!strcmp(fn_name, "exit")) {
-    long code = net_read_int(n, arg_p);
-    void (*fn)(int) = (void (*)(int))sym;
-    fn((int)code);
+  fflush(stdout);
+
+  if (!strcmp(fn_name, "dlopen")) {
+    void *h = dlopen(argc > 0 ? (const char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL);
+    if (!h) {
+      fprintf(stderr, "ffi: dlopen failed: %s\n", dlerror());
+      return 0;
+    }
+    printf("%ld", (long)(intptr_t)h);
     return 1;
   }
   if (!strcmp(fn_name, "getenv")) {
-    char *(*fn)(const char *) = (char *(*)(const char *))sym;
-    char *res = fn(is_str ? arg_str : "");
+    char *res = getenv(argc > 0 ? (const char *)c_args[0] : "");
     fputs(res ? res : "(null)", stdout);
     return 1;
   }
-
-  long arg_val = net_read_int(n, arg_p);
-  if (arg_val >= 0) {
-    long (*fn)(long) = (long (*)(long))sym;
-    printf("%ld", fn(arg_val));
-    return 1;
-  } else {
-    long (*fn)(void) = (long (*)(void))sym;
-    printf("%ld", fn());
+  if (!strcmp(fn_name, "exit")) {
+    exit(argc > 0 ? (int)c_args[0] : 0);
     return 1;
   }
+  if (!strcmp(fn_name, "puts")) {
+    int res = puts(argc > 0 ? (const char *)c_args[0] : "");
+    printf("%d", res);
+    return 1;
+  }
+
+  long res = 0;
+  switch (argc) {
+  case 0: res = ((long (*)(void))sym)(); break;
+  case 1: res = ((long (*)(long))sym)(c_args[0]); break;
+  case 2: res = ((long (*)(long, long))sym)(c_args[0], c_args[1]); break;
+  case 3: res = ((long (*)(long, long, long))sym)(c_args[0], c_args[1], c_args[2]); break;
+  case 4: res = ((long (*)(long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3]); break;
+  case 5: res = ((long (*)(long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4]); break;
+  case 6: res = ((long (*)(long, long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5]); break;
+  default:
+    fprintf(stderr, "ffi: too many arguments (%d)\n", argc);
+    return 0;
+  }
+  printf("%ld", res);
+  return 1;
 }
 
 /* Print a port representation to stdout */
@@ -344,7 +444,6 @@ int net_print(Net *n) {
       return 0;
     }
   }
-  if (live_dup_reachable(n)) return 1;
   print_port(r, 0);
   return 0;
 }
