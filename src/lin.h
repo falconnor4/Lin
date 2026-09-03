@@ -4,22 +4,22 @@
 #include <stdio.h>
 
 #define NAME 32
-#define MAXSCOPE 512
 
-/* ---------------- terms ---------------- */
-enum { TVAR, TLAM, TAPP, TNUM, TLET, TDEF, TDEFX };
+/* ---------------- core terms (pure untyped lambda) ---------------- */
+enum { TVAR, TLAM, TAPP, TDEF, TDEFX };
+typedef struct Type { int kind, id; struct Type *a, *b; } Type;
 typedef struct Term {
   int type;
   char name[NAME];
   struct Term *l, *r;
-  void *annot;
+  Type *annot;
 } Term;
 
 /* ---------------- interaction net ---------------- */
 enum { LAM, APP, DUP, ERA, ROOT };
 
 typedef struct { int node, port; } Port;
-typedef struct { uint64_t bits; int len; } Scope;
+typedef struct { int len, off; } Scope;
 
 typedef struct {
   int cap, nn;
@@ -28,8 +28,8 @@ typedef struct {
   Scope *scope;
   char (*name)[NAME];
   Port *act; int atop, actcap;
-  int *mark; unsigned gen;
   unsigned char *dead;
+  uint64_t *sca; int sccap, scn;
   long steps;
 } Net;
 
@@ -38,12 +38,11 @@ void net_link(Net *n, Port a, Port b, int enqueue);
 void net_init(Net *n, int cap);
 void net_free(Net *n);
 long net_reduce(Net *n, long limit);
-long net_reduce_whnf(Net *n, long limit);
+long net_reduce_readback(Net *n, long limit);
 Net *net_copy(const Net *n);
-long net_reduce_full(Net *n, long limit);
 Scope scope_nil(void);
-Scope scope_ext(Scope s, int bit);
-int scope_eq(Scope a, Scope b);
+Scope scope_ext(Net *n, Scope s, int bit);
+int scope_eq(Net *n, Scope a, Scope b);
 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
@@ -54,7 +53,6 @@ void term_free(Term *t);
 int term_refs(Term *t, const char *name);
 
 /* ---------------- types ---------------- */
-typedef struct Type { int kind, id; struct Type *a, *b; } Type;
 typedef struct { int nq, q[64]; Type *t; } Scheme;
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
@@ -69,7 +67,7 @@ int compile(Term *t, Net *n, char *err, int errsz);
 
 /* ---------------- readback ---------------- */
 int net_print(Net *n);
-char *term_eval_string(Term *t);
+int term_decode(Term *t);
 
 /* ---------------- goi ---------------- */
 long long goi_det(Net *n);

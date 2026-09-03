@@ -26,12 +26,6 @@ long long goi_det(Net *n) {
       size_t rc = (size_t)(i * 3 + p) * d + w.node * 3 + w.port;
       m[rc] = (m[rc] - 1 + MOD) % MOD;
     }
-  for (int i = 0; i + 1 < n->atop; i += 2) {
-    int r = n->act[i].node * 3 + n->act[i].port;
-    int c = n->act[i + 1].node * 3 + n->act[i + 1].port;
-    m[(size_t)r * d + c] = (m[(size_t)r * d + c] - 1 + MOD) % MOD;
-    m[(size_t)c * d + r] = (m[(size_t)c * d + r] - 1 + MOD) % MOD;
-  }
   long long det = 1;
   for (int i = 0; i < d; i++) {
     int piv = -1;

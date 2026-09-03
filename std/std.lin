@@ -28,8 +28,8 @@
 ; same Church numerals, which HM cannot infer (occurs check), so they carry
 ; explicit annotations via define! (trusted definitions).
 (define! leq (num -> num -> bool) (\m (\n (is_zero ((sub m) n)))))
-(define! eq (num -> num -> bool) (\m (\n (and (leq m n) (leq n m)))))
-(define! lt (num -> num -> bool) (\m (\n (and (leq m n) (not (eq m n))))))
+(define! eq (num -> num -> bool) (\m (\n (is_zero (add (sub m n) (sub n m))))))
+(define! lt (num -> num -> bool) (\m (\n (not (leq n m)))))
 (define! gt (num -> num -> bool) (\m (\n (lt n m))))
 
 ; ---- pairs ----

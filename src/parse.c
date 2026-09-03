@@ -52,9 +52,6 @@ int term_refs(Term *t, const char *name) {
   switch (t->type) {
   case TVAR: return !strcmp(t->name, name);
   case TLAM: return strcmp(t->name, name) && term_refs(t->l, name);
-  case TLET:
-    return term_refs(t->l, name) ||
-           (strcmp(t->name, name) && term_refs(t->r, name));
   default: return term_refs(t->l, name) || term_refs(t->r, name);
   }
 }
@@ -86,6 +83,15 @@ static int isnum(const char *s) {
   for (const char *p = s; *p; p++)
     if (!isdigit((unsigned char)*p)) return 0;
   return 1;
+}
+
+/* numeral k desugars to the Church term \_cf. \_cx. _cf^k _cx */
+static Term *church(long k) {
+  Term *body = term_new(TVAR, "_cx", NULL, NULL);
+  for (long i = 0; i < k; i++)
+    body = term_new(TAPP, "", term_new(TVAR, "_cf", NULL, NULL), body);
+  Term *lamx = term_new(TLAM, "_cx", body, NULL);
+  return term_new(TLAM, "_cf", lamx, NULL);
 }
 
 static Term *parse_term(void);
@@ -155,6 +161,15 @@ static Term *parse_tail(Term *f) {
     Term *a = parse_term();
     f = term_new(TAPP, "", f, a);
   }
+}
+
+static Term *parse_atom(const char *kw) {
+  if (isnum(kw)) {
+    long k = atol(kw);
+    if (k > 5000) pfail("numeral too large (max 5000)");
+    return church(k);
+  }
+  return term_new(TVAR, kw, NULL, NULL);
 }
 
 static Term *parse_term(void) {
@@ -230,14 +245,14 @@ static Term *parse_term(void) {
       }
       Term *body = parse_tail(parse_term());
       for (int i = nb - 1; i >= 0; i--)
-        body = term_new(TLET, names[i], vals[i], body);
+        body = term_new(TAPP, "", term_new(TLAM, names[i], body, NULL), vals[i]);
       return body;
     }
-    return parse_tail(term_new(isnum(kw) ? TNUM : TVAR, kw, NULL, NULL));
+    return parse_tail(parse_atom(kw));
   }
   char kw[NAME];
   if (!sym(kw, NAME)) pfail("unexpected character");
-  return term_new(isnum(kw) ? TNUM : TVAR, kw, NULL, NULL);
+  return parse_atom(kw);
 }
 
 static int resync(int start) {

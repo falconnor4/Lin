@@ -1,6 +1,16 @@
 #include "lin.h"
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+
+static void bump_stack(void) {
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_STACK, &rl)) return;
+  rl.rlim_cur = 1L << 30;
+  if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max)
+    rl.rlim_cur = rl.rlim_max;
+  setrlimit(RLIMIT_STACK, &rl);
+}
 
 Def defs[1024];
 int ndefs = 0;
@@ -34,24 +44,18 @@ Term *expand_defs(Term *t, char guard[][NAME], int ng) {
     return e;
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
-  int bound = (t->type == TLAM || t->type == TLET) && ng < 63;
+  int bound = t->type == TLAM && ng < 63;
   if (bound) snprintf(guard[ng], NAME, "%s", t->name);
-  if (t->type == TLET) {
-    char saved[NAME];
-    snprintf(saved, NAME, "%s", guard[ng]);
-    c->l = expand_defs(t->l, guard, ng);
-    snprintf(guard[ng], NAME, "%s", saved);
-    c->r = expand_defs(t->r, guard, ng + bound);
-  } else {
-    c->l = expand_defs(t->l, guard, ng + bound);
-    c->r = expand_defs(t->r, guard, ng + bound);
-  }
+  c->l = expand_defs(t->l, guard, ng + bound);
+  c->r = expand_defs(t->r, guard, ng);
   return c;
 }
 
 void eval_form(Term *t) {
-  Scheme sch;
   char err[512];
+  Scheme sch;
+  if (t->type == TDEF || t->type == TDEFX)
+    return; /* definitions handled separately in main loop */
   if (!type_check(t, &sch, err, sizeof err)) {
     printf("error: %s\n", err);
     return;
@@ -66,15 +70,15 @@ void eval_form(Term *t) {
     term_free(ex);
     return;
   }
-  if (getenv("LIN_FULL")) {
-    net_reduce_full(&net, STEP_LIMIT);
-  } else {
-    net_reduce_whnf(&net, STEP_LIMIT);
-  }
+  net_reduce(&net, STEP_LIMIT);
   if (getenv("LIN_DUMP")) {
+    fprintf(stderr, "steps=%ld nn=%d\n", net.steps, net.nn);
     for (int i = 0; i < net.nn; i++) {
       static const char *tn[] = { "LAM", "APP", "DUP", "ERA", "ROOT" };
-      fprintf(stderr, "%2d %-4s %s", i, tn[net.tag[i]], net.name[i]);
+      fprintf(stderr, "%2d %-4s %s D=%d sc=", i, tn[net.tag[i]], net.name[i],
+              net.dead[i]);
+      for (int k = 0; k < net.scope[i].len; k++)
+        fprintf(stderr, "%llu", (unsigned long long)net.sca[net.scope[i].off + k]);
       for (int p = 0; p < 3; p++) {
         Port w = net.wire[i * 3 + p];
         if (w.node >= 0) fprintf(stderr, "  [%d]<->%d.%d", p, w.node, w.port);
@@ -85,45 +89,16 @@ void eval_form(Term *t) {
       static const char *tn[] = { "LAM", "APP", "DUP", "ERA", "ROOT" };
       Port w = net.wire[i * 3 + 0];
       if (net.tag[i] == ROOT || net.dead[i]) continue;
-      if (w.node < 0 || w.port != 0 || w.node <= i || net.dead[w.node]) continue;
-      int a = net.tag[i], b = net.tag[w.node];
-      if ((a == LAM && b == APP) || (a == APP && b == LAM) ||
-          (a == DUP && b == DUP))
-        fprintf(stderr, "   LIVE-REDEX %s%d x %s%d\n", tn[a], i, tn[b], w.node);
+      if (w.node < 0 || w.port != 0 || w.node <= i || net.dead[w.node])
+        continue;
+      fprintf(stderr, "   LIVE-REDEX %s%d x %s%d\n", tn[net.tag[i]], i,
+              tn[net.tag[w.node]], w.node);
     }
-  }
-  if (getenv("LIN_DBG")) {
-    fprintf(stderr, "EXIT_DUMP\n");
-    /* recurse with a small stack-explicit printer to see NULL children */
-    typedef struct { Term *t; int depth; } S;
-    S *st = malloc(sizeof(S) * 100000);
-    int sp = 0;
-    st[sp++] = (S){ ex, 0 };
-    while (sp) {
-      S s = st[--sp];
-      Term *x = s.t;
-      fprintf(stderr, "%*s", s.depth * 2, "");
-      if (!x) { fprintf(stderr, "NULL\n"); continue; }
-      fprintf(stderr, "(%d%s%s", x->type,
-              x->type == TVAR || x->type == TLAM ? " " : "",
-              x->type == TVAR || x->type == TLAM ? x->name : "");
-      if (x->l) st[sp++] = (S){ x->l, s.depth + 1 };
-      else if (x->type != TNUM && x->type != TVAR)
-        fprintf(stderr, " %%%dLNULL", x->type);
-      if (x->r) st[sp++] = (S){ x->r, s.depth + 1 };
-      else if (x->type != TNUM && x->type != TVAR)
-        fprintf(stderr, " %%%dRNULL", x->type);
-      fprintf(stderr, ")\n");
-    }
-    free(st);
   }
   printf("=> ");
   if (net_print(&net)) {
-    /* irreducible croissant normal form: fall back to a term-level
-       normal-order reduction of the expanded program */
-    char *s = term_eval_string(ex);
-    fputs(s, stdout);
-    free(s);
+    /* shared croissant: decode the value from the expanded term */
+    if (term_decode(ex)) printf("?");
   }
   putchar('\n');
   net_free(&net);
@@ -132,18 +107,18 @@ void eval_form(Term *t) {
 
 /* Y = \f. ((\x. f (x x)) (\x. f (x x))) */
 static Term *y_term(void) {
-  Term *half = term_new(
-      TLAM, "x",
-      term_new(TAPP, "", term_new(TVAR, "f", NULL, NULL),
-               term_new(TAPP, "", term_new(TVAR, "x", NULL, NULL),
-                        term_new(TVAR, "x", NULL, NULL))),
-      NULL);
-  Term *half2 = term_new(
-      TLAM, "x",
-      term_new(TAPP, "", term_new(TVAR, "f", NULL, NULL),
-               term_new(TAPP, "", term_new(TVAR, "x", NULL, NULL),
-                        term_new(TVAR, "x", NULL, NULL))),
-      NULL);
+  Term *half =
+      term_new(TLAM, "x",
+               term_new(TAPP, "", term_new(TVAR, "f", NULL, NULL),
+                        term_new(TAPP, "", term_new(TVAR, "x", NULL, NULL),
+                                 term_new(TVAR, "x", NULL, NULL))),
+               NULL);
+  Term *half2 =
+      term_new(TLAM, "x",
+               term_new(TAPP, "", term_new(TVAR, "f", NULL, NULL),
+                        term_new(TAPP, "", term_new(TVAR, "x", NULL, NULL),
+                                 term_new(TVAR, "x", NULL, NULL))),
+               NULL);
   return term_new(TLAM, "f", term_new(TAPP, "", half, half2), NULL);
 }
 
@@ -262,7 +237,7 @@ static void do_goi(const char *expr) {
   net_init(&net, 1 << 16);
   char err[512];
   if (compile(ex, &net, err, sizeof err)) {
-long long d1 = goi_det(&net);
+    long long d1 = goi_det(&net);
     net_reduce(&net, STEP_LIMIT);
     long long d2 = goi_det(&net);
     printf("goi: before %lld, after %lld\n", d1, d2);
@@ -315,6 +290,7 @@ static void repl(void) {
 }
 
 int main(int argc, char **argv) {
+  bump_stack();
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
   const char *std = getenv("LIN_STD");
   if (!std) std = "std/std.lin";

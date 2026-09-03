@@ -187,24 +187,20 @@ static Type *infer(Term *t) {
     return tarrow(a, b);
   }
   case TAPP: {
+    if (t->l && t->l->type == TLAM) {
+      Type *v = infer(t->r);
+      env_push(t->l->name, generalize(v));
+      Type *b = infer(t->l->l);
+      envn--;
+      return b;
+    }
     Type *f = infer(t->l);
     Type *x = infer(t->r);
     Type *r = tvar();
     unify(f, tarrow(x, r));
     return r;
   }
-  case TNUM: {
-    Type *a = tvar();
-    return tarrow(tarrow(a, a), tarrow(a, a));
-  }
-  case TLET: {
-    Type *v = infer(t->l);
-    env_push(t->name, generalize(v));
-    Type *b = infer(t->r);
-    envn--;
-    return b;
-  }
-  case TDEF: return infer(t->l);
+  case TDEFX: return infer(t->l);
   }
   return NULL;
 }
