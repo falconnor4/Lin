@@ -13,35 +13,33 @@ static inline Port wire(Port p) {
 
 /* --- Geometry of Interaction (GoI) Value Marshaling --- */
 
+static inline Port dup_hop(Net *n, Port p) {
+  for (int step = 0; step < 1000 && p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP; step++) {
+    if (p.port == 0) p = n->wire[p.node * 3 + 1];
+    else p = n->wire[p.node * 3 + 0];
+  }
+  return p;
+}
+
 static long read_scott(Net *n, Port p) {
   N = n;
   long count = 0;
   Port cur = p;
   for (int step = 0; step < 1000000; step++) {
-    if (getenv("DBG_SCOTT")) {
-      printf("SCOTT step %d: cur=(%d,%d) tag=%d name=%s\n", step, cur.node, cur.port, cur.node>=0?n->tag[cur.node]:-1, cur.node>=0?n->name[cur.node]:"");
-    }
-    while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
-      cur = wire((Port){cur.node, 0});
+    cur = dup_hop(n, cur);
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
     if (n->tag[cur.node] != LAM || strncmp(n->name[cur.node], "_sz", 3)) return -1;
     int sz = cur.node;
-    Port ss_p = wire((Port){sz, 2});
-    while (ss_p.node >= 0 && ss_p.node < n->nn && !n->dead[ss_p.node] && n->tag[ss_p.node] == DUP)
-      ss_p = wire((Port){ss_p.node, 0});
+    Port ss_p = dup_hop(n, wire((Port){sz, 2}));
     if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node]) return -1;
     if (n->tag[ss_p.node] != LAM || strncmp(n->name[ss_p.node], "_ss", 3)) return -1;
     int ss = ss_p.node;
 
-    Port body = wire((Port){ss, 2});
-    while (body.node >= 0 && body.node < n->nn && !n->dead[body.node] && n->tag[body.node] == DUP)
-      body = wire((Port){body.node, 0});
+    Port body = dup_hop(n, wire((Port){ss, 2}));
     if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return -1;
     if (body.node == sz && body.port == 1) return count;
     if (n->tag[body.node] == APP) {
-      Port fn = wire((Port){body.node, 0});
-      while (fn.node >= 0 && fn.node < n->nn && !n->dead[fn.node] && n->tag[fn.node] == DUP)
-        fn = wire((Port){fn.node, 0});
+      Port fn = dup_hop(n, wire((Port){body.node, 0}));
       if (fn.node == ss && fn.port == 1) {
         count++;
         cur = wire((Port){body.node, 2});
@@ -372,9 +370,11 @@ static int net_try_ffi(Net *n, Port p) {
   return 1;
 }
 
+static unsigned char *vis_print = NULL;
+
 /* Print a port representation to stdout */
 static void print_port(Port p, int depth) {
-  if (depth > 100000 || p.node < 0 || p.node >= N->nn) {
+  if (depth > 1000 || p.node < 0 || p.node >= N->nn) {
     putchar('?');
     return;
   }
@@ -382,55 +382,70 @@ static void print_port(Port p, int depth) {
     putchar('_');
     return;
   }
+  if (N->tag[p.node] == LAM && p.port == 1) {
+    fputs(N->name[p.node], stdout);
+    return;
+  }
+  if (vis_print && vis_print[p.node]) {
+    putchar('?');
+    return;
+  }
+  if (vis_print) vis_print[p.node] = 1;
+
   switch (N->tag[p.node]) {
   case ROOT:
     print_port(wire(p), depth + 1);
-    return;
+    break;
   case ERA:
     putchar('_');
-    return;
+    break;
   case DUP:
     if (p.port == 0) print_port(wire((Port){p.node, 1}), depth + 1);
     else print_port(wire((Port){p.node, 0}), depth + 1);
-    return;
+    break;
   case APP:
     putchar('(');
     print_port(wire((Port){p.node, 0}), depth + 1);
     putchar(' ');
     print_port(wire((Port){p.node, 2}), depth + 1);
     putchar(')');
-    return;
+    break;
   case LAM:
     if (p.port == 1) {
       fputs(N->name[p.node], stdout);
-      return;
+      break;
     }
     if (p.port == 0) {
       long v = net_read_int(N, p);
       if (v >= 0) {
         printf("%ld", v);
-        return;
+        break;
       }
       int b = net_read_bool(N, p);
       if (b >= 0) {
         fputs(b ? "true" : "false", stdout);
-        return;
+        break;
       }
       fputs("(\\", stdout);
       fputs(N->name[p.node], stdout);
       putchar(' ');
       print_port(wire((Port){p.node, 2}), depth + 1);
       putchar(')');
-      return;
+      break;
     }
     print_port(wire(p), depth + 1);
-    return;
+    break;
   }
+  if (vis_print) vis_print[p.node] = 0;
 }
 
 int net_print(Net *n) {
   N = n;
   Port r = wire((Port){0, 0});
+  for (int step = 0; step < 1000 && r.node >= 0 && r.node < n->nn && !n->dead[r.node] && n->tag[r.node] == DUP; step++) {
+    if (r.port == 0) r = wire((Port){r.node, 1});
+    else r = wire((Port){r.node, 0});
+  }
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     if (net_try_ffi(n, r)) return 0;
     long v = net_read_int(n, r);
@@ -444,6 +459,9 @@ int net_print(Net *n) {
       return 0;
     }
   }
+  vis_print = calloc((size_t)(n->nn + 1), 1);
   print_port(r, 0);
+  free(vis_print);
+  vis_print = NULL;
   return 0;
 }

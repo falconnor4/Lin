@@ -44,7 +44,7 @@ Term *expand_defs(Term *t, char guard[][NAME], int ng) {
     return e;
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
-  int bound = t->type == TLAM && ng < 63;
+  int bound = (t->type == TLAM || t->type == TDEF) && ng < 63;
   if (bound) snprintf(guard[ng], NAME, "%s", t->name);
   c->l = expand_defs(t->l, guard, ng + bound);
   c->r = expand_defs(t->r, guard, ng);
@@ -122,10 +122,6 @@ static Term *y_term(void) {
 static void process_def(Term *t) {
   if (ndefs >= 1024) {
     printf("error: too many definitions\n");
-    return;
-  }
-  if (def_find(t->name)) {
-    printf("error: redefinition of '%s'\n", t->name);
     return;
   }
   char err[512];

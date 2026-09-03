@@ -74,10 +74,12 @@ Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
     n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope));
     n->name = realloc(n->name, (size_t)nc * NAME);
     n->dead = realloc(n->dead, nc);
+    memset(n->dead + n->cap, 0, (size_t)(nc - n->cap));
     n->cap = nc;
   }
   int id = n->nn++;
   n->tag[id] = tag;
+  n->dead[id] = 0;
   n->scope[id] = sc;
   snprintf(n->name[id], NAME, "%s", name);
   for (int i = 0; i < 3; i++) n->wire[id * 3 + i] = NONE;
