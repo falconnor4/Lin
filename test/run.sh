@@ -7,7 +7,7 @@ fail=0
 
 TESTS="$@"
 if [ -z "$TESTS" ]; then
-  TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin"
+  TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/tseitin.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin"
 fi
 
 for f in $TESTS; do

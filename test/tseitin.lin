@@ -1,0 +1,17 @@
+; Tseitin Parity on 3-Regular Expander Graphs
+; Tests linear-time superposition reduction on hard expander graph formulas
+
+(define! tru bool (\t (\f t)))
+(define! fls bool (\t (\f f)))
+(define! or (bool -> bool -> bool) (\a (\b ((a tru) b))))
+(define! and (bool -> bool -> bool) (\a (\b ((a b) fls))))
+(define! not (bool -> bool) (\b (\t (\f ((b f) t)))))
+(define! exists ((bool -> bool) -> bool) (\p ((or (p tru)) (p fls))))
+(define or3 (\a (\b (\c ((or ((or a) b)) c)))))
+
+(exists (\e1 (exists (\e2 (exists (\e3 (exists (\e4 (exists (\e5 (exists (\e6 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and (or3 e1 e4 e5)) (or3 e1 (not e4) (not e5)))) (or3 (not e1) e4 (not e5)))) (or3 (not e1) (not e4) e5))) (or3 e2 e1 (not e6)))) (or3 e2 (not e1) e6))) (or3 (not e2) e1 e6))) (or3 (not e2) (not e1) (not e6)))) (or3 e3 e2 (not e5)))) (or3 e3 (not e2) e5))) (or3 (not e3) e2 e5))) (or3 (not e3) (not e2) (not e5)))) (or3 e4 e3 (not e6)))) (or3 e4 (not e3) e6))) (or3 (not e4) e3 e6))) (or3 (not e4) (not e3) (not e6)))))))))))))))
+; expect => (\t (\f t))
+
+; n=6 Tseitin (|E|=9 edges, 24 clauses)
+(exists (\e1 (exists (\e2 (exists (\e3 (exists (\e4 (exists (\e5 (exists (\e6 (exists (\e7 (exists (\e8 (exists (\e9 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and (or3 e1 e6 e7)) (or3 e1 (not e6) (not e7)))) (or3 (not e1) e6 (not e7)))) (or3 (not e1) (not e6) e7))) (or3 e2 e1 (not e8)))) (or3 e2 (not e1) e8))) (or3 (not e2) e1 e8))) (or3 (not e2) (not e1) (not e8)))) (or3 e3 e2 (not e9)))) (or3 e3 (not e2) e9))) (or3 (not e3) e2 e9))) (or3 (not e3) (not e2) (not e9)))) (or3 e4 e3 (not e7)))) (or3 e4 (not e3) e7))) (or3 (not e4) e3 e7))) (or3 (not e4) (not e3) (not e7)))) (or3 e5 e4 (not e8)))) (or3 e5 (not e4) e8))) (or3 (not e5) e4 e8))) (or3 (not e5) (not e4) (not e8)))) (or3 e6 e5 (not e9)))) (or3 e6 (not e5) e9))) (or3 (not e6) e5 e9))) (or3 (not e6) (not e5) (not e9)))))))))))))))))))))
+; expect => (\t (\f t))
