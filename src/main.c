@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 #include "lin.h"
 #include <stdlib.h>
 #include <string.h>
@@ -153,19 +155,28 @@ static void process_def(Term *t) {
   }
 }
 
-static void form_cb(Term *t, const char *perr, void *ud) {
-  (void)ud;
-  if (perr) {
-    printf("error: %s\n", perr);
-    return;
+#include <unistd.h>
+#include <limits.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+static char loaded_paths[512][PATH_MAX];
+static int n_loaded = 0;
+static char dir_stack[64][PATH_MAX];
+static int dir_sp = 0;
+
+static int is_already_loaded(const char *canon) {
+  for (int i = 0; i < n_loaded; i++)
+    if (!strcmp(loaded_paths[i], canon)) return 1;
+  return 0;
+}
+
+static void mark_loaded(const char *canon) {
+  if (n_loaded < 512) {
+    snprintf(loaded_paths[n_loaded++], PATH_MAX, "%s", canon);
   }
-  if (t->type == TDEF || t->type == TDEFX) {
-    process_def(t);
-    term_free(t);
-    return;
-  }
-  eval_form(t);
-  term_free(t);
 }
 
 static char *read_file(const char *path) {
@@ -185,10 +196,66 @@ static char *read_file(const char *path) {
   return buf;
 }
 
+static int resolve_path(const char *rel, char *out, size_t out_sz) {
+  (void)out_sz;
+  char cand[PATH_MAX];
+  if (rel[0] != '/' && dir_sp > 0) {
+    snprintf(cand, sizeof cand, "%s/%s", dir_stack[dir_sp - 1], rel);
+    if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
+  }
+  if (access(rel, R_OK) == 0 && realpath(rel, out)) return 1;
+  const char *std_dir = getenv("LIN_STD_DIR");
+  if (!std_dir) std_dir = "std";
+  snprintf(cand, sizeof cand, "%s/%s", std_dir, rel);
+  if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
+  return 0;
+}
+
+static int load_file(const char *path);
+
+static void form_cb(Term *t, const char *perr, void *ud) {
+  (void)ud;
+  if (perr) {
+    printf("error: %s\n", perr);
+    return;
+  }
+  if (t->type == TLOAD) {
+    if (!load_file(t->name))
+      printf("error: cannot load '%s'\n", t->name);
+    term_free(t);
+    return;
+  }
+  if (t->type == TDEF || t->type == TDEFX) {
+    process_def(t);
+    term_free(t);
+    return;
+  }
+  eval_form(t);
+  term_free(t);
+}
+
 static int load_file(const char *path) {
-  char *src = read_file(path);
+  char full[PATH_MAX];
+  if (!resolve_path(path, full, sizeof full)) return 0;
+  if (is_already_loaded(full)) return 1;
+  mark_loaded(full);
+
+  char *src = read_file(full);
   if (!src) return 0;
+
+  char dir[PATH_MAX];
+  snprintf(dir, sizeof dir, "%s", full);
+  char *last_slash = strrchr(dir, '/');
+  if (last_slash) *last_slash = '\0';
+  else snprintf(dir, sizeof dir, ".");
+
+  if (dir_sp < 64) {
+    snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
+  }
+
   parse_forms(src, form_cb, NULL);
+
+  if (dir_sp > 0) dir_sp--;
   free(src);
   return 1;
 }

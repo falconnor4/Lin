@@ -240,6 +240,27 @@ static Term *parse_term(void) {
       t->annot = ty;
       return t;
     }
+    if (!strcmp(kw, "load")) {
+      skipws();
+      if (S[P] != '"') pfail("load: expected string path");
+      P++;
+      int start = P;
+      while (S[P] && S[P] != '"') {
+        if (S[P] == '\\' && S[P + 1]) P++;
+        P++;
+      }
+      if (S[P] != '"') pfail("load: unterminated path");
+      int len = P - start;
+      char path[NAME];
+      if (len >= NAME) pfail("load: path too long");
+      memcpy(path, S + start, (size_t)len);
+      path[len] = '\0';
+      P++;
+      skipws();
+      if (S[P] != ')') pfail("load: expected ')'");
+      P++;
+      return term_new(TLOAD, path, NULL, NULL);
+    }
     if (!strcmp(kw, "let")) {
       skipws();
       if (S[P] != '(') pfail("let: expected '('");
@@ -304,6 +325,11 @@ static int resync(int start) {
 }
 
 void parse_forms(const char *src, FormFn fn, void *ud) {
+  const char *prev_S = S;
+  int prev_P = P;
+  jmp_buf prev_PJ;
+  memcpy(prev_PJ, PJ, sizeof(jmp_buf));
+
   S = src;
   P = 0;
   for (;;) {
@@ -320,4 +346,8 @@ void parse_forms(const char *src, FormFn fn, void *ud) {
     Term *t = parse_term();
     fn(t, NULL, ud);
   }
+
+  S = prev_S;
+  P = prev_P;
+  memcpy(PJ, prev_PJ, sizeof(jmp_buf));
 }

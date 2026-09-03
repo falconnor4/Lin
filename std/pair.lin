@@ -1,0 +1,6 @@
+; lin standard library: pairs
+(load "bool.lin")
+
+(define pair (\x (\y (\f ((f x) y)))))
+(define fst (\p (p true)))
+(define snd (\p (p false)))

@@ -1,0 +1,42 @@
+; lin standard library: boolean satisfiability (SAT) & witness extraction
+(load "bool.lin")
+(load "pair.lin")
+(load "list.lin")
+
+(define! tru bool true)
+(define! fls bool false)
+
+; Existential and Universal quantifiers over Church booleans
+(define! exists ((bool -> bool) -> bool) (\p ((or (p tru)) (p fls))))
+(define! forall ((bool -> bool) -> bool) (\p ((and (p tru)) (p fls))))
+
+; 3-literal OR clause constructor
+(define or3 (\a (\b (\c ((or a) ((or b) c))))))
+
+; Self-reducible single-variable witness probe:
+; Probes if x=true satisfies predicate p; if not, tests x=false.
+; Returns (pair is_satisfiable chosen_val).
+(define probe1
+  (\p (ifl (p tru)
+        (\_ (pair true true))
+        (\_ (ifl (p fls)
+              (\_ (pair true false))
+              (\_ (pair false false)))))))
+
+; 2-variable witness extraction:
+; Returns (pair is_sat (pair x1_val x2_val))
+(define probe2
+  (\p (ifl (exists (p tru))
+        (\_ (pair true (pair true (snd (probe1 (p tru))))))
+        (\_ (ifl (exists (p fls))
+              (\_ (pair true (pair false (snd (probe1 (p fls))))))
+              (\_ (pair false (pair false false))))))))
+
+; 3-variable witness extraction:
+; Returns (pair is_sat (pair x1_val (pair x2_val x3_val)))
+(define probe3
+  (\p (ifl (exists (\x2 (exists (\x3 (((p tru) x2) x3)))))
+        (\_ (pair true (pair true (snd (probe2 (p tru))))))
+        (\_ (ifl (exists (\x2 (exists (\x3 (((p fls) x2) x3)))))
+              (\_ (pair true (pair false (snd (probe2 (p fls))))))
+              (\_ (pair false (pair false (pair false false)))))))))

@@ -1,0 +1,23 @@
+; lin standard library: foreign function interface (FFI)
+(load "list.lin")
+
+; FFI action is encoded as: (\_ffi (\_ret ((_ffi fn) args)))
+(define ffi (\fn (\args (\_ffi (\_ret ((_ffi fn) args))))))
+(define ccall0 (\fn (ffi fn nil)))
+(define ccall1 (\fn (\a1 (ffi fn (cons a1 nil)))))
+(define ccall2 (\fn (\a1 (\a2 (ffi fn (cons a1 (cons a2 nil)))))))
+(define ccall3 (\fn (\a1 (\a2 (\a3 (ffi fn (cons a1 (cons a2 (cons a3 nil)))))))))
+
+; Standard C Library Bindings
+(define puts (\s (ffi "puts" s)))
+(define putchar (\c (ffi "putchar" c)))
+(define exit (\c (ffi "exit" c)))
+(define getenv (\name (ffi "getenv" name)))
+(define system (\cmd (ffi "system" cmd)))
+(define load_lib (\lib (ffi "dlopen" lib)))
+
+; File I/O
+(define fopen (\path (\mode (ccall2 "fopen" path mode))))
+(define fclose (\fp (ccall1 "fclose" fp)))
+(define fgetc (\fp (ccall1 "fgetc" fp)))
+(define fputc (\c (\fp (ccall2 "fputc" c fp))))

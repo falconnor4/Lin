@@ -1,0 +1,22 @@
+; lin standard library: numbers (Church & Scott numerals)
+(load "bool.lin")
+
+; ---- Church numerals ----
+(define zero 0)
+(define succ (\n (\_cf (\_cx (_cf (((n _cf) _cx)))))))
+(define add (\m (\n (\_cf (\_cx (((m _cf) ((n _cf) _cx))))))))
+(define mul (\m (\n (\_cf (\_cx (((m (n _cf)) _cx)))))))
+(define pow (\m (\n (\_cf (\_cx ((((n m) _cf) _cx)))))))
+(define! pred (num -> num) (\n (\_cf (\_cx ((((n (\g (\h (h ((g _cf)))))) (\u _cx)) (\u u)))))))
+(define! sub (num -> num -> num) (\m (\n ((n pred) m))))
+(define! is_zero (num -> bool) (\n ((n (\x false)) true)))
+(define! leq (num -> num -> bool) (\m (\n (is_zero ((sub m) n)))))
+(define! eq (num -> num -> bool) (\m (\n (and (leq m n) (leq n m)))))
+(define! lt (num -> num -> bool) (\m (\n (not (leq n m)))))
+(define! gt (num -> num -> bool) (\m (\n (lt n m))))
+
+; ---- Scott numerals ----
+(define! zero_s num (\_sz (\_ss _sz)))
+(define! succ_s (num -> num) (\n (\_sz (\_ss (_ss n)))))
+(define! pred_s (num -> num) (\n ((n zero_s) (\p p))))
+(define! is_zero_s (num -> bool) (\n ((n true) (\p false))))

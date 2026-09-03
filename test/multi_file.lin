@@ -1,0 +1,47 @@
+; multi-file loading & diamond dependency test suite
+
+; Load standard sub-modules
+(load "std/bool.lin")
+(load "std/num.lin")
+(load "std/pair.lin")
+(load "std/sat.lin")
+
+; Test re-loading (diamond dependency include-guard verification)
+(load "std/bool.lin")
+(load "std/num.lin")
+
+; Verify functions from loaded modules
+(if true 1 2)
+; expect => 1
+
+(add 5 7)
+; expect => 12
+
+(fst (pair 99 42))
+; expect => 99
+
+(snd (pair 99 42))
+; expect => 42
+
+; Verify witness extraction from std/sat.lin
+(fst (probe1 (\x ((or x) (not x)))))
+; expect => true
+
+(snd (probe1 (\x ((or x) (not x)))))
+; expect => true
+
+(snd (probe1 (\x (not x))))
+; expect => false
+
+; Verify 2-variable witness extraction
+(define p_sat (\x1 (\x2 ((and x1) (not x2)))))
+(define w2 (probe2 p_sat))
+
+(fst w2)
+; expect => true
+
+(fst (snd w2))
+; expect => true
+
+(snd (snd w2))
+; expect => false

@@ -3,10 +3,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define NAME 32
+#define NAME 128
 
 /* ---------------- core terms (pure untyped lambda) ---------------- */
-enum { TVAR, TLAM, TAPP, TDEF, TDEFX };
+enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD };
 typedef struct Type { int kind, id; struct Type *a, *b; } Type;
 typedef struct Term {
   int type;
