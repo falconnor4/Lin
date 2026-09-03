@@ -3,6 +3,7 @@
 #include "lin.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/resource.h>
 
 static void bump_stack(void) {
@@ -18,6 +19,7 @@ Def defs[1024];
 int ndefs = 0;
 
 static long STEP_LIMIT = 1L << 24;
+static int bench_mode = 0;
 
 Def *def_find(const char *name) {
   for (int i = ndefs - 1; i >= 0; i--)
@@ -72,34 +74,26 @@ void eval_form(Term *t) {
     term_free(ex);
     return;
   }
-  net_reduce(&net, STEP_LIMIT);
-  if (getenv("LIN_DUMP")) {
-    fprintf(stderr, "steps=%ld nn=%d\n", net.steps, net.nn);
-    for (int i = 0; i < net.nn; i++) {
-      static const char *tn[] = { "LAM", "APP", "DUP", "ERA", "ROOT" };
-      fprintf(stderr, "%2d %-4s %s D=%d sc=", i, tn[net.tag[i]], net.name[i],
-              net.dead[i]);
-      for (int k = 0; k < net.scope[i].len; k++)
-        fprintf(stderr, "%llu", (unsigned long long)net.sca[net.scope[i].off + k]);
-      for (int p = 0; p < 3; p++) {
-        Port w = net.wire[i * 3 + p];
-        if (w.node >= 0) fprintf(stderr, "  [%d]<->%d.%d", p, w.node, w.port);
-      }
-      fprintf(stderr, "\n");
-    }
-    for (int i = 0; i < net.nn; i++) {
-      static const char *tn[] = { "LAM", "APP", "DUP", "ERA", "ROOT" };
-      Port w = net.wire[i * 3 + 0];
-      if (net.tag[i] == ROOT || net.dead[i]) continue;
-      if (w.node < 0 || w.port != 0 || w.node <= i || net.dead[w.node])
-        continue;
-      fprintf(stderr, "   LIVE-REDEX %s%d x %s%d\n", tn[net.tag[i]], i,
-              tn[net.tag[w.node]], w.node);
-    }
+  struct timespec t0, t1;
+  long long d1 = 0, d2 = 0;
+  if (bench_mode) {
+    d1 = goi_det(&net);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
   }
+  net_reduce(&net, STEP_LIMIT);
+  if (bench_mode) {
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    d2 = goi_det(&net);
+  }
+
   printf("=> ");
   net_print(&net);
   putchar('\n');
+  if (bench_mode) {
+    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1000000.0;
+    fprintf(stderr, "[bench] %ld steps | %d nodes | %.2f ms | GoI det: %lld -> %lld\n",
+            net.steps, net.nn, ms, d1, d2);
+  }
   net_free(&net);
   term_free(ex);
 }
@@ -305,44 +299,89 @@ static void do_goi(const char *expr) {
   term_free(first_form);
 }
 
+static int paren_balance(const char *s, int *in_str) {
+  int bal = 0;
+  for (int i = 0; s[i]; i++) {
+    if (*in_str) {
+      if (s[i] == '\\' && s[i + 1]) { i++; continue; }
+      if (s[i] == '"') *in_str = 0;
+      continue;
+    }
+    if (s[i] == ';') break;
+    if (s[i] == '"') { *in_str = 1; continue; }
+    if (s[i] == '(') bal++;
+    else if (s[i] == ')') bal--;
+  }
+  return bal;
+}
+
 static void repl(void) {
+  char buf[65536];
   char line[8192];
+  int buf_len = 0, depth = 0, in_str = 0;
   printf("lin 0.1 - interaction combinator language\n");
   printf("commands: :type <expr>  :goi <expr>  :load <file>  :help  :q\n");
   for (;;) {
-    printf("lin> ");
+    printf(depth > 0 || in_str ? "...  " : "lin> ");
     fflush(stdout);
     if (!fgets(line, sizeof line, stdin)) break;
     size_t len = strlen(line);
     while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
       line[--len] = 0;
-    if (!len) continue;
-    if (!strcmp(line, ":q") || !strcmp(line, ":quit")) break;
-    if (!strcmp(line, ":help")) {
-      printf("  (\\x body)         lambda (also: lambda, lam, U+03BB)\n");
-      printf("  (f a b ...)       application, left associative\n");
-      printf("  (let ((x v)) b)   local binding\n");
-      printf("  (define n t)      top-level definition (auto Y for recursion)\n");
-      printf("  (define! n T t)   trusted definition with type annotation T\n");
-      printf("                    (types: -> ( ) num bool, lowercase = var)\n");
-      printf("  123               Church numeral literal\n");
-      printf("  ; comment\n");
-      continue;
+
+    if (depth == 0 && !in_str) {
+      if (!len) continue;
+      if (!strcmp(line, ":q") || !strcmp(line, ":quit")) break;
+      if (!strcmp(line, ":help")) {
+        printf("  (\\x body)         lambda (also: lambda, lam, U+03BB)\n");
+        printf("  (f a b ...)       application, left associative\n");
+        printf("  (let ((x v)) b)   local binding\n");
+        printf("  (define n t)      top-level definition\n");
+        printf("  (define! n T t)   trusted definition with type annotation T\n");
+        printf("                    (types: -> ( ) num bool, lowercase = var)\n");
+        printf("  123               Scott numeral literal\n");
+        printf("  ; comment\n");
+        continue;
+      }
+      if (!strncmp(line, ":load ", 6)) {
+        if (!load_file(line + 6)) printf("error: cannot read '%s'\n", line + 6);
+        continue;
+      }
+      if (!strncmp(line, ":type ", 6)) {
+        do_type(line + 6);
+        continue;
+      }
+      if (!strncmp(line, ":goi ", 5)) {
+        do_goi(line + 5);
+        continue;
+      }
     }
-    if (!strncmp(line, ":load ", 6)) {
-      if (!load_file(line + 6)) printf("error: cannot read '%s'\n", line + 6);
-      continue;
+
+    int delta = paren_balance(line, &in_str);
+    depth += delta;
+    if (depth < 0) depth = 0;
+
+    if (buf_len + (int)len + 2 < (int)sizeof(buf)) {
+      memcpy(buf + buf_len, line, len);
+      buf_len += len;
+      buf[buf_len++] = '\n';
+      buf[buf_len] = 0;
     }
-    if (!strncmp(line, ":type ", 6)) {
-      do_type(line + 6);
-      continue;
+
+    if (depth == 0 && !in_str) {
+      parse_forms(buf, form_cb, NULL);
+      buf_len = 0;
     }
-    if (!strncmp(line, ":goi ", 5)) {
-      do_goi(line + 5);
-      continue;
-    }
-    parse_forms(line, form_cb, NULL);
   }
+}
+
+static void print_usage(const char *prog) {
+  printf("usage: %s [options] [files...]\n\n", prog);
+  printf("options:\n");
+  printf("  -e, --eval <expr>   evaluate expression and exit\n");
+  printf("  -b, --bench         enable benchmark metrics (steps, nodes, time, GoI)\n");
+  printf("  -h, --help          display this help message\n");
+  printf("  -v, --version       display version information\n");
 }
 
 int main(int argc, char **argv) {
@@ -352,12 +391,39 @@ int main(int argc, char **argv) {
   if (!std) std = "std/std.lin";
   if (!load_file(std))
     fprintf(stderr, "warning: standard library not found at '%s'\n", std);
-  if (argc > 1) {
-    for (int i = 1; i < argc; i++)
-      if (!load_file(argv[i]))
-        fprintf(stderr, "error: cannot read '%s'\n", argv[i]);
-    return 0;
+
+  int ran_eval = 0;
+  for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+      print_usage(argv[0]);
+      return 0;
+    }
+    if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version")) {
+      printf("lin 0.1 - interaction combinator language\n");
+      return 0;
+    }
+    if (!strcmp(argv[i], "-b") || !strcmp(argv[i], "--bench")) {
+      bench_mode = 1;
+      continue;
+    }
+    if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--eval")) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "error: %s requires an argument\n", argv[i]);
+        return 1;
+      }
+      parse_forms(argv[++i], form_cb, NULL);
+      ran_eval = 1;
+      continue;
+    }
+    if (argv[i][0] == '-') {
+      fprintf(stderr, "unknown option: %s\n", argv[i]);
+      print_usage(argv[0]);
+      return 1;
+    }
+    if (!load_file(argv[i]))
+      fprintf(stderr, "error: cannot read '%s'\n", argv[i]);
+    ran_eval = 1;
   }
-  repl();
+  if (!ran_eval) repl();
   return 0;
 }

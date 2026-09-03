@@ -51,58 +51,8 @@ static long read_scott(Net *n, Port p) {
   return -1;
 }
 
-static long read_church(Net *n, Port p) {
-  N = n;
-  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM) return -1;
-  if (strncmp(n->name[p.node], "_cf", 3)) return -1;
-  Port bf = wire((Port){p.node, 2});
-  if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM) return -1;
-  int inner = bf.node;
-  if (strncmp(n->name[inner], "_cx", 3)) return -1;
-
-  Port cur = wire((Port){inner, 2});
-  long count = 0;
-  int stack[8192];
-  int sp = 0;
-
-  for (int step = 0; step < 10000000; step++) {
-    if (cur.node < 0 || n->dead[cur.node]) return count;
-    if (cur.node == inner && cur.port == 1) return count;
-    int tag = n->tag[cur.node];
-    if (tag == ERA) return count;
-    if (tag == DUP) {
-      if (cur.port == 1 || cur.port == 2) {
-        if (sp >= 8192) return -1;
-        stack[sp++] = cur.port;
-        cur = wire((Port){cur.node, 0});
-      } else if (cur.port == 0) {
-        if (sp <= 0) return count > 0 ? count : -1;
-        cur = wire((Port){cur.node, stack[--sp]});
-      }
-    } else if (tag == APP) {
-      Port f0 = wire((Port){cur.node, 0});
-      if (f0.node == inner && f0.port == 1) return count;
-      if (cur.port == 1) {
-        count++;
-        cur = wire((Port){cur.node, 2});
-      } else if (cur.port == 2) {
-        cur = wire((Port){cur.node, 1});
-      } else {
-        return -1;
-      }
-    } else if (tag == LAM && (n->name[cur.node][0] == 'u' || !strncmp(n->name[cur.node], "_u", 2))) {
-      return count;
-    } else {
-      return -1;
-    }
-  }
-  return -1;
-}
-
 long net_read_int(Net *n, Port p) {
-  long s = read_scott(n, p);
-  if (s >= 0) return s;
-  return read_church(n, p);
+  return read_scott(n, p);
 }
 
 
@@ -190,39 +140,21 @@ static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_m
     p = wire((Port){p.node, 0});
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
 
-  /* 1. Number check: Church (_cf) or Scott (_sz) */
-  if (!strncmp(n->name[p.node], "_cf", 3) || !strncmp(n->name[p.node], "_sz", 3)) {
-    long v = net_read_int(n, p);
-    if (v >= 0) {
-      *out_val = v;
-      return 1;
-    }
-  }
-
-  /* 2. Boolean check: _bt */
+  /* 1. Boolean check: _bt */
   if (!strncmp(n->name[p.node], "_bt", 3)) {
     int b = net_read_bool(n, p);
-    if (b >= 0) {
-      *out_val = b;
-      return 1;
-    }
+    if (b >= 0) { *out_val = b; return 1; }
   }
 
-  /* 3. String check: c or _cl */
+  /* 2. String check: c or _cl */
   if (n->name[p.node][0] == 'c' || !strncmp(n->name[p.node], "_cl", 3)) {
     int len = net_read_string(n, p, str_buf, str_max);
-    if (len >= 0) {
-      *out_val = (long)(intptr_t)str_buf;
-      return 1;
-    }
+    if (len >= 0) { *out_val = (long)(intptr_t)str_buf; return 1; }
   }
 
-  /* Fallback */
+  /* 3. Number check / fallback */
   long v = net_read_int(n, p);
-  if (v >= 0) {
-    *out_val = v;
-    return 1;
-  }
+  if (v >= 0) { *out_val = v; return 1; }
   return 0;
 }
 
@@ -433,11 +365,7 @@ static void print_port(Port p, int depth) {
 
 int net_print(Net *n) {
   N = n;
-  Port r = wire((Port){0, 0});
-  for (int step = 0; step < 1000 && r.node >= 0 && r.node < n->nn && !n->dead[r.node] && n->tag[r.node] == DUP; step++) {
-    if (r.port == 0) r = wire((Port){r.node, 1});
-    else r = wire((Port){r.node, 0});
-  }
+  Port r = dup_hop(n, wire((Port){0, 0}));
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     if (net_try_ffi(n, r)) return 0;
     long v = net_read_int(n, r);

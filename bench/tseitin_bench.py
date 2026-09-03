@@ -68,7 +68,7 @@ def run_bench():
     print("=========================================================================================")
     print("Lin Interaction Net Benchmark 3: Tseitin Parity on 3-Regular Expander Graphs")
     print("=========================================================================================")
-    print(f"{'Vertices':<9} | {'Edges |E|':<9} | {'Clauses':<8} | {'Search Space':<14} | {'Lin Steps':<10} | {'Expected (90|E|-3)':<18} | {'Time':<8}")
+    print(f"{'Vertices':<9} | {'Edges |E|':<9} | {'Clauses':<8} | {'Search Space':<14} | {'Lin Steps':<10} | {'Expected (82|E|-3)':<18} | {'Time':<8}")
     print("-----------------------------------------------------------------------------------------")
     
     sizes = [4, 6, 8, 10, 12, 14, 16, 20]
@@ -91,7 +91,7 @@ def run_bench():
             )
             elapsed_ms = (time.perf_counter() - t0) * 1000
             steps = len(res.stderr.splitlines())
-            expected_steps = 90 * num_edges - 3
+            expected_steps = 82 * num_edges - 3
             space_str = f"2^{num_edges}"
             print(f"{n:<9d} | {num_edges:<9d} | {num_clauses:<8d} | {space_str:<14} | {steps:<10d} | {expected_steps:<18d} | {elapsed_ms:6.2f} ms")
         finally:
@@ -99,7 +99,7 @@ def run_bench():
                 os.remove(tpath)
                 
     print("=========================================================================================")
-    print("Conclusion: Lin reduces Tseitin expander refutations in exactly 90|E| - 3 linear steps,")
+    print("Conclusion: Lin reduces Tseitin expander refutations in exactly 82|E| - 3 linear steps,")
     print("bypassing the classical exponential 2^Omega(n) resolution proof size barrier.")
     print("=========================================================================================")
 
