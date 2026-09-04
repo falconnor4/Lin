@@ -51,30 +51,21 @@ static long read_scott(Net *n, Port p) {
   return -1;
 }
 
-long net_read_int(Net *n, Port p) {
-  return read_scott(n, p);
-}
-
+long net_read_int(Net *n, Port p) { return read_scott(n, p); }
 
 /* Extract Church boolean: _bt / _bf */
 int net_read_bool(Net *n, Port p) {
   N = n;
-  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM) return -1;
-  if (strncmp(n->name[p.node], "_bt", 3)) return -1;
+  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM || strncmp(n->name[p.node], "_bt", 3)) return -1;
   Port bf = wire((Port){p.node, 2});
-  if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM) return -1;
-  if (strncmp(n->name[bf.node], "_bf", 3)) return -1;
-
+  if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM || strncmp(n->name[bf.node], "_bf", 3)) return -1;
   Port cur = wire((Port){bf.node, 2});
   for (int step = 0; step < n->nn; step++) {
     if (cur.node < 0 || n->dead[cur.node]) return -1;
     if (cur.node == p.node && cur.port == 1) return 1;
     if (cur.node == bf.node && cur.port == 1) return 0;
-    if (n->tag[cur.node] == DUP) {
-      cur = wire((Port){cur.node, 0});
-    } else {
-      break;
-    }
+    if (n->tag[cur.node] == DUP) cur = wire((Port){cur.node, 0});
+    else break;
   }
   return -1;
 }
@@ -154,8 +145,7 @@ static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_m
 
   /* 3. Number check / fallback */
   long v = net_read_int(n, p);
-  if (v >= 0) { *out_val = v; return 1; }
-  return 0;
+  return v >= 0 ? (*out_val = v, 1) : 0;
 }
 
 static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], int max_args) {
@@ -278,9 +268,7 @@ static int net_try_ffi(Net *n, Port p) {
   case 6: res = ((long (*)(long, long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5]); break;
   case 7: res = ((long (*)(long, long, long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6]); break;
   case 8: res = ((long (*)(long, long, long, long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]); break;
-  default:
-    fprintf(stderr, "ffi: too many arguments (%d)\n", argc);
-    return 0;
+  default: fprintf(stderr, "ffi: too many arguments (%d)\n", argc); return 0;
   }
   printf("%ld", res);
   return 1;
@@ -338,13 +326,8 @@ static void print_port(Port p, int depth) {
         break;
       }
       int b = net_read_bool(N, p);
-      if (b >= 0) {
-        fputs(b ? "true" : "false", stdout);
-        break;
-      }
-      fputs("(\\", stdout);
-      fputs(N->name[p.node], stdout);
-      putchar(' ');
+      if (b >= 0) { fputs(b ? "true" : "false", stdout); break; }
+      printf("(\\%s ", N->name[p.node]);
       print_port(wire((Port){p.node, 2}), depth + 1);
       putchar(')');
       break;
@@ -361,15 +344,9 @@ int net_print(Net *n) {
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     if (net_try_ffi(n, r)) return 0;
     long v = net_read_int(n, r);
-    if (v >= 0) {
-      printf("%ld", v);
-      return 0;
-    }
+    if (v >= 0) { printf("%ld", v); return 0; }
     int b = net_read_bool(n, r);
-    if (b >= 0) {
-      fputs(b ? "true" : "false", stdout);
-      return 0;
-    }
+    if (b >= 0) { fputs(b ? "true" : "false", stdout); return 0; }
   }
   vis_print = calloc((size_t)(n->nn + 1), 1);
   print_port(r, 0);

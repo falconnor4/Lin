@@ -2,27 +2,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
 #define NONE ((Port){-1, -1})
 
 Scope scope_nil(void) { return (Scope){0, 0}; }
 
-/* scopes live in a per-net arena (unbounded free-group words, never mutated) */
+static void sc_ensure_cap(Net *n, int need) {
+  if (need <= n->sccap) return;
+  int nc = n->sccap ? n->sccap * 2 : 256;
+  while (nc < need && nc > 0) nc *= 2;
+  n->sca = realloc(n->sca, (size_t)nc * sizeof(uint64_t));
+  n->sccap = nc;
+}
+
 static int sc_alloc(Net *n, int len) {
   if (len < 0 || n->scn > 0x7fffffff - len) return 0;
-  if (n->scn + len > n->sccap) {
-    int nc = n->sccap ? n->sccap * 2 : 256;
-    while (nc < n->scn + len && nc > 0) nc *= 2;
-    if (nc <= 0) return 0;
-    uint64_t *p = realloc(n->sca, (size_t)nc * sizeof(uint64_t));
-    if (!p) return 0;
-    n->sca = p;
-    n->sccap = nc;
-  }
-  int off = n->scn;
-  n->scn += len;
-  return off;
+  sc_ensure_cap(n, n->scn + len);
+  return __atomic_fetch_add(&n->scn, len, __ATOMIC_RELAXED);
 }
 
 Scope scope_ext(Net *n, Scope s, int bit) {
@@ -37,8 +37,7 @@ static Scope scope_cat(Net *n, int bit, Scope a, Scope b) {
   int off = sc_alloc(n, 1 + a.len + b.len);
   n->sca[off] = bit & 1;
   memcpy(n->sca + off + 1, n->sca + a.off, (size_t)a.len * sizeof(uint64_t));
-  memcpy(n->sca + off + 1 + a.len, n->sca + b.off,
-         (size_t)b.len * sizeof(uint64_t));
+  memcpy(n->sca + off + 1 + a.len, n->sca + b.off, (size_t)b.len * sizeof(uint64_t));
   return (Scope){1 + a.len + b.len, off};
 }
 
@@ -66,18 +65,22 @@ void net_free(Net *n) {
   free(n->name); free(n->act); free(n->dead); free(n->sca);
 }
 
+static void net_ensure_cap(Net *n, int need) {
+  if (need <= n->cap) return;
+  int nc = n->cap ? n->cap * 2 : 256;
+  while (nc < need) nc *= 2;
+  n->tag = realloc(n->tag, nc);
+  n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
+  n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope));
+  n->name = realloc(n->name, (size_t)nc * NAME);
+  n->dead = realloc(n->dead, nc);
+  memset(n->dead + n->cap, 0, (size_t)(nc - n->cap));
+  n->cap = nc;
+}
+
 Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
-  if (n->nn >= n->cap) {
-    int nc = n->cap * 2;
-    n->tag = realloc(n->tag, nc);
-    n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
-    n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope));
-    n->name = realloc(n->name, (size_t)nc * NAME);
-    n->dead = realloc(n->dead, nc);
-    memset(n->dead + n->cap, 0, (size_t)(nc - n->cap));
-    n->cap = nc;
-  }
-  int id = n->nn++;
+  net_ensure_cap(n, n->nn + 1);
+  int id = __atomic_fetch_add(&n->nn, 1, __ATOMIC_RELAXED);
   n->tag[id] = tag;
   n->dead[id] = 0;
   n->scope[id] = sc;
@@ -93,11 +96,38 @@ static void act_push(Net *n, Port a, Port b) {
   n->act[n->atop++] = b;
 }
 
+typedef struct { Port *p; int top, cap; } ActBuf;
+static ActBuf *t_act;
+static int n_tact, in_parallel;
+
+static void ensure_tact(void) {
+#ifdef _OPENMP
+  int m = omp_get_max_threads();
+  if (m > n_tact) {
+    t_act = realloc(t_act, (size_t)m * sizeof(ActBuf));
+    for (int i = n_tact; i < m; i++) t_act[i] = (ActBuf){0};
+    n_tact = m;
+  }
+#endif
+}
+
 void net_link(Net *n, Port a, Port b, int enqueue) {
   if (a.node < 0 || b.node < 0) return;
   WIRE(n, a) = b;
   WIRE(n, b) = a;
-  if (enqueue && a.port == 0 && b.port == 0) act_push(n, a, b);
+  if (enqueue && a.port == 0 && b.port == 0) {
+#ifdef _OPENMP
+    if (in_parallel) {
+      int tid = omp_get_thread_num();
+      if (t_act[tid].top + 2 > t_act[tid].cap)
+        t_act[tid].p = realloc(t_act[tid].p, (size_t)(t_act[tid].cap = t_act[tid].cap ? t_act[tid].cap * 2 : 256) * sizeof(Port));
+      t_act[tid].p[t_act[tid].top++] = a;
+      t_act[tid].p[t_act[tid].top++] = b;
+      return;
+    }
+#endif
+    act_push(n, a, b);
+  }
 }
 
 /* the four rules of the scope-gauge calculus (wave-opt-reduction main.hs).
@@ -168,12 +198,73 @@ static int interact(Net *n, Port p1, Port p2) {
   return 0; /* era or stuck gauge pair: dropped, as in the reference */
 }
 
+typedef struct { Port p1, p2; } Pair;
+
+static inline void footprint(Net *n, int u, int v, int *c) {
+  c[0] = u; c[1] = v;
+  c[2] = WIRE(n, ((Port){u, 1})).node; c[3] = WIRE(n, ((Port){u, 2})).node;
+  c[4] = WIRE(n, ((Port){v, 1})).node; c[5] = WIRE(n, ((Port){v, 2})).node;
+}
+
 static void reduce_worklist(Net *n, long limit, int *changed) {
+#ifdef _OPENMP
+  ensure_tact();
+  int nth = omp_get_max_threads();
+  if (nth > 1 && n->atop >= 8) {
+    uint8_t *touched = calloc((size_t)n->cap, 1);
+    Pair *batch = malloc((size_t)(n->atop / 2 + 1) * sizeof(Pair));
+    while (n->atop >= 8 && n->steps < limit) {
+      int count = 0, rem = 0, sc_need = 0;
+      for (int i = 0; i < n->atop; i += 2) {
+        Port p1 = n->act[i], p2 = n->act[i + 1];
+        if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
+        if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
+        if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port) continue;
+        if (p1.port != 0 || p2.port != 0) continue;
+        int u = p1.node, v = p2.node, c[6], conf = 0;
+        footprint(n, u, v, c);
+        for (int k = 0; k < 6; k++)
+          if (c[k] >= 0 && c[k] < n->cap && touched[c[k]]) { conf = 1; break; }
+        if (conf) { n->act[rem++] = p1; n->act[rem++] = p2; continue; }
+        for (int k = 0; k < 6; k++)
+          if (c[k] >= 0 && c[k] < n->cap) touched[c[k]] = 1;
+        batch[count++] = (Pair){p1, p2};
+        sc_need += 2 * (1 + n->scope[u].len + n->scope[v].len);
+      }
+      n->atop = rem;
+      if (count == 0) break;
+      net_ensure_cap(n, n->nn + count * 4);
+      sc_ensure_cap(n, n->scn + sc_need);
+      in_parallel = 1;
+      int batch_changed = 0;
+      #pragma omp parallel for reduction(+:batch_changed) schedule(static)
+      for (int i = 0; i < count; i++) {
+        if (interact(n, batch[i].p1, batch[i].p2))
+          batch_changed++;
+      }
+      in_parallel = 0;
+      n->steps += count;
+      *changed += batch_changed;
+      for (int i = 0; i < count; i++) {
+        int c[6];
+        footprint(n, batch[i].p1.node, batch[i].p2.node, c);
+        for (int k = 0; k < 6; k++)
+          if (c[k] >= 0 && c[k] < n->cap) touched[c[k]] = 0;
+      }
+      for (int t = 0; t < nth; t++) {
+        for (int j = 0; j < t_act[t].top; j += 2)
+          act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
+        t_act[t].top = 0;
+      }
+    }
+    free(touched);
+    free(batch);
+  }
+#endif
   while (n->atop > 0 && n->steps < limit) {
     Port p2 = n->act[--n->atop];
     Port p1 = n->act[--n->atop];
-    if (p1.node < 0 || p2.node < 0) continue;
-    if (n->dead[p1.node] || n->dead[p2.node]) continue;
+    if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
     if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
     if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port) continue;
     if (p1.port != 0 || p2.port != 0) continue;
@@ -247,21 +338,13 @@ long net_reduce_readback(Net *n, long limit) {
 
 Net *net_copy(const Net *n) {
   Net *c = malloc(sizeof(Net));
-  c->cap = n->cap;
-  c->tag = malloc(c->cap);
-  c->wire = malloc(c->cap * 3 * sizeof(Port));
-  c->scope = malloc(c->cap * sizeof(Scope));
-  c->name = malloc(c->cap * NAME);
-  c->act = NULL; c->actcap = 0; c->atop = 0;
-  c->dead = malloc(c->cap);
-  memcpy(c->dead, n->dead, c->cap);
-  c->nn = n->nn; c->steps = 0;
-  memcpy(c->tag, n->tag, c->cap);
-  memcpy(c->wire, n->wire, c->cap * 3 * sizeof(Port));
-  memcpy(c->scope, n->scope, c->cap * sizeof(Scope));
-  memcpy(c->name, n->name, c->cap * NAME);
-  c->sca = malloc(n->scn * sizeof(uint64_t));
-  memcpy(c->sca, n->sca, n->scn * sizeof(uint64_t));
-  c->sccap = c->scn = n->scn;
+  *c = *n;
+  c->tag = malloc(c->cap); memcpy(c->tag, n->tag, c->cap);
+  c->wire = malloc(c->cap * 3 * sizeof(Port)); memcpy(c->wire, n->wire, c->cap * 3 * sizeof(Port));
+  c->scope = malloc(c->cap * sizeof(Scope)); memcpy(c->scope, n->scope, c->cap * sizeof(Scope));
+  c->name = malloc(c->cap * NAME); memcpy(c->name, n->name, c->cap * NAME);
+  c->dead = malloc(c->cap); memcpy(c->dead, n->dead, c->cap);
+  c->sca = malloc((size_t)n->scn * sizeof(uint64_t)); memcpy(c->sca, n->sca, (size_t)n->scn * sizeof(uint64_t));
+  c->act = NULL; c->actcap = c->atop = 0; c->steps = 0;
   return c;
 }

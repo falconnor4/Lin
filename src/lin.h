@@ -77,7 +77,7 @@ long long goi_det(Net *n);
 /* ---------------- main / defs ---------------- */
 typedef struct { char name[NAME]; Term *term; Scheme sch; int typed; } Def;
 extern Def *defs;
-extern int ndefs;
+extern int ndefs, lin_threads;
 Def *def_find(const char *name);
 Term *expand_defs(Term *t);
 void eval_form(Term *t);

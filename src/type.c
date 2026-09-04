@@ -19,29 +19,13 @@ static void tfail(const char *fmt, ...) {
 }
 
 static Type *tvar(void) {
-  Type *t = malloc(sizeof *t);
-  t->kind = TVR;
-  t->id = next_id++;
-  t->a = t->b = NULL;
-  return t;
+  Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, .id = next_id++}; return t;
 }
-
 static Type *tarrow(Type *a, Type *b) {
-  Type *t = malloc(sizeof *t);
-  t->kind = TARROW;
-  t->id = -1;
-  t->a = a;
-  t->b = b;
-  return t;
+  Type *t = malloc(sizeof *t); *t = (Type){.kind = TARROW, .id = -1, .a = a, .b = b}; return t;
 }
-
 static Type *tlist(Type *e) {
-  Type *t = malloc(sizeof *t);
-  t->kind = TLIST;
-  t->id = -1;
-  t->a = e;
-  t->b = NULL;
-  return t;
+  Type *t = malloc(sizeof *t); *t = (Type){.kind = TLIST, .id = -1, .a = e}; return t;
 }
 
 static Type *find(Type *t) {
@@ -64,27 +48,10 @@ static void unify(Type *x, Type *y) {
   x = find(x);
   y = find(y);
   if (x == y) return;
-  if (x->kind == TARROW && y->kind == TARROW) {
-    unify(x->a, y->a);
-    unify(x->b, y->b);
-    return;
-  }
-  if (x->kind == TLIST && y->kind == TLIST) {
-    unify(x->a, y->a);
-    return;
-  }
-  if (x->kind == TVR) {
-    if (occurs(x, y)) tfail("infinite type");
-    x->kind = TLINK;
-    x->a = y;
-    return;
-  }
-  if (y->kind == TVR) {
-    if (occurs(y, x)) tfail("infinite type");
-    y->kind = TLINK;
-    y->a = x;
-    return;
-  }
+  if (x->kind == TARROW && y->kind == TARROW) { unify(x->a, y->a); unify(x->b, y->b); return; }
+  if (x->kind == TLIST && y->kind == TLIST) { unify(x->a, y->a); return; }
+  if (x->kind == TVR) { if (occurs(x, y)) tfail("infinite type"); x->kind = TLINK; x->a = y; return; }
+  if (y->kind == TVR) { if (occurs(y, x)) tfail("infinite type"); y->kind = TLINK; y->a = x; return; }
   tfail("type mismatch");
 }
 

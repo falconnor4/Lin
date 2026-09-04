@@ -5,6 +5,9 @@
 #include <string.h>
 #include <time.h>
 #include <sys/resource.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 static void bump_stack(void) {
   struct rlimit rl;
@@ -115,15 +118,9 @@ void eval_form(Term *t) {
 
 /* Z = \_f. ((\_x. _f (\_v. _x _x _v)) (\_x. _f (\_v. _x _x _v))) */
 static Term *y_term(void) {
-  Term *xxv = term_new(TAPP, "",
-                       term_new(TAPP, "", term_new(TVAR, "_x", NULL, NULL),
-                                term_new(TVAR, "_x", NULL, NULL)),
-                       term_new(TVAR, "_v", NULL, NULL));
-  Term *lam_v = term_new(TLAM, "_v", xxv, NULL);
-  Term *half = term_new(TLAM, "_x",
-                        term_new(TAPP, "", term_new(TVAR, "_f", NULL, NULL), lam_v),
-                        NULL);
-  return term_new(TLAM, "_f", term_new(TAPP, "", half, term_copy(half)), NULL);
+  Term *xxv = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "_x", 0, 0), term_new(TVAR, "_x", 0, 0)), term_new(TVAR, "_v", 0, 0));
+  Term *half = term_new(TLAM, "_x", term_new(TAPP, "", term_new(TVAR, "_f", 0, 0), term_new(TLAM, "_v", xxv, 0)), 0);
+  return term_new(TLAM, "_f", term_new(TAPP, "", half, term_copy(half)), 0);
 }
 
 static void process_def(Term *t) {
@@ -218,22 +215,10 @@ static int load_file(const char *path);
 
 static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
-  if (perr) {
-    printf("error: %s\n", perr);
-    return;
-  }
-  if (t->type == TLOAD) {
-    if (!load_file(t->name))
-      printf("error: cannot load '%s'\n", t->name);
-    term_free(t);
-    return;
-  }
-  if (t->type == TDEF || t->type == TDEFX) {
-    process_def(t);
-    term_free(t);
-    return;
-  }
-  eval_form(t);
+  if (perr) { printf("error: %s\n", perr); return; }
+  if (t->type == TLOAD) { if (!load_file(t->name)) printf("error: cannot load '%s'\n", t->name); }
+  else if (t->type == TDEF || t->type == TDEFX) process_def(t);
+  else eval_form(t);
   term_free(t);
 }
 
@@ -267,11 +252,8 @@ static Term *first_form;
 
 static void cap_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
-  if (perr) {
-    printf("error: %s\n", perr);
-    return;
-  }
-  if (!first_form) first_form = t;
+  if (perr) printf("error: %s\n", perr);
+  else if (!first_form) first_form = t;
   else term_free(t);
 }
 
@@ -281,12 +263,8 @@ static void do_type(const char *expr) {
   if (!first_form) return;
   Scheme sch;
   char err[512];
-  if (type_check(first_form, &sch, err, sizeof err)) {
-    scheme_print(&sch);
-    putchar('\n');
-  } else {
-    printf("error: %s\n", err);
-  }
+  if (type_check(first_form, &sch, err, sizeof err)) { scheme_print(&sch); putchar('\n'); }
+  else printf("error: %s\n", err);
   term_free(first_form);
 }
 
@@ -301,11 +279,8 @@ static void do_goi(const char *expr) {
   if (compile(ex, &net, err, sizeof err)) {
     long long d1 = goi_det(&net);
     net_reduce(&net, STEP_LIMIT);
-    long long d2 = goi_det(&net);
-    printf("goi: before %lld, after %lld\n", d1, d2);
-  } else {
-    printf("error: %s\n", err);
-  }
+    printf("goi: before %lld, after %lld\n", d1, goi_det(&net));
+  } else printf("error: %s\n", err);
   net_free(&net);
   term_free(ex);
   term_free(first_form);
@@ -380,13 +355,19 @@ static void repl(void) {
   }
 }
 
+int lin_threads = 0;
+
 static void print_usage(const char *prog) {
-  printf("usage: %s [-e expr] [-b] [-h] [-v] [files...]\n", prog);
+  printf("usage: %s [-e expr] [-b] [-t threads] [-h] [-v] [files...]\n", prog);
 }
 
 int main(int argc, char **argv) {
   bump_stack();
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
+  if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
+#ifdef _OPENMP
+  if (lin_threads > 0) omp_set_num_threads(lin_threads);
+#endif
   const char *std = getenv("LIN_STD");
   if (!std) std = "std/std.lin";
   if (!load_file(std))
@@ -394,34 +375,25 @@ int main(int argc, char **argv) {
 
   int ran_eval = 0;
   for (int i = 1; i < argc; i++) {
-    if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
-      print_usage(argv[0]);
-      return 0;
-    }
-    if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version")) {
-      printf("lin 0.1 - interaction combinator language\n");
-      return 0;
-    }
-    if (!strcmp(argv[i], "-b") || !strcmp(argv[i], "--bench")) {
-      bench_mode = 1;
+    if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(argv[0]); return 0; }
+    if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version")) { printf("lin 0.1\n"); return 0; }
+    if (!strcmp(argv[i], "-b") || !strcmp(argv[i], "--bench")) { bench_mode = 1; continue; }
+    if (!strcmp(argv[i], "-t") || !strcmp(argv[i], "--threads")) {
+      if (++i >= argc) { fprintf(stderr, "error: -t requires an argument\n"); return 1; }
+      lin_threads = atoi(argv[i]);
+#ifdef _OPENMP
+      if (lin_threads > 0) omp_set_num_threads(lin_threads);
+#endif
       continue;
     }
     if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--eval")) {
-      if (i + 1 >= argc) {
-        fprintf(stderr, "error: %s requires an argument\n", argv[i]);
-        return 1;
-      }
-      parse_forms(argv[++i], form_cb, NULL);
+      if (++i >= argc) { fprintf(stderr, "error: -e requires an argument\n"); return 1; }
+      parse_forms(argv[i], form_cb, NULL);
       ran_eval = 1;
       continue;
     }
-    if (argv[i][0] == '-') {
-      fprintf(stderr, "unknown option: %s\n", argv[i]);
-      print_usage(argv[0]);
-      return 1;
-    }
-    if (!load_file(argv[i]))
-      fprintf(stderr, "error: cannot read '%s'\n", argv[i]);
+    if (argv[i][0] == '-') { fprintf(stderr, "unknown option: %s\n", argv[i]); print_usage(argv[0]); return 1; }
+    if (!load_file(argv[i])) fprintf(stderr, "error: cannot read '%s'\n", argv[i]);
     ran_eval = 1;
   }
   if (!ran_eval) repl();

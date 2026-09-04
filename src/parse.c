@@ -27,19 +27,13 @@ static void skipws(void) {
 
 Term *term_new(int type, const char *name, Term *l, Term *r) {
   Term *t = malloc(sizeof *t);
-  t->type = type;
+  *t = (Term){.type = type, .l = l, .r = r};
   snprintf(t->name, NAME, "%s", name ? name : "");
-  t->l = l;
-  t->r = r;
-  t->annot = NULL;
   return t;
 }
 
 void term_free(Term *t) {
-  if (!t) return;
-  term_free(t->l);
-  term_free(t->r);
-  free(t);
+  if (t) { term_free(t->l); term_free(t->r); free(t); }
 }
 
 Term *term_copy(Term *t) {

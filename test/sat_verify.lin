@@ -132,3 +132,54 @@
 ; Verify certificate against original formula
 (verify5 f5 (snd m5))
 ; expect => true
+
+; -------------------------------------------------------------------
+; 7. Superposition Refutation & False-Positive Certificate Rejection
+; Tests that certificate verifiers reject invalid witnesses extracted
+; from superposition-collapsed formulas, and confirms sound evaluation
+; via explicit branch desugaring.
+; -------------------------------------------------------------------
+; 1-variable contradictory formula: x1 and not x1 (UNSAT)
+(define f_unsat1 (\x1 ((and x1) (not x1))))
+
+; Direct exists exhibits superposition collapse (false positive):
+(exists f_unsat1)
+; expect => true
+
+; Probe extracts candidate witness based on collapsed superposition:
+(define m_unsat1 (probe1 f_unsat1))
+
+; Independent verification rejects false-positive candidate witness:
+(verify1 f_unsat1 (snd m_unsat1))
+; expect => false
+
+; Explicit branch desugaring correctly proves unsatisfiability:
+((or (f_unsat1 tru)) (f_unsat1 fls))
+; expect => false
+
+; 1-variable idempotence: x1 and x1 (SAT with x1=true)
+(define f_sat1 (\x1 ((and x1) x1)))
+
+; Direct exists exhibits superposition collapse (false negative):
+(exists f_sat1)
+; expect => false
+
+; Explicit branch desugaring correctly proves satisfiability:
+((or (f_sat1 tru)) (f_sat1 fls))
+; expect => true
+
+(verify1 f_sat1 true)
+; expect => true
+
+; 2-variable contradictory formula: (x1 and not x1) and (x2 or not x2) (UNSAT)
+(define f_unsat2 (\x1 (\x2 ((and ((and x1) (not x1))) ((or x2) (not x2))))))
+(define m_unsat2 (probe2 f_unsat2))
+
+; Independent verification rejects false-positive 2-variable witness:
+(verify2 f_unsat2 (snd m_unsat2))
+; expect => false
+
+; Explicit 2-variable branch desugaring proves unsatisfiability:
+((or ((or ((f_unsat2 tru) tru)) ((f_unsat2 tru) fls)))
+     ((or ((f_unsat2 fls) tru)) ((f_unsat2 fls) fls)))
+; expect => false
