@@ -94,3 +94,80 @@
 
 (fifth l5)
 ; expect => 5
+
+; -------------------------------------------------------------------
+; 5. Pair Combinators (swap, curry, uncurry)
+; -------------------------------------------------------------------
+(define p12 (pair 10 20))
+(fst (swap p12))
+; expect => 20
+
+(snd (swap p12))
+; expect => 10
+
+(((curry fst) 10) 20)
+; expect => 10
+
+((uncurry add) p12)
+; expect => 30
+
+; -------------------------------------------------------------------
+; 6. Monadic Maybe & Either (bind, fallback, from_right)
+; -------------------------------------------------------------------
+(is_just (maybe_bind (just 42) (\x (just (succ x)))))
+; expect => true
+
+(is_nothing (maybe_bind nothing (\x (just x))))
+; expect => true
+
+(is_nothing (maybe_bind (just 42) (\x nothing)))
+; expect => true
+
+(from_maybe 0 (maybe_or nothing (just 99)))
+; expect => 99
+
+(from_maybe 0 (maybe_or (just 42) (just 99)))
+; expect => 42
+
+(is_right (either_bind (right 42) (\y (right (succ y)))))
+; expect => true
+
+(is_left (either_bind (left 99) (\y (right y))))
+; expect => true
+
+(from_right 0 (right 77))
+; expect => 77
+
+(from_right 0 (left 77))
+; expect => 0
+
+; -------------------------------------------------------------------
+; 7. Tree Navigation & List Constructors
+; -------------------------------------------------------------------
+(tree_has_left t1)
+; expect => true
+
+(tree_has_right t1)
+; expect => true
+
+(tree_has_left (tree_left t1))
+; expect => false
+
+(tree_val_left t1)
+; expect => 50
+
+(tree_val_right t1)
+; expect => 150
+
+(define l3 (list3 10 20 30))
+(first l3)
+; expect => 10
+
+(second l3)
+; expect => 20
+
+(third l3)
+; expect => 30
+
+(is_empty (tail (tail (tail l3))))
+; expect => true

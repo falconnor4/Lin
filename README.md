@@ -8,10 +8,16 @@ Lin includes a Hindley-Milner type system, Scott-encoded inductive datatypes, a 
 
 ### Building
 
-Lin is written in C99 and has no external dependencies beyond POSIX `libdl`:
+Lin is written in C99 and uses OpenMP for lock-free parallel graph reduction. Build with:
 
 ```bash
-gcc -O2 -std=c99 -o lin src/*.c -ldl
+make
+```
+
+Or invoke the compiler directly:
+
+```bash
+gcc -O2 -std=c99 -fopenmp -o lin src/*.c -ldl
 ```
 
 ### Usage
@@ -21,16 +27,19 @@ gcc -O2 -std=c99 -o lin src/*.c -ldl
 ./lin
 
 # Run a source file
-./lin examples/tsp.lin
+./lin examples/adts.lin
 
 # Evaluate an expression directly
 ./lin -e '(load "std/num.lin") (mul 6 7)'
 
+# Multi-threaded parallel reduction (e.g. 8 threads)
+./lin -t 8 examples/parallel_tree.lin
+
 # Benchmark mode (execution time, rewrite steps, GoI determinant)
-./lin -b examples/tsp.lin
+./lin -b examples/sat_verify.lin
 ```
 
-Run tests with:
+Run test suite with:
 
 ```bash
 ./test/run.sh
@@ -66,19 +75,19 @@ zero        ; => 0
 (is_zero 0) ; => true
 ```
 
-Integer literals (`0` to `5000`) are supported directly.
+Arbitrary-magnitude integer literals are supported directly.
 
 ### Standard Library
 
 The standard library (`std/`) is written in pure Lin:
 
 - `std/bool.lin`: Booleans and conditionals (`true`, `false`, `not`, `and`, `or`, `xor`, `if`, `ifl`).
-- `std/pair.lin`: Pairs and projections (`pair`, `fst`, `snd`, `swap`).
-- `std/list.lin`: Inductive lists (`nil`, `cons`, `head`, `tail`, `length`, `first`..`fifth`).
-- `std/maybe.lin`: Option type (`nothing`, `just`, `maybe`).
-- `std/either.lin`: Sum type (`left`, `right`, `either`).
-- `std/tree.lin`: Binary trees (`leaf`, `node`, `tree_sum`).
-- `std/num.lin`: Arithmetic and comparisons (`add`, `sub`, `mul`, `div`, `mod`, `eq`, `lt`, `leq`, `gt`).
+- `std/pair.lin`: Pairs and projections (`pair`, `fst`, `snd`, `swap`, `pair_map`, `curry`, `uncurry`).
+- `std/list.lin`: Inductive lists (`nil`, `cons`, `head`, `tail`, `list1`..`list5`, `first`..`eighth`).
+- `std/maybe.lin`: Option monad (`nothing`, `just`, `is_nothing`, `is_just`, `from_maybe`, `maybe_map`, `maybe_bind`, `maybe_or`).
+- `std/either.lin`: Sum / Result type (`left`, `right`, `is_left`, `is_right`, `either`, `either_map`, `either_bind`, `from_right`).
+- `std/tree.lin`: Binary trees (`leaf`, `node`, `is_leaf`, `is_node`, `tree_val`, `tree_left`, `tree_right`, navigation helpers).
+- `std/num.lin`: Arithmetic and comparisons (`add`, `sub`, `mul`, `div`, `mod`, `eq`, `lt`, `leq`, `gt`, `geq`).
 - `std/sat.lin`: SAT combinators, quantifiers, and witness probes (`exists`, `forall`, `probe1`..`probe5`, `verify1`..`verify5`).
 - `std/ffi.lin`: POSIX C interoperability (`puts`, `fopen`, `fclose`, `getenv`, `system`, `dlopen`).
 
@@ -89,24 +98,28 @@ Lin supports calling C library functions and dynamically loaded symbols:
 ```scheme
 (load "std/ffi.lin")
 
-(puts "Hello, world!")
-(system "uname -s")
+(puts "Hello from Lin!")
+(getenv "USER")
 ```
 
-## Non-Abelian Interaction Nets
+## Parallel Reduction & Architecture
 
-Classical optimal reduction (Lamping, Asperti) required auxiliary bracket and croissant nodes to delimit sharing scopes, which often led to exponential bookkeeping overhead.
+Lin executes lambda calculus terms directly as interaction nets using non-abelian scope gauges ($\langle 1, 2 \rangle^*$), eliminating the administrative bookkeeping nodes historically required by sharing graphs.
 
-Lin labels duplicator nodes with words from the free group $\mathbb{F}_2 = \langle 1, 2 \rangle^*$. During reduction:
-- When a duplicator interacts with an abstraction or application, scope prefixes ($1 \cdot w$, $2 \cdot w$) are injected.
-- When two duplicators meet, matching gauges annihilate while differing gauges commute.
+- **Wavefront Parallelism**: Redexes whose 2-hop neighborhoods do not overlap form independent sets that are contracted simultaneously across CPU hardware threads without mutexes or global locks.
+- **Lévy Optimality**: Shared subcomputations are evaluated at most once, reducing functional expressions in optimal steps.
+- **Zero Garbage Collection**: Node allocation and reclamation occur linearly as part of cut-elimination with no stop-the-world pauses.
+- **Non-Resolution Graph Normalization**: Formula normalization bypasses classical $2^{\Omega(n)}$ resolution lower bounds on parity problems like Tseitin expanders ($82|E| - 3$ linear steps).
 
-This provides confluent, optimal reduction without administrative nodes.
+## Examples
 
-### Applications & Benchmarks
+The `examples/` directory contains self-contained programs:
 
-- **Tseitin Expander Formulas**: Tseitin parity formulas on 3-regular expander graphs have an exponential lower bound $2^{\Omega(n)}$ in resolution-based proof systems (such as DPLL and CDCL). Lin evaluates them via superposition sharing in strictly linear steps ($\text{Steps}(|E|) = 82|E| - 3$). See [`bench/tseitin_bench.py`](bench/tseitin_bench.py).
-- **Traveling Salesperson Problem (TSP)**: Encodes candidate tours as boolean decision superpositions, extracts optimal tour witnesses, and verifies certificates in sub-millisecond time. See [`examples/tsp.lin`](examples/tsp.lin) and [`bench/tsp_bench.py`](bench/tsp_bench.py).
+- `examples/adts.lin`: Functional data structures (Maybe, Either, Binary Search Tree, Pairs) with monadic chaining.
+- `examples/parallel_tree.lin`: Wavefront parallel reduction across OpenMP threads on balanced trees.
+- `examples/sat_verify.lin`: 3-SAT formulation, candidate witness extraction, and certificate verification.
+- `examples/tsp.lin`: Traveling Salesperson Problem (TSP) tour extraction and verification.
+- `examples/ffi_sys.lin`: Interoperability with standard C library functions (`puts`, `getenv`, `putchar`).
 
 ## Command-Line Options
 
@@ -114,10 +127,11 @@ This provides confluent, optimal reduction without administrative nodes.
 Usage: lin [options] [file.lin]
 
 Options:
-  -e, --eval <expr>   Evaluate expression string directly and exit
-  -b, --bench [file]  Benchmark mode: report steps, nodes, time, and GoI determinant
-  -v, --version       Display version information
-  -h, --help          Display help and usage information
+  -e, --eval <expr>       Evaluate expression string directly and exit
+  -b, --bench [file]      Benchmark mode: report steps, nodes, time, and GoI determinant
+  -t, --threads <N>       Number of OpenMP worker threads (or LIN_THREADS env)
+  -v, --version           Display version information
+  -h, --help              Display help and usage information
 ```
 
 ## License

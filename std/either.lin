@@ -7,3 +7,5 @@
 (define is_right (\e ((e (\_ false)) (\_ true))))
 (define either (\fl (\fr (\e ((e fl) fr)))))
 (define either_map (\f (\e ((e left) (\y (right (f y)))))))
+(define either_bind (\e (\f ((e left) (\y (f y))))))
+(define from_right (\d (\e ((e (\_ d)) (\y y)))))

@@ -1,0 +1,34 @@
+; ==============================================================================
+; Wavefront Parallelism in Lin
+;
+; Demonstrates concurrent independent-set graph reduction across OpenMP threads.
+; Lin detects non-overlapping redexes (disjoint 2-hop neighborhoods) and
+; contracts them in parallel with lock-free atomic node allocation.
+;
+; Usage:
+;   ./lin -t 4 -b examples/parallel_tree.lin
+; ==============================================================================
+
+(load "std/std.lin")
+
+; Construct a balanced tree of redexes with independent subtrees
+(define make_subtree
+  (\base
+    (node base
+      (node (succ base) leaf leaf)
+      (node (succ (succ base)) leaf leaf))))
+
+; Build tree with independent branches:
+(define root
+  (node 100
+    (make_subtree 10)
+    (make_subtree 20)))
+
+; Evaluate projections across independent branches concurrently:
+(tree_val root)
+(tree_val (tree_left root))
+(tree_val (tree_right root))
+(tree_val (tree_left (tree_left root)))
+(tree_val (tree_right (tree_left root)))
+(tree_val (tree_left (tree_right root)))
+(tree_val (tree_right (tree_right root)))

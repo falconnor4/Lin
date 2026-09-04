@@ -1,0 +1,69 @@
+; ==============================================================================
+; Algebraic Data Types (ADTs) in Lin
+; Demonstrates pure Scott-encoded functional data structures:
+;   1. Option / Maybe (safe nullability & monadic composition)
+;   2. Either / Result (error handling with Left/Right)
+;   3. Pairs & Tuples (combinators, swapping, curry/uncurry)
+;   4. Binary Trees (recursive node structures & leaf checks)
+; ==============================================================================
+
+(load "std/std.lin")
+
+; ------------------------------------------------------------------------------
+; 1. Option / Maybe Type
+; ------------------------------------------------------------------------------
+; Safe predecessor returning (just (pred n)) or nothing when n is zero
+(define safe_pred
+  (\n
+    (ifl (is_zero n)
+      (\_ nothing)
+      (\_ (just (pred n))))))
+
+; Monadic chaining: double predecessor
+(define safe_pred2
+  (\n
+    (maybe_bind (safe_pred n) safe_pred)))
+
+; 5 - 1 - 1 = 3
+(from_maybe 0 (safe_pred2 5))
+
+; 1 - 1 - 1 = nothing -> fallback to 0
+(from_maybe 0 (safe_pred2 1))
+
+; ------------------------------------------------------------------------------
+; 2. Either / Result Type
+; ------------------------------------------------------------------------------
+; Safe non-zero constructor: returns (left 0) on zero, else (right n)
+(define safe_nonzero
+  (\n
+    (ifl (is_zero n)
+      (\_ (left 0))
+      (\_ (right n)))))
+
+(is_right (safe_nonzero 21))
+(is_left (safe_nonzero 0))
+
+; ------------------------------------------------------------------------------
+; 3. Binary Trees
+; ------------------------------------------------------------------------------
+; Construct a small binary search tree:
+;         10
+;        /  \
+;       5    15
+(define bst
+  (node 10
+    (node 5 leaf leaf)
+    (node 15 leaf leaf)))
+
+; Root value:
+(tree_val bst)
+
+; Left child value:
+(tree_val_left bst)
+
+; Right child value:
+(tree_val_right bst)
+
+; Check branch existence:
+(tree_has_left bst)
+(tree_has_left (tree_left bst))

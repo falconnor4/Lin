@@ -28,6 +28,7 @@
 (define! lt  (num -> num -> bool) (\a (\b (ccall2 "lin_lt" a b))))
 (define! leq (num -> num -> bool) (\a (\b (ccall2 "lin_leq" a b))))
 (define! gt  (num -> num -> bool) (\a (\b (ccall2 "lin_gt" a b))))
+(define! geq (num -> num -> bool) (\a (\b (leq b a))))
 
 ; Scott aliases
 (define zero_s zero)

@@ -7,7 +7,13 @@
 (define! head (list a -> a) (\l ((l (\h (\t h))) nil)))
 (define! tail (list a -> list a) (\l ((l (\h (\t t))) nil)))
 (define! is_empty (list a -> bool) (\l ((l (\h (\t false))) true)))
-(define! length (list a -> num) (\l (ifl (is_empty l) (\_ 0) (\_ (succ (length (tail l)))))))
+
+; Positional constructors
+(define list1 (\a (cons a nil)))
+(define list2 (\a (\b (cons a (cons b nil)))))
+(define list3 (\a (\b (\c (cons a (cons b (cons c nil)))))))
+(define list4 (\a (\b (\c (\d (cons a (cons b (cons c (cons d nil)))))))))
+(define list5 (\a (\b (\c (\d (\e (cons a (cons b (cons c (cons d (cons e nil)))))))))))
 
 ; Direct O(1) positional projections
 (define first head)
@@ -15,3 +21,13 @@
 (define third  (\l (head (tail (tail l)))))
 (define fourth (\l (head (tail (tail (tail l))))))
 (define fifth  (\l (head (tail (tail (tail (tail l)))))))
+(define sixth  (\l (head (tail (tail (tail (tail (tail l))))))))
+(define seventh (\l (head (tail (tail (tail (tail (tail (tail l)))))))))
+(define eighth  (\l (head (tail (tail (tail (tail (tail (tail (tail l))))))))))
+
+; Aliases
+(define nth1 first)
+(define nth2 second)
+(define nth3 third)
+(define nth4 fourth)
+(define nth5 fifth)

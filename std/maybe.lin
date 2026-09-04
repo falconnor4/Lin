@@ -7,3 +7,5 @@
 (define is_just (\m ((m false) (\_ true))))
 (define from_maybe (\d (\m ((m d) (\x x)))))
 (define maybe_map (\f (\m ((m nothing) (\x (just (f x)))))))
+(define maybe_bind (\m (\f ((m nothing) (\x (f x))))))
+(define maybe_or (\m1 (\m2 ((m1 m2) (\x (just x))))))

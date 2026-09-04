@@ -4,3 +4,7 @@
 (define pair (\x (\y (\f ((f x) y)))))
 (define fst (\p (p true)))
 (define snd (\p (p false)))
+(define swap (\p (pair (snd p) (fst p))))
+(define pair_map (\f (\g (\p (pair (f (fst p)) (g (snd p)))))))
+(define curry (\f (\x (\y (f (pair x y))))))
+(define uncurry (\f (\p ((f (fst p)) (snd p)))))

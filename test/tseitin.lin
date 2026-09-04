@@ -1,5 +1,5 @@
 ; Tseitin Parity on 3-Regular Expander Graphs
-; Tests linear-time superposition reduction on hard expander graph formulas
+; Tests non-resolution graph normalization on expander parity formulas
 
 (define! tru bool (\t (\f t)))
 (define! fls bool (\t (\f f)))

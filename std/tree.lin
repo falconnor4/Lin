@@ -8,3 +8,7 @@
 (define! tree_val (a -> b) (\t ((t 0) (\v (\_ (\_ v))))))
 (define! tree_left (a -> b) (\t ((t leaf) (\_ (\left (\_ left))))))
 (define! tree_right (a -> b) (\t ((t leaf) (\_ (\_ (\right right))))))
+(define tree_has_left (\t (is_node (tree_left t))))
+(define tree_has_right (\t (is_node (tree_right t))))
+(define tree_val_left (\t (tree_val (tree_left t))))
+(define tree_val_right (\t (tree_val (tree_right t))))

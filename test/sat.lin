@@ -1,5 +1,5 @@
-; boolean satisfiability (SAT) via optimal interaction net superposition
-; tests linear-time superposition reduction on phase-transition 3-SAT
+; Boolean satisfiability (SAT) & clause reduction test suite
+; Tests interaction net reduction on propositional boolean formulas
 
 (define! tru bool (\t (\f t)))
 (define! fls bool (\t (\f f)))
@@ -24,6 +24,6 @@
 (exists (\x1 (exists (\x2 (exists (\x3 ((and ((or x1) ((or x2) x3))) ((or (not x1)) ((or (not x2)) (not x3))))))))))
 ; expect => (\t (\f t))
 
-; 3-SAT unsatisfiable phase-transition formula (N=3, m=12 clauses)
+; 3-SAT unsatisfiable formula (N=3, m=12 clauses)
 (exists (\x1 (exists (\x2 (exists (\x3 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((or (not x1)) ((or x3) (not x1)))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x2)) ((or x1) (not x2))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))))))))
 ; expect => (\t (\f f))

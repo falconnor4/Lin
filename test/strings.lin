@@ -32,15 +32,18 @@
 (is_empty (tail (tail (tail (tail (tail "hello"))))))
 ; expect => true
 
-; string length
-(length "")
-; expect => 0
+; Positional projections on string character lists
+(first "hello")
+; expect => 104
 
-(length "a")
-; expect => 1
+(second "hello")
+; expect => 101
 
-(length "hello")
-; expect => 5
+(third "hello")
+; expect => 108
 
-(length "Lin Language")
-; expect => 12
+(fourth "hello")
+; expect => 108
+
+(fifth "hello")
+; expect => 111

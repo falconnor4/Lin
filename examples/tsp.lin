@@ -3,12 +3,10 @@
 ;
 ; Demonstrates:
 ;   1. Combinatorial encoding of candidate tours as boolean decision variables.
-;   2. Solving the TSP decision problem (TSP(D, B) <=> exists tau. cost(tau) <= B)
-;      via non-abelian interaction net reduction.
-;   3. Self-reducible witness extraction: recovering the exact optimal tour
-;      witness tau* and its minimum cost in linear-time rewrite steps.
-;   4. Independent certificate verification: verifying tau* satisfies all
-;      constraints and budget bounds.
+;   2. Evaluating the TSP decision predicate: exists tau. cost(tau) <= B.
+;   3. Self-reducible witness probing: extracting candidate tour assignments.
+;   4. Independent certificate verification: verifying that the candidate
+;      witness satisfies all tour and budget constraints.
 ; ==============================================================================
 
 (load "std/sat.lin")

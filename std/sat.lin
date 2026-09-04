@@ -7,6 +7,8 @@
 (define! fls bool false)
 
 ; Quantifiers over booleans
+; Note: for formulas with non-linear variable occurrences, probe candidate witnesses
+; via probe1..probe5 and verify with verify1..verify5, or branch explicitly at call site.
 (define! exists ((bool -> bool) -> bool) (\p ((or (p tru)) (p fls))))
 (define! forall ((bool -> bool) -> bool) (\p ((and (p tru)) (p fls))))
 

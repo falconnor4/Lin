@@ -1,5 +1,5 @@
 ; Comprehensive SAT & Certificate Verification Test Suite
-; Demonstrates linear-time superposition reduction and quadratic certificate extraction
+; SAT Encoding, Witness Extraction & Certificate Verification Test Suite
 
 (load "std/sat.lin")
 
@@ -85,9 +85,9 @@
 ; expect => true
 
 ; -------------------------------------------------------------------
-; 5. Phase-Transition 3-SAT Superpositions
+; 5. 3-SAT Formula Reduction
 ; -------------------------------------------------------------------
-; N=3 Unsatisfiable (m=12 clauses at phase transition)
+; N=3 Unsatisfiable (m=12 clauses)
 (exists (\x1 (exists (\x2 (exists (\x3 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((or (not x1)) ((or x3) (not x1)))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x2)) ((or x1) (not x2))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))))))))
 ; expect => false
 
@@ -134,10 +134,10 @@
 ; expect => true
 
 ; -------------------------------------------------------------------
-; 7. Superposition Refutation & False-Positive Certificate Rejection
-; Tests that certificate verifiers reject invalid witnesses extracted
-; from superposition-collapsed formulas, and confirms sound evaluation
-; via explicit branch desugaring.
+; 7. Quantifier Sharing Boundaries & Certificate Rejection
+; Tests that independent certificate verifiers reject invalid candidate
+; witnesses extracted from non-linear sharing formulas, and confirms sound
+; evaluation via explicit branch desugaring.
 ; -------------------------------------------------------------------
 ; 1-variable contradictory formula: x1 and not x1 (UNSAT)
 (define f_unsat1 (\x1 ((and x1) (not x1))))
