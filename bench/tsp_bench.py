@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Traveling Salesperson Problem (TSP) Benchmark for Lin Interaction Net Runtime
-Demonstrating optimal tour witness extraction, decision problem satisfiability,
-and certificate verification via non-abelian gauge-invariant interaction nets.
-"""
+"""Traveling salesperson problem (TSP) benchmark."""
 
 import subprocess
 import time
@@ -72,11 +68,8 @@ def generate_tsp_lin(budget):
 """
 
 def run_bench():
-    print("=========================================================================================")
-    print("Lin Interaction Net Benchmark 4: Traveling Salesperson Problem (TSP)")
-    print("=========================================================================================")
-    print(f"{'Budget B':<10} | {'Status':<8} | {'Witness Tour':<22} | {'Cost':<6} | {'Lin Steps':<10} | {'Time (ms)':<10}")
-    print("-----------------------------------------------------------------------------------------")
+    print(f"{'Budget':>8} {'Status':>8} {'Cost':>6} {'Steps':>8} {'Time (ms)':>10}  {'Witness Tour'}")
+    print("-" * 68)
     
     budgets = [15, 20, 23, 24, 25, 28, 30, 35]
     for b in budgets:
@@ -118,15 +111,10 @@ def run_bench():
                 tour_str = "None (No path <= B)"
                 cost = "-"
                 
-            print(f"{b:<10d} | {status:<8} | {tour_str:<22} | {cost:<6} | {total_steps:<10d} | {elapsed_ms:8.2f} ms")
+            print(f"{b:>8d} {status:>8} {cost:>6} {total_steps:>8d} {elapsed_ms:>10.2f}  {tour_str}")
         finally:
             if os.path.exists(tpath):
                 os.remove(tpath)
-                
-    print("=========================================================================================")
-    print("Conclusion: Lin determines satisfiability, extracts the optimal tour (0->1->3->2->0),")
-    print("and independently verifies the certificate in < 1 ms via non-abelian net reduction.")
-    print("=========================================================================================")
 
 if __name__ == "__main__":
     run_bench()

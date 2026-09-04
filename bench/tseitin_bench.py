@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Tseitin Parity Expander Benchmark for Lin Interaction Net Runtime
-Demonstrating strictly linear reduction O(|E|) on formulas requiring
-exponential 2^Omega(n) resolution proofs in classical DPLL/CDCL solvers.
-"""
+"""Tseitin parity expander benchmark."""
 
 import subprocess
 import time
@@ -65,11 +61,8 @@ def generate_tseitin_lin(n):
 """
 
 def run_bench():
-    print("=========================================================================================")
-    print("Lin Interaction Net Benchmark 3: Tseitin Parity on 3-Regular Expander Graphs")
-    print("=========================================================================================")
-    print(f"{'Vertices':<9} | {'Edges |E|':<9} | {'Clauses':<8} | {'Search Space':<14} | {'Lin Steps':<10} | {'Expected (82|E|-3)':<18} | {'Time':<8}")
-    print("-----------------------------------------------------------------------------------------")
+    print(f"{'Vertices':>8} {'Edges':>8} {'Clauses':>8} {'Space':>10} {'Steps':>8} {'Expected':>10} {'Time (ms)':>10}")
+    print("-" * 68)
     
     sizes = [4, 6, 8, 10, 12, 14, 16, 20]
     for n in sizes:
@@ -93,15 +86,10 @@ def run_bench():
             steps = len(res.stderr.splitlines())
             expected_steps = 82 * num_edges - 3
             space_str = f"2^{num_edges}"
-            print(f"{n:<9d} | {num_edges:<9d} | {num_clauses:<8d} | {space_str:<14} | {steps:<10d} | {expected_steps:<18d} | {elapsed_ms:6.2f} ms")
+            print(f"{n:>8d} {num_edges:>8d} {num_clauses:>8d} {space_str:>10} {steps:>8d} {expected_steps:>10d} {elapsed_ms:>10.2f}")
         finally:
             if os.path.exists(tpath):
                 os.remove(tpath)
-                
-    print("=========================================================================================")
-    print("Conclusion: Lin reduces Tseitin expander refutations in exactly 82|E| - 3 linear steps,")
-    print("bypassing the classical exponential 2^Omega(n) resolution proof size barrier.")
-    print("=========================================================================================")
 
 if __name__ == "__main__":
     run_bench()
