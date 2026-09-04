@@ -63,7 +63,7 @@ static Port dup_tree(Port *ts, int nts, Scope sc) {
   return cur;
 }
 
-static Port ct(Term *t, Scope sc, int depth) {
+static Port ct(Term *t, Scope sc) {
   switch (t->type) {
   case TVAR: {
     for (int i = csp - 1; i >= 0; i--) {
@@ -79,10 +79,9 @@ static Port ct(Term *t, Scope sc, int depth) {
   }
   case TLAM: {
     Port self = net_alloc(N, LAM, sc, t->name);
-    if (depth > 1000000) cfail("lambda nesting too deep");
     push_var(t->name, (Port){self.node, 1});
     int my = csp - 1;
-    Port body = ct(t->l, sc, depth + 1);
+    Port body = ct(t->l, sc);
     net_link(N, (Port){self.node, 2}, body, 0);
     CVar *e = &cstack[my];
     if (e->count == 0) {
@@ -105,13 +104,13 @@ static Port ct(Term *t, Scope sc, int depth) {
   }
   case TAPP: {
     Port a = net_alloc(N, APP, sc, "");
-    Port f = ct(t->l, sc, depth);
+    Port f = ct(t->l, sc);
     net_link(N, (Port){a.node, 0}, f, 1);
-    Port g = ct(t->r, sc, depth);
+    Port g = ct(t->r, sc);
     net_link(N, (Port){a.node, 2}, g, 1);
     return (Port){a.node, 1};
   }
-  case TDEF: return ct(t->l, sc, depth);
+  case TDEF: return ct(t->l, sc);
   }
   return (Port){-1, -1};
 }
@@ -127,7 +126,7 @@ int compile(Term *t, Net *n, char *err, int errsz) {
     snprintf(err, errsz, "%s", CMSG);
     return 0;
   }
-  Port r = ct(t, scope_nil(), 0);
+  Port r = ct(t, scope_nil());
   net_link(N, (Port){0, 0}, r, 0);
   return 1;
 }

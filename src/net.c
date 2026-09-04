@@ -87,10 +87,8 @@ Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
 }
 
 static void act_push(Net *n, Port a, Port b) {
-  if (n->atop + 2 > n->actcap) {
-    n->actcap = n->actcap ? n->actcap * 2 : 256;
-    n->act = realloc(n->act, (size_t)n->actcap * sizeof(Port));
-  }
+  if (n->atop + 2 > n->actcap)
+    n->act = realloc(n->act, (size_t)(n->actcap = n->actcap ? n->actcap * 2 : 256) * sizeof(Port));
   n->act[n->atop++] = a;
   n->act[n->atop++] = b;
 }
@@ -188,7 +186,7 @@ static void reduce_worklist(Net *n, long limit, int *changed) {
    bodies, fan-out subterms, and croissant tails (reference:
    reduceToNormalForm). */
 long net_reduce(Net *n, long limit) {
-  for (int round = 0; round < 100000 && n->steps < limit; round++) {
+  while (n->steps < limit) {
     int changed = 0;
     n->atop = 0;
     /* find nodes reachable from root */

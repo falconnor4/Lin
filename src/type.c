@@ -89,14 +89,14 @@ static void unify(Type *x, Type *y) {
 }
 
 typedef struct { char name[NAME]; Scheme s; } TEnv;
-static TEnv env[1024];
-static int envn;
+static TEnv *env;
+static int envn, envcap;
 
 static void env_push(const char *name, Scheme s) {
-  if (envn >= 1024) tfail("environment overflow");
+  if (envn >= envcap)
+    env = realloc(env, (size_t)(envcap = envcap ? envcap * 2 : 128) * sizeof(TEnv));
   snprintf(env[envn].name, NAME, "%s", name);
-  env[envn].s = s;
-  envn++;
+  env[envn++].s = s;
 }
 
 static Scheme *env_find(const char *name) {
@@ -110,7 +110,7 @@ static void fv(Type *t, int *set, int *n) {
   if (t->kind == TVR) {
     for (int i = 0; i < *n; i++)
       if (set[i] == t->id) return;
-    if (*n < 64) set[(*n)++] = t->id;
+    if (*n < 256) set[(*n)++] = t->id;
     return;
   }
   if (t->kind == TARROW) {
@@ -120,8 +120,8 @@ static void fv(Type *t, int *set, int *n) {
   if (t->kind == TLIST) fv(t->a, set, n);
 }
 
-static int mid[64];
-static Type *mty[64];
+static int mid[256];
+static Type *mty[256];
 static int mn;
 
 static Type *inst_rec(Type *t) {
@@ -147,10 +147,10 @@ static Type *instantiate(Scheme *s) {
 }
 
 static Scheme generalize(Type *t) {
-  int f[64], fn = 0;
+  int f[256], fn = 0;
   fv(t, f, &fn);
   for (int i = 0; i < envn; i++) {
-    int g[64], gn = 0;
+    int g[256], gn = 0;
     fv(env[i].s.t, g, &gn);
     for (int j = 0; j < fn; j++) {
       int hit = 0;
@@ -164,7 +164,7 @@ static Scheme generalize(Type *t) {
   }
   Scheme s;
   s.nq = fn;
-  memcpy(s.q, f, fn * sizeof(int));
+  memcpy(s.q, f, (size_t)fn * sizeof(int));
   s.t = t;
   return s;
 }

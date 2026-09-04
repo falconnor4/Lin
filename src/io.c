@@ -14,7 +14,7 @@ static inline Port wire(Port p) {
 /* --- Geometry of Interaction (GoI) Value Marshaling --- */
 
 static inline Port dup_hop(Net *n, Port p) {
-  for (int step = 0; step < 1000 && p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP; step++) {
+  for (int step = 0; step < n->nn && p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP; step++) {
     if (p.port == 0) p = n->wire[p.node * 3 + 1];
     else p = n->wire[p.node * 3 + 0];
   }
@@ -25,7 +25,7 @@ static long read_scott(Net *n, Port p) {
   N = n;
   long count = 0;
   Port cur = p;
-  for (int step = 0; step < 1000000; step++) {
+  for (int step = 0; step < n->nn; step++) {
     cur = dup_hop(n, cur);
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
     if (n->tag[cur.node] != LAM || strncmp(n->name[cur.node], "_sz", 3)) return -1;
@@ -66,7 +66,7 @@ int net_read_bool(Net *n, Port p) {
   if (strncmp(n->name[bf.node], "_bf", 3)) return -1;
 
   Port cur = wire((Port){bf.node, 2});
-  for (int step = 0; step < 1000; step++) {
+  for (int step = 0; step < n->nn; step++) {
     if (cur.node < 0 || n->dead[cur.node]) return -1;
     if (cur.node == p.node && cur.port == 1) return 1;
     if (cur.node == bf.node && cur.port == 1) return 0;
@@ -85,7 +85,7 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
   size_t len = 0;
   Port cur = p;
 
-  for (int step = 0; step < 100000 && len + 1 < max; step++) {
+  for (int step = 0; step < n->nn && len + 1 < max; step++) {
     while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
       cur = wire((Port){cur.node, 0});
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) break;
@@ -171,7 +171,7 @@ static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], i
     while (bn.node >= 0 && bn.node < n->nn && !n->dead[bn.node] && n->tag[bn.node] == DUP)
       bn = wire((Port){bn.node, 0});
     if (bn.node >= 0 && bn.port == 0 && n->tag[bn.node] == LAM) {
-      for (int step = 0; step < 100000 && argc < max_args; step++) {
+      for (int step = 0; step < n->nn && argc < max_args; step++) {
         while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP)
           cur = wire((Port){cur.node, 0});
         if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
@@ -249,10 +249,7 @@ static int net_try_ffi(Net *n, Port p) {
 
   if (!strcmp(fn_name, "dlopen")) {
     void *h = dlopen(argc > 0 ? (const char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL);
-    if (!h) {
-      fprintf(stderr, "ffi: dlopen failed: %s\n", dlerror());
-      return 0;
-    }
+    if (!h) { fprintf(stderr, "ffi: dlopen failed: %s\n", dlerror()); return 0; }
     printf("%ld", (long)(intptr_t)h);
     return 1;
   }
@@ -261,15 +258,8 @@ static int net_try_ffi(Net *n, Port p) {
     fputs(res ? res : "(null)", stdout);
     return 1;
   }
-  if (!strcmp(fn_name, "exit")) {
-    exit(argc > 0 ? (int)c_args[0] : 0);
-    return 1;
-  }
-  if (!strcmp(fn_name, "puts")) {
-    int res = puts(argc > 0 ? (const char *)c_args[0] : "");
-    printf("%d", res);
-    return 1;
-  }
+  if (!strcmp(fn_name, "exit")) { exit(argc > 0 ? (int)c_args[0] : 0); return 1; }
+  if (!strcmp(fn_name, "puts")) { printf("%d", puts(argc > 0 ? (const char *)c_args[0] : "")); return 1; }
 
   void *sym = dlsym(RTLD_DEFAULT, fn_name);
   if (!sym) {
@@ -286,6 +276,8 @@ static int net_try_ffi(Net *n, Port p) {
   case 4: res = ((long (*)(long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3]); break;
   case 5: res = ((long (*)(long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4]); break;
   case 6: res = ((long (*)(long, long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5]); break;
+  case 7: res = ((long (*)(long, long, long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6]); break;
+  case 8: res = ((long (*)(long, long, long, long, long, long, long, long))sym)(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]); break;
   default:
     fprintf(stderr, "ffi: too many arguments (%d)\n", argc);
     return 0;
@@ -298,7 +290,7 @@ static unsigned char *vis_print = NULL;
 
 /* Print a port representation to stdout */
 static void print_port(Port p, int depth) {
-  if (depth > 1000 || p.node < 0 || p.node >= N->nn) {
+  if (depth > N->nn || p.node < 0 || p.node >= N->nn) {
     putchar('?');
     return;
   }

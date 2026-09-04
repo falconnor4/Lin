@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define NAME 128
+#define NAME 256
 
 /* ---------------- core terms (pure untyped lambda) ---------------- */
 enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD };
@@ -53,7 +53,7 @@ void term_free(Term *t);
 int term_refs(Term *t, const char *name);
 
 /* ---------------- types ---------------- */
-typedef struct { int nq, q[64]; Type *t; } Scheme;
+typedef struct { int nq, q[256]; Type *t; } Scheme;
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
@@ -76,10 +76,10 @@ long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
 typedef struct { char name[NAME]; Term *term; Scheme sch; int typed; } Def;
-extern Def defs[];
+extern Def *defs;
 extern int ndefs;
 Def *def_find(const char *name);
-Term *expand_defs(Term *t, char guard[][NAME], int ng);
+Term *expand_defs(Term *t);
 void eval_form(Term *t);
 
 #endif

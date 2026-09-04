@@ -15,8 +15,8 @@ static void bump_stack(void) {
   setrlimit(RLIMIT_STACK, &rl);
 }
 
-Def defs[1024];
-int ndefs = 0;
+Def *defs;
+int ndefs = 0, defcap = 0;
 
 static long STEP_LIMIT = 1L << 24;
 static int bench_mode = 0;
@@ -27,32 +27,48 @@ Def *def_find(const char *name) {
   return NULL;
 }
 
-/* inline definitions at use sites; guard prevents recursive expansion,
-   binders shadow definition names */
-Term *expand_defs(Term *t, char guard[][NAME], int ng) {
+typedef struct { char (*names)[NAME]; int count, cap; } Guard;
+
+static void guard_push(Guard *g, const char *name) {
+  if (g->count >= g->cap)
+    g->names = realloc(g->names, (size_t)(g->cap = g->cap ? g->cap * 2 : 64) * sizeof *g->names);
+  snprintf(g->names[g->count++], NAME, "%s", name);
+}
+
+static int guard_has(Guard *g, const char *name) {
+  for (int i = 0; i < g->count; i++)
+    if (!strcmp(g->names[i], name)) return 1;
+  return 0;
+}
+
+static Term *expand(Term *t, Guard *g) {
   if (!t) return NULL;
   if (t->type == TVAR) {
-    for (int i = 0; i < ng; i++)
-      if (!strcmp(guard[i], t->name))
-        return term_new(TVAR, t->name, NULL, NULL);
+    if (guard_has(g, t->name))
+      return term_new(TVAR, t->name, NULL, NULL);
     Def *d = def_find(t->name);
     if (!d) return term_new(TVAR, t->name, NULL, NULL);
-    if (ng >= 63) {
-      fprintf(stderr, "error: expansion too deep\n");
-      exit(1);
-    }
-    snprintf(guard[ng], NAME, "%s", d->name);
+    guard_push(g, d->name);
     Term *body = term_copy(d->term);
-    Term *e = expand_defs(body, guard, ng + 1);
+    Term *e = expand(body, g);
     term_free(body);
+    g->count--;
     return e;
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
-  int bound = (t->type == TLAM || t->type == TDEF) && ng < 63;
-  if (bound) snprintf(guard[ng], NAME, "%s", t->name);
-  c->l = expand_defs(t->l, guard, ng + bound);
-  c->r = expand_defs(t->r, guard, ng);
+  int bound = (t->type == TLAM || t->type == TDEF);
+  if (bound) guard_push(g, t->name);
+  c->l = expand(t->l, g);
+  if (bound) g->count--;
+  c->r = expand(t->r, g);
   return c;
+}
+
+Term *expand_defs(Term *t) {
+  Guard g = {0};
+  Term *res = expand(t, &g);
+  free(g.names);
+  return res;
 }
 
 void eval_form(Term *t) {
@@ -64,8 +80,7 @@ void eval_form(Term *t) {
     printf("error: %s\n", err);
     return;
   }
-  char guard[64][NAME];
-  Term *ex = expand_defs(t, guard, 0);
+  Term *ex = expand_defs(t);
   Net net;
   net_init(&net, 1 << 16);
   if (!compile(ex, &net, err, sizeof err)) {
@@ -112,10 +127,8 @@ static Term *y_term(void) {
 }
 
 static void process_def(Term *t) {
-  if (ndefs >= 1024) {
-    printf("error: too many definitions\n");
-    return;
-  }
+  if (ndefs >= defcap)
+    defs = realloc(defs, (size_t)(defcap = defcap ? defcap * 2 : 128) * sizeof(Def));
   char err[512];
   Scheme sch;
   int rec = term_refs(t->l, t->name);
@@ -152,10 +165,10 @@ static void process_def(Term *t) {
 #define PATH_MAX 4096
 #endif
 
-static char loaded_paths[512][PATH_MAX];
-static int n_loaded = 0;
-static char dir_stack[64][PATH_MAX];
-static int dir_sp = 0;
+static char (*loaded_paths)[PATH_MAX];
+static int n_loaded = 0, loaded_cap = 0;
+static char (*dir_stack)[PATH_MAX];
+static int dir_sp = 0, dir_cap = 0;
 
 static int is_already_loaded(const char *canon) {
   for (int i = 0; i < n_loaded; i++)
@@ -164,9 +177,9 @@ static int is_already_loaded(const char *canon) {
 }
 
 static void mark_loaded(const char *canon) {
-  if (n_loaded < 512) {
-    snprintf(loaded_paths[n_loaded++], PATH_MAX, "%s", canon);
-  }
+  if (n_loaded >= loaded_cap)
+    loaded_paths = realloc(loaded_paths, (size_t)(loaded_cap = loaded_cap ? loaded_cap * 2 : 64) * sizeof *loaded_paths);
+  snprintf(loaded_paths[n_loaded++], PATH_MAX, "%s", canon);
 }
 
 static char *read_file(const char *path) {
@@ -239,9 +252,9 @@ static int load_file(const char *path) {
   if (last_slash) *last_slash = '\0';
   else snprintf(dir, sizeof dir, ".");
 
-  if (dir_sp < 64) {
-    snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
-  }
+  if (dir_sp >= dir_cap)
+    dir_stack = realloc(dir_stack, (size_t)(dir_cap = dir_cap ? dir_cap * 2 : 16) * sizeof *dir_stack);
+  snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
 
   parse_forms(src, form_cb, NULL);
 
@@ -281,8 +294,7 @@ static void do_goi(const char *expr) {
   first_form = NULL;
   parse_forms(expr, cap_cb, NULL);
   if (!first_form) return;
-  char guard[64][NAME];
-  Term *ex = expand_defs(first_form, guard, 0);
+  Term *ex = expand_defs(first_form);
   Net net;
   net_init(&net, 1 << 16);
   char err[512];
@@ -333,14 +345,7 @@ static void repl(void) {
       if (!len) continue;
       if (!strcmp(line, ":q") || !strcmp(line, ":quit")) break;
       if (!strcmp(line, ":help")) {
-        printf("  (\\x body)         lambda (also: lambda, lam, U+03BB)\n");
-        printf("  (f a b ...)       application, left associative\n");
-        printf("  (let ((x v)) b)   local binding\n");
-        printf("  (define n t)      top-level definition\n");
-        printf("  (define! n T t)   trusted definition with type annotation T\n");
-        printf("                    (types: -> ( ) num bool, lowercase = var)\n");
-        printf("  123               Scott numeral literal\n");
-        printf("  ; comment\n");
+        printf("(\\x body) lambda | (f a b) app | (let ((x v)) b) | (define n t) | 123 Scott\n");
         continue;
       }
       if (!strncmp(line, ":load ", 6)) {
@@ -376,12 +381,7 @@ static void repl(void) {
 }
 
 static void print_usage(const char *prog) {
-  printf("usage: %s [options] [files...]\n\n", prog);
-  printf("options:\n");
-  printf("  -e, --eval <expr>   evaluate expression and exit\n");
-  printf("  -b, --bench         enable benchmark metrics (steps, nodes, time, GoI)\n");
-  printf("  -h, --help          display this help message\n");
-  printf("  -v, --version       display version information\n");
+  printf("usage: %s [-e expr] [-b] [-h] [-v] [files...]\n", prog);
 }
 
 int main(int argc, char **argv) {

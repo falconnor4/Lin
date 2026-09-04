@@ -104,9 +104,9 @@ static Term *parse_term(void);
 /* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'
    builtins: num = fresh type variable, bool = p->q->p (fresh vars per use) */
 static Type *parse_type(void);
-static char tvn[64][NAME];
-static Type *tvt[64];
-static int tvnn;
+static char (*tvn)[NAME];
+static Type **tvt;
+static int tvnn, tvcap;
 
 static Type *parse_type_atom(void) {
   skipws();
@@ -133,7 +133,10 @@ static Type *parse_type_atom(void) {
   }
   for (int i = 0; i < tvnn; i++)
     if (!strcmp(tvn[i], nm)) return tvt[i];
-  if (tvnn >= 64) pfail("type: too many variables");
+  if (tvnn >= tvcap) {
+    tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);
+    tvt = realloc(tvt, (size_t)tvcap * sizeof *tvt);
+  }
   snprintf(tvn[tvnn], NAME, "%s", nm);
   tvt[tvnn] = type_var();
   return tvt[tvnn++];
@@ -168,11 +171,7 @@ static Term *parse_tail(Term *f) {
 }
 
 static Term *parse_atom(const char *kw) {
-  if (isnum(kw)) {
-    long k = atol(kw);
-    if (k > 5000) pfail("numeral too large (max 5000)");
-    return scott(k);
-  }
+  if (isnum(kw)) return scott(atol(kw));
   return term_new(TVAR, kw, NULL, NULL);
 }
 
@@ -269,9 +268,9 @@ static Term *parse_term(void) {
       skipws();
       if (S[P] != '(') pfail("let: expected '('");
       P++;
-      char names[64][NAME];
-      Term *vals[64];
-      int nb = 0;
+      char (*names)[NAME] = NULL;
+      Term **vals = NULL;
+      int nb = 0, ncap = 0;
       for (;;) {
         skipws();
         if (S[P] == ')') {
@@ -287,15 +286,18 @@ static Term *parse_term(void) {
         skipws();
         if (S[P] != ')') pfail("let: missing ')' in binding");
         P++;
-        if (nb < 64) {
-          snprintf(names[nb], NAME, "%s", vn);
-          vals[nb] = v;
-          nb++;
+        if (nb >= ncap) {
+          names = realloc(names, (size_t)(ncap = ncap ? ncap * 2 : 16) * sizeof *names);
+          vals = realloc(vals, (size_t)ncap * sizeof *vals);
         }
+        snprintf(names[nb], NAME, "%s", vn);
+        vals[nb++] = v;
       }
       Term *body = parse_tail(parse_term());
       for (int i = nb - 1; i >= 0; i--)
         body = term_new(TAPP, "", term_new(TLAM, names[i], body, NULL), vals[i]);
+      free(names);
+      free(vals);
       return body;
     }
     return parse_tail(parse_atom(kw));
