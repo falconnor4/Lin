@@ -18,15 +18,9 @@ static void tfail(const char *fmt, ...) {
   longjmp(TJ, 1);
 }
 
-static Type *tvar(void) {
-  Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, .id = next_id++}; return t;
-}
-static Type *tarrow(Type *a, Type *b) {
-  Type *t = malloc(sizeof *t); *t = (Type){.kind = TARROW, .id = -1, .a = a, .b = b}; return t;
-}
-static Type *tlist(Type *e) {
-  Type *t = malloc(sizeof *t); *t = (Type){.kind = TLIST, .id = -1, .a = e}; return t;
-}
+static Type *tvar(void) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, .id = next_id++}; return t; }
+static Type *tarrow(Type *a, Type *b) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARROW, .id = -1, .a = a, .b = b}; return t; }
+static Type *tlist(Type *e) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TLIST, .id = -1, .a = e}; return t; }
 
 static Type *find(Type *t) {
   while (t->kind == TLINK) {
@@ -129,11 +123,7 @@ static Scheme generalize(Type *t) {
       }
     }
   }
-  Scheme s;
-  s.nq = fn;
-  memcpy(s.q, f, (size_t)fn * sizeof(int));
-  s.t = t;
-  return s;
+  Scheme s; s.nq = fn; memcpy(s.q, f, (size_t)fn * sizeof(int)); s.t = t; return s;
 }
 
 static Type *infer(Term *t) {
@@ -144,10 +134,7 @@ static Type *infer(Term *t) {
     return instantiate(s);
   }
   case TLAM: {
-    Type *a = tvar();
-    Scheme s;
-    s.nq = 0;
-    s.t = a;
+    Type *a = tvar(); Scheme s = {.nq = 0, .t = a};
     env_push(t->name, s);
     Type *b = infer(t->l);
     envn--;

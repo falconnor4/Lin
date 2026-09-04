@@ -90,6 +90,30 @@ The standard library (`std/`) is written in pure Lin:
 - `std/num.lin`: Arithmetic and comparisons (`add`, `sub`, `mul`, `div`, `mod`, `eq`, `lt`, `leq`, `gt`, `geq`).
 - `std/sat.lin`: SAT combinators, quantifiers, and witness probes (`exists`, `forall`, `probe1`..`probe5`, `verify1`..`verify5`).
 - `std/ffi.lin`: POSIX C interoperability (`puts`, `fopen`, `fclose`, `getenv`, `system`, `dlopen`).
+- `std/io.lin`: General I/O and result waiting primitives (`io_wait`, `io_read`, `io_file`, `io_print`, `io_write_to`, `io_prompt`, `io_done`).
+
+### General Result Waiting & Interactive I/O
+
+Lin provides a general, continuation-passing mechanism to wait for results from arbitrary sources:
+- **Terminal input / `stdin`**: `(io_wait 0 (\input ...))` or `(io_read cb)`
+- **File descriptors / IPC**: `(io_wait fd (\chunk ...))`
+- **External processes / commands**: `(io_wait "!echo 42" (\output ...))`
+- **File contents**: `(io_wait "file:path" (\contents ...))`
+- **Timers / delays**: `(io_wait "sleep:50" (\ms ...))`
+- **FFI calls**: `(io_wait (add 40 2) (\res ...))`
+
+Example:
+```scheme
+(load "std/io.lin")
+
+; Prompt terminal user:
+(io_prompt "Enter name: "
+  (\name (io_print (cons "Hello, " name) (io_done 0))))
+
+; Wait for an external process result:
+(io_wait "!uname -s"
+  (\kernel (io_print kernel (io_done 0))))
+```
 
 ### Foreign Function Interface
 
@@ -113,11 +137,15 @@ Lin executes lambda calculus terms directly as interaction nets using non-abelia
 
 ## Examples
 
-The `examples/` directory contains self-contained programs:
+The `examples/` directory contains self-contained programs demonstrating the language:
 
+- `examples/tictactoe.lin`: Interactive 3x3 Tic-Tac-Toe game engine and AI opponent; evaluates moves in real time (`(play board move)`), detects winning threats, blocks opponent lines, and referees matches.
+- `examples/sat_solver.lin`: Working propositional SAT solver with model extraction, certificate verification, and Tseitin graph expander refutations.
+- `examples/logic_proofs.lin`: Constructive Curry-Howard proof terms, Modus Ponens, De Morgan's laws, and double negation.
+- `examples/circuit_alu.lin`: Gate-level hardware simulation (Full Adder, 4-bit Ripple-Carry Adder, Multiplexer, ALU).
+- `examples/cellular_automaton.lin`: Discrete dynamical systems (Rule 90 Sierpinski fractal & Rule 110 Turing-complete automaton).
 - `examples/adts.lin`: Functional data structures (Maybe, Either, Binary Search Tree, Pairs) with monadic chaining.
 - `examples/parallel_tree.lin`: Wavefront parallel reduction across OpenMP threads on balanced trees.
-- `examples/sat_verify.lin`: 3-SAT formulation, candidate witness extraction, and certificate verification.
 - `examples/tsp.lin`: Traveling Salesperson Problem (TSP) tour extraction and verification.
 - `examples/ffi_sys.lin`: Interoperability with standard C library functions (`puts`, `getenv`, `putchar`).
 

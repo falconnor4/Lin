@@ -1,0 +1,87 @@
+; ==============================================================================
+; Mathematical Logic & Constructive Proofs in Lin
+;
+; Demonstrates:
+;   1. The Curry-Howard Correspondence: propositions as types, proofs as terms.
+;   2. Constructive theorem proving via interaction net cut-elimination.
+;   3. Tautology verification: De Morgan's laws, double negation, contraposition.
+; ==============================================================================
+
+(load "std/bool.lin")
+(load "std/pair.lin")
+
+; ------------------------------------------------------------------------------
+; 1. Constructive Curry-Howard Proof Terms
+; In constructive logic, a proof of A -> B is a function from A to B.
+; ------------------------------------------------------------------------------
+
+; Theorem: A -> A (Reflexivity of Implication / Identity)
+; Proof: The identity combinator I
+(define! proof_identity (a -> a)
+  (\x x))
+
+; Theorem: (A -> B) -> A -> B (Modus Ponens)
+; Proof: Function application
+(define! proof_modus_ponens ((a -> b) -> a -> b)
+  (\f (\x (f x))))
+
+; Theorem: (B -> C) -> (A -> B) -> (A -> C) (Hypothetical Syllogism)
+; Proof: Function composition (B combinator)
+(define! proof_syllogism ((b -> c) -> (a -> b) -> a -> c)
+  (\f (\g (\x (f (g x))))))
+
+; Theorem: A and B -> B and A (Commutativity of Conjunction)
+; Proof: Pair swapping
+(define proof_and_comm
+  (\p (pair (snd p) (fst p))))
+
+; Execute proof normalization on concrete terms:
+(proof_identity 42)
+((proof_modus_ponens succ) 41)
+(((proof_syllogism succ) succ) 40)
+(fst (proof_and_comm (pair 10 20)))
+(snd (proof_and_comm (pair 10 20)))
+
+; ------------------------------------------------------------------------------
+; 2. Propositional Logic Connectives & Tautology Verification
+; ------------------------------------------------------------------------------
+(define implies (\a (\b ((or (not a)) b))))
+(define iff (\a (\b ((and (implies a b)) (implies b a)))))
+
+; Theorem: not (A or B) <=> (not A) and (not B)  [De Morgan's First Law]
+(define demorgan1
+  (\a (\b
+    (iff (not (or a b)) (and (not a) (not b))))))
+
+; Verify De Morgan's First Law across all 4 valuations:
+((demorgan1 true) true)
+((demorgan1 true) false)
+((demorgan1 false) true)
+((demorgan1 false) false)
+
+; Theorem: not (A and B) <=> (not A) or (not B)  [De Morgan's Second Law]
+(define demorgan2
+  (\a (\b
+    (iff (not (and a b)) (or (not a) (not b))))))
+
+((demorgan2 true) true)
+((demorgan2 true) false)
+((demorgan2 false) true)
+((demorgan2 false) false)
+
+; Theorem: not (not A) <=> A  [Double Negation Elimination]
+(define double_negation
+  (\a (iff (not (not a)) a)))
+
+(double_negation true)
+(double_negation false)
+
+; Theorem: (A -> B) <=> (not B -> not A)  [Law of Contraposition]
+(define contraposition
+  (\a (\b
+    (iff (implies a b) (implies (not b) (not a))))))
+
+((contraposition true) true)
+((contraposition true) false)
+((contraposition false) true)
+((contraposition false) false)

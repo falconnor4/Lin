@@ -17,10 +17,7 @@ static void pfail(const char *msg) {
 static void skipws(void) {
   for (;;) {
     while (S[P] && isspace((unsigned char)S[P])) P++;
-    if (S[P] == ';') {
-      while (S[P] && S[P] != '\n') P++;
-      continue;
-    }
+    if (S[P] == ';') { while (S[P] && S[P] != '\n') P++; continue; }
     break;
   }
 }
@@ -79,17 +76,10 @@ static int isnum(const char *s) {
   return 1;
 }
 
-/* numeral k desugars to the Scott term \_sz. \_ss. (_ss^k _sz) */
 static Term *scott(long k) {
-  Term *cur = term_new(TLAM, "_sz",
-                       term_new(TLAM, "_ss",
-                                term_new(TVAR, "_sz", NULL, NULL),
-                                NULL),
-                       NULL);
-  for (long i = 0; i < k; i++) {
-    Term *app = term_new(TAPP, "", term_new(TVAR, "_ss", NULL, NULL), cur);
-    cur = term_new(TLAM, "_sz", term_new(TLAM, "_ss", app, NULL), NULL);
-  }
+  Term *cur = term_new(TLAM, "_sz", term_new(TLAM, "_ss", term_new(TVAR, "_sz", 0, 0), 0), 0);
+  for (long i = 0; i < k; i++)
+    cur = term_new(TLAM, "_sz", term_new(TLAM, "_ss", term_new(TAPP, "", term_new(TVAR, "_ss", 0, 0), cur), 0), 0);
   return cur;
 }
 
@@ -114,17 +104,9 @@ static Type *parse_type_atom(void) {
   }
   char nm[NAME];
   if (!sym(nm, NAME)) pfail("type: expected name");
-  if (!strcmp(nm, "num")) {
-    return type_var();
-  }
-  if (!strcmp(nm, "bool")) {
-    Type *p = type_var(), *q = type_var();
-    return type_arrow(p, type_arrow(q, p));
-  }
-  if (!strcmp(nm, "list")) {
-    Type *e = parse_type_atom();
-    return type_list(e);
-  }
+  if (!strcmp(nm, "num")) return type_var();
+  if (!strcmp(nm, "bool")) { Type *p = type_var(), *q = type_var(); return type_arrow(p, type_arrow(q, p)); }
+  if (!strcmp(nm, "list")) return type_list(parse_type_atom());
   for (int i = 0; i < tvnn; i++)
     if (!strcmp(tvn[i], nm)) return tvt[i];
   if (tvnn >= tvcap) {
@@ -267,13 +249,9 @@ static Term *parse_term(void) {
       int nb = 0, ncap = 0;
       for (;;) {
         skipws();
-        if (S[P] == ')') {
-          P++;
-          break;
-        }
+        if (S[P] == ')') { P++; break; }
         if (S[P] != '(') pfail("let: expected binding");
-        P++;
-        skipws();
+        P++; skipws();
         char vn[NAME];
         if (!sym(vn, NAME)) pfail("let: bad binding");
         Term *v = parse_term();
@@ -290,8 +268,7 @@ static Term *parse_term(void) {
       Term *body = parse_tail(parse_term());
       for (int i = nb - 1; i >= 0; i--)
         body = term_new(TAPP, "", term_new(TLAM, names[i], body, NULL), vals[i]);
-      free(names);
-      free(vals);
+      free(names); free(vals);
       return body;
     }
     return parse_tail(parse_atom(kw));
@@ -305,18 +282,11 @@ static int resync(int start) {
   int p = start, depth = 0;
   while (S[p]) {
     char c = S[p];
-    if (c == ';') {
-      while (S[p] && S[p] != '\n') p++;
-      continue;
-    }
+    if (c == ';') { while (S[p] && S[p] != '\n') p++; continue; }
     if (c == '(') depth++;
-    else if (c == ')') {
-      depth--;
-      if (depth <= 0) return p + 1;
-    } else if (depth == 0 && !isspace((unsigned char)c)) {
-      while (S[p] && !isspace((unsigned char)S[p]) && S[p] != '(' &&
-             S[p] != ')')
-        p++;
+    else if (c == ')') { if (--depth <= 0) return p + 1; }
+    else if (depth == 0 && !isspace((unsigned char)c)) {
+      while (S[p] && !isspace((unsigned char)S[p]) && S[p] != '(' && S[p] != ')') p++;
       return p;
     }
     p++;

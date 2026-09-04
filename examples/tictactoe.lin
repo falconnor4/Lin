@@ -1,0 +1,261 @@
+; ==============================================================================
+; Interactive Tic-Tac-Toe in Pure Lin
+;
+; A self-contained, fully interactive 3x3 game engine and AI opponent:
+;   - Board state: 3x3 Scott 9-tuple representing cells 0..8 directly.
+;   - Referee: evaluates winning lines (rows, cols, diags) and draws.
+;   - AI Opponent: evaluates immediate winning moves, detects and blocks human
+;     winning threats, and takes strategic board positions (center, corners, edges).
+;   - Interactive Loop: native terminal I/O prompts for moves, prints boards,
+;     and plays the complete game in the terminal without external scripts.
+;
+; How to Play Interactively:
+;   $ ./lin examples/tictactoe.lin
+;
+; How to Play Step-by-Step in the Lin REPL:
+;   $ ./lin
+;   lin> :load examples/tictactoe.lin
+;   lin> (define b1 (play empty_board 4))  ; Human plays center (cell 4)
+;   lin> (cell b1 4)                       ; => 1 (Player X mark)
+;   lin> (cell b1 0)                       ; => 2 (Lin AI counter-move)
+;   lin> (status b1)                       ; => 0 (Ongoing)
+;   lin> (define b2 (play b1 1))           ; Human plays cell 1
+;   lin> (cell b2 7)                       ; => 2 (Lin AI blocks at cell 7)
+; ==============================================================================
+
+(load "std/std.lin")
+
+(define! match9 (num -> a -> a -> a -> a -> a -> a -> a -> a -> a -> a)
+  (\n (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8
+    ((n c0) (\n1
+    ((n1 c1) (\n2
+    ((n2 c2) (\n3
+    ((n3 c3) (\n4
+    ((n4 c4) (\n5
+    ((n5 c5) (\n6
+    ((n6 c6) (\n7
+    ((n7 c7) (\n8
+    c8)))))))))))))))))))))))))))
+
+(define empty_board
+  (\f (((((((((f 0) 0) 0) 0) 0) 0) 0) 0) 0)))
+
+(define! get_cell (num -> a -> num)
+  (\idx (\b
+    (b (match9 idx
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c0)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c1)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c2)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c3)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c4)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c5)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c6)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c7)))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 c8))))))))))))))
+
+(define cell get_cell)
+
+(define! set_cell (num -> num -> a -> a)
+  (\idx (\v (\b
+    (b (match9 idx
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f v)  c1) c2) c3) c4) c5) c6) c7) c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) v)  c2) c3) c4) c5) c6) c7) c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) c1) v)  c3) c4) c5) c6) c7) c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) c1) c2) v)  c4) c5) c6) c7) c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) c1) c2) c3) v)  c5) c6) c7) c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) c1) c2) c3) c4) v)  c6) c7) c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) c1) c2) c3) c4) c5) v)  c7) c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) c1) c2) c3) c4) c5) c6) v)  c8)))))))))))
+      (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\f (((((((((f c0) c1) c2) c3) c4) c5) c6) c7) v)))))))))))))))))
+
+(define line_win
+  (\p1 (\p2 (\p3
+    (ifl (is_zero p1) (\_ 0)
+      (\_ (ifl (eq p1 p2)
+            (\_ (ifl (eq p1 p3) (\_ p1) (\_ 0)))
+            (\_ 0))))))))
+
+(define check_winner
+  (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8
+    (let ((w0 (line_win c0 c1 c2)))
+      (ifl (is_zero w0)
+        (\_ (let ((w1 (line_win c3 c4 c5)))
+          (ifl (is_zero w1)
+            (\_ (let ((w2 (line_win c6 c7 c8)))
+              (ifl (is_zero w2)
+                (\_ (let ((w3 (line_win c0 c3 c6)))
+                  (ifl (is_zero w3)
+                    (\_ (let ((w4 (line_win c1 c4 c7)))
+                      (ifl (is_zero w4)
+                        (\_ (let ((w5 (line_win c2 c5 c8)))
+                          (ifl (is_zero w5)
+                            (\_ (let ((w6 (line_win c0 c4 c8)))
+                              (ifl (is_zero w6)
+                                (\_ (line_win c2 c4 c6))
+                                (\_ w6))))
+                            (\_ w5))))
+                        (\_ w4))))
+                    (\_ w3))))
+                (\_ w2))))
+            (\_ w1))))
+        (\_ w0)))))))))))))
+
+(define! board_winner (a -> num)
+  (\b (b check_winner)))
+
+(define has_empty
+  (\b (b (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8
+    ((or (is_zero c0))
+    ((or (is_zero c1))
+    ((or (is_zero c2))
+    ((or (is_zero c3))
+    ((or (is_zero c4))
+    ((or (is_zero c5))
+    ((or (is_zero c6))
+    ((or (is_zero c7))
+         (is_zero c8)))))))))))))))))))))
+
+(define! board_status (a -> num)
+  (\b
+    (let ((w (board_winner b)))
+      (ifl (is_zero w)
+        (\_ (ifl (has_empty b) (\_ 0) (\_ 3)))
+        (\_ w)))))
+
+(define status board_status)
+
+(define! test_win (num -> num -> a -> bool)
+  (\player (\cell_idx (\b
+    (ifl (is_zero (get_cell cell_idx b))
+      (\_ (eq player (board_winner (set_cell cell_idx player b))))
+      (\_ false))))))
+
+(define check_win_cell
+  (\player (\cell_idx (\b
+    (ifl (test_win player cell_idx b)
+      (\_ (just cell_idx))
+      (\_ nothing))))))
+
+(define find_win
+  (\player (\b
+    (maybe_or (check_win_cell player 0 b)
+    (maybe_or (check_win_cell player 1 b)
+    (maybe_or (check_win_cell player 2 b)
+    (maybe_or (check_win_cell player 3 b)
+    (maybe_or (check_win_cell player 4 b)
+    (maybe_or (check_win_cell player 5 b)
+    (maybe_or (check_win_cell player 6 b)
+    (maybe_or (check_win_cell player 7 b)
+              (check_win_cell player 8 b))))))))))))
+
+(define! first_empty (a -> num)
+  (\b (b (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8
+    (ifl (is_zero c4) (\_ 4)
+    (\_ (ifl (is_zero c0) (\_ 0)
+    (\_ (ifl (is_zero c2) (\_ 2)
+    (\_ (ifl (is_zero c6) (\_ 6)
+    (\_ (ifl (is_zero c8) (\_ 8)
+    (\_ (ifl (is_zero c1) (\_ 1)
+    (\_ (ifl (is_zero c3) (\_ 3)
+    (\_ (ifl (is_zero c5) (\_ 5)
+    (\_ 7))))))))))))))))))))))))))))
+
+(define! choose_ai_move (a -> num)
+  (\b
+    (from_maybe (from_maybe (first_empty b) (find_win 1 b)) (find_win 2 b))))
+
+(define play
+  (\b (\move
+    (let ((b1 (set_cell move 1 b)))
+      (ifl (is_zero (board_status b1))
+        (\_ (set_cell (choose_ai_move b1) 2 b1))
+        (\_ b1))))))
+
+(define cell_str
+  (\v (\def_ch
+    (ifl (is_zero v)
+      (\_ def_ch)
+      (\_ (ifl (eq v 1) (\_ "X") (\_ "O")))))))
+
+(define print_board
+  (\b (\next
+    (b (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8
+      (io_print "\n "
+      (io_print (cell_str c0 "0")
+      (io_print " | "
+      (io_print (cell_str c1 "1")
+      (io_print " | "
+      (io_print (cell_str c2 "2")
+      (io_print "\n---+---+---\n "
+      (io_print (cell_str c3 "3")
+      (io_print " | "
+      (io_print (cell_str c4 "4")
+      (io_print " | "
+      (io_print (cell_str c5 "5")
+      (io_print "\n---+---+---\n "
+      (io_print (cell_str c6 "6")
+      (io_print " | "
+      (io_print (cell_str c7 "7")
+      (io_print " | "
+      (io_print (cell_str c8 "8")
+      (io_print "\n\n" next))))))))))))))))))))))))))))))))
+
+
+(define! end_game (a -> b)
+  (\b
+    (print_board b
+      (let ((st (board_status b)))
+        (ifl (eq st 1)
+          (\_ (io_print ">>> Player X (Human) wins! <<<\n" io_done))
+          (\_ (ifl (eq st 2)
+            (\_ (io_print ">>> Player O (Lin AI) wins! <<<\n" io_done))
+            (\_ (io_print ">>> It's a draw (Cat's game)! <<<\n" io_done)))))))))
+
+(define play_turn5
+  (\b
+    (print_board b
+      (io_prompt "Enter move (0-8): " (\move
+        (let ((b1 (play b move)))
+          (end_game b1)))))))
+
+(define play_turn4
+  (\b
+    (print_board b
+      (io_prompt "Enter move (0-8): " (\move
+        (let ((b1 (play b move)))
+          (ifl (is_zero (board_status b1))
+            (\_ (play_turn5 b1))
+            (\_ (end_game b1)))))))))
+
+(define play_turn3
+  (\b
+    (print_board b
+      (io_prompt "Enter move (0-8): " (\move
+        (let ((b1 (play b move)))
+          (ifl (is_zero (board_status b1))
+            (\_ (play_turn4 b1))
+            (\_ (end_game b1)))))))))
+
+(define play_turn2
+  (\b
+    (print_board b
+      (io_prompt "Enter move (0-8): " (\move
+        (let ((b1 (play b move)))
+          (ifl (is_zero (board_status b1))
+            (\_ (play_turn3 b1))
+            (\_ (end_game b1)))))))))
+
+(define play_turn1
+  (\b
+    (print_board b
+      (io_prompt "Enter move (0-8): " (\move
+        (let ((b1 (play b move)))
+          (ifl (is_zero (board_status b1))
+            (\_ (play_turn2 b1))
+            (\_ (end_game b1)))))))))
+
+(define! play_interactive a
+  (io_print "========================================\n       Interactive Tic-Tac-Toe\n========================================\n"
+    (play_turn1 empty_board)))
+
+(play_interactive)

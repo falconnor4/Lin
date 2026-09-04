@@ -8,3 +8,4 @@
 (load "tree.lin")
 (load "ffi.lin")
 (load "sat.lin")
+(load "io.lin")

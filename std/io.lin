@@ -1,0 +1,24 @@
+; lin standard library: general result waiting & I/O primitives
+(load "list.lin")
+
+; General waiting for results:
+; Waits for results from any source:
+;   - 0 or "stdin": terminal input / stdin
+;   - fd (integer): file descriptor / pipe / socket / channel
+;   - "!cmd" or "cmd:...": external process execution output
+;   - "file:...": file contents on disk
+;   - "sleep:ms": timer / delay
+;   - FFI call: foreign computation result
+(define io_wait     (\src (\cb (\_iow ((_iow src) cb)))))
+(define io_read     (\cb (io_wait 0 cb)))
+(define io_file     (\path (\cb (io_wait path cb))))
+
+; Destination-directed writing:
+;   - 1 or omitted: stdout
+;   - 2: stderr
+(define io_write_to (\dst (\msg (\next (\_iop (((_iop dst) msg) next))))))
+(define io_print    (\msg (\next (\_iop ((_iop msg) next)))))
+(define io_done     (\_iod _iod))
+
+; Prompt and wait for input:
+(define io_prompt   (\prompt (\cb (io_print prompt (io_read cb)))))

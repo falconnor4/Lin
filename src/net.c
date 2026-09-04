@@ -11,6 +11,7 @@
 
 Scope scope_nil(void) { return (Scope){0, 0}; }
 
+static int in_parallel;
 static void sc_ensure_cap(Net *n, int need) {
   if (need <= n->sccap) return;
   int nc = n->sccap ? n->sccap * 2 : 256;
@@ -21,7 +22,7 @@ static void sc_ensure_cap(Net *n, int need) {
 
 static int sc_alloc(Net *n, int len) {
   if (len < 0 || n->scn > 0x7fffffff - len) return 0;
-  sc_ensure_cap(n, n->scn + len);
+  if (!in_parallel) sc_ensure_cap(n, n->scn + len);
   return __atomic_fetch_add(&n->scn, len, __ATOMIC_RELAXED);
 }
 
@@ -48,15 +49,10 @@ int scope_eq(Net *n, Scope a, Scope b) {
 }
 
 void net_init(Net *n, int cap) {
-  n->cap = cap;
-  n->tag = malloc(cap);
-  n->wire = malloc(cap * 3 * sizeof(Port));
-  n->scope = malloc(cap * sizeof(Scope));
-  n->name = malloc(cap * NAME);
-  n->act = NULL; n->atop = 0; n->actcap = 0;
-  n->dead = calloc(cap, 1);
-  n->sca = NULL; n->sccap = 0; n->scn = 0;
-  n->nn = 0; n->steps = 0;
+  n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
+  n->scope = malloc(cap * sizeof(Scope)); n->name = malloc(cap * NAME);
+  n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
+  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0;
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
@@ -69,21 +65,15 @@ static void net_ensure_cap(Net *n, int need) {
   if (need <= n->cap) return;
   int nc = n->cap ? n->cap * 2 : 256;
   while (nc < need) nc *= 2;
-  n->tag = realloc(n->tag, nc);
-  n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
-  n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope));
-  n->name = realloc(n->name, (size_t)nc * NAME);
-  n->dead = realloc(n->dead, nc);
-  memset(n->dead + n->cap, 0, (size_t)(nc - n->cap));
-  n->cap = nc;
+  n->tag = realloc(n->tag, nc); n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
+  n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope)); n->name = realloc(n->name, (size_t)nc * NAME);
+  n->dead = realloc(n->dead, nc); memset(n->dead + n->cap, 0, (size_t)(nc - n->cap)); n->cap = nc;
 }
 
 Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
-  net_ensure_cap(n, n->nn + 1);
+  if (!in_parallel) net_ensure_cap(n, n->nn + 1);
   int id = __atomic_fetch_add(&n->nn, 1, __ATOMIC_RELAXED);
-  n->tag[id] = tag;
-  n->dead[id] = 0;
-  n->scope[id] = sc;
+  n->tag[id] = tag; n->dead[id] = 0; n->scope[id] = sc;
   snprintf(n->name[id], NAME, "%s", name);
   for (int i = 0; i < 3; i++) n->wire[id * 3 + i] = NONE;
   return (Port){id, 0};
@@ -98,7 +88,7 @@ static void act_push(Net *n, Port a, Port b) {
 
 typedef struct { Port *p; int top, cap; } ActBuf;
 static ActBuf *t_act;
-static int n_tact, in_parallel;
+static int n_tact;
 
 static void ensure_tact(void) {
 #ifdef _OPENMP

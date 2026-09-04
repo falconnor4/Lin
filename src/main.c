@@ -13,8 +13,7 @@ static void bump_stack(void) {
   struct rlimit rl;
   if (getrlimit(RLIMIT_STACK, &rl)) return;
   rl.rlim_cur = 1L << 30;
-  if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max)
-    rl.rlim_cur = rl.rlim_max;
+  if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max) rl.rlim_cur = rl.rlim_max;
   setrlimit(RLIMIT_STACK, &rl);
 }
 
@@ -33,8 +32,7 @@ Def *def_find(const char *name) {
 typedef struct { char (*names)[NAME]; int count, cap; } Guard;
 
 static void guard_push(Guard *g, const char *name) {
-  if (g->count >= g->cap)
-    g->names = realloc(g->names, (size_t)(g->cap = g->cap ? g->cap * 2 : 64) * sizeof *g->names);
+  if (g->count >= g->cap) g->names = realloc(g->names, (size_t)(g->cap = g->cap ? g->cap * 2 : 64) * sizeof *g->names);
   snprintf(g->names[g->count++], NAME, "%s", name);
 }
 
@@ -104,9 +102,11 @@ void eval_form(Term *t) {
     d2 = goi_det(&net);
   }
 
-  printf("=> ");
-  net_print(&net);
-  putchar('\n');
+  if (!net_run_io(&net, STEP_LIMIT)) {
+    printf("=> ");
+    net_print(&net);
+    putchar('\n');
+  }
   if (bench_mode) {
     double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1000000.0;
     fprintf(stderr, "[bench] %ld steps | %d nodes | %.2f ms | GoI det: %lld -> %lld\n",
@@ -124,23 +124,13 @@ static Term *y_term(void) {
 }
 
 static void process_def(Term *t) {
-  if (ndefs >= defcap)
-    defs = realloc(defs, (size_t)(defcap = defcap ? defcap * 2 : 128) * sizeof(Def));
-  char err[512];
-  Scheme sch;
+  if (ndefs >= defcap) defs = realloc(defs, (size_t)(defcap = defcap ? defcap * 2 : 128) * sizeof(Def));
+  char err[512]; Scheme sch;
   int rec = term_refs(t->l, t->name);
-  int ok;
-  if (t->type == TDEFX) {
-    sch = scheme_all((Type *)t->annot);
-    ok = 1;
-  } else {
-    ok = rec ? type_check_rec(t->name, t->l, &sch, err, sizeof err)
-             : type_check(t->l, &sch, err, sizeof err);
-  }
-  if (!ok) {
-    printf("error: %s\n", err);
-    return;
-  }
+  int ok = (t->type == TDEFX) ? (sch = scheme_all((Type *)t->annot), 1)
+           : rec ? type_check_rec(t->name, t->l, &sch, err, sizeof err)
+                 : type_check(t->l, &sch, err, sizeof err);
+  if (!ok) { printf("error: %s\n", err); return; }
   Def *d = &defs[ndefs++];
   snprintf(d->name, NAME, "%s", t->name);
   d->sch = sch;
@@ -174,8 +164,7 @@ static int is_already_loaded(const char *canon) {
 }
 
 static void mark_loaded(const char *canon) {
-  if (n_loaded >= loaded_cap)
-    loaded_paths = realloc(loaded_paths, (size_t)(loaded_cap = loaded_cap ? loaded_cap * 2 : 64) * sizeof *loaded_paths);
+  if (n_loaded >= loaded_cap) loaded_paths = realloc(loaded_paths, (size_t)(loaded_cap = loaded_cap ? loaded_cap * 2 : 64) * sizeof *loaded_paths);
   snprintf(loaded_paths[n_loaded++], PATH_MAX, "%s", canon);
 }
 
@@ -237,8 +226,7 @@ static int load_file(const char *path) {
   if (last_slash) *last_slash = '\0';
   else snprintf(dir, sizeof dir, ".");
 
-  if (dir_sp >= dir_cap)
-    dir_stack = realloc(dir_stack, (size_t)(dir_cap = dir_cap ? dir_cap * 2 : 16) * sizeof *dir_stack);
+  if (dir_sp >= dir_cap) dir_stack = realloc(dir_stack, (size_t)(dir_cap = dir_cap ? dir_cap * 2 : 16) * sizeof *dir_stack);
   snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
 
   parse_forms(src, form_cb, NULL);
@@ -323,12 +311,16 @@ static void repl(void) {
         printf("(\\x body) lambda | (f a b) app | (let ((x v)) b) | (define n t) | 123 Scott\n");
         continue;
       }
-      if (!strncmp(line, ":load ", 6)) {
-        if (!load_file(line + 6)) printf("error: cannot read '%s'\n", line + 6);
+      if (!strncmp(line, ":load ", 6) || !strncmp(line, ":l ", 3)) {
+        const char *p = line + (line[2] == ' ' ? 3 : 6);
+        while (*p == ' ') p++;
+        if (!load_file(p)) printf("error: cannot read '%s'\n", p);
         continue;
       }
-      if (!strncmp(line, ":type ", 6)) {
-        do_type(line + 6);
+      if (!strncmp(line, ":type ", 6) || !strncmp(line, ":t ", 3)) {
+        const char *p = line + (line[2] == ' ' ? 3 : 6);
+        while (*p == ' ') p++;
+        do_type(p);
         continue;
       }
       if (!strncmp(line, ":goi ", 5)) {
@@ -366,12 +358,10 @@ int main(int argc, char **argv) {
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
   if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
 #ifdef _OPENMP
-  if (lin_threads > 0) omp_set_num_threads(lin_threads);
+  omp_set_num_threads(lin_threads > 0 ? lin_threads : 1);
 #endif
-  const char *std = getenv("LIN_STD");
-  if (!std) std = "std/std.lin";
-  if (!load_file(std))
-    fprintf(stderr, "warning: standard library not found at '%s'\n", std);
+  const char *std = getenv("LIN_STD") ? getenv("LIN_STD") : "std/std.lin";
+  if (!load_file(std)) fprintf(stderr, "warning: standard library not found at '%s'\n", std);
 
   int ran_eval = 0;
   for (int i = 1; i < argc; i++) {
@@ -388,9 +378,7 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--eval")) {
       if (++i >= argc) { fprintf(stderr, "error: -e requires an argument\n"); return 1; }
-      parse_forms(argv[i], form_cb, NULL);
-      ran_eval = 1;
-      continue;
+      parse_forms(argv[i], form_cb, NULL); ran_eval = 1; continue;
     }
     if (argv[i][0] == '-') { fprintf(stderr, "unknown option: %s\n", argv[i]); print_usage(argv[0]); return 1; }
     if (!load_file(argv[i])) fprintf(stderr, "error: cannot read '%s'\n", argv[i]);

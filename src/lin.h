@@ -69,6 +69,7 @@ int compile(Term *t, Net *n, char *err, int errsz);
 long net_read_int(Net *n, Port p);
 int net_read_bool(Net *n, Port p);
 int net_read_string(Net *n, Port p, char *buf, size_t max);
+int net_run_io(Net *n, long step_limit);
 int net_print(Net *n);
 
 /* ---------------- goi ---------------- */
