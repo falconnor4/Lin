@@ -89,8 +89,8 @@ The standard library (`std/`) is written in pure Lin:
 - `std/tree.lin`: Binary trees (`leaf`, `node`, `is_leaf`, `is_node`, `tree_val`, `tree_left`, `tree_right`, navigation helpers).
 - `std/num.lin`: Arithmetic and comparisons (`add`, `sub`, `mul`, `div`, `mod`, `eq`, `lt`, `leq`, `gt`, `geq`).
 - `std/sat.lin`: SAT combinators, quantifiers, and witness probes (`exists`, `forall`, `probe1`..`probe5`, `verify1`..`verify5`).
-- `std/ffi.lin`: POSIX C interoperability (`puts`, `fopen`, `fclose`, `getenv`, `system`, `dlopen`).
-- `std/io.lin`: General I/O and result waiting primitives (`io_wait`, `io_read`, `io_file`, `io_print`, `io_write_to`, `io_prompt`, `io_done`).
+- `std/ffi.lin`: POSIX Foreign Function Interface (`ffi`, `ccall0`..`ccall3`, `dlopen`, `getenv`, `system`, `exit`).
+- `std/io.lin`: I/O subsystem: stream/character printing (`puts`, `putchar`), file operations (`fopen`, `fclose`, `fgetc`, `fputc`), continuation-passing waiting (`io_wait`, `io_read`, `io_file`), and monadic output (`io_print`, `io_write_to`, `io_prompt`, `io_done`).
 
 ### General Result Waiting & Interactive I/O
 

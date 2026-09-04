@@ -1,5 +1,6 @@
 ; lin standard library: general result waiting & I/O primitives
 (load "list.lin")
+(load "ffi.lin")
 
 ; General waiting for results:
 ; Waits for results from any source:
@@ -22,3 +23,18 @@
 
 ; Prompt and wait for input:
 (define io_prompt   (\prompt (\cb (io_print prompt (io_read cb)))))
+
+; FFI Stream & Character Printing
+(define puts        (\s (ccall1 "puts" s)))
+(define putchar     (\c (ccall1 "putchar" c)))
+
+; FFI File Operations
+(define fopen       (\path (\mode (ccall2 "fopen" path mode))))
+(define fclose      (\fp (ccall1 "fclose" fp)))
+(define fgetc       (\fp (ccall1 "fgetc" fp)))
+(define fputc       (\c (\fp (ccall2 "fputc" c fp))))
+
+; Monadic wrappers for FFI printing & calls
+(define io_call     (\fn (\args (\cb (io_wait (ffi fn args) cb)))))
+(define io_puts     (\s (\next (io_wait (puts s) (\_ next)))))
+(define io_putchar  (\c (\next (io_wait (putchar c) (\_ next)))))

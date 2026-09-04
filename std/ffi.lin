@@ -8,16 +8,11 @@
 (define ccall2 (\fn (\a1 (\a2 (ffi fn (cons a1 (cons a2 nil)))))))
 (define ccall3 (\fn (\a1 (\a2 (\a3 (ffi fn (cons a1 (cons a2 (cons a3 nil)))))))))
 
-; Standard C Library Bindings
-(define puts (\s (ccall1 "puts" s)))
-(define putchar (\c (ccall1 "putchar" c)))
+; Core POSIX & System Bindings
 (define exit (\c (ccall1 "exit" c)))
 (define getenv (\name (ccall1 "getenv" name)))
 (define system (\cmd (ccall1 "system" cmd)))
 (define load_lib (\lib (ccall1 "dlopen" lib)))
 
-; File I/O
-(define fopen (\path (\mode (ccall2 "fopen" path mode))))
-(define fclose (\fp (ccall1 "fclose" fp)))
-(define fgetc (\fp (ccall1 "fgetc" fp)))
-(define fputc (\c (\fp (ccall2 "fputc" c fp))))
+; Load I/O module (printing, character streams, file operations)
+(load "io.lin")
