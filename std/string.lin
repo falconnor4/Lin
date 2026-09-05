@@ -48,6 +48,9 @@
             (cons (first s1) (cons (second s1) (cons (third s1) s2)))
             (cons (first s1) (cons (second s1) (cons (third s1) (cons (fourth s1) s2)))))))))))
 
+; Character-by-character string equality
+(define eq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
+
 (namespace _)
 (open str)
 (define str_empty str.empty)
@@ -64,3 +67,5 @@
 (define str_fourth str.fourth)
 (define str_length str.length)
 (define str_concat str.concat)
+(define str_eq str.eq)
+(define streq str.eq)

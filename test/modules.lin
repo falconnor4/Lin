@@ -86,3 +86,42 @@ test_b.x
 (define c4 (\f (\x (f (f (f (f x)))))))
 (stream.nth_c c4 s)
 ; expect => 4
+
+; 8. Nested FFI arithmetic resolution (issue 2)
+(div (mul 150 150) 100)
+; expect => 225
+
+; 9. FFI Boolean correctness with Church combinators (issue 1)
+(io_wait (ccall2 "lin_eq" 42 42) (\b (io_print (if b 10 20) (io_print "\n" io_done))))
+; expect 10
+
+(io_wait (ccall2 "lin_eq" 42 43) (\b (io_print (if b 10 20) (io_print "\n" io_done))))
+; expect 20
+
+(io_wait (ccall2 "lin_eq" 42 43) (\b (io_print (not b) (io_print "\n" io_done))))
+; expect true
+
+; 10. String literal escape sequences (issue 5)
+(str.length "\e[31mLin\e[0m")
+; expect => 8
+
+(str.length "\033[32m")
+; expect => 5
+
+; 11. String equality via str.eq / list.eq (issue 6)
+(str.eq "hello" "hello")
+; expect => true
+
+(str.eq "hello" "world")
+; expect => false
+
+(str_eq "foo" "foo")
+; expect => true
+
+; 12. Deep definition expansion DAG (issue 4)
+(define t1 (\x (add x x)))
+(define t2 (\x (t1 (t1 x))))
+(define t3 (\x (t2 (t2 x))))
+(t3 1)
+; expect => 16
+

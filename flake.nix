@@ -301,7 +301,7 @@
       devShells = forAllSystems (system: pkgs: {
         default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.lin ];
-          packages = [ pkgs.gnumake pkgs.gdb pkgs.valgrind ];
+          packages = [ self.packages.${system}.lin pkgs.gnumake pkgs.gdb pkgs.valgrind ];
           shellHook = ''
             nix() {
               if [ "$1" = "test" ]; then

@@ -1,0 +1,188 @@
+(load "std/std.lin")
+
+; ==============================================================================
+; Lin: Interactive Terminal Roguelike Dungeon Crawler
+; ==============================================================================
+; Demonstrates:
+;   1. Pure in-net Scott numeral pattern matching (bypassing FFI boolean bugs).
+;   2. Coordinate geometry collision and item detection.
+;   3. Real-time ANSI dungeon display with dynamic hero stats.
+;   4. Deterministic linear turn sequence pipeline.
+; ==============================================================================
+
+; --- Pure In-Net Exact Scott Numeral Matchers (0..9) ---
+(define! is_0 (num -> bool) (\n ((n bool.true) (\_ bool.false))))
+(define! is_1 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.true) (\_ bool.false))))))
+(define! is_2 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.true) (\_ bool.false))))))))
+(define! is_3 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.true) (\_ bool.false))))))))))
+(define! is_4 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.true) (\_ bool.false))))))))))))
+(define! is_5 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.true) (\_ bool.false))))))))))))))
+(define! is_6 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.true) (\_ bool.false))))))))))))))))
+(define! is_7 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.true) (\_ bool.false))))))))))))))))))
+(define! is_8 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.false) (\p8 ((p8 bool.true) (\_ bool.false))))))))))))))))))))
+(define! is_9 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.false) (\p8 ((p8 bool.false) (\p9 ((p9 bool.true) (\_ bool.false))))))))))))))))))))))
+
+; --- Spatial Invariants ---
+; Walls lie on the main diagonal (px == py): (0,0), (1,1), (2,2), (3,3), (4,4)
+(define! is_wall (num -> num -> bool)
+  (\x (\y (or (lt x 0) (or (gt x 4) (or (lt y 0) (or (gt y 4) (eq x y))))))))
+
+(define! is_exit (num -> num -> bool)
+  (\x (\y (and (is_4 x) (is_0 y)))))
+
+(define! is_gold (num -> num -> bool)
+  (\x (\y (or (and (is_2 x) (is_0 y)) (and (is_4 x) (is_3 y))))))
+
+(define! is_potion (num -> num -> bool)
+  (\x (\y (or (and (is_1 x) (is_2 y)) (and (is_2 x) (is_4 y))))))
+
+(define! is_goblin (num -> num -> bool)
+  (\x (\y (or (and (is_3 x) (is_1 y)) (and (is_1 x) (is_3 y))))))
+
+; Movement with wall collision:
+(define! move_x (num -> num -> num -> num)
+  (\nx (\ny (\px
+    (ifl (is_wall nx ny) (\_ px) (\_ nx))))))
+
+(define! move_y (num -> num -> num -> num)
+  (\nx (\ny (\py
+    (ifl (is_wall nx ny) (\_ py) (\_ ny))))))
+
+; Numpad Controls (8=Up, 2=Down, 4=Left, 6=Right, 9=Quit):
+(define! next_px (num -> num -> num -> num)
+  (\cmd (\px (\py
+    (ifl (is_4 cmd)
+      (\_ (move_x (sub px 1) py px))
+      (\_ (ifl (is_6 cmd)
+            (\_ (move_x (add px 1) py px))
+            (\_ px))))))))
+
+(define! next_py (num -> num -> num -> num)
+  (\cmd (\px (\py
+    (ifl (is_8 cmd)
+      (\_ (move_y px (sub py 1) py))
+      (\_ (ifl (is_2 cmd)
+            (\_ (move_y px (add py 1) py))
+            (\_ py))))))))
+
+; Stat updates:
+(define! next_hp (num -> num -> num -> num)
+  (\px (\py (\hp
+    (ifl (is_potion px py) (\_ (add hp 25))
+    (\_ (ifl (is_goblin px py) (\_ (sub hp 15))
+    (\_ hp))))))))
+
+(define! next_gold (num -> num -> num -> num)
+  (\px (\py (\g
+    (ifl (is_gold px py) (\_ (add g 10))
+    (\_ g))))))
+
+; --- HUD & Map Rendering ---
+(define! render_hud (num -> num -> num -> num -> num -> a -> b)
+  (\px (\py (\hp (\gold (\turn (\next
+    (io_print "\n========================================================\n"
+    (io_print "     LIN DUNGEON CRAWLER // INTERACTION ROGUELIKE       \n"
+    (io_print "========================================================\n"
+    (io_print "   MAP LAYOUT: (Walls=#, Gold=$, Potion=!, Goblin=G, Exit=>)\n"
+    (io_print "     y=0:  #   .   $   .   >\n"
+    (io_print "     y=1:  .   #   .   G   .\n"
+    (io_print "     y=2:  .   !   #   .   .\n"
+    (io_print "     y=3:  .   G   .   #   $\n"
+    (io_print "     y=4:  .   .   !   .   #\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "  HERO LOCATION: ("
+    (io_print px
+    (io_print ", "
+    (io_print py
+    (io_print ")    HP: "
+    (io_print hp
+    (io_print " / 100    GOLD: $"
+    (io_print gold
+    (io_print "    TURN: "
+    (io_print turn
+    (io_print "\n========================================================\n"
+    (io_print " Controls: [8] Up  [2] Down  [4] Left  [6] Right  [9] Quit\n"
+    next)))))))))))))))))))))))))))))
+
+; --- End Conditions ---
+(define! check_end (num -> num -> num -> a -> b)
+  (\px (\py (\hp (\next
+    (ifl (is_exit px py)
+      (\_ (io_print "\n>>> VICTORY! You unlocked the stairs and escaped! <<<\n" io_done))
+      (\_ (ifl (is_zero hp)
+            (\_ (io_print "\n>>> DEFEATED! The hero succumbed to dungeon perils. <<<\n" io_done))
+            (\_ next)))))))))
+
+; --- Interactive Turns ---
+(define! step_done (num -> num -> num -> num -> a)
+  (\px (\py (\hp (\gold
+    (render_hud px py hp gold 6
+      (io_print "\nReached end of demo mission! Thanks for playing!\n" io_done)))))))
+
+(define! turn5 (num -> num -> num -> num -> a)
+  (\px (\py (\hp (\gold
+    (render_hud px py hp gold 5
+      (check_end px py hp
+        (io_prompt "Action (8=Up, 2=Down, 4=Left, 6=Right, 9=Quit): " (\cmd
+          (ifl (is_9 cmd)
+            (\_ (io_print "\nExiting dungeon crawl. Farewell!\n" io_done))
+            (\_ (let ((nx (next_px cmd px py)))
+                (let ((ny (next_py cmd px py)))
+                (let ((nh (next_hp nx ny hp)))
+                (let ((ng (next_gold nx ny gold)))
+                  (step_done nx ny nh ng))))))))))))))))
+
+(define! turn4 (num -> num -> num -> num -> a)
+  (\px (\py (\hp (\gold
+    (render_hud px py hp gold 4
+      (check_end px py hp
+        (io_prompt "Action (8=Up, 2=Down, 4=Left, 6=Right, 9=Quit): " (\cmd
+          (ifl (is_9 cmd)
+            (\_ (io_print "\nExiting dungeon crawl. Farewell!\n" io_done))
+            (\_ (let ((nx (next_px cmd px py)))
+                (let ((ny (next_py cmd px py)))
+                (let ((nh (next_hp nx ny hp)))
+                (let ((ng (next_gold nx ny gold)))
+                  (turn5 nx ny nh ng))))))))))))))))
+
+(define! turn3 (num -> num -> num -> num -> a)
+  (\px (\py (\hp (\gold
+    (render_hud px py hp gold 3
+      (check_end px py hp
+        (io_prompt "Action (8=Up, 2=Down, 4=Left, 6=Right, 9=Quit): " (\cmd
+          (ifl (is_9 cmd)
+            (\_ (io_print "\nExiting dungeon crawl. Farewell!\n" io_done))
+            (\_ (let ((nx (next_px cmd px py)))
+                (let ((ny (next_py cmd px py)))
+                (let ((nh (next_hp nx ny hp)))
+                (let ((ng (next_gold nx ny gold)))
+                  (turn4 nx ny nh ng))))))))))))))))
+
+(define! turn2 (num -> num -> num -> num -> a)
+  (\px (\py (\hp (\gold
+    (render_hud px py hp gold 2
+      (check_end px py hp
+        (io_prompt "Action (8=Up, 2=Down, 4=Left, 6=Right, 9=Quit): " (\cmd
+          (ifl (is_9 cmd)
+            (\_ (io_print "\nExiting dungeon crawl. Farewell!\n" io_done))
+            (\_ (let ((nx (next_px cmd px py)))
+                (let ((ny (next_py cmd px py)))
+                (let ((nh (next_hp nx ny hp)))
+                (let ((ng (next_gold nx ny gold)))
+                  (turn3 nx ny nh ng))))))))))))))))
+
+(define! turn1 (num -> num -> num -> num -> a)
+  (\px (\py (\hp (\gold
+    (render_hud px py hp gold 1
+      (check_end px py hp
+        (io_prompt "Action (8=Up, 2=Down, 4=Left, 6=Right, 9=Quit): " (\cmd
+          (ifl (is_9 cmd)
+            (\_ (io_print "\nExiting dungeon crawl. Farewell!\n" io_done))
+            (\_ (let ((nx (next_px cmd px py)))
+                (let ((ny (next_py cmd px py)))
+                (let ((nh (next_hp nx ny hp)))
+                (let ((ng (next_gold nx ny gold)))
+                  (turn2 nx ny nh ng))))))))))))))))
+
+; Start hero at (1, 0) with 100 HP, 0 Gold:
+(turn1 1 0 100 0)

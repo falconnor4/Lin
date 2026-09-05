@@ -1,0 +1,147 @@
+(load "std/std.lin")
+
+; ==============================================================================
+; Lin: Master Interactive Example Suite Launcher
+; ==============================================================================
+; Interactive gateway to all 8 Lin demonstration systems:
+; Games, 2.5D raymarching, cellular automata, hardware simulation,
+; and advanced mathematical logic on optimal interaction nets.
+; ==============================================================================
+
+; --- Pure In-Net Exact Scott Numeral Matchers (0..9) ---
+(define! is_0 (num -> bool) (\n ((n bool.true) (\_ bool.false))))
+(define! is_1 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.true) (\_ bool.false))))))
+(define! is_2 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.true) (\_ bool.false))))))))
+(define! is_3 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.true) (\_ bool.false))))))))))
+(define! is_4 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.true) (\_ bool.false))))))))))))
+(define! is_5 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.true) (\_ bool.false))))))))))))))
+(define! is_6 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.true) (\_ bool.false))))))))))))))))
+(define! is_7 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.true) (\_ bool.false))))))))))))))))))
+(define! is_8 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.false) (\p8 ((p8 bool.true) (\_ bool.false))))))))))))))))))))
+(define! is_9 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.false) (\p8 ((p8 bool.false) (\p9 ((p9 bool.true) (\_ bool.false))))))))))))))))))))))
+
+; --- Descriptions ---
+(define! show_info1 (a -> b)
+  (\next
+    (io_print "\n[ 1. DOOM 2.5D RAYCASTER ENGINE ]\n"
+    (io_print "File: examples/doom_raycaster.lin\n"
+    (io_print "Features: 2.5D DDA raymarching, depth shading, real-time minimap, DOOM HUD\n"
+    (io_print "Launch:   ./lin examples/doom_raycaster.lin\n"
+    next))))))
+
+(define! show_info2 (a -> b)
+  (\next
+    (io_print "\n[ 2. INTERACTIVE TIC-TAC-TOE AI ]\n"
+    (io_print "File: examples/tictactoe.lin\n"
+    (io_print "Features: 9-cell functional board state, combinatoric referee, strategic AI\n"
+    (io_print "Launch:   ./lin examples/tictactoe.lin\n"
+    next))))))
+
+(define! show_info3 (a -> b)
+  (\next
+    (io_print "\n[ 3. DUNGEON CRAWLER ROGUELIKE ]\n"
+    (io_print "File: examples/dungeon_crawl.lin\n"
+    (io_print "Features: Grid collision, Gold/Potion items, Goblin combat, stairs escape\n"
+    (io_print "Launch:   ./lin examples/dungeon_crawl.lin\n"
+    next))))))
+
+(define! show_info4 (a -> b)
+  (\next
+    (io_print "\n[ 4. FRACTAL EXPLORER & DYNAMICAL SYSTEMS ]\n"
+    (io_print "File: examples/mandelbrot.lin\n"
+    (io_print "Features: Mandelbrot escape-time, Julia dust, Sierpinski, Collatz orbit\n"
+    (io_print "Launch:   ./lin examples/mandelbrot.lin\n"
+    next))))))
+
+(define! show_info5 (a -> b)
+  (\next
+    (io_print "\n[ 5. CELLULAR AUTOMATA & LIFE ]\n"
+    (io_print "File: examples/cellular_automata.lin\n"
+    (io_print "Features: Wolfram Rule 30 (Chaos), Rule 90 (Fractal), Rule 110, Life Glider\n"
+    (io_print "Launch:   ./lin examples/cellular_automata.lin\n"
+    next))))))
+
+(define! show_info6 (a -> b)
+  (\next
+    (io_print "\n[ 6. TSEITIN SAT SOLVER & EXPANDERS ]\n"
+    (io_print "File: examples/sat_tseitin.lin\n"
+    (io_print "Features: Graph parity invariants, PHP_2^3, K_4 3-coloring, witness extraction\n"
+    (io_print "Launch:   ./lin examples/sat_tseitin.lin\n"
+    next))))))
+
+(define! show_info7 (a -> b)
+  (\next
+    (io_print "\n[ 7. 8-BIT ALU HARDWARE SIMULATOR ]\n"
+    (io_print "File: examples/circuit_cpu.lin\n"
+    (io_print "Features: Full adders, two's complement subtractor, logic gates, shift bus\n"
+    (io_print "Launch:   ./lin examples/circuit_cpu.lin\n"
+    next))))))
+
+(define! show_info8 (a -> b)
+  (\next
+    (io_print "\n[ 8. CURRY-HOWARD & GOI INVARIANTS ]\n"
+    (io_print "File: examples/logic_proofs.lin\n"
+    (io_print "Features: Proof terms, Girard's det(2I - A), Lévy sharing, linear duality\n"
+    (io_print "Launch:   ./lin examples/logic_proofs.lin\n"
+    next))))))
+
+; --- Dispatch ---
+(define! dispatch (num -> a -> b)
+  (\choice (\next
+    (ifl (is_1 choice) (\_ (show_info1 next))
+    (\_ (ifl (is_2 choice) (\_ (show_info2 next))
+    (\_ (ifl (is_3 choice) (\_ (show_info3 next))
+    (\_ (ifl (is_4 choice) (\_ (show_info4 next))
+    (\_ (ifl (is_5 choice) (\_ (show_info5 next))
+    (\_ (ifl (is_6 choice) (\_ (show_info6 next))
+    (\_ (ifl (is_7 choice) (\_ (show_info7 next))
+    (\_ (ifl (is_8 choice) (\_ (show_info8 next))
+    (\_ next)))))))))))))))))))
+
+; --- Menu UI ---
+(define! render_menu (a -> b)
+  (\next
+    (io_print "\n======================================================================\n"
+    (io_print "         LIN INTERACTION COMBINATOR SUITE // MASTER MENU              \n"
+    (io_print "======================================================================\n"
+    (io_print "  [1] Doom 2.5D Raycaster       - 3D perspective raymarcher & minimap\n"
+    (io_print "  [2] Tic-Tac-Toe AI            - In-net referee & minimax strategy\n"
+    (io_print "  [3] Dungeon Crawler Roguelike - Grid movement, combat, items, HUD\n"
+    (io_print "  [4] Mandelbrot & Julia Sets   - Escape-time fractals & Collatz orbit\n"
+    (io_print "  [5] Cellular Automata         - Wolfram 30/90/110 & Game of Life\n"
+    (io_print "  [6] Tseitin SAT Solver        - Expander graph parity refutation\n"
+    (io_print "  [7] 8-Bit ALU CPU Circuit     - Hardware ripple-carry adder & logic\n"
+    (io_print "  [8] Curry-Howard & GoI Proofs - Matrix invariants & Lévy optimality\n"
+    (io_print "  [9] Exit\n"
+    (io_print "======================================================================\n"
+    next)))))))))))))))
+
+; --- Interactive Turns ---
+(define! step_done (a)
+  (io_print "\nThank you for exploring Lin! Goodbye!\n" io_done))
+
+(define! turn3 (num -> a)
+  (\_
+    (render_menu
+      (io_prompt "Choose Example (1-8, 9=Quit): " (\cmd
+        (ifl (is_9 cmd)
+          (\_ step_done)
+          (\_ (dispatch cmd step_done))))))))
+
+(define! turn2 (num -> a)
+  (\_
+    (render_menu
+      (io_prompt "Choose Example (1-8, 9=Quit): " (\cmd
+        (ifl (is_9 cmd)
+          (\_ step_done)
+          (\_ (dispatch cmd (turn3 0)))))))))
+
+(define! turn1 (num -> a)
+  (\_
+    (render_menu
+      (io_prompt "Choose Example (1-8, 9=Quit): " (\cmd
+        (ifl (is_9 cmd)
+          (\_ step_done)
+          (\_ (dispatch cmd (turn2 0)))))))))
+
+(turn1 0)

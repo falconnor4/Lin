@@ -192,24 +192,27 @@ static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
 }
 
 static void eg_saturate(EGraph *g) {
-  for (int round = 0; round < 6; round++) {
+  for (int round = 0; round < 4; round++) {
     int start_n = g->nn;
     for (int i = 0; i < start_n && g->nn < 32768; i++) {
       ENode n = g->nodes[i]; int cls = eg_find(g, g->node_cls[i]);
       if (n.type == TAPP) {
-        int fn_cls = eg_find(g, n.l);
-        for (int j = 0; j < start_n; j++)
-          if (eg_find(g, g->node_cls[j]) == fn_cls && g->nodes[j].type == TLAM) {
-            char vn[NAME]; snprintf(vn, NAME, "%s", g->nodes[j].name);
-            eg_union(g, cls, eg_subst(g, g->nodes[j].l, vn, n.r, 0));
+        int fn_cls = eg_find(g, n.l), bn = g->classes[fn_cls].best_node;
+        if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TLAM) {
+          int bl = eg_find(g, g->nodes[bn].l);
+          if (g->classes[bl].cost <= 64) {
+            char vn[NAME]; snprintf(vn, NAME, "%s", g->nodes[bn].name);
+            eg_union(g, cls, eg_subst(g, g->nodes[bn].l, vn, n.r, 0));
           }
+        }
       } else if (n.type == TLAM) {
-        int body_cls = eg_find(g, n.l);
-        for (int j = 0; j < start_n; j++) {
-          if (eg_find(g, g->node_cls[j]) == body_cls && g->nodes[j].type == TAPP) {
-            ENode an = g->nodes[g->classes[eg_find(g, g->nodes[j].r)].best_node];
-            if (an.type == TVAR && !strcmp(an.name, n.name) && !eg_has_var(g, g->nodes[j].l, n.name))
-              eg_union(g, cls, g->nodes[j].l);
+        int body_cls = eg_find(g, n.l), bn = g->classes[body_cls].best_node;
+        if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TAPP) {
+          int an_node = g->classes[eg_find(g, g->nodes[bn].r)].best_node;
+          if (an_node >= 0 && an_node < g->nn) {
+            ENode an = g->nodes[an_node];
+            if (an.type == TVAR && !strcmp(an.name, n.name) && !eg_has_var(g, g->nodes[bn].l, n.name))
+              eg_union(g, cls, g->nodes[bn].l);
           }
         }
       }

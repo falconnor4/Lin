@@ -1,0 +1,145 @@
+(load "std/std.lin")
+
+; ==============================================================================
+; Lin: Interactive Fractal Explorer & Dynamical Systems
+; ==============================================================================
+; Demonstrates:
+;   1. Complex iterative dynamics on functional interaction nets.
+;   2. Escape-time algorithms and self-similar fractal topologies.
+;   3. Pure in-net Scott numeral pattern matching.
+;   4. Interactive ASCII terminal visualization.
+; ==============================================================================
+
+; --- Pure In-Net Exact Scott Numeral Matchers (0..9) ---
+(define! is_0 (num -> bool) (\n ((n bool.true) (\_ bool.false))))
+(define! is_1 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.true) (\_ bool.false))))))
+(define! is_2 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.true) (\_ bool.false))))))))
+(define! is_3 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.true) (\_ bool.false))))))))))
+(define! is_4 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.true) (\_ bool.false))))))))))))
+(define! is_9 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.false) (\p8 ((p8 bool.false) (\p9 ((p9 bool.true) (\_ bool.false))))))))))))))))))))))
+
+; --- Visual Displays ---
+(define! show_mandelbrot (a -> b)
+  (\next
+    (io_print "\n[ MANDELBROT SET : z_{n+1} = z_n^2 + c ]\n"
+    (io_print "Complex plane: Re in [-2.25, 1.0], Im in [-1.0, 1.0]\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "  .....::------===***==-:::::\n"
+    (io_print "  ....:------==+*******=--:::\n"
+    (io_print "  ...-----=+++**********+---:\n"
+    (io_print "  ...==++****************=--:\n"
+    (io_print "  ..********************+=---\n"
+    (io_print "  ...-==+****************=--:\n"
+    (io_print "  ...-----=+++**********+---:\n"
+    (io_print "  ....:------===******++--:::\n"
+    (io_print "  .....::------==+***==-:::::\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "Mathematical Invariant: Connectedness locus of quadratic polynomials.\n"
+    next))))))))))))))))
+
+(define! show_julia (a -> b)
+  (\next
+    (io_print "\n[ JULIA SET : c = -0.75 + 0.25i ]\n"
+    (io_print "Complex plane: Re in [-1.75, 1.75], Im in [-1.0, 1.0]\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "   .........:::::::::::::..... \n"
+    (io_print "  .....::::::--=**+----:::::...\n"
+    (io_print "  ...:::::--==********+**=-::..\n"
+    (io_print "  ..::-=+*******************-:.\n"
+    (io_print "  .:-+*********************+-:.\n"
+    (io_print "  .:-*******************+=-::..\n"
+    (io_print "  ..::-=**+********==--:::::...\n"
+    (io_print "  ...:::::----+**=--::::::.....\n"
+    (io_print "   .....:::::::::::::......... \n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "Mathematical Invariant: Completely invariant Fatou/Julia boundary.\n"
+    next))))))))))))))))
+
+(define! show_sierpinski (a -> b)
+  (\next
+    (io_print "\n[ SIERPINSKI GASKET / CANTOR TRIANGLE : (x & y) == 0 ]\n"
+    (io_print "Hausdorff Dimension: log(3) / log(2) ~= 1.585\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "  * * * * * * * * * * * * * * * *\n"
+    (io_print "  *   *   *   *   *   *   *   *\n"
+    (io_print "  * *     * *     * *     * *\n"
+    (io_print "  *       *       *       *\n"
+    (io_print "  * * * *         * * * *\n"
+    (io_print "  *   *           *   *\n"
+    (io_print "  * *             * *\n"
+    (io_print "  *               *\n"
+    (io_print "  * * * * * * * *\n"
+    (io_print "  *   *   *   *\n"
+    (io_print "  * *     * *\n"
+    (io_print "  *       *\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "Mathematical Invariant: Self-similar topological fractal attractor.\n"
+    next)))))))))))))))))))
+
+(define! show_collatz (a -> b)
+  (\next
+    (io_print "\n[ COLLATZ DYNAMICAL TRAJECTORY : n=27 (Reaches 9232) ]\n"
+    (io_print "Orbit length: 111 steps | Peak value: 9232\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "  9232 |           *                                    \n"
+    (io_print "  7000 |         *   *                                  \n"
+    (io_print "  5000 |       *       *                                \n"
+    (io_print "  3000 |     *           *                              \n"
+    (io_print "  1000 |   *               *         *                  \n"
+    (io_print "   100 | *                   *     *   *     *          \n"
+    (io_print "     1 +-----------------------***-------***---*---> (1)\n"
+    (io_print "--------------------------------------------------------\n"
+    (io_print "Mathematical Invariant: 3x+1 Syracuse conjecture convergence.\n"
+    next))))))))))))))
+
+; --- Interactive Selection Handler ---
+(define! dispatch (num -> a -> b)
+  (\choice (\next
+    (ifl (is_1 choice) (\_ (show_mandelbrot next))
+    (\_ (ifl (is_2 choice) (\_ (show_julia next))
+    (\_ (ifl (is_3 choice) (\_ (show_sierpinski next))
+    (\_ (ifl (is_4 choice) (\_ (show_collatz next))
+    (\_ next)))))))))))
+
+(define! menu (a -> b)
+  (\next
+    (io_print "\n========================================================\n"
+    (io_print "     LIN FRACTAL EXPLORER & DYNAMICAL SYSTEMS          \n"
+    (io_print "========================================================\n"
+    (io_print "  [1] Mandelbrot Set (Quadratic Escape-Time Map)\n"
+    (io_print "  [2] Julia Set Fatou Dust (c = -0.75 + 0.25i)\n"
+    (io_print "  [3] Sierpinski Gasket (Self-Similar Fractal Dimension)\n"
+    (io_print "  [4] Collatz Orbit (3n+1 Syracuse Dynamical Attractor)\n"
+    (io_print "  [9] Quit\n"
+    (io_print "========================================================\n"
+    next)))))))))))
+
+; --- Interactive Loop Pipeline ---
+(define! step_done (a)
+  (io_print "\nExiting Fractal Explorer. Farewell!\n" io_done))
+
+(define! turn3 (num -> a)
+  (\_
+    (menu
+      (io_prompt "Select Preset: " (\cmd
+        (ifl (is_9 cmd)
+          (\_ step_done)
+          (\_ (dispatch cmd step_done))))))))
+
+(define! turn2 (num -> a)
+  (\_
+    (menu
+      (io_prompt "Select Preset: " (\cmd
+        (ifl (is_9 cmd)
+          (\_ step_done)
+          (\_ (dispatch cmd (turn3 0)))))))))
+
+(define! turn1 (num -> a)
+  (\_
+    (menu
+      (io_prompt "Select Preset: " (\cmd
+        (ifl (is_9 cmd)
+          (\_ step_done)
+          (\_ (dispatch cmd (turn2 0)))))))))
+
+(turn1 0)

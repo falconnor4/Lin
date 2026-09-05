@@ -67,9 +67,11 @@ static Term *expand(Term *t, Guard *g) {
     if (guard_has(g, t->name)) return term_new(TVAR, t->name, NULL, NULL);
     Def *d = def_find(t->name);
     if (!d) return term_new(TVAR, t->name, NULL, NULL);
-    guard_push(g, d->name);
-    Term *body = term_copy(d->term), *e = expand(body, g);
-    term_free(body); g->count--; return e;
+    if (!d->expanded) {
+      guard_push(g, d->name); Term *body = term_copy(d->term);
+      d->expanded = expand(body, g); term_free(body); g->count--;
+    }
+    return term_copy(d->expanded);
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
   int bound = (t->type == TLAM || t->type == TDEF);
@@ -136,6 +138,7 @@ static void process_def(Term *t) {
   else snprintf(d->name, NAME, "%s", t->name);
   d->sch = sch; d->typed = 1;
   d->term = rec ? term_new(TAPP, "", y_term(), term_new(TLAM, t->name, t->l, NULL)) : t->l;
+  d->expanded = NULL;
   t->l = NULL;
 }
 
@@ -147,15 +150,13 @@ static void process_def(Term *t) {
 #endif
 
 static char (*loaded_paths)[PATH_MAX];
-static int n_loaded = 0, loaded_cap = 0;
+static int n_loaded = 0, loaded_cap = 0, dir_sp = 0, dir_cap = 0;
 static char (*dir_stack)[PATH_MAX];
-static int dir_sp = 0, dir_cap = 0;
 
 static int is_already_loaded(const char *canon) {
   for (int i = 0; i < n_loaded; i++) if (!strcmp(loaded_paths[i], canon)) return 1;
   return 0;
 }
-
 static void mark_loaded(const char *canon) {
   if (n_loaded >= loaded_cap) loaded_paths = realloc(loaded_paths, (size_t)(loaded_cap = loaded_cap ? loaded_cap * 2 : 64) * sizeof *loaded_paths);
   snprintf(loaded_paths[n_loaded++], PATH_MAX, "%s", canon);

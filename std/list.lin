@@ -15,6 +15,17 @@
 (define! tail (list a -> list a) (\l ((l (\h (\t t))) list.nil)))
 (define! is_empty (list a -> bool) (\l ((l (\h (\t bool.false))) bool.true)))
 
+; Higher-order list equality
+(define eq
+  (\elem_eq
+    (\l1 (\l2
+      (bool.ifl (list.is_empty l1)
+        (\_ (list.is_empty l2))
+        (\_ (bool.ifl (list.is_empty l2)
+              (\_ bool.false)
+              (\_ (bool.and ((elem_eq (list.head l1)) (list.head l2))
+                            (((eq elem_eq) (list.tail l1)) (list.tail l2)))))))))))
+
 ; Church self-iterating lists & folds
 (define c_nil (\c (\n n)))
 (define c_cons (\h (\t (\c (\n (c h (t c n)))))))
@@ -86,3 +97,4 @@
 (define c_concat list.c_concat)
 (define c_to_scott list.c_to_scott)
 (define c_reverse list.c_reverse)
+(define list_eq list.eq)

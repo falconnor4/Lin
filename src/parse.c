@@ -23,20 +23,11 @@ static void skipws(void) {
 }
 
 Term *term_new(int type, const char *name, Term *l, Term *r) {
-  Term *t = malloc(sizeof *t);
-  *t = (Term){.type = type, .l = l, .r = r};
-  snprintf(t->name, NAME, "%s", name ? name : "");
-  return t;
+  Term *t = malloc(sizeof *t); *t = (Term){.type = type, .l = l, .r = r};
+  snprintf(t->name, NAME, "%s", name ? name : ""); return t;
 }
-
-void term_free(Term *t) {
-  if (t) { term_free(t->l); term_free(t->r); free(t); }
-}
-
-Term *term_copy(Term *t) {
-  if (!t) return NULL;
-  return term_new(t->type, t->name, term_copy(t->l), term_copy(t->r));
-}
+void term_free(Term *t) { if (t) { term_free(t->l); term_free(t->r); free(t); } }
+Term *term_copy(Term *t) { return t ? term_new(t->type, t->name, term_copy(t->l), term_copy(t->r)) : NULL; }
 
 int term_refs(Term *t, const char *name) {
   if (!t) return 0;
@@ -124,21 +115,14 @@ static Type *parse_type(void) {
   return a;
 }
 
-static Type *parse_type_top(void) {
-  tvnn = 0;
-  return parse_type();
-}
+static Type *parse_type_top(void) { tvnn = 0; return parse_type(); }
 
 static Term *parse_tail(Term *f) {
   for (;;) {
     skipws();
-    if (S[P] == ')') {
-      P++;
-      return f;
-    }
+    if (S[P] == ')') { P++; return f; }
     if (!S[P]) pfail("missing ')'");
-    Term *a = parse_term();
-    f = term_new(TAPP, "", f, a);
+    f = term_new(TAPP, "", f, parse_term());
   }
 }
 
@@ -152,20 +136,27 @@ static Term *parse_term(void) {
   if (!S[P]) pfail("unexpected end of input");
   if (S[P] == ')') pfail("unexpected ')'");
   if (S[P] == '"') {
-    P++;
-    int start = P;
-    while (S[P] && S[P] != '"') { if (S[P] == '\\' && S[P + 1]) P++; P++; }
-    if (S[P] != '"') pfail("unterminated string literal");
-    int end = P; P++;
-    Term *body = term_new(TVAR, "nil", NULL, NULL);
-    for (int i = end - 1; i >= start; i--) {
-      char c = S[i];
-      if (i > start && S[i - 1] == '\\') {
-        if (c == 'n') c = '\n'; else if (c == 't') c = '\t';
-        else if (c == 'r') c = '\r'; else if (c == '0') c = '\0';
-        i--;
+    P++; unsigned char dec[4096]; int dlen = 0;
+    while (S[P] && S[P] != '"') {
+      unsigned char c = (unsigned char)S[P++];
+      if (c == '\\' && S[P]) {
+        c = (unsigned char)S[P++];
+        if (c == 'n') c = '\n'; else if (c == 't') c = '\t'; else if (c == 'r') c = '\r';
+        else if (c == 'e') c = 27;
+        else if (c == '0' && S[P] >= '0' && S[P] <= '7' && S[P + 1] >= '0' && S[P + 1] <= '7') {
+          c = (unsigned char)((S[P] - '0') * 8 + (S[P + 1] - '0')); P += 2;
+        } else if (c == '0') c = '\0';
+        else if (c == 'x' && isxdigit((unsigned char)S[P]) && isxdigit((unsigned char)S[P + 1])) {
+          char h[3] = {S[P], S[P + 1], 0}; c = (unsigned char)strtol(h, NULL, 16); P += 2;
+        }
       }
-      Term *ch = scott((unsigned char)c);
+      if (dlen < (int)sizeof(dec)) dec[dlen++] = c;
+    }
+    if (S[P] != '"') pfail("unterminated string literal");
+    P++;
+    Term *body = term_new(TVAR, "nil", NULL, NULL);
+    for (int i = dlen - 1; i >= 0; i--) {
+      Term *ch = scott(dec[i]);
       body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "cons", NULL, NULL), ch), body);
     }
     return body;
