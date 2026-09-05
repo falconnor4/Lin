@@ -23,7 +23,7 @@ typedef struct { int node:30; unsigned int port:2; } Port;
 typedef struct { int len, off; } Scope;
 
 typedef struct {
-  int cap, nn, free_head; unsigned char *tag; Port *wire; Scope *scope; char **name;
+  int cap, nn; unsigned char *tag; Port *wire; Scope *scope; char **name;
   Port *act; int atop, actcap; unsigned char *dead; uint64_t *sca; int sccap, scn;
   long steps;
 } Net;
