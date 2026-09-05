@@ -20,7 +20,7 @@ typedef struct Term {
 enum { LAM, APP, DUP, ERA, ROOT };
 
 typedef struct { int node:30; unsigned int port:2; } Port;
-typedef struct { int len, off; } Scope;
+typedef union { uint64_t raw; struct { uint64_t is_heap:1, len:6, bits:57; } sso; struct { uint64_t is_heap:1, len:31, off:32; } heap; } Scope;
 
 typedef struct {
   int cap, nn; unsigned char *tag; Port *wire; Scope *scope; char **name;
