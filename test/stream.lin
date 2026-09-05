@@ -1,0 +1,66 @@
+; Lazy Streams & Generator Sequences test suite
+(load "std/stream.lin")
+
+(define s_nats (nats_from 0))
+(stream_head s_nats)
+; expect => 0
+
+(define s1 (stream_tail s_nats))
+(stream_head s1)
+; expect => 1
+
+(define s2 (stream_tail s1))
+(stream_head s2)
+; expect => 2
+
+(define s3 (stream_tail s2))
+(stream_head s3)
+; expect => 3
+
+; Constant stream
+(define s_rep (repeat 42))
+(stream_head s_rep)
+; expect => 42
+
+(stream_head (stream_tail s_rep))
+; expect => 42
+
+(stream_head (stream_tail (stream_tail s_rep)))
+; expect => 42
+
+; Direct positional access
+(stream_nth0 s_nats)
+; expect => 0
+
+(stream_nth1 s_nats)
+; expect => 1
+
+(stream_nth2 s_nats)
+; expect => 2
+
+(stream_nth3 s_nats)
+; expect => 3
+
+; Realization into finite lists
+(define l3 (stream_take3 (nats_from 10)))
+(first l3)
+; expect => 10
+
+(second l3)
+; expect => 11
+
+(third l3)
+; expect => 12
+
+(define l4 (stream_take4 (repeat 7)))
+(first l4)
+; expect => 7
+
+(second l4)
+; expect => 7
+
+(third l4)
+; expect => 7
+
+(fourth l4)
+; expect => 7

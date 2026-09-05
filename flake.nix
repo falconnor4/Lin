@@ -116,7 +116,7 @@
             printf "\n''${C_BOLD}Running Lin Confluence & Stability Test Suite''${C_RESET}\n"
 
             printf "\n''${C_TIER}[Tier 1: Core Interaction Calculus & Primitives]''${C_RESET}\n"
-            for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin; do
+            for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin; do
               run_test "$f"
             done
 
@@ -131,7 +131,7 @@
             done
 
             printf "\n''${C_TIER}[Tier 4: Non-Trivial Workloads & Confluence Invariants]''${C_RESET}\n"
-            for f in test/graph.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin; do
+            for f in test/graph.lin test/map.lin test/set.lin test/queue.lin test/stream.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin; do
               run_test "$f"
             done
 

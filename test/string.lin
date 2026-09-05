@@ -1,0 +1,72 @@
+; String manipulation and character combinators test suite
+(load "std/string.lin")
+
+(str_is_empty str_empty)
+; expect => true
+
+(str_is_empty "")
+; expect => true
+
+(str_is_empty "a")
+; expect => false
+
+(str_head "hello")
+; expect => 104
+
+(str_first "hello")
+; expect => 104
+
+(str_second "hello")
+; expect => 101
+
+(str_third "hello")
+; expect => 108
+
+(str_fourth "hello")
+; expect => 108
+
+; String character construction
+(str_char1 65)
+; expect => "A"
+
+(str_char2 65 66)
+; expect => "AB"
+
+(str_char3 65 66 67)
+; expect => "ABC"
+
+(str_char4 76 105 110 33)
+; expect => "Lin!"
+
+; String length
+(str_length "")
+; expect => 0
+
+(str_length "a")
+; expect => 1
+
+(str_length "ab")
+; expect => 2
+
+(str_length "abc")
+; expect => 3
+
+(str_length "abcd")
+; expect => 4
+
+; String concatenation
+(define msg (str_concat "hi" "yo"))
+(str_first msg)
+; expect => 104
+
+(str_second msg)
+; expect => 105
+
+(str_third msg)
+; expect => 121
+
+(str_fourth msg)
+; expect => 111
+
+(str_length msg)
+; expect => 4

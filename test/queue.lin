@@ -1,0 +1,42 @@
+; Functional FIFO Queue test suite
+(load "std/queue.lin")
+
+(define q0 empty_queue)
+(is_empty_queue q0)
+; expect => true
+
+(define q1 (queue_push 10 q0))
+(is_empty_queue q1)
+; expect => false
+
+(queue_peek q1)
+; expect => 10
+
+(define q2 (queue_push 20 q1))
+(define q3 (queue_push 30 q2))
+
+(queue_peek q3)
+; expect => 10
+
+(define q3_p1 (queue_pop q3))
+(queue_peek q3_p1)
+; expect => 20
+
+(define q3_p2 (queue_pop q3_p1))
+(queue_peek q3_p2)
+; expect => 30
+
+(define q3_p3 (queue_pop q3_p2))
+(is_empty_queue q3_p3)
+; expect => true
+
+; Singleton queue test
+(define qs (queue_singleton 99))
+(is_empty_queue qs)
+; expect => false
+
+(queue_peek qs)
+; expect => 99
+
+(is_empty_queue (queue_pop qs))
+; expect => true

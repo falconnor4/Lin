@@ -1,0 +1,43 @@
+; lin standard library: string manipulation and character combinators
+(load "bool.lin")
+(load "num.lin")
+(load "list.lin")
+
+(define str_empty nil)
+(define str_is_empty is_empty)
+(define str_head head)
+(define str_tail tail)
+
+(define str_char1 list1)
+(define str_char2 list2)
+(define str_char3 list3)
+(define str_char4 list4)
+
+(define str_first first)
+(define str_second second)
+(define str_third third)
+(define str_fourth fourth)
+
+(define str_length
+  (\s
+    (if (is_empty s)
+      0
+      (if (is_empty (tail s))
+        1
+        (if (is_empty (tail (tail s)))
+          2
+          (if (is_empty (tail (tail (tail s))))
+            3
+            4))))))
+
+(define str_concat
+  (\s1 (\s2
+    (if (is_empty s1)
+      s2
+      (if (is_empty (tail s1))
+        (cons (first s1) s2)
+        (if (is_empty (tail (tail s1)))
+          (cons (first s1) (cons (second s1) s2))
+          (if (is_empty (tail (tail (tail s1))))
+            (cons (first s1) (cons (second s1) (cons (third s1) s2)))
+            (cons (first s1) (cons (second s1) (cons (third s1) (cons (fourth s1) s2)))))))))))

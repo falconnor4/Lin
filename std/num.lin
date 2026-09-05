@@ -32,14 +32,46 @@
           (\pppa ((pppa (succ (succ (succ b))))
             (\ppppa ((ppppa (succ (succ (succ (succ b)))))
               (\_ (ccall2 "lin_add" a b))))))))))))))
-(define! sub (num -> num -> num) (\a (\b (ccall2 "lin_sub" a b))))
-(define! mul (num -> num -> num) (\a (\b (ccall2 "lin_mul" a b))))
+
+(define! sub (num -> num -> num)
+  (\a (\b
+    ((b a)
+      (\pb ((pb (pred a))
+        (\ppb ((ppb (pred (pred a)))
+          (\pppb ((pppb (pred (pred (pred a))))
+            (\ppppa ((ppppa (pred (pred (pred (pred a)))))
+              (\_ (ccall2 "lin_sub" a b))))))))))))))
+
+(define! mul (num -> num -> num)
+  (\a (\b
+    ((a 0)
+      (\pa ((pa b)
+        (\ppa ((ppa ((add b) b))
+          (\pppa ((pppa ((add b) ((add b) b)))
+            (\ppppa ((ppppa ((add b) ((add b) ((add b) b))))
+              (\_ (ccall2 "lin_mul" a b))))))))))))))
 (define! div (num -> num -> num) (\a (\b (ccall2 "lin_div" a b))))
 (define! mod (num -> num -> num) (\a (\b (ccall2 "lin_mod" a b))))
-(define! lt  (num -> num -> bool) (\a (\b (ccall2 "lin_lt" a b))))
-(define! leq (num -> num -> bool) (\a (\b (ccall2 "lin_leq" a b))))
-(define! gt  (num -> num -> bool) (\a (\b (ccall2 "lin_gt" a b))))
-(define! geq (num -> num -> bool) (\a (\b (leq b a))))
+
+; Hybrid comparisons: pure in-net reduction for 0..5, FFI for larger
+(define! lt (num -> num -> bool)
+  (\a (\b
+    ((a (not (is_zero b)))
+      (\pa ((b false)
+        (\pb ((pa (not (is_zero pb)))
+          (\ppa ((pb false)
+            (\ppb ((ppa (not (is_zero ppb)))
+              (\pppa ((ppb false)
+                (\pppb ((pppa (not (is_zero pppb)))
+                  (\ppppa ((pppb false)
+                    (\ppppb ((ppppa (not (is_zero ppppb)))
+                      (\pppppa ((ppppb false)
+                        (\pppppb ((pppppa (not (is_zero pppppb)))
+                          (\_ (ccall2 "lin_lt" a b))))))))))))))))))))))))))
+
+(define! gt  (num -> num -> bool) (\a (\b ((lt b) a))))
+(define! leq (num -> num -> bool) (\a (\b (not ((lt b) a)))))
+(define! geq (num -> num -> bool) (\a (\b (not ((lt a) b)))))
 
 ; Scott aliases
 (define zero_s zero)

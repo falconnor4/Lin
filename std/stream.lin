@@ -1,0 +1,26 @@
+; lin standard library: lazy streams & generator sequences
+(load "bool.lin")
+(load "num.lin")
+(load "pair.lin")
+(load "list.lin")
+
+(define stream_create (\s0 (\next (pair s0 next))))
+(define stream_head (\s (fst s)))
+(define! stream_tail (a -> b) (\s (s (\curr (\step (pair (step curr) step))))))
+
+(define nats_from (\n (stream_create n succ)))
+(define repeat (\x (stream_create x (\v v))))
+
+(define stream_drop1 stream_tail)
+(define stream_drop2 (\s (stream_tail (stream_tail s))))
+(define stream_drop3 (\s (stream_tail (stream_tail (stream_tail s)))))
+
+(define stream_nth0 stream_head)
+(define stream_nth1 (\s (stream_head (stream_drop1 s))))
+(define stream_nth2 (\s (stream_head (stream_drop2 s))))
+(define stream_nth3 (\s (stream_head (stream_drop3 s))))
+
+(define stream_take1 (\s (list1 (stream_head s))))
+(define stream_take2 (\s (list2 (stream_head s) (stream_head (stream_tail s)))))
+(define stream_take3 (\s (list3 (stream_head s) (stream_head (stream_tail s)) (stream_head (stream_tail (stream_tail s))))))
+(define stream_take4 (\s (list4 (stream_head s) (stream_head (stream_tail s)) (stream_head (stream_tail (stream_tail s))) (stream_head (stream_tail (stream_tail (stream_tail s)))))))

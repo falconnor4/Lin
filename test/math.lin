@@ -1,0 +1,73 @@
+; Math utilities and combinators test suite
+
+(min 2 3)
+; expect => 2
+
+(min 4 1)
+; expect => 1
+
+(min 3 3)
+; expect => 3
+
+(max 2 3)
+; expect => 3
+
+(max 4 1)
+; expect => 4
+
+(max 3 3)
+; expect => 3
+
+(clamp 1 4 0)
+; expect => 1
+
+(clamp 1 4 5)
+; expect => 4
+
+(clamp 1 4 3)
+; expect => 3
+
+(clamp 2 5 2)
+; expect => 2
+
+(clamp 2 5 5)
+; expect => 5
+
+(sqr 0)
+; expect => 0
+
+(sqr 1)
+; expect => 1
+
+(sqr 2)
+; expect => 4
+
+(sqr 3)
+; expect => 9
+
+(cube 0)
+; expect => 0
+
+(cube 1)
+; expect => 1
+
+(cube 2)
+; expect => 8
+
+(abs_diff 2 5)
+; expect => 3
+
+(abs_diff 5 2)
+; expect => 3
+
+(abs_diff 4 4)
+; expect => 0
+
+(sign 0)
+; expect => 0
+
+(sign 1)
+; expect => 1
+
+(sign 5)
+; expect => 1

@@ -1,0 +1,71 @@
+; lin standard library: functional map / dictionary (Scott-encoded BST)
+(load "bool.lin")
+(load "num.lin")
+(load "pair.lin")
+(load "maybe.lin")
+(load "tree.lin")
+
+(define empty_map leaf)
+(define is_empty_map is_leaf)
+(define map_singleton (\k (\v (((node (pair k v)) leaf) leaf))))
+
+(define map_insert_left
+  (\k (\v (\m
+    (if (is_leaf (tree_left m))
+      (((node (tree_val m)) (map_singleton k v)) (tree_right m))
+      (if (eq k (fst (tree_val_left m)))
+        (((node (tree_val m)) (((node (pair k v)) (tree_left (tree_left m))) (tree_right (tree_left m)))) (tree_right m))
+        (if (lt k (fst (tree_val_left m)))
+          (((node (tree_val m)) (((node (tree_val_left m)) (map_singleton k v)) (tree_right (tree_left m)))) (tree_right m))
+          (((node (tree_val m)) (((node (tree_val_left m)) (tree_left (tree_left m))) (map_singleton k v))) (tree_right m)))))))))
+
+(define map_insert_right
+  (\k (\v (\m
+    (if (is_leaf (tree_right m))
+      (((node (tree_val m)) (tree_left m)) (map_singleton k v))
+      (if (eq k (fst (tree_val_right m)))
+        (((node (tree_val m)) (tree_left m)) (((node (pair k v)) (tree_left (tree_right m))) (tree_right (tree_right m))))
+        (if (lt k (fst (tree_val_right m)))
+          (((node (tree_val m)) (tree_left m)) (((node (tree_val_right m)) (map_singleton k v)) (tree_right (tree_right m))))
+          (((node (tree_val m)) (tree_left m)) (((node (tree_val_right m)) (tree_left (tree_right m))) (map_singleton k v))))))))))
+
+(define map_insert
+  (\k (\v (\m
+    (if (is_leaf m)
+      (map_singleton k v)
+      (if (eq k (fst (tree_val m)))
+        (((node (pair k v)) (tree_left m)) (tree_right m))
+        (if (lt k (fst (tree_val m)))
+          (map_insert_left k v m)
+          (map_insert_right k v m))))))))
+
+(define map_lookup_sub
+  (\k (\m
+    (if (is_leaf m)
+      nothing
+      (if (eq k (fst (tree_val m)))
+        (just (snd (tree_val m)))
+        (if (lt k (fst (tree_val m)))
+          (if (tree_has_left m)
+            (if (eq k (fst (tree_val_left m)))
+              (just (snd (tree_val_left m)))
+              nothing)
+            nothing)
+          (if (tree_has_right m)
+            (if (eq k (fst (tree_val_right m)))
+              (just (snd (tree_val_right m)))
+              nothing)
+            nothing)))))))
+
+(define map_get
+  (\k (\m
+    (if (is_leaf m)
+      nothing
+      (if (eq k (fst (tree_val m)))
+        (just (snd (tree_val m)))
+        (if (lt k (fst (tree_val m)))
+          (map_lookup_sub k (tree_left m))
+          (map_lookup_sub k (tree_right m))))))))
+
+(define map_get_or (\def_val (\k (\m (from_maybe def_val ((map_get k) m))))))
+(define map_has (\k (\m (is_just ((map_get k) m)))))

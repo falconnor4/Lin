@@ -1,0 +1,57 @@
+; Functional BST Map test suite
+(load "std/map.lin")
+
+(define m0 empty_map)
+(is_empty_map m0)
+; expect => true
+
+(define m1 (map_insert 2 20 m0))
+(is_empty_map m1)
+; expect => false
+
+(map_get_or 0 2 m1)
+; expect => 20
+
+(map_get_or 0 1 m1)
+; expect => 0
+
+(define m2 (map_insert 1 10 m1))
+(define m3 (map_insert 3 30 m2))
+
+(map_get_or 0 1 m3)
+; expect => 10
+
+(map_get_or 0 2 m3)
+; expect => 20
+
+(map_get_or 0 3 m3)
+; expect => 30
+
+(map_get_or 0 4 m3)
+; expect => 0
+
+(map_has 1 m3)
+; expect => true
+
+(map_has 2 m3)
+; expect => true
+
+(map_has 3 m3)
+; expect => true
+
+(map_has 4 m3)
+; expect => false
+
+(map_has 0 m3)
+; expect => false
+
+; Key update test
+(define m_upd (map_insert 2 200 m3))
+(map_get_or 0 2 m_upd)
+; expect => 200
+
+(map_get_or 0 1 m_upd)
+; expect => 10
+
+(map_get_or 0 3 m_upd)
+; expect => 30

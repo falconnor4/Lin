@@ -1,0 +1,45 @@
+; Functional BST Set test suite
+(load "std/set.lin")
+
+(define s0 empty_set)
+(is_empty_set s0)
+; expect => true
+
+(define s1 (set_insert 2 s0))
+(is_empty_set s1)
+; expect => false
+
+(set_member 2 s1)
+; expect => true
+
+(set_member 1 s1)
+; expect => false
+
+(define s2 (set_insert 1 s1))
+(define s3 (set_insert 3 s2))
+
+(set_member 1 s3)
+; expect => true
+
+(set_member 2 s3)
+; expect => true
+
+(set_member 3 s3)
+; expect => true
+
+(set_member 0 s3)
+; expect => false
+
+(set_member 4 s3)
+; expect => false
+
+; Idempotent insertion
+(define s3_dup (set_insert 2 s3))
+(set_member 2 s3_dup)
+; expect => true
+
+(set_member 1 s3_dup)
+; expect => true
+
+(set_member 3 s3_dup)
+; expect => true

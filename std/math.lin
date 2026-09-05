@@ -1,0 +1,11 @@
+; lin standard library: math utilities & combinators
+(load "bool.lin")
+(load "num.lin")
+
+(define min (\a (\b (if ((leq a) b) a b))))
+(define max (\a (\b (if ((geq a) b) a b))))
+(define clamp (\lo (\hi (\x ((max lo) ((min hi) x))))))
+(define sqr (\x ((mul x) x)))
+(define cube (\x ((mul x) (sqr x))))
+(define abs_diff (\a (\b (if ((geq a) b) ((sub a) b) ((sub b) a)))))
+(define sign (\x (if (is_zero x) 0 1)))
