@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "lin.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +6,7 @@
 #include <dlfcn.h>
 
 static Net *N;
+#define NNM(n, i) ((i) >= 0 && (i) < (n)->nn && (n)->name[i] ? (n)->name[i] : "")
 
 static inline Port wire(Port p) {
   return N->wire[p.node * 3 + p.port];
@@ -29,11 +29,11 @@ long net_read_int(Net *n, Port p) {
   for (int step = 0; step < n->nn; step++) {
     cur = dup_hop(n, cur);
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
-    if (n->tag[cur.node] != LAM || strncmp(n->name[cur.node], "_sz", 3)) return -1;
+    if (n->tag[cur.node] != LAM || strncmp(NNM(n, cur.node), "_sz", 3)) return -1;
     int sz = cur.node;
     Port ss_p = dup_hop(n, wire((Port){sz, 2}));
     if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node]) return -1;
-    if (n->tag[ss_p.node] != LAM || strncmp(n->name[ss_p.node], "_ss", 3)) return -1;
+    if (n->tag[ss_p.node] != LAM || strncmp(NNM(n, ss_p.node), "_ss", 3)) return -1;
     int ss = ss_p.node;
 
     Port body = dup_hop(n, wire((Port){ss, 2}));
@@ -55,9 +55,9 @@ long net_read_int(Net *n, Port p) {
 /* Extract Church boolean: _bt / _bf */
 int net_read_bool(Net *n, Port p) {
   N = n;
-  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM || strncmp(n->name[p.node], "_bt", 3)) return -1;
+  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM || strncmp(NNM(n, p.node), "_bt", 3)) return -1;
   Port bf = wire((Port){p.node, 2});
-  if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM || strncmp(n->name[bf.node], "_bf", 3)) return -1;
+  if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM || strncmp(NNM(n, bf.node), "_bf", 3)) return -1;
   Port cur = wire((Port){bf.node, 2});
   for (int step = 0; step < n->nn; step++) {
     if (cur.node < 0 || n->dead[cur.node]) return -1;
@@ -82,11 +82,11 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
   for (int step = 0; step < n->nn && len + 1 < max; step++) {
     cur = skip_dup(n, cur);
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
-    if (n->name[cur.node][0] != 'c' && strncmp(n->name[cur.node], "_cl", 3)) break;
+    if (NNM(n, cur.node)[0] != 'c' && strncmp(NNM(n, cur.node), "_cl", 3)) break;
 
     Port bn = skip_dup(n, wire((Port){cur.node, 2}));
     if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) break;
-    if (n->name[bn.node][0] != 'n' && strncmp(n->name[bn.node], "_nl", 3)) break;
+    if (NNM(n, bn.node)[0] != 'n' && strncmp(NNM(n, bn.node), "_nl", 3)) break;
 
     Port body = skip_dup(n, wire((Port){bn.node, 2}));
     if (body.node < 0) break;
@@ -109,8 +109,8 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
 static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_max) {
   p = skip_dup(n, p);
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
-  if (!strncmp(n->name[p.node], "_bt", 3)) { int b = net_read_bool(n, p); if (b >= 0) { *out_val = b; return 1; } }
-  if (n->name[p.node][0] == 'c' || !strncmp(n->name[p.node], "_cl", 3)) {
+  if (!strncmp(NNM(n, p.node), "_bt", 3)) { int b = net_read_bool(n, p); if (b >= 0) { *out_val = b; return 1; } }
+  if (NNM(n, p.node)[0] == 'c' || !strncmp(NNM(n, p.node), "_cl", 3)) {
     int len = net_read_string(n, p, str_buf, str_max); if (len >= 0) { *out_val = (long)(intptr_t)str_buf; return 1; }
   }
   long v = net_read_int(n, p); return v >= 0 ? (*out_val = v, 1) : 0;
@@ -119,7 +119,7 @@ static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_m
 static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], int max_args) {
   int argc = 0; Port cur = skip_dup(n, arg_p);
   if (cur.node >= 0 && cur.node < n->nn && n->tag[cur.node] == LAM &&
-      (n->name[cur.node][0] == 'c' || !strncmp(n->name[cur.node], "_cl", 3))) {
+      (NNM(n, cur.node)[0] == 'c' || !strncmp(NNM(n, cur.node), "_cl", 3))) {
     Port bn = skip_dup(n, wire((Port){cur.node, 2}));
     if (bn.node >= 0 && bn.port == 0 && n->tag[bn.node] == LAM) {
       for (int step = 0; step < n->nn && argc < max_args; step++) {
@@ -144,9 +144,9 @@ static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], i
 /* Check if root is an FFI invocation: \_ffi. \_ret. ((_ffi fn) args) */
 static int run_ffi(Net *n, Port p, long *out_int, char *out_str, size_t max_str) {
   p = skip_dup(n, p);
-  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || strcmp(n->name[p.node], "_ffi")) return 0;
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || strcmp(NNM(n, p.node), "_ffi")) return 0;
   Port r = skip_dup(n, wire((Port){p.node, 2}));
-  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || strcmp(n->name[r.node], "_ret")) return 0;
+  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || strcmp(NNM(n, r.node), "_ret")) return 0;
   Port a2 = skip_dup(n, wire((Port){r.node, 2}));
   if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
   Port a1 = skip_dup(n, wire((Port){a2.node, 0}));
@@ -201,7 +201,7 @@ static void print_port(Port p, int depth) {
     putchar('_');
     return;
   }
-  if (N->tag[p.node] == LAM && p.port == 1) { fputs(N->name[p.node], stdout); return; }
+  if (N->tag[p.node] == LAM && p.port == 1) { fputs(NNM(N, p.node), stdout); return; }
   if (vis_print && vis_print[p.node]) { putchar('?'); return; }
   if (vis_print) vis_print[p.node] = 1;
   switch (N->tag[p.node]) {
@@ -212,11 +212,11 @@ static void print_port(Port p, int depth) {
     putchar('('); print_port(wire((Port){p.node, 0}), depth + 1); putchar(' ');
     print_port(wire((Port){p.node, 2}), depth + 1); putchar(')'); break;
   case LAM:
-    if (p.port == 1) { fputs(N->name[p.node], stdout); break; }
+    if (p.port == 1) { fputs(NNM(N, p.node), stdout); break; }
     if (p.port == 0) {
       long v = net_read_int(N, p); if (v >= 0) { printf("%ld", v); break; }
       int b = net_read_bool(N, p); if (b >= 0) { fputs(b ? "true" : "false", stdout); break; }
-      printf("(\\%s ", N->name[p.node]); print_port(wire((Port){p.node, 2}), depth + 1); putchar(')'); break;
+      printf("(\\%s ", NNM(N, p.node)); print_port(wire((Port){p.node, 2}), depth + 1); putchar(')'); break;
     }
     print_port(wire(p), depth + 1); break;
   }
@@ -299,8 +299,8 @@ int net_run_io(Net *n, long step_limit) {
   for (;;) {
     Port r = dup_hop(n, wire((Port){0, 0}));
     if (r.node < 0 || r.node >= n->nn || n->dead[r.node] || n->tag[r.node] != LAM) break;
-    if (!strcmp(n->name[r.node], "_iod")) return 1;
-    if (!strcmp(n->name[r.node], "_iop")) {
+    if (!strcmp(NNM(n, r.node), "_iod")) return 1;
+    if (!strcmp(NNM(n, r.node), "_iop")) {
       Port body = dup_hop(n, wire((Port){r.node, 2}));
       if (body.node < 0 || n->tag[body.node] != APP) break;
       Port a0 = dup_hop(n, wire((Port){body.node, 0}));
@@ -324,7 +324,7 @@ int net_run_io(Net *n, long step_limit) {
       }
       fflush(out_fp);
       Port next_p = wire((Port){body.node, 2});
-      if (next_p.node >= 0 && next_p.node < n->nn && !n->dead[next_p.node] && n->tag[next_p.node] == LAM && !is_io_tag(n->name[next_p.node])) {
+      if (next_p.node >= 0 && next_p.node < n->nn && !n->dead[next_p.node] && n->tag[next_p.node] == LAM && !is_io_tag(NNM(n, next_p.node))) {
         Port app = net_alloc(n, APP, scope_nil(), ""), unit = net_alloc_scott(n, 0);
         net_link(n, (Port){app.node, 0}, next_p, 1); net_link(n, (Port){app.node, 2}, unit, 1);
         net_link(n, (Port){0, 0}, (Port){app.node, 1}, 1);
@@ -333,7 +333,7 @@ int net_run_io(Net *n, long step_limit) {
       did_io = 1;
       continue;
     }
-    if (!strcmp(n->name[r.node], "_ior") || !strcmp(n->name[r.node], "_iow")) {
+    if (!strcmp(NNM(n, r.node), "_ior") || !strcmp(NNM(n, r.node), "_iow")) {
       Port body = dup_hop(n, wire((Port){r.node, 2}));
       if (body.node < 0 || n->tag[body.node] != APP) break;
       Port a0 = dup_hop(n, wire((Port){body.node, 0}));

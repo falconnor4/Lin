@@ -1,5 +1,6 @@
 #ifndef LIN_H
 #define LIN_H
+#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 
@@ -22,14 +23,8 @@ typedef struct { int node, port; } Port;
 typedef struct { int len, off; } Scope;
 
 typedef struct {
-  int cap, nn;
-  unsigned char *tag;
-  Port *wire;
-  Scope *scope;
-  char (*name)[NAME];
-  Port *act; int atop, actcap;
-  unsigned char *dead;
-  uint64_t *sca; int sccap, scn;
+  int cap, nn; unsigned char *tag; Port *wire; Scope *scope; char **name;
+  Port *act; int atop, actcap; unsigned char *dead; uint64_t *sca; int sccap, scn;
   long steps;
 } Net;
 

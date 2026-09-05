@@ -50,15 +50,15 @@ int scope_eq(Net *n, Scope a, Scope b) {
 
 void net_init(Net *n, int cap) {
   n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
-  n->scope = malloc(cap * sizeof(Scope)); n->name = malloc(cap * NAME);
+  n->scope = malloc(cap * sizeof(Scope)); n->name = calloc(cap, sizeof(char *));
   n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
   n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0;
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
 void net_free(Net *n) {
-  free(n->tag); free(n->wire); free(n->scope);
-  free(n->name); free(n->act); free(n->dead); free(n->sca);
+  free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->sca);
+  if (n->name) { for (int i = 0; i < n->nn; i++) free(n->name[i]); free(n->name); }
 }
 
 static void net_ensure_cap(Net *n, int need) {
@@ -66,7 +66,8 @@ static void net_ensure_cap(Net *n, int need) {
   int nc = n->cap ? n->cap * 2 : 256;
   while (nc < need) nc *= 2;
   n->tag = realloc(n->tag, nc); n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
-  n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope)); n->name = realloc(n->name, (size_t)nc * NAME);
+  n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope)); n->name = realloc(n->name, (size_t)nc * sizeof(char *));
+  memset(n->name + n->cap, 0, (size_t)(nc - n->cap) * sizeof(char *));
   n->dead = realloc(n->dead, nc); memset(n->dead + n->cap, 0, (size_t)(nc - n->cap)); n->cap = nc;
 }
 
@@ -74,7 +75,8 @@ Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
   if (!in_parallel) net_ensure_cap(n, n->nn + 1);
   int id = __atomic_fetch_add(&n->nn, 1, __ATOMIC_RELAXED);
   n->tag[id] = tag; n->dead[id] = 0; n->scope[id] = sc;
-  snprintf(n->name[id], NAME, "%s", name);
+  if (n->name[id]) { free(n->name[id]); n->name[id] = NULL; }
+  if (name && name[0]) n->name[id] = strdup(name);
   for (int i = 0; i < 3; i++) n->wire[id * 3 + i] = NONE;
   return (Port){id, 0};
 }
@@ -133,8 +135,7 @@ static int interact(Net *n, Port p1, Port p2) {
   if (t1 == LAM && t2 == APP) {
     Port lv = WIRE(n, ((Port){n1, 1})), lb = WIRE(n, ((Port){n1, 2}));
     Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
-    n->dead[n1] = 1;
-    n->dead[n2] = 1;
+    n->dead[n1] = 1; n->dead[n2] = 1;
     if (lv.node == n1 && lv.port == 2 && lb.node == n1 && lb.port == 1) {
       net_link(n, aa, ar, 1); /* identity: V = (\x. x) V */
       return 1;
@@ -149,8 +150,7 @@ static int interact(Net *n, Port p1, Port p2) {
       return 0; /* gauge mismatch (except during readback expansion) */
     Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
     Port b1 = WIRE(n, ((Port){n2, 1})), b2 = WIRE(n, ((Port){n2, 2}));
-    n->dead[n1] = 1;
-    n->dead[n2] = 1;
+    n->dead[n1] = 1; n->dead[n2] = 1;
     if (a1.node == n2 && a1.port == 1) net_link(n, a2, b2, 1);
     else if (a2.node == n2 && a2.port == 2) net_link(n, a1, b1, 1);
     else if (a1.node == n2 && a1.port == 2) net_link(n, a2, b1, 1);
@@ -163,14 +163,12 @@ static int interact(Net *n, Port p1, Port p2) {
     Scope sn = n->scope[n1], sd = n->scope[n2];
     Port nv = WIRE(n, ((Port){n1, 1})), nb = WIRE(n, ((Port){n1, 2}));
     Port da = WIRE(n, ((Port){n2, 1})), db = WIRE(n, ((Port){n2, 2}));
-    n->dead[n1] = 1;
-    n->dead[n2] = 1;
-    char nm[NAME];
-    snprintf(nm, NAME, "%s", n->name[n1]);
+    const char *nm = n->name[n1] ? n->name[n1] : "";
     int m1 = net_alloc(n, t1, scope_cat(n, 1, sn, sd), nm).node;
     int m2 = net_alloc(n, t1, scope_cat(n, 2, sn, sd), nm).node;
     int d1 = net_alloc(n, DUP, sd, "").node;
     int d2 = net_alloc(n, DUP, sd, "").node;
+    n->dead[n1] = 1; n->dead[n2] = 1;
     net_link(n, (Port){d1, 1}, (Port){m1, 1}, 0);
     net_link(n, (Port){d1, 2}, (Port){m2, 1}, 0);
     net_link(n, (Port){d2, 1}, (Port){m1, 2}, 0);
@@ -332,7 +330,8 @@ Net *net_copy(const Net *n) {
   c->tag = malloc(c->cap); memcpy(c->tag, n->tag, c->cap);
   c->wire = malloc(c->cap * 3 * sizeof(Port)); memcpy(c->wire, n->wire, c->cap * 3 * sizeof(Port));
   c->scope = malloc(c->cap * sizeof(Scope)); memcpy(c->scope, n->scope, c->cap * sizeof(Scope));
-  c->name = malloc(c->cap * NAME); memcpy(c->name, n->name, c->cap * NAME);
+  c->name = calloc(c->cap, sizeof(char *));
+  for (int i = 0; i < n->nn; i++) if (n->name[i]) c->name[i] = strdup(n->name[i]);
   c->dead = malloc(c->cap); memcpy(c->dead, n->dead, c->cap);
   c->sca = malloc((size_t)n->scn * sizeof(uint64_t)); memcpy(c->sca, n->sca, (size_t)n->scn * sizeof(uint64_t));
   c->act = NULL; c->actcap = c->atop = 0; c->steps = 0;

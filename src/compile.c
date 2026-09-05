@@ -260,12 +260,12 @@ Term *egraph_optimize(Term *t) {
 int net_save_line(Net *n, const char *path) {
   FILE *f = fopen(path, "wb"); if (!f) return 0;
   fputs("#!/usr/bin/env lin\n", f); fwrite("LINE", 1, 4, f);
-  uint32_t nnamed = 0; for (int i = 0; i < n->nn; i++) if (n->name[i][0]) nnamed++;
+  uint32_t nnamed = 0; for (int i = 0; i < n->nn; i++) if (n->name[i] && n->name[i][0]) nnamed++;
   uint32_t meta[4] = { 2, (uint32_t)n->nn, (uint32_t)n->scn, nnamed };
   fwrite(meta, sizeof(uint32_t), 4, f);
   fwrite(n->tag, 1, (size_t)n->nn, f); fwrite(n->dead, 1, (size_t)n->nn, f);
   fwrite(n->wire, sizeof(Port) * 3, (size_t)n->nn, f); fwrite(n->scope, sizeof(Scope), (size_t)n->nn, f);
-  for (int i = 0; i < n->nn; i++) if (n->name[i][0]) {
+  for (int i = 0; i < n->nn; i++) if (n->name[i] && n->name[i][0]) {
     uint32_t id = i; uint8_t len = (uint8_t)strlen(n->name[i]);
     fwrite(&id, 4, 1, f); fwrite(&len, 1, 1, f); fwrite(n->name[i], 1, len, f);
   }
@@ -287,10 +287,10 @@ int net_load_line(Net *n, const char *path) {
   if (fread(n->tag, 1, (size_t)nn, f) != (size_t)nn || fread(n->dead, 1, (size_t)nn, f) != (size_t)nn ||
       fread(n->wire, sizeof(Port) * 3, (size_t)nn, f) != (size_t)nn ||
       fread(n->scope, sizeof(Scope), (size_t)nn, f) != (size_t)nn) { fclose(f); net_free(n); return 0; }
-  memset(n->name, 0, (size_t)n->cap * NAME);
   for (uint32_t k = 0; k < nnamed; k++) {
     uint32_t id = 0; uint8_t len = 0;
     if (fread(&id, 4, 1, f) != 1 || fread(&len, 1, 1, f) != 1) { fclose(f); net_free(n); return 0; }
+    n->name[id] = malloc((size_t)len + 1);
     if (fread(n->name[id], 1, len, f) != len) { fclose(f); net_free(n); return 0; }
     n->name[id][len] = 0;
   }
