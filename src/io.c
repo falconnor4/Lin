@@ -7,10 +7,7 @@
 
 static Net *N;
 #define NNM(n, i) ((i) >= 0 && (i) < (n)->nn && (n)->name[i] ? (n)->name[i] : "")
-
-static inline Port wire(Port p) {
-  return N->wire[p.node * 3 + p.port];
-}
+static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 
 /* --- Geometry of Interaction (GoI) Value Marshaling --- */
 

@@ -52,7 +52,7 @@ void net_init(Net *n, int cap) {
   n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
   n->scope = malloc(cap * sizeof(Scope)); n->name = calloc(cap, sizeof(char *));
   n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
-  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0;
+  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0; n->free_head = -1;
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
@@ -72,8 +72,9 @@ static void net_ensure_cap(Net *n, int need) {
 }
 
 Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
-  if (!in_parallel) net_ensure_cap(n, n->nn + 1);
-  int id = __atomic_fetch_add(&n->nn, 1, __ATOMIC_RELAXED);
+  int id;
+  if (!in_parallel && n->free_head >= 0) { id = n->free_head; n->free_head = n->wire[id * 3].node; }
+  else { if (!in_parallel) net_ensure_cap(n, n->nn + 1); id = __atomic_fetch_add(&n->nn, 1, __ATOMIC_RELAXED); }
   n->tag[id] = tag; n->dead[id] = 0; n->scope[id] = sc;
   if (n->name[id]) { free(n->name[id]); n->name[id] = NULL; }
   if (name && name[0]) n->name[id] = strdup(name);
@@ -283,6 +284,14 @@ long net_reduce(Net *n, long limit) {
           q[qt++] = w.node;
         }
       }
+    }
+    while (n->nn > 1 && (!reach[n->nn - 1] || n->dead[n->nn - 1])) {
+      n->nn--; if (n->name[n->nn]) { free(n->name[n->nn]); n->name[n->nn] = NULL; }
+    }
+    n->free_head = -1;
+    for (int i = n->nn - 1; i >= 1; i--) if (n->dead[i] || !reach[i]) {
+      n->dead[i] = 1; if (n->name[i]) { free(n->name[i]); n->name[i] = NULL; }
+      n->wire[i * 3].node = n->free_head; n->free_head = i;
     }
     for (int i = 0; i < n->nn; i++) {
       if (n->tag[i] == ROOT || n->dead[i] || !reach[i]) continue;
