@@ -1,6 +1,6 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c99 -fopenmp
-SRCS    := $(wildcard src/*.c)
+SRCS    := $(wildcard src/*.c) $(wildcard std/drivers/*.c)
 
 build:
 	nix build

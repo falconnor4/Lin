@@ -21,7 +21,7 @@
 
             buildPhase = ''
               runHook preBuild
-              $CC -O2 -Wall -Wextra -std=c99 -fopenmp -o lin src/*.c -ldl
+              $CC -O2 -Wall -Wextra -std=c99 -fopenmp -o lin src/*.c std/drivers/*.c -ldl
               runHook postBuild
             '';
 
@@ -51,7 +51,7 @@
             pass=0
             fail=0
 
-            TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/egraph.lin"
+            TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/egraph.lin test/driver_gpu.lin"
 
             for f in $TESTS; do
               got=$($LIN_BIN "$f" 2>&1 | grep -v '^warning' || true)
@@ -171,7 +171,7 @@
             pass=0
             fail=0
 
-            TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/egraph.lin"
+            TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/egraph.lin test/driver_gpu.lin"
 
             for f in $TESTS; do
               got=$($LIN_BIN "$f" 2>&1 | grep -v '^warning' || true)

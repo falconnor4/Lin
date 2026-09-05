@@ -1,0 +1,30 @@
+; hardware accelerator driver plugin test
+(load "std/drivers/gpu.lin")
+; expect => 1
+
+(get_driver)
+; expect => gpu
+
+((add 18) 24)
+; expect => 42
+
+(second (list3 10 20 30))
+; expect => 20
+
+(load "std/drivers/simd.lin")
+; expect => 1
+
+(get_driver)
+; expect => simd
+
+((mul 6) 7)
+; expect => 42
+
+(third (list3 10 20 30))
+; expect => 30
+
+(set_driver "cpu")
+; expect => 1
+
+(get_driver)
+; expect => cpu

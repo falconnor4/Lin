@@ -24,21 +24,17 @@ static long STEP_LIMIT = 1L << 24;
 static int bench_mode = 0;
 
 Def *def_find(const char *name) {
-  for (int i = ndefs - 1; i >= 0; i--)
-    if (!strcmp(defs[i].name, name)) return &defs[i];
+  for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, name)) return &defs[i];
   return NULL;
 }
 
 typedef struct { char (*names)[NAME]; int count, cap; } Guard;
-
 static void guard_push(Guard *g, const char *name) {
   if (g->count >= g->cap) g->names = realloc(g->names, (size_t)(g->cap = g->cap ? g->cap * 2 : 64) * sizeof *g->names);
   snprintf(g->names[g->count++], NAME, "%s", name);
 }
-
 static int guard_has(Guard *g, const char *name) {
-  for (int i = 0; i < g->count; i++)
-    if (!strcmp(g->names[i], name)) return 1;
+  for (int i = 0; i < g->count; i++) if (!strcmp(g->names[i], name)) return 1;
   return 0;
 }
 
@@ -159,9 +155,9 @@ static int resolve_path(const char *rel, char *out, size_t out_sz) {
     if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
   }
   if (access(rel, R_OK) == 0 && realpath(rel, out)) return 1;
-  const char *std_dir = getenv("LIN_STD_DIR");
-  if (!std_dir) std_dir = "std";
-  snprintf(cand, sizeof cand, "%s/%s", std_dir, rel);
+  const char *std_dir = getenv("LIN_STD_DIR") ?: "std";
+  const char *sub = !strncmp(rel, "std/", 4) ? rel + 4 : rel;
+  snprintf(cand, sizeof cand, "%s/%s", std_dir, sub);
   if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
   return 0;
 }

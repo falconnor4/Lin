@@ -138,7 +138,7 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
 /* the four rules of the scope-gauge calculus (wave-opt-reduction main.hs).
    ERA is an inert terminal: era-principal pairs are simply dropped. */
 static int SC_O; /* scope-oblivious mode: annihilate gauge-mismatched dups */
-static int interact(Net *n, Port p1, Port p2) {
+int net_interact(Net *n, Port p1, Port p2) {
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
   if (t1 > t2) { Port t = p1; p1 = p2; p2 = t; int u = t1; t1 = t2; t2 = u; }
   int n1 = p1.node, n2 = p2.node;
@@ -212,6 +212,9 @@ static void net_compact(Net *n, const unsigned char *reach) {
 }
 
 typedef struct { Port p1, p2; } Pair;
+static LinDriver *cur_drv;
+void lin_set_driver(LinDriver *d) { cur_drv = d; }
+LinDriver *lin_get_driver(void) { return cur_drv; }
 
 static void reduce_wavefront(Net *n, long limit, int *changed) {
 #ifdef _OPENMP
@@ -221,6 +224,7 @@ static void reduce_wavefront(Net *n, long limit, int *changed) {
   Port *curr = NULL;
   int curr_cap = 0;
   while (n->atop > 0 && n->steps < limit) {
+    if (cur_drv && cur_drv->reduce_wave(n, limit, changed)) continue;
     int wave_cnt = n->atop;
     if (wave_cnt > curr_cap) curr = realloc(curr, (size_t)(curr_cap = wave_cnt) * sizeof(Port));
     memcpy(curr, n->act, (size_t)wave_cnt * sizeof(Port));
@@ -255,7 +259,7 @@ static void reduce_wavefront(Net *n, long limit, int *changed) {
         for (int s = 0; s < nsec; s++)
           for (int i = head[s]; i >= 0; i = next[i])
             if (WIRE(n, inter[i].p1).node == inter[i].p2.node && !n->dead[inter[i].p1.node] && !n->dead[inter[i].p2.node])
-              if (interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
+              if (net_interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
         in_parallel = 0; n->steps += n_int; *changed += batch_changed;
         for (int t = 0; t < nth; t++) {
           for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
@@ -267,7 +271,7 @@ static void reduce_wavefront(Net *n, long limit, int *changed) {
         Port p1 = bound[i].p1, p2 = bound[i].p2;
         if (p1.node >= 0 && p2.node >= 0 && !n->dead[p1.node] && !n->dead[p2.node] &&
             WIRE(n, p1).node == p2.node && WIRE(n, p2).node == p1.node && !p1.port && !p2.port) {
-          if (interact(n, p1, p2)) *changed += 1;
+          if (net_interact(n, p1, p2)) *changed += 1;
           n->steps++;
         }
       }
@@ -283,7 +287,7 @@ static void reduce_wavefront(Net *n, long limit, int *changed) {
       if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
       if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
       if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
-      if (interact(n, p1, p2)) *changed += 1;
+      if (net_interact(n, p1, p2)) *changed += 1;
       n->steps++;
     }
   }

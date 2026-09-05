@@ -30,44 +30,35 @@ typedef struct {
 
 Port net_alloc(Net *n, int tag, Scope sc, const char *name);
 void net_link(Net *n, Port a, Port b, int enqueue);
-void net_init(Net *n, int cap);
-void net_free(Net *n);
-long net_reduce(Net *n, long limit);
-long net_reduce_readback(Net *n, long limit);
-Net *net_copy(const Net *n);
-Scope scope_nil(void);
-Scope scope_ext(Net *n, Scope s, int bit);
-int scope_eq(Net *n, Scope a, Scope b);
+void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, Port a, Port b);
+long net_reduce(Net *n, long limit); long net_reduce_readback(Net *n, long limit);
+Net *net_copy(const Net *n); Scope scope_nil(void);
+Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
+typedef struct LinDriver { const char *name; int (*reduce_wave)(Net *n, long limit, int *changed); } LinDriver;
+void lin_set_driver(LinDriver *d); LinDriver *lin_get_driver(void); extern LinDriver lin_gpu_driver, lin_simd_driver;
 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
 void parse_forms(const char *src, FormFn fn, void *ud);
-Term *term_new(int type, const char *name, Term *l, Term *r);
-Term *term_copy(Term *t);
-void term_free(Term *t);
-int term_refs(Term *t, const char *name);
+Term *term_new(int type, const char *name, Term *l, Term *r); Term *term_copy(Term *t);
+void term_free(Term *t); int term_refs(Term *t, const char *name);
 
 /* ---------------- types ---------------- */
 typedef struct { int nq, q[256]; Type *t; } Scheme;
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
-Type *type_var(void);
-Type *type_arrow(Type *a, Type *b);
-Type *type_list(Type *e);
-Scheme scheme_all(Type *t);
+Type *type_var(void); Type *type_arrow(Type *a, Type *b);
+Type *type_list(Type *e); Scheme scheme_all(Type *t);
 
 /* ---------------- compile & aot & .line ---------------- */
 int compile(Term *t, Net *n, char *err, int errsz);
 Term *egraph_optimize(Term *t);
-int net_save_line(Net *n, const char *path);
-int net_load_line(Net *n, const char *path);
+int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const char *path);
 
 /* ---------------- readback ---------------- */
-long net_read_int(Net *n, Port p);
-int net_read_bool(Net *n, Port p);
-int net_read_string(Net *n, Port p, char *buf, size_t max);
-int net_run_io(Net *n, long step_limit);
+long net_read_int(Net *n, Port p); int net_read_bool(Net *n, Port p);
+int net_read_string(Net *n, Port p, char *buf, size_t max); int net_run_io(Net *n, long step_limit);
 int net_print(Net *n);
 
 /* ---------------- goi ---------------- */

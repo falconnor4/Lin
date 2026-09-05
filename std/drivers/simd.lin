@@ -1,0 +1,5 @@
+; lin standard library: wavefront simd accelerator driver
+(load "driver.lin")
+
+; activate wavefront SIMD offloading
+(set_driver "simd")
