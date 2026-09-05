@@ -6,43 +6,59 @@ Lin includes a Hindley-Milner type system, Scott-encoded inductive datatypes, a 
 
 ## Getting Started
 
-### Building
+### Building & Testing with Nix
 
-Lin is written in C99 and uses OpenMP for lock-free parallel graph reduction. Build with:
+Lin uses [Nix](https://nixos.org/) for reproducible, hermetic builds and testing:
 
 ```bash
-make
+# Build the lin compiler/runtime
+nix build
+
+# Run the test suite (all 18 test suites + .line verification)
+nix flake check
+
+# Interactively run the test runner
+nix run .#test
+
+# Run the AOT E-Graph benchmark suite
+nix run .#benchmarks
+
+# Enter the development environment (gcc, gdb, valgrind, and `nix test` helper)
+nix develop
 ```
 
-Or invoke the compiler directly:
+### Classic Makefile Build
+
+Lin is written in C99 and uses OpenMP for lock-free parallel graph reduction:
 
 ```bash
-gcc -O2 -std=c99 -fopenmp -o lin src/*.c -ldl
+# Build via Nix (default)
+make build
+
+# Run tests via Nix
+make test
+
+# Or compile directly with gcc/clang
+make lin
 ```
 
 ### Usage
 
 ```bash
 # Interactive REPL
-./lin
+./result/bin/lin
 
 # Run a source file
-./lin examples/adts.lin
+./result/bin/lin examples/adts.lin
 
 # Evaluate an expression directly
-./lin -e '(load "std/num.lin") (mul 6 7)'
+./result/bin/lin -e '(load "std/num.lin") (mul 6 7)'
 
 # Multi-threaded parallel reduction (e.g. 8 threads)
-./lin -t 8 examples/parallel_tree.lin
+./result/bin/lin -t 8 examples/parallel_tree.lin
 
 # Benchmark mode (execution time, rewrite steps, GoI determinant)
-./lin -b examples/sat_verify.lin
-```
-
-Run test suite with:
-
-```bash
-./test/run.sh
+./result/bin/lin -b examples/sat_verify.lin
 ```
 
 ## Language Overview

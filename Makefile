@@ -2,13 +2,19 @@ CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c99 -fopenmp
 SRCS    := $(wildcard src/*.c)
 
+build:
+	nix build
+
 lin: $(SRCS) src/lin.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) -ldl
 
-test: lin
-	sh test/run.sh
+test:
+	nix flake check
+
+bench:
+	nix run .#benchmarks
 
 clean:
-	rm -f lin
+	rm -rf lin result test/line_binary.line
 
-.PHONY: test clean
+.PHONY: build test bench clean

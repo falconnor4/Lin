@@ -3,3 +3,6 @@ lin_debug
 __pycache__/
 *.pyc
 scratch/
+result
+result-*
+*.line
