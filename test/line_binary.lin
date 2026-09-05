@@ -1,0 +1,11 @@
+; Standalone portable .line binary test program
+(load "std/std.lin")
+
+(define! main a
+  (let ((ans (fst (pair 42 999)))
+        (chk (if false 0 1)))
+    (io_print "LINE_BINARY_OK: "
+      (io_print (add ans chk)
+        (io_print "\n" 0)))))
+
+(main)

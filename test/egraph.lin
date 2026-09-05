@@ -1,0 +1,73 @@
+; E-Graph Equality Saturation test suite
+; Tests beta contractions, eta contractions, projections, booleans, and Scott collapses
+
+; Beta reductions
+((\x x) 42)
+; expect => 42
+
+((\x 99) 123)
+; expect => 99
+
+((\x (\y x)) 10 20)
+; expect => 10
+
+((\x (\y y)) 10 20)
+; expect => 20
+
+; Pair projections
+(fst (pair 42 100))
+; expect => 42
+
+(snd (pair 42 100))
+; expect => 100
+
+(fst (fst (pair (pair 1 2) 3)))
+; expect => 1
+
+(snd (fst (pair (pair 1 2) 3)))
+; expect => 2
+
+(snd (pair 1 (pair 2 3)))
+; expect => (\f ((f 2) 3))
+
+; Boolean reductions & conditionals
+(if true 111 222)
+; expect => 111
+
+(if false 111 222)
+; expect => 222
+
+(not (not true))
+; expect => true
+
+(not (not false))
+; expect => false
+
+(and true true)
+; expect => true
+
+(and true false)
+; expect => false
+
+(or false true)
+; expect => true
+
+(or false false)
+; expect => false
+
+; Scott numeral collapses
+(is_zero 0)
+; expect => true
+
+(is_zero 5)
+; expect => false
+
+(pred (succ 42))
+; expect => 42
+
+(pred (succ 0))
+; expect => 0
+
+; Combined let and projection
+(let ((p (pair 7 8))) (add (fst p) (snd p)))
+; expect => 15

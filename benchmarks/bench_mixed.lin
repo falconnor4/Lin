@@ -1,0 +1,31 @@
+(load "std/std.lin")
+
+; Benchmark: Composite program with pairs, booleans, combinators, and let bindings
+(define make_node (\val (\left (\right (pair val (pair left right))))))
+(define node_val (\n (fst n)))
+(define node_left (\n (fst (snd n))))
+(define node_right (\n (snd (snd n))))
+
+(define tree1
+  (make_node 100
+    (make_node 50
+      (make_node 25 0 0)
+      (make_node 75 0 0))
+    (make_node 150
+      (make_node 125 0 0)
+      (make_node 175 0 0))))
+
+(define! main a
+  (let ((root (node_val tree1))
+        (l1 (node_val (node_left tree1)))
+        (r1 (node_val (node_right tree1)))
+        (ll (node_val (node_left (node_left tree1))))
+        (lr (node_val (node_right (node_left tree1))))
+        (rl (node_val (node_left (node_right tree1))))
+        (rr (node_val (node_right (node_right tree1))))
+        (flag (not (not (and (gt root 0) (gt l1 0))))))
+    (if flag
+      (add root (add l1 (add r1 (add ll (add lr (add rl rr))))))
+      0)))
+
+(main)

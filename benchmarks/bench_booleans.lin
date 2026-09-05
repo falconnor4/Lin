@@ -1,0 +1,14 @@
+(load "std/std.lin")
+
+; Benchmark: Nested boolean conditionals and logic trees
+(define b1 (and (or (not false) (and true false)) (not (not true))))
+(define b2 (xor (and true true) (or false false)))
+(define b3 (if b1 (if b2 100 200) (if b2 300 400)))
+
+(define! main a
+  (let ((c1 (if true (if false 1 2) 3))
+        (c2 (if (not (not (and true true))) 10 20))
+        (c3 (if (or false (and true false)) 30 40)))
+    (add b3 (add c1 (add c2 c3)))))
+
+(main)

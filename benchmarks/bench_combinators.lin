@@ -1,0 +1,16 @@
+(load "std/std.lin")
+
+; Benchmark: SKI combinators and nested beta-redex trees
+(define I (\x x))
+(define K (\x (\y x)))
+(define S (\x (\y (\z ((x z) (y z))))))
+
+(define c1 (((S K) K) 42))
+(define c2 (((S (K (S K))) K) 99))
+(define c3 ((K 123) 456))
+(define c4 (I (I (I (I (I (I (I (I 55)))))))))
+
+(define! main a
+  (add c1 (add c2 (add c3 c4))))
+
+(main)

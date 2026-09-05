@@ -1,0 +1,12 @@
+(load "std/std.lin")
+
+; Benchmark: Scott numeral conversions, pred/succ collapses, and zero checks
+(define n1 (pred (succ (pred (succ (pred (succ 10)))))))
+(define n2 (pred (succ (pred (succ 25)))))
+(define z1 (if (is_zero (pred (succ 0))) 50 0))
+(define z2 (if (is_zero (succ 10)) 0 50))
+
+(define! main a
+  (add n1 (add n2 (add z1 z2))))
+
+(main)

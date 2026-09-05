@@ -99,28 +99,18 @@ static Type *inst_rec(Type *t) {
 
 static Type *instantiate(Scheme *s) {
   mn = 0;
-  for (int i = 0; i < s->nq; i++) {
-    mid[mn] = s->q[i];
-    mty[mn] = tvar();
-    mn++;
-  }
+  for (int i = 0; i < s->nq; i++) { mid[mn] = s->q[i]; mty[mn++] = tvar(); }
   return inst_rec(s->t);
 }
 
 static Scheme generalize(Type *t) {
-  int f[256], fn = 0;
-  fv(t, f, &fn);
+  int f[256], fn = 0; fv(t, f, &fn);
   for (int i = 0; i < envn; i++) {
-    int g[256], gn = 0;
-    fv(env[i].s.t, g, &gn);
+    int g[256], gn = 0; fv(env[i].s.t, g, &gn);
     for (int j = 0; j < fn; j++) {
       int hit = 0;
-      for (int k = 0; k < gn; k++)
-        if (f[j] == g[k]) { hit = 1; break; }
-      if (hit) {
-        f[j] = f[--fn];
-        j--;
-      }
+      for (int k = 0; k < gn; k++) if (f[j] == g[k]) { hit = 1; break; }
+      if (hit) { f[j] = f[--fn]; j--; }
     }
   }
   Scheme s; s.nq = fn; memcpy(s.q, f, (size_t)fn * sizeof(int)); s.t = t; return s;
@@ -134,25 +124,16 @@ static Type *infer(Term *t) {
     return instantiate(s);
   }
   case TLAM: {
-    Type *a = tvar(); Scheme s = {.nq = 0, .t = a};
-    env_push(t->name, s);
-    Type *b = infer(t->l);
-    envn--;
-    return tarrow(a, b);
+    Type *a = tvar(); env_push(t->name, (Scheme){.nq = 0, .t = a});
+    Type *b = infer(t->l); envn--; return tarrow(a, b);
   }
   case TAPP: {
     if (t->l && t->l->type == TLAM) {
-      Type *v = infer(t->r);
-      env_push(t->l->name, generalize(v));
-      Type *b = infer(t->l->l);
-      envn--;
-      return b;
+      env_push(t->l->name, generalize(infer(t->r)));
+      Type *b = infer(t->l->l); envn--; return b;
     }
-    Type *f = infer(t->l);
-    Type *x = infer(t->r);
-    Type *r = tvar();
-    unify(f, tarrow(x, r));
-    return r;
+    Type *f = infer(t->l), *x = infer(t->r), *r = tvar();
+    unify(f, tarrow(x, r)); return r;
   }
   case TDEFX: return infer(t->l);
   }
@@ -161,73 +142,42 @@ static Type *infer(Term *t) {
 
 static void env_load_defs(void) {
   envn = 0;
-  for (int i = 0; i < ndefs; i++)
-    if (defs[i].typed) env_push(defs[i].name, defs[i].sch);
+  for (int i = 0; i < ndefs; i++) if (defs[i].typed) env_push(defs[i].name, defs[i].sch);
 }
 
 int type_check(Term *t, Scheme *out, char *err, int errsz) {
-  if (setjmp(TJ)) {
-    snprintf(err, errsz, "%s", TMSG);
-    return 0;
-  }
-  env_load_defs();
-  *out = generalize(infer(t));
-  return 1;
+  if (setjmp(TJ)) { snprintf(err, errsz, "%s", TMSG); return 0; }
+  env_load_defs(); *out = generalize(infer(t)); return 1;
 }
 
-int type_check_rec(const char *name, Term *body, Scheme *out, char *err,
-                   int errsz) {
-  if (setjmp(TJ)) {
-    snprintf(err, errsz, "%s", TMSG);
-    return 0;
-  }
-  env_load_defs();
-  Type *a = tvar();
-  Scheme s;
-  s.nq = 0;
-  s.t = a;
-  env_push(name, s);
-  unify(a, infer(body));
-  envn--;
-  *out = generalize(a);
-  return 1;
+int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz) {
+  if (setjmp(TJ)) { snprintf(err, errsz, "%s", TMSG); return 0; }
+  env_load_defs(); Type *a = tvar(); env_push(name, (Scheme){.nq = 0, .t = a});
+  unify(a, infer(body)); envn--; *out = generalize(a); return 1;
 }
 
 static void print_rec(Type *t, int par) {
   t = find(t);
   if (t->kind == TVR) {
-    if (t->id < 26) putchar('a' + t->id);
-    else printf("t%d", t->id);
+    if (t->id < 26) putchar('a' + t->id); else printf("t%d", t->id);
     return;
   }
   if (t->kind == TARROW) {
     if (par) putchar('(');
-    print_rec(t->a, 1);
-    printf(" -> ");
-    print_rec(t->b, 0);
+    print_rec(t->a, 1); printf(" -> "); print_rec(t->b, 0);
     if (par) putchar(')');
     return;
   }
-  if (t->kind == TLIST) {
-    printf("list ");
-    print_rec(t->a, 1);
-    return;
-  }
+  if (t->kind == TLIST) { printf("list "); print_rec(t->a, 1); return; }
   putchar('?');
 }
 
 void scheme_print(Scheme *s) { print_rec(s->t, 0); }
-
 Type *type_var(void) { return tvar(); }
 Type *type_arrow(Type *a, Type *b) { return tarrow(a, b); }
 Type *type_list(Type *e) { return tlist(e); }
 
 Scheme scheme_all(Type *t) {
-  int f[64], fn = 0;
-  fv(t, f, &fn);
-  Scheme s;
-  s.nq = fn;
-  memcpy(s.q, f, fn * sizeof(int));
-  s.t = t;
-  return s;
+  int f[64], fn = 0; fv(t, f, &fn);
+  Scheme s; s.nq = fn; memcpy(s.q, f, (size_t)fn * sizeof(int)); s.t = t; return s;
 }

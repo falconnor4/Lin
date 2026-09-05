@@ -158,21 +158,15 @@ static Term *parse_term(void) {
   if (S[P] == '"') {
     P++;
     int start = P;
-    while (S[P] && S[P] != '"') {
-      if (S[P] == '\\' && S[P + 1]) P++;
-      P++;
-    }
+    while (S[P] && S[P] != '"') { if (S[P] == '\\' && S[P + 1]) P++; P++; }
     if (S[P] != '"') pfail("unterminated string literal");
-    int end = P;
-    P++;
+    int end = P; P++;
     Term *body = term_new(TVAR, "nil", NULL, NULL);
     for (int i = end - 1; i >= start; i--) {
       char c = S[i];
       if (i > start && S[i - 1] == '\\') {
-        if (c == 'n') c = '\n';
-        else if (c == 't') c = '\t';
-        else if (c == 'r') c = '\r';
-        else if (c == '0') c = '\0';
+        if (c == 'n') c = '\n'; else if (c == 't') c = '\t';
+        else if (c == 'r') c = '\r'; else if (c == '0') c = '\0';
         i--;
       }
       Term *ch = scott((unsigned char)c);
@@ -181,89 +175,48 @@ static Term *parse_term(void) {
     return body;
   }
   if (S[P] == '(') {
-    P++;
-    skipws();
-    if (S[P] == '(') {
-      Term *f = parse_term();
-      return parse_tail(f);
-    }
+    P++; skipws();
+    if (S[P] == '(') return parse_tail(parse_term());
     char kw[NAME];
     if (!sym(kw, NAME)) pfail("empty '('");
     if (islambda(kw)) {
-      skipws();
-      char var[NAME];
-      if (!sym(var, NAME)) pfail("lambda: expected binder");
-      Term *body = parse_term();
-      return term_new(TLAM, var, parse_tail(body), NULL);
+      skipws(); char var[NAME]; if (!sym(var, NAME)) pfail("lambda: expected binder");
+      Term *body = parse_term(); return term_new(TLAM, var, parse_tail(body), NULL);
     }
-    if (!strcmp(kw, "define")) {
-      skipws();
-      char name[NAME];
-      if (!sym(name, NAME)) pfail("define: expected name");
-      Term *v = parse_term();
-      skipws();
-      if (S[P] != ')') pfail("define: expected ')'");
-      P++;
-      return term_new(TDEF, name, v, NULL);
-    }
-    if (!strcmp(kw, "define!")) {
-      skipws();
-      char name[NAME];
-      if (!sym(name, NAME)) pfail("define!: expected name");
-      Type *ty = parse_type_top();
-      Term *v = parse_term();
-      skipws();
-      if (S[P] != ')') pfail("define!: expected ')'");
-      P++;
-      Term *t = term_new(TDEFX, name, v, NULL);
-      t->annot = ty;
-      return t;
+    if (!strcmp(kw, "define") || !strcmp(kw, "define!")) {
+      int typed = !strcmp(kw, "define!");
+      skipws(); char name[NAME]; if (!sym(name, NAME)) pfail("define: expected name");
+      Type *ty = typed ? parse_type_top() : NULL;
+      Term *v = parse_term(); skipws();
+      if (S[P] != ')') pfail("define: expected ')'"); else P++;
+      Term *t = term_new(typed ? TDEFX : TDEF, name, v, NULL);
+      t->annot = ty; return t;
     }
     if (!strcmp(kw, "load")) {
-      skipws();
-      if (S[P] != '"') pfail("load: expected string path");
-      P++;
-      int start = P;
-      while (S[P] && S[P] != '"') {
-        if (S[P] == '\\' && S[P + 1]) P++;
-        P++;
-      }
+      skipws(); if (S[P] != '"') pfail("load: expected string path");
+      int start = ++P;
+      while (S[P] && S[P] != '"') { if (S[P] == '\\' && S[P + 1]) P++; P++; }
       if (S[P] != '"') pfail("load: unterminated path");
-      int len = P - start;
-      char path[NAME];
+      int len = P - start; char path[NAME];
       if (len >= NAME) pfail("load: path too long");
-      memcpy(path, S + start, (size_t)len);
-      path[len] = '\0';
-      P++;
-      skipws();
-      if (S[P] != ')') pfail("load: expected ')'");
-      P++;
+      memcpy(path, S + start, (size_t)len); path[len] = '\0'; P++; skipws();
+      if (S[P] != ')') pfail("load: expected ')'"); else P++;
       return term_new(TLOAD, path, NULL, NULL);
     }
     if (!strcmp(kw, "let")) {
-      skipws();
-      if (S[P] != '(') pfail("let: expected '('");
-      P++;
-      char (*names)[NAME] = NULL;
-      Term **vals = NULL;
-      int nb = 0, ncap = 0;
+      skipws(); if (S[P] != '(') pfail("let: expected '('"); P++;
+      char (*names)[NAME] = NULL; Term **vals = NULL; int nb = 0, ncap = 0;
       for (;;) {
-        skipws();
-        if (S[P] == ')') { P++; break; }
+        skipws(); if (S[P] == ')') { P++; break; }
         if (S[P] != '(') pfail("let: expected binding");
-        P++; skipws();
-        char vn[NAME];
-        if (!sym(vn, NAME)) pfail("let: bad binding");
-        Term *v = parse_term();
-        skipws();
-        if (S[P] != ')') pfail("let: missing ')' in binding");
+        P++; skipws(); char vn[NAME]; if (!sym(vn, NAME)) pfail("let: bad binding");
+        Term *v = parse_term(); skipws(); if (S[P] != ')') pfail("let: missing ')' in binding");
         P++;
         if (nb >= ncap) {
           names = realloc(names, (size_t)(ncap = ncap ? ncap * 2 : 16) * sizeof *names);
           vals = realloc(vals, (size_t)ncap * sizeof *vals);
         }
-        snprintf(names[nb], NAME, "%s", vn);
-        vals[nb++] = v;
+        snprintf(names[nb], NAME, "%s", vn); vals[nb++] = v;
       }
       Term *body = parse_tail(parse_term());
       for (int i = nb - 1; i >= 0; i--)

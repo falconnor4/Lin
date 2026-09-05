@@ -62,8 +62,11 @@ Type *type_arrow(Type *a, Type *b);
 Type *type_list(Type *e);
 Scheme scheme_all(Type *t);
 
-/* ---------------- compile ---------------- */
+/* ---------------- compile & aot & .line ---------------- */
 int compile(Term *t, Net *n, char *err, int errsz);
+Term *egraph_optimize(Term *t);
+int net_save_line(Net *n, const char *path);
+int net_load_line(Net *n, const char *path);
 
 /* ---------------- readback ---------------- */
 long net_read_int(Net *n, Port p);
