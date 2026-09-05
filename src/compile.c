@@ -93,7 +93,7 @@ static Port ct(Term *t, Scope sc) {
       for (int i = 0; i < e->nextra; i++) {
         ts[i + 1] = N->wire[e->extra[i].node * 3 + 1];
         N->dead[e->extra[i].node] = 1;
-        N->wire[e->extra[i].node * 3 + 1] = (Port){-1, -1};
+        N->wire[e->extra[i].node * 3 + 1] = (Port){-1, 0};
       }
       Port root = dup_tree(ts, e->count, sc);
       net_link(N, (Port){self.node, 1}, root, 0);
@@ -113,7 +113,7 @@ static Port ct(Term *t, Scope sc) {
   }
   case TDEF: return ct(t->l, sc);
   }
-  return (Port){-1, -1};
+  return (Port){-1, 0};
 }
 
 int compile(Term *t, Net *n, char *err, int errsz) {

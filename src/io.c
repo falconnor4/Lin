@@ -237,7 +237,7 @@ int net_print(Net *n) {
 }
 
 static Port net_alloc_scott(Net *n, long k) {
-  Scope sc = scope_nil(); Port cur = (Port){-1, -1};
+  Scope sc = scope_nil(); Port cur = (Port){-1, 0};
   for (long i = 0; i <= k; i++) {
     Port sz = net_alloc(n, LAM, sc, "_sz"), ss = net_alloc(n, LAM, sc, "_ss");
     net_link(n, (Port){sz.node, 2}, (Port){ss.node, 0}, 0);
@@ -335,7 +335,7 @@ int net_run_io(Net *n, long step_limit) {
       if (body.node < 0 || n->tag[body.node] != APP) break;
       Port a0 = dup_hop(n, wire((Port){body.node, 0}));
       Port cb = wire((Port){body.node, 2});
-      Port src_p = (a0.node >= 0 && n->tag[a0.node] == APP) ? dup_hop(n, wire((Port){a0.node, 2})) : (Port){-1, -1};
+      Port src_p = (a0.node >= 0 && n->tag[a0.node] == APP) ? dup_hop(n, wire((Port){a0.node, 2})) : (Port){-1, 0};
 
       char in_buf[4096] = {0};
       long res_int = -1, ffi_int = 0;

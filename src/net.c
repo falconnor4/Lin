@@ -7,7 +7,7 @@
 #endif
 
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
-#define NONE ((Port){-1, -1})
+#define NONE ((Port){-1, 0})
 
 Scope scope_nil(void) { return (Scope){0, 0}; }
 

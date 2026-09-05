@@ -19,7 +19,7 @@ typedef struct Term {
 /* ---------------- interaction net ---------------- */
 enum { LAM, APP, DUP, ERA, ROOT };
 
-typedef struct { int node, port; } Port;
+typedef struct { int node:30; unsigned int port:2; } Port;
 typedef struct { int len, off; } Scope;
 
 typedef struct {
