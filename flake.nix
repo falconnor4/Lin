@@ -48,12 +48,31 @@
             export LIN_STD="${lin}/share/lin/std/std.lin"
             export LIN_STD_DIR="${lin}/share/lin/std"
 
+            # Terminal styling
+            if [ -t 1 ]; then
+              C_PASS="\033[1;32m"
+              C_FAIL="\033[1;31m"
+              C_TIER="\033[1;34m"
+              C_BOLD="\033[1m"
+              C_DIM="\033[2m"
+              C_RESET="\033[0m"
+            else
+              C_PASS=""
+              C_FAIL=""
+              C_TIER=""
+              C_BOLD=""
+              C_DIM=""
+              C_RESET=""
+            fi
+
             pass=0
             fail=0
+            total_checks=0
+            t_start=$(date +%s%3N 2>/dev/null || date +%s)
 
-            TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/egraph.lin test/driver_gpu.lin"
-
-            for f in $TESTS; do
+            run_test() {
+              f="$1"
+              t0=$(date +%s%3N 2>/dev/null || date +%s)
               got=$($LIN_BIN "$f" 2>&1 | grep -v '^warning' || true)
               want=$(grep '^; expect ' "$f" | sed 's/^; expect //')
               gn=$(printf '%s\n' "$got" | grep -c . || true)
@@ -77,37 +96,66 @@
                   i=$((i + 1))
                 done
               fi
+              t1=$(date +%s%3N 2>/dev/null || date +%s)
+              dur=$((t1 - t0))
+              total_checks=$((total_checks + wn))
+
               if [ "$ok" = 1 ]; then
                 pass=$((pass + 1))
-                printf "PASS %s\n" "$f"
+                printf "  ''${C_PASS}PASS''${C_RESET} %-32s ''${C_DIM}(%2d checks, %3dms)''${C_RESET}\n" "$f" "$wn" "$dur"
               else
                 fail=$((fail + 1))
-                echo "FAIL $f"
+                printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s ''${C_DIM}(got %d lines, want %d lines)''${C_RESET}\n" "$f" "$gn" "$wn"
                 echo "--- want ---"
                 printf '%s\n' "$want"
                 echo "--- got ---"
                 printf '%s\n' "$got"
               fi
+            }
+
+            printf "\n''${C_BOLD}Running Lin Confluence & Stability Test Suite''${C_RESET}\n"
+
+            printf "\n''${C_TIER}[Tier 1: Core Interaction Calculus & Primitives]''${C_RESET}\n"
+            for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin; do
+              run_test "$f"
             done
 
+            printf "\n''${C_TIER}[Tier 2: Foreign Function Interface & System Drivers]''${C_RESET}\n"
+            for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin; do
+              run_test "$f"
+            done
+
+            printf "\n''${C_TIER}[Tier 3: Constraint Satisfaction & Term Rewriting]''${C_RESET}\n"
+            for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do
+              run_test "$f"
+            done
+
+            printf "\n''${C_TIER}[Tier 4: Non-Trivial Workloads & Confluence Invariants]''${C_RESET}\n"
+            for f in test/graph.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin; do
+              run_test "$f"
+            done
+
+            printf "\n''${C_TIER}[Tier 5: Container Compilation & Execution Invariants]''${C_RESET}\n"
+            t0=$(date +%s%3N 2>/dev/null || date +%s)
             TMP_DIR=$(mktemp -d)
             trap 'rm -rf "$TMP_DIR"' EXIT
             $LIN_BIN build test/line_binary.lin -o "$TMP_DIR/line_binary.line"
 
+            line_ok=1
             if [ ! -x "$TMP_DIR/line_binary.line" ]; then
               echo "FAIL: line_binary.line is not executable"
-              exit 1
+              line_ok=0
             fi
 
             if ! head -n 1 "$TMP_DIR/line_binary.line" | grep -q '^#!/usr/bin/env lin'; then
               echo "FAIL: line_binary.line missing lin shebang"
-              exit 1
+              line_ok=0
             fi
 
             out1=$($LIN_BIN "$TMP_DIR/line_binary.line")
             if [ "$out1" != "LINE_BINARY_OK: 43" ]; then
               echo "FAIL: unexpected engine output: $out1"
-              exit 1
+              line_ok=0
             fi
 
             if [ -x /usr/bin/env ]; then
@@ -115,15 +163,33 @@
               out2=$(cat "$TMP_DIR/out2")
               if [ "$out2" != "LINE_BINARY_OK: 43" ]; then
                 echo "FAIL: unexpected direct binary output: $out2"
-                exit 1
+                line_ok=0
               fi
             fi
 
-            pass=$((pass + 1))
-            printf "PASS test/line_binary (.line container build & execute)\n"
+            t1=$(date +%s%3N 2>/dev/null || date +%s)
+            dur=$((t1 - t0))
+            total_checks=$((total_checks + 4))
 
-            echo ""
-            echo "$pass passed, $fail failed"
+            if [ "$line_ok" = 1 ]; then
+              pass=$((pass + 1))
+              printf "  ''${C_PASS}PASS''${C_RESET} %-32s ''${C_DIM}( 4 checks, %3dms)''${C_RESET}\n" "test/line_binary.line" "$dur"
+            else
+              fail=$((fail + 1))
+              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/line_binary.line"
+            fi
+
+            t_end=$(date +%s%3N 2>/dev/null || date +%s)
+            total_dur=$((t_end - t_start))
+
+            printf "\n''${C_BOLD}======================================================================''${C_RESET}\n"
+            if [ "$fail" -eq 0 ]; then
+              printf "''${C_PASS}''${C_BOLD}SUCCESS: All %d test suites passed (%d assertions checked in %dms)''${C_RESET}\n" "$pass" "$total_checks" "$total_dur"
+            else
+              printf "''${C_FAIL}''${C_BOLD}FAILURE: %d failed, %d passed (%d total assertions)''${C_RESET}\n" "$fail" "$pass" "$total_checks"
+            fi
+            printf "''${C_BOLD}======================================================================''${C_RESET}\n\n"
+
             [ "$fail" -eq 0 ]
           '';
 
@@ -149,6 +215,7 @@
         in {
           default = lin;
           lin = lin;
+          testRunner = testRunner;
           test = testCheck;
         }
       );
@@ -161,91 +228,7 @@
       apps = forAllSystems (system: pkgs:
         let
           lin = self.packages.${system}.lin;
-
-          testRunner = pkgs.writeShellScriptBin "lin-test" ''
-            set -e
-            LIN_BIN="${lin}/bin/lin"
-            export LIN_STD="${lin}/share/lin/std/std.lin"
-            export LIN_STD_DIR="${lin}/share/lin/std"
-
-            pass=0
-            fail=0
-
-            TESTS="test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/strings.lin test/adts.lin test/multi_file.lin test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/egraph.lin test/driver_gpu.lin"
-
-            for f in $TESTS; do
-              got=$($LIN_BIN "$f" 2>&1 | grep -v '^warning' || true)
-              want=$(grep '^; expect ' "$f" | sed 's/^; expect //')
-              gn=$(printf '%s\n' "$got" | grep -c . || true)
-              wn=$(printf '%s\n' "$want" | grep -c . || true)
-              ok=1
-              [ "$gn" = "$wn" ] || ok=0
-              if [ "$ok" = 1 ] && [ "$wn" -gt 0 ]; then
-                i=1
-                while [ "$i" -le "$wn" ]; do
-                  w=$(printf '%s\n' "$want" | sed -n "''${i}p")
-                  g=$(printf '%s\n' "$got" | sed -n "''${i}p")
-                  case "$w" in
-                    *...)
-                      pfx="''${w%...}"
-                      case "$g" in "$pfx"*) ;; *) ok=0 ;; esac
-                      ;;
-                    *)
-                      [ "$w" = "$g" ] || ok=0
-                      ;;
-                  esac
-                  i=$((i + 1))
-                done
-              fi
-              if [ "$ok" = 1 ]; then
-                pass=$((pass + 1))
-                printf "PASS %s\n" "$f"
-              else
-                fail=$((fail + 1))
-                echo "FAIL $f"
-                echo "--- want ---"
-                printf '%s\n' "$want"
-                echo "--- got ---"
-                printf '%s\n' "$got"
-              fi
-            done
-
-            TMP_DIR=$(mktemp -d)
-            trap 'rm -rf "$TMP_DIR"' EXIT
-            $LIN_BIN build test/line_binary.lin -o "$TMP_DIR/line_binary.line"
-
-            if [ ! -x "$TMP_DIR/line_binary.line" ]; then
-              echo "FAIL: line_binary.line is not executable"
-              exit 1
-            fi
-
-            if ! head -n 1 "$TMP_DIR/line_binary.line" | grep -q '^#!/usr/bin/env lin'; then
-              echo "FAIL: line_binary.line missing lin shebang"
-              exit 1
-            fi
-
-            out1=$($LIN_BIN "$TMP_DIR/line_binary.line")
-            if [ "$out1" != "LINE_BINARY_OK: 43" ]; then
-              echo "FAIL: unexpected engine output: $out1"
-              exit 1
-            fi
-
-            if [ -x /usr/bin/env ]; then
-              PATH="${lin}/bin:$PATH" "$TMP_DIR/line_binary.line" > "$TMP_DIR/out2"
-              out2=$(cat "$TMP_DIR/out2")
-              if [ "$out2" != "LINE_BINARY_OK: 43" ]; then
-                echo "FAIL: unexpected direct binary output: $out2"
-                exit 1
-              fi
-            fi
-
-            pass=$((pass + 1))
-            printf "PASS test/line_binary (.line container build & execute)\n"
-
-            echo ""
-            echo "$pass passed, $fail failed"
-            [ "$fail" -eq 0 ]
-          '';
+          testRunner = self.packages.${system}.testRunner;
 
           benchRunner = pkgs.writeShellScriptBin "lin-benchmarks" ''
             set -e

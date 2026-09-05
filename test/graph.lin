@@ -1,0 +1,85 @@
+; Directed Graph Reachability & Boolean Matrix Multiplication Test Suite
+(load "std/bool.lin")
+(load "std/pair.lin")
+(load "std/list.lin")
+
+(define or4 (\a (\b (\c (\d ((or a) ((or b) ((or c) d))))))))
+(define and2 (\a (\b ((and a) b))))
+
+; Boolean semiring matrix dot product for 4-node graphs:
+; dot(u, v) = (u0 & v0) | (u1 & v1) | (u2 & v2) | (u3 & v3)
+(define dot4
+  (\a0 (\a1 (\a2 (\a3
+    (\b0 (\b1 (\b2 (\b3
+      (or4 (and2 a0 b0) (and2 a1 b1) (and2 a2 b2) (and2 a3 b3)))))))))))
+
+; Directed Acyclic Graph (DAG) with 4 vertices:
+;   0 -> 1 -> 2 -> 3
+; Adjacency matrix rows (outgoing edges from u):
+;   row0 = [0, 1, 0, 0]  (0 -> 1)
+;   row1 = [0, 0, 1, 0]  (1 -> 2)
+;   row2 = [0, 0, 0, 1]  (2 -> 3)
+;   row3 = [0, 0, 0, 0]  (terminal)
+
+; Adjacency matrix columns (incoming edges to v):
+;   col0 = [0, 0, 0, 0]  (no incoming edges)
+;   col1 = [1, 0, 0, 0]  (from 0)
+;   col2 = [0, 1, 0, 0]  (from 1)
+;   col3 = [0, 0, 1, 0]  (from 2)
+
+; --- 1. Two-Hop Path Reachability: A^2 = A * A ---
+; Reachability 0 -> 2 in 2 hops: dot(row0, col2)
+(dot4 false true false false false true false false)
+; expect => true
+
+; Reachability 0 -> 3 in 2 hops: dot(row0, col3)
+(dot4 false true false false false false true false)
+; expect => false
+
+; Reachability 0 -> 1 in 2 hops: dot(row0, col1)
+(dot4 false true false false true false false false)
+; expect => false
+
+; Reachability 1 -> 3 in 2 hops: dot(row1, col3)
+(dot4 false false true false false false true false)
+; expect => true
+
+; Reachability 1 -> 2 in 2 hops: dot(row1, col2)
+(dot4 false false true false false true false false)
+; expect => false
+
+; Reachability 2 -> 3 in 2 hops: dot(row2, col3)
+(dot4 false false false true false false true false)
+; expect => false
+
+; --- 2. Three-Hop Path Reachability: A^3 = A^2 * A ---
+; row0 of A^2 is [0, 0, 1, 0]
+; col3 of A   is [0, 0, 1, 0]
+; Reachability 0 -> 3 in 3 hops: dot(row0_A2, col3)
+(dot4 false false true false false false true false)
+; expect => true
+
+; Reachability 0 -> 2 in 3 hops: dot(row0_A2, col2)
+(dot4 false false true false false true false false)
+; expect => false
+
+; Reachability 1 -> 3 in 3 hops:
+; row1 of A^2 is [0, 0, 0, 1]
+; col3 of A   is [0, 0, 1, 0]
+(dot4 false false false true false false true false)
+; expect => false
+
+; --- 3. Backward & Diagonal (DAG Invariant: No Cycles) ---
+; In a DAG, all diagonal self-loops are false:
+(dot4 false true false false false false false false)
+; expect => false
+
+; Reachability 3 -> 0 (backward):
+(dot4 false false false false false false false false)
+; expect => false
+
+; --- 4. Cycle Introduction (Feedback Edge 3 -> 0) ---
+; If edge 3 -> 0 is added, col0 becomes [0, 0, 0, 1]
+; 4-hop path from 0 back to 0: dot(row0_A3, col0_cycle)
+(dot4 false false false true false false false true)
+; expect => true

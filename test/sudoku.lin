@@ -1,0 +1,155 @@
+; 4x4 Sudoku (Shidoku) Constraint Satisfaction & Verification Test Suite
+; Validates row uniqueness, column uniqueness, 2x2 block constraints,
+; board transpositions, and partial clue satisfiability.
+(load "std/num.lin")
+(load "std/bool.lin")
+(load "std/list.lin")
+
+; --- 1. Pairwise Distinct Invariant (4 Elements) ---
+(define distinct4
+  (\a (\b (\c (\d
+    (and (not (eq a b))
+    (and (not (eq a c))
+    (and (not (eq a d))
+    (and (not (eq b c))
+    (and (not (eq b d))
+         (not (eq c d))))))))))))
+
+; All distinct digits 1..4
+(distinct4 1 2 3 4)
+; expect => true
+
+; Duplicated digit rejection
+(distinct4 1 2 2 4)
+; expect => false
+
+(distinct4 4 4 4 4)
+; expect => false
+
+; --- 2. Full 4x4 Sudoku Constraint Validator ---
+(define valid_sudoku_4x4
+  (\c00 (\c01 (\c02 (\c03
+   (\c10 (\c11 (\c12 (\c13
+   (\c20 (\c21 (\c22 (\c23
+   (\c30 (\c31 (\c32 (\c33
+    ; 4 Rows
+    (and (distinct4 c00 c01 c02 c03)
+    (and (distinct4 c10 c11 c12 c13)
+    (and (distinct4 c20 c21 c22 c23)
+    (and (distinct4 c30 c31 c32 c33)
+    ; 4 Columns
+    (and (distinct4 c00 c10 c20 c30)
+    (and (distinct4 c01 c11 c21 c31)
+    (and (distinct4 c02 c12 c22 c32)
+    (and (distinct4 c03 c13 c23 c33)
+    ; 4 2x2 Blocks
+    (and (distinct4 c00 c01 c10 c11)
+    (and (distinct4 c02 c03 c12 c13)
+    (and (distinct4 c20 c21 c30 c31)
+         (distinct4 c22 c23 c32 c33)))))))))))))))))))))))))))))
+
+; --- 3. Solution Verification ---
+; Board A (Canonical Solution):
+; 1 2 | 3 4
+; 3 4 | 1 2
+; -----+-----
+; 2 1 | 4 3
+; 4 3 | 2 1
+(valid_sudoku_4x4
+  1 2 3 4
+  3 4 1 2
+  2 1 4 3
+  4 3 2 1)
+; expect => true
+
+; Board B (Transposed Board A):
+; 1 3 | 2 4
+; 2 4 | 1 3
+; -----+-----
+; 3 1 | 4 2
+; 4 2 | 3 1
+(valid_sudoku_4x4
+  1 3 2 4
+  2 4 1 3
+  3 1 4 2
+  4 2 3 1)
+; expect => true
+
+; --- 4. Invalid Board Rejections ---
+; Row collision: two 1s in row 0
+(valid_sudoku_4x4
+  1 1 3 4
+  3 4 1 2
+  2 1 4 3
+  4 3 2 1)
+; expect => false
+
+; Column collision: two 3s in col 0
+(valid_sudoku_4x4
+  3 2 3 4
+  3 4 1 2
+  2 1 4 3
+  4 3 2 1)
+; expect => false
+
+; Block collision: rows and cols distinct, but 2x2 blocks have duplicates
+(valid_sudoku_4x4
+  1 2 3 4
+  2 1 4 3
+  3 4 1 2
+  4 3 2 1)
+; expect => false
+
+; --- 5. Partial Puzzle Clue Matching ---
+; Clues:
+; 1 . | 3 .
+; . 4 | . 2
+; -----+-----
+; 2 . | 4 .
+; . 3 | . 1
+(define check_clues
+  (\c00 (\c02 (\c11 (\c13 (\c20 (\c22 (\c31 (\c33
+    (and (eq c00 1)
+    (and (eq c02 3)
+    (and (eq c11 4)
+    (and (eq c13 2)
+    (and (eq c20 2)
+    (and (eq c22 4)
+    (and (eq c31 3)
+         (eq c33 1)))))))))))))))))
+
+; Board A matches clues
+(check_clues 1 3 4 2 2 4 3 1)
+; expect => true
+
+; Board B violates clues (c02 is 2, expected 3)
+(check_clues 1 2 4 3 3 4 2 1)
+; expect => false
+
+; Combined Satisfiability: Valid board AND matches clues
+(define valid_solved_puzzle
+  (\c00 (\c01 (\c02 (\c03
+   (\c10 (\c11 (\c12 (\c13
+   (\c20 (\c21 (\c22 (\c23
+   (\c30 (\c31 (\c32 (\c33
+    (and (check_clues c00 c02 c11 c13 c20 c22 c31 c33)
+         (valid_sudoku_4x4 c00 c01 c02 c03
+                           c10 c11 c12 c13
+                           c20 c21 c22 c23
+                           c30 c31 c32 c33)))))))))))))))))))
+
+; Board A solves the puzzle
+(valid_solved_puzzle
+  1 2 3 4
+  3 4 1 2
+  2 1 4 3
+  4 3 2 1)
+; expect => true
+
+; Board B fails the puzzle (even though valid Sudoku, violates clues)
+(valid_solved_puzzle
+  1 3 2 4
+  2 4 1 3
+  3 1 4 2
+  4 2 3 1)
+; expect => false

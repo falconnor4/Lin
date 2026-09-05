@@ -1,0 +1,105 @@
+; 4-Queens Constraint Satisfaction & Verification Test Suite
+; Validates board configurations, non-attacking invariants, and Scott list encodings.
+(load "std/num.lin")
+(load "std/bool.lin")
+(load "std/list.lin")
+
+; Queen pair attack check
+; Two queens at (ri, ci) and (rj, cj) attack if same column or diagonal
+(define attacks
+  (\ri (\ci (\rj (\cj
+    (or (eq ci cj)
+    (or (eq (add ri cj) (add rj ci))
+        (eq (add ri ci) (add rj cj)))))))))
+
+(define safe
+  (\ri (\ci (\rj (\cj
+    (not (attacks ri ci rj cj)))))))
+
+; Full 4-Queens board validity:
+; Queen 0 at (0, q0), Queen 1 at (1, q1), Queen 2 at (2, q2), Queen 3 at (3, q3)
+(define valid_queens
+  (\q0 (\q1 (\q2 (\q3
+    (and (safe 0 q0 1 q1)
+    (and (safe 0 q0 2 q2)
+    (and (safe 0 q0 3 q3)
+    (and (safe 1 q1 2 q2)
+    (and (safe 1 q1 3 q3)
+         (safe 2 q2 3 q3)))))))))))
+
+; --- 1. Pairwise Attack Checks ---
+; Same column collision: (0, 1) vs (2, 1)
+(attacks 0 1 2 1)
+; expect => true
+
+; Main diagonal collision: (0, 0) vs (2, 2)
+(attacks 0 0 2 2)
+; expect => true
+
+; Anti-diagonal collision: (1, 2) vs (2, 1)
+(attacks 1 2 2 1)
+; expect => true
+
+; Safe queen placement (knight move offset): (0, 1) vs (1, 3)
+(attacks 0 1 1 3)
+; expect => false
+
+(safe 0 1 1 3)
+; expect => true
+
+; --- 2. Valid Solution Verification ---
+; Solution 1: [1, 3, 0, 2]
+(valid_queens 1 3 0 2)
+; expect => true
+
+; Solution 2: [2, 0, 3, 1] (Reflection of Solution 1)
+(valid_queens 2 0 3 1)
+; expect => true
+
+; --- 3. Invalid Configuration Rejection ---
+; Column conflict: all queens in column 0
+(valid_queens 0 0 0 0)
+; expect => false
+
+; Main diagonal conflict: [0, 1, 2, 3]
+(valid_queens 0 1 2 3)
+; expect => false
+
+; Anti-diagonal conflict: [3, 2, 1, 0]
+(valid_queens 3 2 1 0)
+; expect => false
+
+; Minor swap invalidation: [1, 2, 0, 3]
+(valid_queens 1 2 0 3)
+; expect => false
+
+; --- 4. Board List Representation & Queries ---
+(define sol1 (list4 1 3 0 2))
+(define sol2 (list4 2 0 3 1))
+
+; Solution 1 queen columns
+(first sol1)
+; expect => 1
+
+(second sol1)
+; expect => 3
+
+(third sol1)
+; expect => 0
+
+(fourth sol1)
+; expect => 2
+
+; Verify board emptiness invariants
+(is_empty sol1)
+; expect => false
+
+(is_empty (tail (tail (tail (tail sol1)))))
+; expect => true
+
+; Validate from list terms
+(valid_queens (first sol1) (second sol1) (third sol1) (fourth sol1))
+; expect => true
+
+(valid_queens (first sol2) (second sol2) (third sol2) (fourth sol2))
+; expect => true

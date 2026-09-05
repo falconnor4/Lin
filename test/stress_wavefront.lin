@@ -1,0 +1,83 @@
+; Wavefront Hardware Stress Test
+; Tests heavy concurrent reduction across CPU, SIMD, and Vulkan GPU backends
+
+(load "std/bool.lin")
+(load "std/pair.lin")
+(load "std/list.lin")
+(load "std/drivers/driver.lin")
+
+(define or4 (\a (\b (\c (\d ((or a) ((or b) ((or c) d))))))))
+(define and2 (\a (\b ((and a) b))))
+
+; High-fanout boolean tree reducer
+(define tree_fanout_8
+  (\b
+    (and2 (or4 b b b b) (or4 b b b b))))
+
+; 16-way parallel wavefront expansion
+(define wave_16
+  (\v
+    (pair (tree_fanout_8 v) (tree_fanout_8 v))))
+
+; 32-way parallel wavefront expansion
+(define wave_32
+  (\v
+    (pair (wave_16 v) (wave_16 v))))
+
+; 64-way parallel wavefront expansion
+(define wave_64
+  (\v
+    (pair (wave_32 v) (wave_32 v))))
+
+; --- 1. Execution on Default CPU Engine (OpenMP Spatial Buckets) ---
+(set_driver "cpu")
+; expect => 1
+
+(get_driver)
+; expect => cpu
+
+(define res_cpu (wave_64 true))
+(fst (fst (fst res_cpu)))
+; expect => true
+
+; --- 2. Execution on SIMD Vector Driver ---
+(load "std/drivers/simd.lin")
+; expect => 1
+
+(get_driver)
+; expect => simd
+
+(define res_simd (wave_64 true))
+(fst (fst (fst res_simd)))
+; expect => true
+
+(define res_simd_f (wave_64 false))
+(fst (fst (fst res_simd_f)))
+; expect => false
+
+; --- 3. Execution on Vulkan GPU Accelerator Driver ---
+(load "std/drivers/gpu.lin")
+; expect => 1
+
+(get_driver)
+; expect => gpu
+
+(define res_gpu (wave_64 true))
+(fst (fst (fst res_gpu)))
+; expect => true
+
+(define res_gpu_f (wave_64 false))
+(fst (fst (fst res_gpu_f)))
+; expect => false
+
+; --- 4. Cross-Backend Confluence Verification ---
+; Restore CPU driver and verify state
+(set_driver "cpu")
+; expect => 1
+
+(get_driver)
+; expect => cpu
+
+; Verify combinator application under restored CPU
+(and2 (fst (fst (fst res_cpu))) (fst (fst (fst res_gpu))))
+; expect => true
