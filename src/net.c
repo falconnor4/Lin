@@ -202,26 +202,16 @@ static void net_compact(Net *n, const unsigned char *reach) {
   for (int i = 0; i < n->nn; i++) {
     int dst = remap[i];
     if (dst < 0) continue;
-    if (dst != i) {
-      n->tag[dst] = n->tag[i]; n->scope[dst] = n->scope[i];
-      n->name[dst] = n->name[i]; n->name[i] = NULL;
-    }
+    if (dst != i) { n->tag[dst] = n->tag[i]; n->scope[dst] = n->scope[i]; n->name[dst] = n->name[i]; n->name[i] = NULL; }
     for (int p = 0; p < 3; p++) {
       Port w = n->wire[i * 3 + p];
-      n->wire[dst * 3 + p] = (w.node >= 0 && w.node < n->nn && remap[w.node] >= 0)
-                                 ? (Port){remap[w.node], w.port} : NONE;
+      n->wire[dst * 3 + p] = (w.node >= 0 && w.node < n->nn && remap[w.node] >= 0) ? (Port){remap[w.node], w.port} : NONE;
     }
   }
   memset(n->dead, 0, (size_t)new_nn); n->nn = new_nn; free(remap);
 }
 
 typedef struct { Port p1, p2; } Pair;
-
-static inline void footprint(Net *n, int u, int v, int *c) {
-  c[0] = u; c[1] = v;
-  c[2] = WIRE(n, ((Port){u, 1})).node; c[3] = WIRE(n, ((Port){u, 2})).node;
-  c[4] = WIRE(n, ((Port){v, 1})).node; c[5] = WIRE(n, ((Port){v, 2})).node;
-}
 
 static void reduce_wavefront(Net *n, long limit, int *changed) {
 #ifdef _OPENMP
@@ -237,38 +227,51 @@ static void reduce_wavefront(Net *n, long limit, int *changed) {
     n->atop = 0;
 #ifdef _OPENMP
     if (nth > 1 && wave_cnt >= 8) {
-      uint8_t *touched = calloc((size_t)n->cap, 1);
-      Pair *batch = malloc((size_t)(wave_cnt / 2 + 1) * sizeof(Pair));
-      int count = 0, sc_need = 0;
+      int np = wave_cnt / 2, nsec = (n->nn + 63) >> 6;
+      Pair *inter = malloc((size_t)np * sizeof(Pair)), *bound = malloc((size_t)np * sizeof(Pair));
+      int n_int = 0, n_bnd = 0, sc_need = 0;
       for (int i = 0; i < wave_cnt; i += 2) {
         Port p1 = curr[i], p2 = curr[i + 1];
         if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
         if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
-        if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port) continue;
-        if (p1.port != 0 || p2.port != 0) continue;
-        int u = p1.node, v = p2.node, c[6], conf = 0;
-        footprint(n, u, v, c);
-        for (int k = 0; k < 6; k++)
-          if (c[k] >= 0 && c[k] < n->cap && touched[c[k]]) { conf = 1; break; }
-        if (conf) { act_push(n, p1, p2); continue; }
-        for (int k = 0; k < 6; k++) if (c[k] >= 0 && c[k] < n->cap) touched[c[k]] = 1;
-        batch[count++] = (Pair){p1, p2};
+        if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
+        int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
+        if (ok) {
+          int c[4] = { WIRE(n, ((Port){u, 1})).node, WIRE(n, ((Port){u, 2})).node,
+                       WIRE(n, ((Port){v, 1})).node, WIRE(n, ((Port){v, 2})).node };
+          for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
+        }
+        if (ok) inter[n_int++] = (Pair){p1, p2}; else bound[n_bnd++] = (Pair){p1, p2};
         int lu = scope_len(n->scope[u]), lv = scope_len(n->scope[v]);
-        if (1 + lu + lv > 57 || n->scope[u].sso.is_heap || n->scope[v].sso.is_heap)
-          sc_need += 2 * (1 + lu + lv);
+        if (1 + lu + lv > 57 || n->scope[u].sso.is_heap || n->scope[v].sso.is_heap) sc_need += 2 * (1 + lu + lv);
       }
-      if (count > 0) {
-        net_ensure_cap(n, n->nn + count * 4); sc_ensure_cap(n, n->scn + sc_need);
+      if (n_int > 0) {
+        int *head = malloc((size_t)nsec * sizeof(int)), *next = malloc((size_t)n_int * sizeof(int));
+        memset(head, -1, (size_t)nsec * sizeof(int));
+        for (int i = 0; i < n_int; i++) { int s = inter[i].p1.node >> 6; next[i] = head[s]; head[s] = i; }
+        net_ensure_cap(n, n->nn + n_int * 4); sc_ensure_cap(n, n->scn + sc_need);
         in_parallel = 1; int batch_changed = 0;
-        #pragma omp parallel for reduction(+:batch_changed) schedule(static)
-        for (int i = 0; i < count; i++) if (interact(n, batch[i].p1, batch[i].p2)) batch_changed++;
-        in_parallel = 0; n->steps += count; *changed += batch_changed;
+        #pragma omp parallel for reduction(+:batch_changed) schedule(dynamic)
+        for (int s = 0; s < nsec; s++)
+          for (int i = head[s]; i >= 0; i = next[i])
+            if (WIRE(n, inter[i].p1).node == inter[i].p2.node && !n->dead[inter[i].p1.node] && !n->dead[inter[i].p2.node])
+              if (interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
+        in_parallel = 0; n->steps += n_int; *changed += batch_changed;
         for (int t = 0; t < nth; t++) {
           for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
           t_act[t].top = 0;
         }
+        free(head); free(next);
       }
-      free(touched); free(batch); continue;
+      for (int i = 0; i < n_bnd; i++) {
+        Port p1 = bound[i].p1, p2 = bound[i].p2;
+        if (p1.node >= 0 && p2.node >= 0 && !n->dead[p1.node] && !n->dead[p2.node] &&
+            WIRE(n, p1).node == p2.node && WIRE(n, p2).node == p1.node && !p1.port && !p2.port) {
+          if (interact(n, p1, p2)) *changed += 1;
+          n->steps++;
+        }
+      }
+      free(inter); free(bound); continue;
     }
 #endif
     for (int i = 0; i < wave_cnt; i += 2) {
@@ -279,8 +282,7 @@ static void reduce_wavefront(Net *n, long limit, int *changed) {
       Port p1 = curr[i], p2 = curr[i + 1];
       if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
       if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
-      if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port) continue;
-      if (p1.port != 0 || p2.port != 0) continue;
+      if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
       if (interact(n, p1, p2)) *changed += 1;
       n->steps++;
     }
@@ -299,9 +301,7 @@ long net_reduce(Net *n, long limit) {
       int u = q[qh++];
       for (int p = 0; p < 3; p++) {
         Port w = WIRE(n, ((Port){u, p}));
-        if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && !reach[w.node]) {
-          reach[w.node] = 1; q[qt++] = w.node;
-        }
+        if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; }
       }
     }
     net_compact(n, reach); free(reach); free(q);
