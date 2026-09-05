@@ -1,14 +1,40 @@
-; lin standard library: binary trees (Scott-encoded)
+; ==============================================================================
+; Lin Standard Library: Binary Trees
+; ==============================================================================
+; Combines Scott-encoded binary trees (for O(1) left/right destructors)
+; and Church trees (for pure self-iterating structural folds).
+; ==============================================================================
+
 (load "bool.lin")
 
+(namespace tree)
 (define! leaf a (\l (\n l)))
 (define! node (a -> b -> c -> d) (\v (\left (\right (\l (\n (((n v) left) right)))))))
-(define! is_leaf (a -> bool) (\t ((t true) (\_ (\_ (\_ false))))))
-(define! is_node (a -> bool) (\t ((t false) (\_ (\_ (\_ true))))))
-(define! tree_val (a -> b) (\t ((t 0) (\v (\_ (\_ v))))))
-(define! tree_left (a -> b) (\t ((t leaf) (\_ (\left (\_ left))))))
-(define! tree_right (a -> b) (\t ((t leaf) (\_ (\_ (\right right))))))
-(define tree_has_left (\t (is_node (tree_left t))))
-(define tree_has_right (\t (is_node (tree_right t))))
-(define tree_val_left (\t (tree_val (tree_left t))))
-(define tree_val_right (\t (tree_val (tree_right t))))
+(define! is_leaf (a -> bool) (\t ((t bool.true) (\_ (\_ (\_ bool.false))))))
+(define! is_node (a -> bool) (\t ((t bool.false) (\_ (\_ (\_ bool.true))))))
+(define! val (a -> b) (\t ((t 0) (\v (\_ (\_ v))))))
+(define! left (a -> b) (\t ((t tree.leaf) (\_ (\left (\_ left))))))
+(define! right (a -> b) (\t ((t tree.leaf) (\_ (\_ (\right right))))))
+(define has_left (\t (tree.is_node (tree.left t))))
+(define has_right (\t (tree.is_node (tree.right t))))
+(define val_left (\t (tree.val (tree.left t))))
+(define val_right (\t (tree.val (tree.right t))))
+
+; --- Church Self-Iterating Trees & Folds ---
+(define c_leaf (\l (\n l)))
+(define c_node (\v (\l (\r (\fl (\fn (((fn v) (l fl fn)) (r fl fn))))))))
+(define c_fold (\fl (\fn (\t ((t fl) fn)))))
+
+(namespace _)
+(open tree)
+(define leaf tree.leaf)
+(define node tree.node)
+(define is_leaf tree.is_leaf)
+(define is_node tree.is_node)
+(define tree_val tree.val)
+(define tree_left tree.left)
+(define tree_right tree.right)
+(define tree_has_left tree.has_left)
+(define tree_has_right tree.has_right)
+(define tree_val_left tree.val_left)
+(define tree_val_right tree.val_right)

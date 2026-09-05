@@ -1,36 +1,42 @@
-; lin standard library: string manipulation and character combinators
+; ==============================================================================
+; Lin Standard Library: String Manipulation & Character Combinators
+; ==============================================================================
+; Scott/Church character sequences, string concatenation, and metrics.
+; ==============================================================================
+
 (load "bool.lin")
 (load "num.lin")
 (load "list.lin")
 
-(define str_empty nil)
-(define str_is_empty is_empty)
-(define str_head head)
-(define str_tail tail)
+(namespace str)
+(define empty list.nil)
+(define is_empty list.is_empty)
+(define head list.head)
+(define tail list.tail)
 
-(define str_char1 list1)
-(define str_char2 list2)
-(define str_char3 list3)
-(define str_char4 list4)
+(define char1 list.list1)
+(define char2 list.list2)
+(define char3 list.list3)
+(define char4 list.list4)
 
-(define str_first first)
-(define str_second second)
-(define str_third third)
-(define str_fourth fourth)
+(define first list.first)
+(define second list.second)
+(define third list.third)
+(define fourth list.fourth)
 
-(define str_length
+(define length
   (\s
-    (if (is_empty s)
-      0
-      (if (is_empty (tail s))
-        1
-        (if (is_empty (tail (tail s)))
-          2
-          (if (is_empty (tail (tail (tail s))))
-            3
-            4))))))
+    (if (is_empty s) 0
+    (if (is_empty (tail s)) 1
+    (if (is_empty (tail (tail s))) 2
+    (if (is_empty (tail (tail (tail s)))) 3
+    (if (is_empty (tail (tail (tail (tail s))))) 4
+    (if (is_empty (tail (tail (tail (tail (tail s)))))) 5
+    (if (is_empty (tail (tail (tail (tail (tail (tail s))))))) 6
+    (if (is_empty (tail (tail (tail (tail (tail (tail (tail s)))))))) 7
+    8))))))))))
 
-(define str_concat
+(define concat
   (\s1 (\s2
     (if (is_empty s1)
       s2
@@ -41,3 +47,20 @@
           (if (is_empty (tail (tail (tail s1))))
             (cons (first s1) (cons (second s1) (cons (third s1) s2)))
             (cons (first s1) (cons (second s1) (cons (third s1) (cons (fourth s1) s2)))))))))))
+
+(namespace _)
+(open str)
+(define str_empty str.empty)
+(define str_is_empty str.is_empty)
+(define str_head str.head)
+(define str_tail str.tail)
+(define str_char1 str.char1)
+(define str_char2 str.char2)
+(define str_char3 str.char3)
+(define str_char4 str.char4)
+(define str_first str.first)
+(define str_second str.second)
+(define str_third str.third)
+(define str_fourth str.fourth)
+(define str_length str.length)
+(define str_concat str.concat)

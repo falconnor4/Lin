@@ -1,4 +1,32 @@
-; lin standard library
+; ==============================================================================
+; Lin Standard Library Prelude (std.lin)
+; ==============================================================================
+; Master prelude for the Lin programming language standard library.
+;
+; Provides a coherent foundation of Scott/Church encodings, self-iterating folds,
+; monadic abstractions, purely functional collections, foreign-function interface,
+; concurrent/monadic I/O, and propositional satisfiability solvers.
+;
+; All modules are organized under distinct namespaces and re-exported into the
+; root scope for idiomatic functional programming:
+;   - bool    : Church booleans, conditionals, logical operators
+;   - num     : Scott numerals, hybrid FFI arithmetic, Church self-iterators
+;   - math    : Numerical combinators (clamp, min, max, sign, powers)
+;   - pair    : Product types, projections, currying
+;   - list    : Scott linked lists, Church self-iterating folds & transforms
+;   - maybe   : Option monad with O(1) Scott dispatch
+;   - either  : Sum types, error monad
+;   - tree    : Scott binary trees, Church recursive tree folds
+;   - map     : Purely functional key-value association dictionaries
+;   - set     : Unordered unique-element sets
+;   - queue   : Purely functional FIFO queues with amortized O(1) operations
+;   - stream  : Purely functional infinite lazy streams and corecursion
+;   - str     : Scott-encoded string representations and operations
+;   - ffi     : Foreign function interface bindings
+;   - io      : Monadic and continuation-based interaction-net I/O
+;   - sat     : Propositional logic, quantifiers, self-reducible witness extraction
+; ==============================================================================
+
 (load "bool.lin")
 (load "num.lin")
 (load "math.lin")
@@ -15,3 +43,22 @@
 (load "ffi.lin")
 (load "sat.lin")
 (load "io.lin")
+
+; --- Open All Standard Namespaces into Current Scope ---
+(open bool)
+(open num)
+(open math)
+(open pair)
+(open list)
+(open maybe)
+(open either)
+(open tree)
+(open map)
+(open set)
+(open queue)
+(open stream)
+(open str)
+(open ffi)
+(open sat)
+(open io)
+

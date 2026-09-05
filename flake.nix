@@ -116,7 +116,7 @@
             printf "\n''${C_BOLD}Running Lin Confluence & Stability Test Suite''${C_RESET}\n"
 
             printf "\n''${C_TIER}[Tier 1: Core Interaction Calculus & Primitives]''${C_RESET}\n"
-            for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin; do
+            for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin; do
               run_test "$f"
             done
 

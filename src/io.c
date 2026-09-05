@@ -20,29 +20,18 @@ static inline Port dup_hop(Net *n, Port p) {
 }
 
 long net_read_int(Net *n, Port p) {
-  N = n;
-  long count = 0;
-  Port cur = p;
+  N = n; long count = 0; Port cur = p;
   for (int step = 0; step < n->nn; step++) {
     cur = dup_hop(n, cur);
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
-    if (n->tag[cur.node] != LAM || strncmp(NNM(n, cur.node), "_sz", 3)) return -1;
-    int sz = cur.node;
-    Port ss_p = dup_hop(n, wire((Port){sz, 2}));
-    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node]) return -1;
-    if (n->tag[ss_p.node] != LAM || strncmp(NNM(n, ss_p.node), "_ss", 3)) return -1;
-    int ss = ss_p.node;
-
-    Port body = dup_hop(n, wire((Port){ss, 2}));
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || strncmp(NNM(n, cur.node), "_sz", 3)) return -1;
+    int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
+    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || strncmp(NNM(n, ss_p.node), "_ss", 3)) return -1;
+    int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
     if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return -1;
     if (body.node == sz && body.port == 1) return count;
     if (n->tag[body.node] == APP) {
       Port fn = dup_hop(n, wire((Port){body.node, 0}));
-      if (fn.node == ss && fn.port == 1) {
-        count++;
-        cur = wire((Port){body.node, 2});
-        continue;
-      }
+      if (fn.node == ss && fn.port == 1) { count++; cur = wire((Port){body.node, 2}); continue; }
     }
     return -1;
   }

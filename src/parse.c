@@ -95,20 +95,16 @@ static int tvnn, tvcap;
 static Type *parse_type_atom(void) {
   skipws();
   if (S[P] == '(') {
-    P++;
-    Type *t = parse_type();
-    skipws();
+    P++; Type *t = parse_type(); skipws();
     if (S[P] != ')') pfail("type: missing ')'");
-    P++;
-    return t;
+    P++; return t;
   }
   char nm[NAME];
   if (!sym(nm, NAME)) pfail("type: expected name");
   if (!strcmp(nm, "num")) return type_var();
   if (!strcmp(nm, "bool")) { Type *p = type_var(), *q = type_var(); return type_arrow(p, type_arrow(q, p)); }
   if (!strcmp(nm, "list")) return type_list(parse_type_atom());
-  for (int i = 0; i < tvnn; i++)
-    if (!strcmp(tvn[i], nm)) return tvt[i];
+  for (int i = 0; i < tvnn; i++) if (!strcmp(tvn[i], nm)) return tvt[i];
   if (tvnn >= tvcap) {
     tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);
     tvt = realloc(tvt, (size_t)tvcap * sizeof *tvt);
@@ -202,6 +198,12 @@ static Term *parse_term(void) {
       memcpy(path, S + start, (size_t)len); path[len] = '\0'; P++; skipws();
       if (S[P] != ')') pfail("load: expected ')'"); else P++;
       return term_new(TLOAD, path, NULL, NULL);
+    }
+    if (!strcmp(kw, "namespace") || !strcmp(kw, "ns") || !strcmp(kw, "module") || !strcmp(kw, "open") || !strcmp(kw, "use")) {
+      int isOpen = !strcmp(kw, "open") || !strcmp(kw, "use");
+      skipws(); char name[NAME]; if (!sym(name, NAME)) pfail("expected name");
+      skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
+      return term_new(isOpen ? TOPEN : TNS, name, NULL, NULL);
     }
     if (!strcmp(kw, "let")) {
       skipws(); if (S[P] != '(') pfail("let: expected '('"); P++;

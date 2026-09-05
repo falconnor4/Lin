@@ -1,34 +1,52 @@
-; lin standard library: functional FIFO queue (Banker's two-list queue)
+; ==============================================================================
+; Lin Standard Library: Functional FIFO Queue (Banker's Two-List Queue)
+; ==============================================================================
+; Pure functional amortized O(1) FIFO queue implemented using dual lists.
+; ==============================================================================
+
 (load "bool.lin")
 (load "pair.lin")
 (load "list.lin")
 
-(define queue_rev
+(namespace queue)
+(define rev
   (\l
-    (if (is_empty l)
+    (if (list.is_empty l)
       nil
-      (if (is_empty (tail l))
+      (if (list.is_empty (tail l))
         l
-        (if (is_empty (tail (tail l)))
+        (if (list.is_empty (tail (tail l)))
           (cons (second l) (cons (first l) nil))
-          (if (is_empty (tail (tail (tail l))))
+          (if (list.is_empty (tail (tail (tail l))))
             (cons (third l) (cons (second l) (cons (first l) nil)))
-            (cons (fourth l) (cons (third l) (cons (second l) (cons (first l) nil))))))))))
+            (if (list.is_empty (tail (tail (tail (tail l)))))
+              (cons (fourth l) (cons (third l) (cons (second l) (cons (first l) nil))))
+              (cons (fifth l) (cons (fourth l) (cons (third l) (cons (second l) (cons (first l) nil))))))))))))
 
-(define empty_queue (pair nil nil))
-(define queue_singleton (\x (pair nil (cons x nil))))
-(define is_empty_queue (\q (and (is_empty (fst q)) (is_empty (snd q)))))
+(define empty (pair nil nil))
+(define singleton (\x (pair nil (cons x nil))))
+(define is_empty (\q (and (list.is_empty (fst q)) (list.is_empty (snd q)))))
 
-(define queue_push
+(define push
   (\x (\q
-    (if (is_empty (snd q))
+    (if (list.is_empty (snd q))
       (pair (fst q) (cons x nil))
       (pair (cons x (fst q)) (snd q))))))
 
-(define queue_peek (\q (head (snd q))))
+(define peek (\q (head (snd q))))
 
-(define queue_pop
+(define pop
   (\q
-    (if (is_empty (tail (snd q)))
-      (pair nil (queue_rev (fst q)))
+    (if (list.is_empty (tail (snd q)))
+      (pair nil (queue.rev (fst q)))
       (pair (fst q) (tail (snd q))))))
+
+(namespace _)
+(open queue)
+(define queue_rev queue.rev)
+(define empty_queue queue.empty)
+(define queue_singleton queue.singleton)
+(define is_empty_queue queue.is_empty)
+(define queue_push queue.push)
+(define queue_peek queue.peek)
+(define queue_pop queue.pop)

@@ -1,40 +1,64 @@
-; lin standard library: general result waiting & I/O primitives
+; ==============================================================================
+; Lin Standard Library: Input / Output Primitives & Foreign Calls
+; ==============================================================================
+; Asynchronous event-driven I/O, destination-directed stream writing, and
+; POSIX file operations integrated with interaction net readback.
+; ==============================================================================
+
 (load "list.lin")
 (load "ffi.lin")
 
-; General waiting for results:
-; Waits for results from any source:
-;   - 0 or "stdin": terminal input / stdin
-;   - fd (integer): file descriptor / pipe / socket / channel
-;   - "!cmd" or "cmd:...": external process execution output
-;   - "file:...": file contents on disk
-;   - "sleep:ms": timer / delay
-;   - FFI call: foreign computation result
-(define io_wait     (\src (\cb (\_iow ((_iow src) cb)))))
-(define io_read     (\cb (io_wait 0 cb)))
-(define io_file     (\path (\cb (io_wait path cb))))
+(namespace io)
 
-; Destination-directed writing:
-;   - 1 or omitted: stdout
-;   - 2: stderr
-(define io_write_to (\dst (\msg (\next (\_iop (((_iop dst) msg) next))))))
-(define io_print    (\msg (\next (\_iop ((_iop msg) next)))))
-(define io_done     (\_iod _iod))
+; --- Asynchronous Waiting & Reading ---
+; Waits for events from descriptors, commands, files, timers, or FFI results:
+;   - 0 or "stdin": terminal input
+;   - fd (integer): file descriptor / pipe / socket
+;   - "!cmd" or "cmd:...": process output
+;   - "file:...": disk file contents
+;   - "sleep:ms": timer delay
+(define wait (\src (\cb (\_iow ((_iow src) cb)))))
+(define read (\cb (io.wait 0 cb)))
+(define file (\path (\cb (io.wait path cb))))
 
-; Prompt and wait for input:
-(define io_prompt   (\prompt (\cb (io_print prompt (io_read cb)))))
+; --- Destination-Directed Output ---
+;   - 1 or omitted: standard output
+;   - 2: standard error
+(define write_to (\dst (\msg (\next (\_iop (((_iop dst) msg) next))))))
+(define print    (\msg (\next (\_iop ((_iop msg) next)))))
+(define done     (\_iod _iod))
 
-; FFI Stream & Character Printing
-(define puts        (\s (ccall1 "puts" s)))
-(define putchar     (\c (ccall1 "putchar" c)))
+; --- Interactive Utilities ---
+(define prompt   (\p (\cb (io.print p (io.read cb)))))
 
-; FFI File Operations
-(define fopen       (\path (\mode (ccall2 "fopen" path mode))))
-(define fclose      (\fp (ccall1 "fclose" fp)))
-(define fgetc       (\fp (ccall1 "fgetc" fp)))
-(define fputc       (\c (\fp (ccall2 "fputc" c fp))))
+; --- Native C Standard I/O Bindings ---
+(define puts     (\s (ffi.ccall1 "puts" s)))
+(define putchar  (\c (ffi.ccall1 "putchar" c)))
+(define fopen    (\path (\mode (ffi.ccall2 "fopen" path mode))))
+(define fclose   (\fp (ffi.ccall1 "fclose" fp)))
+(define fgetc    (\fp (ffi.ccall1 "fgetc" fp)))
+(define fputc    (\c (\fp (ffi.ccall2 "fputc" c fp))))
 
-; Monadic wrappers for FFI printing & calls
-(define io_call     (\fn (\args (\cb (io_wait (ffi fn args) cb)))))
-(define io_puts     (\s (\next (io_wait (puts s) (\_ next)))))
-(define io_putchar  (\c (\next (io_wait (putchar c) (\_ next)))))
+; --- Monadic Wrappers ---
+(define call       (\fn (\args (\cb (io.wait (ffi.ffi fn args) cb)))))
+(define io_puts    (\s (\next (io.wait (io.puts s) (\_ next)))))
+(define io_putchar (\c (\next (io.wait (io.putchar c) (\_ next)))))
+
+(namespace _)
+(open io)
+(define io_wait io.wait)
+(define io_read io.read)
+(define io_file io.file)
+(define io_write_to io.write_to)
+(define io_print io.print)
+(define io_done io.done)
+(define io_prompt io.prompt)
+(define puts io.puts)
+(define putchar io.putchar)
+(define fopen io.fopen)
+(define fclose io.fclose)
+(define fgetc io.fgetc)
+(define fputc io.fputc)
+(define io_call io.call)
+(define io_puts io.io_puts)
+(define io_putchar io.io_putchar)

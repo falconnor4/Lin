@@ -1,10 +1,32 @@
-; lin standard library: pairs
+; ==============================================================================
+; Lin Standard Library: Pairs & Product Types
+; ==============================================================================
+; Provides pure Church-encoded 2-tuples, projections, and combinators.
+; ==============================================================================
+
 (load "bool.lin")
 
+(namespace pair)
+
+; --- Constructor ---
 (define pair (\x (\y (\f ((f x) y)))))
-(define fst (\p (p true)))
-(define snd (\p (p false)))
+
+; --- Projections ---
+(define fst (\p (p bool.true)))
+(define snd (\p (p bool.false)))
+
+; --- Combinators ---
 (define swap (\p (pair (snd p) (fst p))))
-(define pair_map (\f (\g (\p (pair (f (fst p)) (g (snd p)))))))
+(define map  (\f (\g (\p (pair (f (fst p)) (g (snd p)))))))
 (define curry (\f (\x (\y (f (pair x y))))))
 (define uncurry (\f (\p ((f (fst p)) (snd p)))))
+
+(namespace _)
+(open pair)
+(define pair pair.pair)
+(define fst pair.fst)
+(define snd pair.snd)
+(define swap pair.swap)
+(define pair_map pair.map)
+(define curry pair.curry)
+(define uncurry pair.uncurry)

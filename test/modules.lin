@@ -1,0 +1,88 @@
+; Comprehensive test suite for Lin modules, namespaces, and scoping
+
+(load "std/std.lin")
+
+; 1. Basic namespace definition and qualified access
+(namespace test_a)
+(define x 100)
+(define add10 (\n (add n 10)))
+(namespace _)
+
+test_a.x
+; expect => 100
+
+(test_a.add10 5)
+; expect => 15
+
+; 2. Multiple namespaces with identical identifier names (no collisions)
+(namespace test_b)
+(define x 200)
+(define add10 (\n (add n 20)))
+(namespace _)
+
+test_b.x
+; expect => 200
+
+(test_b.add10 5)
+; expect => 25
+
+; Qualified access to test_a.x still unchanged
+test_a.x
+; expect => 100
+
+; 3. Opening namespaces
+(open test_a)
+x
+; expect => 100
+
+(add10 5)
+; expect => 15
+
+; 4. Opening test_b shadows or takes priority for open lookup
+(open test_b)
+x
+; expect => 200
+
+(add10 5)
+; expect => 25
+
+; Explicit qualification always resolves precisely
+test_a.x
+; expect => 100
+test_b.x
+; expect => 200
+
+; 5. Standard library namespaced functions
+(math.min 3 7)
+; expect => 3
+
+(math.max 3 7)
+; expect => 7
+
+(math.sqr 6)
+; expect => 36
+
+(str.is_empty str.empty)
+; expect => true
+
+(str.length "hello")
+; expect => 5
+
+; 6. Church self-iterating folds in list module
+(define cl (list.c_cons 1 (list.c_cons 2 (list.c_cons 3 list.c_nil))))
+(list.c_length cl)
+; expect => 3
+
+(define sl (list.c_to_scott cl))
+(head sl)
+; expect => 1
+(head (tail sl))
+; expect => 2
+(head (tail (tail sl)))
+; expect => 3
+
+; 7. Church self-iterating stream operations
+(define s (stream.nats 0))
+(define c4 (\f (\x (f (f (f (f x)))))))
+(stream.nth_c c4 s)
+; expect => 4

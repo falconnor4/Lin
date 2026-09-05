@@ -23,9 +23,32 @@ int ndefs = 0, defcap = 0;
 static long STEP_LIMIT = 1L << 24;
 static int bench_mode = 0;
 
-Def *def_find(const char *name) {
-  for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, name)) return &defs[i];
+char curr_ns[NAME] = "";
+char open_ns[32][NAME];
+int n_open_ns = 0;
+
+void set_namespace(const char *name) {
+  if (!name || !*name || !strcmp(name, "_") || !strcmp(name, "root")) curr_ns[0] = '\0';
+  else snprintf(curr_ns, sizeof curr_ns, "%s", name);
+}
+void open_namespace(const char *name) {
+  if (!name || !*name) return;
+  for (int i = 0; i < n_open_ns; i++) if (!strcmp(open_ns[i], name)) return;
+  if (n_open_ns < 32) snprintf(open_ns[n_open_ns++], NAME, "%s", name);
+}
+static Def *lookup_raw(const char *s) {
+  for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, s)) return &defs[i];
   return NULL;
+}
+Def *def_find(const char *name) {
+  char qn[NAME]; Def *d;
+  if (strchr(name, '.')) return lookup_raw(name);
+  if (curr_ns[0]) { snprintf(qn, sizeof qn, "%s.%s", curr_ns, name); if ((d = lookup_raw(qn))) return d; }
+  for (int o = n_open_ns - 1; o >= 0; o--) {
+    snprintf(qn, sizeof qn, "%s.%s", open_ns[o], name);
+    if ((d = lookup_raw(qn))) return d;
+  }
+  return lookup_raw(name);
 }
 
 typedef struct { char (*names)[NAME]; int count, cap; } Guard;
@@ -73,15 +96,11 @@ static void run_and_report(Net *net) {
 
 void eval_form(Term *t) {
   char err[512]; Scheme sch;
-  if (t->type == TDEF || t->type == TDEFX) return;
+  if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
   if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); return; }
-  Term *ex = expand_defs(t);
-  Net net; net_init(&net, 1 << 16);
-  if (!compile(ex, &net, err, sizeof err)) {
-    printf("error: %s\n", err); net_free(&net); term_free(ex); return;
-  }
-  run_and_report(&net);
-  net_free(&net); term_free(ex);
+  Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
+  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
+  run_and_report(&net); net_free(&net); term_free(ex);
 }
 
 /* Z = \_f. ((\_x. _f (\_v. _x _x _v)) (\_x. _f (\_v. _x _x _v))) */
@@ -89,6 +108,18 @@ static Term *y_term(void) {
   Term *xxv = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "_x", 0, 0), term_new(TVAR, "_x", 0, 0)), term_new(TVAR, "_v", 0, 0));
   Term *half = term_new(TLAM, "_x", term_new(TAPP, "", term_new(TVAR, "_f", 0, 0), term_new(TLAM, "_v", xxv, 0)), 0);
   return term_new(TLAM, "_f", term_new(TAPP, "", half, term_copy(half)), 0);
+}
+
+static void qualify_free(Term *t, Guard *b) {
+  if (!t) return;
+  if (t->type == TVAR && !strchr(t->name, '.') && !guard_has(b, t->name) && curr_ns[0]) {
+    char qn[NAME]; snprintf(qn, sizeof qn, "%s.%s", curr_ns, t->name);
+    if (lookup_raw(qn)) snprintf(t->name, NAME, "%s", qn);
+  }
+  int bound = (t->type == TLAM);
+  if (bound) guard_push(b, t->name);
+  qualify_free(t->l, b); qualify_free(t->r, b);
+  if (bound) b->count--;
 }
 
 static void process_def(Term *t) {
@@ -99,10 +130,11 @@ static void process_def(Term *t) {
            : rec ? type_check_rec(t->name, t->l, &sch, err, sizeof err)
                  : type_check(t->l, &sch, err, sizeof err);
   if (!ok) { printf("error: %s\n", err); return; }
+  Guard b = {0}; qualify_free(t->l, &b); free(b.names);
   Def *d = &defs[ndefs++];
-  snprintf(d->name, NAME, "%s", t->name);
-  d->sch = sch;
-  d->typed = 1;
+  if (curr_ns[0] && !strchr(t->name, '.')) snprintf(d->name, NAME, "%s.%s", curr_ns, t->name);
+  else snprintf(d->name, NAME, "%s", t->name);
+  d->sch = sch; d->typed = 1;
   d->term = rec ? term_new(TAPP, "", y_term(), term_new(TLAM, t->name, t->l, NULL)) : t->l;
   t->l = NULL;
 }
@@ -120,8 +152,7 @@ static char (*dir_stack)[PATH_MAX];
 static int dir_sp = 0, dir_cap = 0;
 
 static int is_already_loaded(const char *canon) {
-  for (int i = 0; i < n_loaded; i++)
-    if (!strcmp(loaded_paths[i], canon)) return 1;
+  for (int i = 0; i < n_loaded; i++) if (!strcmp(loaded_paths[i], canon)) return 1;
   return 0;
 }
 
@@ -131,20 +162,11 @@ static void mark_loaded(const char *canon) {
 }
 
 static char *read_file(const char *path) {
-  FILE *f = fopen(path, "rb");
-  if (!f) return NULL;
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  char *buf = malloc(sz + 1);
-  if (!buf || fread(buf, 1, sz, f) != (size_t)sz) {
-    fclose(f);
-    free(buf);
-    return NULL;
-  }
-  buf[sz] = 0;
-  fclose(f);
-  return buf;
+  FILE *f = fopen(path, "rb"); if (!f) return NULL;
+  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  char *buf = malloc((size_t)sz + 1);
+  if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(buf); return NULL; }
+  buf[sz] = 0; fclose(f); return buf;
 }
 
 static int resolve_path(const char *rel, char *out, size_t out_sz) {
@@ -176,6 +198,8 @@ static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
   if (perr) { printf("error: %s\n", perr); return; }
   if (t->type == TLOAD) { if (!load_file(t->name)) printf("error: cannot load '%s'\n", t->name); }
+  else if (t->type == TNS) set_namespace(t->name);
+  else if (t->type == TOPEN) open_namespace(t->name);
   else if (t->type == TDEF || t->type == TDEFX) process_def(t);
   else if (building) { if (build_term) term_free(build_term); build_term = term_copy(t); }
   else eval_form(t);
@@ -192,16 +216,16 @@ static int load_file(const char *path) {
   char *src = read_file(full);
   if (!src) return 0;
 
-  char dir[PATH_MAX];
-  snprintf(dir, sizeof dir, "%s", full);
+  char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", full);
   char *last_slash = strrchr(dir, '/');
-  if (last_slash) *last_slash = '\0';
-  else snprintf(dir, sizeof dir, ".");
+  if (last_slash) *last_slash = '\0'; else snprintf(dir, sizeof dir, ".");
 
   if (dir_sp >= dir_cap) dir_stack = realloc(dir_stack, (size_t)(dir_cap = dir_cap ? dir_cap * 2 : 16) * sizeof *dir_stack);
   snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
 
+  char prev_ns[NAME]; snprintf(prev_ns, sizeof prev_ns, "%s", curr_ns); int prev_n_open = n_open_ns;
   parse_forms(src, form_cb, NULL);
+  snprintf(curr_ns, sizeof curr_ns, "%s", prev_ns); n_open_ns = prev_n_open;
 
   if (dir_sp > 0) dir_sp--;
   free(src);

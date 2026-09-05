@@ -1,18 +1,37 @@
-; lin standard library: foreign function interface (FFI)
+; ==============================================================================
+; Lin Standard Library: Foreign Function Interface (FFI)
+; ==============================================================================
+; Direct invocation of native C symbols, system calls, and shared libraries.
+; ==============================================================================
+
 (load "list.lin")
 
+(namespace ffi)
+
 ; FFI action is encoded as: (\_ffi (\_ret ((_ffi fn) args)))
-(define ffi (\fn (\args (\_ffi (\_ret ((_ffi fn) args))))))
-(define ccall0 (\fn (ffi fn nil)))
-(define ccall1 (\fn (\a1 (ffi fn (cons a1 nil)))))
-(define ccall2 (\fn (\a1 (\a2 (ffi fn (cons a1 (cons a2 nil)))))))
-(define ccall3 (\fn (\a1 (\a2 (\a3 (ffi fn (cons a1 (cons a2 (cons a3 nil)))))))))
+(define ffi    (\fn (\args (\_ffi (\_ret ((_ffi fn) args))))))
+(define ccall0 (\fn (ffi.ffi fn list.nil)))
+(define ccall1 (\fn (\a1 (ffi.ffi fn (list.cons a1 list.nil)))))
+(define ccall2 (\fn (\a1 (\a2 (ffi.ffi fn (list.cons a1 (list.cons a2 list.nil)))))))
+(define ccall3 (\fn (\a1 (\a2 (\a3 (ffi.ffi fn (list.cons a1 (list.cons a2 (list.cons a3 list.nil)))))))))
 
 ; Core POSIX & System Bindings
-(define exit (\c (ccall1 "exit" c)))
-(define getenv (\name (ccall1 "getenv" name)))
-(define system (\cmd (ccall1 "system" cmd)))
-(define load_lib (\lib (ccall1 "dlopen" lib)))
+(define exit     (\c (ffi.ccall1 "exit" c)))
+(define getenv   (\name (ffi.ccall1 "getenv" name)))
+(define system   (\cmd (ffi.ccall1 "system" cmd)))
+(define load_lib (\lib (ffi.ccall1 "dlopen" lib)))
+
+(namespace _)
+(open ffi)
+(define ffi ffi.ffi)
+(define ccall0 ffi.ccall0)
+(define ccall1 ffi.ccall1)
+(define ccall2 ffi.ccall2)
+(define ccall3 ffi.ccall3)
+(define exit ffi.exit)
+(define getenv ffi.getenv)
+(define system ffi.system)
+(define load_lib ffi.load_lib)
 
 ; Load I/O module (printing, character streams, file operations)
 (load "io.lin")

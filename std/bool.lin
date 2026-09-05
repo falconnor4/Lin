@@ -1,10 +1,37 @@
-; lin standard library: booleans & conditionals
+; ==============================================================================
+; Lin Standard Library: Booleans & Conditionals
+; ==============================================================================
+; Provides pure Church-encoded booleans and branching combinators for
+; interaction net reduction.
+; ==============================================================================
 
-(define! true bool (\_bt (\_bf _bt)))
+(namespace bool)
+
+; --- Core Constructors ---
+(define! true  bool (\_bt (\_bf _bt)))
 (define! false bool (\_bt (\_bf _bf)))
+
+; --- Logical Operators ---
 (define! not (bool -> bool) (\b ((b false) true)))
 (define! and (bool -> bool -> bool) (\a (\b ((a b) false))))
-(define! or (bool -> bool -> bool) (\a (\b ((a true) b))))
+(define! or  (bool -> bool -> bool) (\a (\b ((a true) b))))
 (define! xor (bool -> bool -> bool) (\a (\b ((a (not b)) b))))
+
+; --- Conditionals ---
+; Strict conditional: both branches are linked to the decision cell.
 (define! if (bool -> a -> a -> a) (\c (\t (\f ((c t) f)))))
+
+; Lazy (thunked) conditional: branches are zero-argument thunks (_ -> value).
+; Only the selected branch is evaluated; the unselected branch is cleanly erased.
 (define! ifl (bool -> (a -> b) -> (a -> b) -> b) (\c (\t (\f (((c t) f) 0)))))
+
+(namespace _)
+(open bool)
+(define! true  bool bool.true)
+(define! false bool bool.false)
+(define! not (bool -> bool) bool.not)
+(define! and (bool -> bool -> bool) bool.and)
+(define! or  (bool -> bool -> bool) bool.or)
+(define! xor (bool -> bool -> bool) bool.xor)
+(define! if  (bool -> a -> a -> a) bool.if)
+(define! ifl (bool -> (a -> b) -> (a -> b) -> b) bool.ifl)

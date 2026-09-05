@@ -7,7 +7,7 @@
 #define NAME 256
 
 /* ---------------- core terms (pure untyped lambda) ---------------- */
-enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD };
+enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN };
 typedef struct Type { int kind, id; struct Type *a, *b; } Type;
 typedef struct Term {
   int type;
@@ -69,6 +69,7 @@ typedef struct { char name[NAME]; Term *term; Scheme sch; int typed; } Def;
 extern Def *defs;
 extern int ndefs, lin_threads;
 Def *def_find(const char *name);
+void set_namespace(const char *name); void open_namespace(const char *name);
 Term *expand_defs(Term *t);
 void eval_form(Term *t);
 

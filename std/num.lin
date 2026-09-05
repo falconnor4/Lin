@@ -1,80 +1,126 @@
-; lin standard library: numbers (Scott numerals & FFI arithmetic)
-(load "bool.lin")
-(load "ffi.lin")
+; ==============================================================================
+; Lin Standard Library: Numerals & Arithmetic
+; ==============================================================================
+; Combines Scott numerals (for O(1) predecessor & pattern matching) and
+; Church numerals (for pure unbounded self-iterating arithmetic folds).
+; ==============================================================================
 
+(load "bool.lin")
+
+(namespace num)
+
+; --- Core Scott Numeral Constructors & Destructors ---
 (define! zero num 0)
 (define! succ (num -> num) (\n (\_sz (\_ss (_ss n)))))
 (define! pred (num -> num) (\n ((n 0) (\p p))))
-(define! is_zero (num -> bool) (\n ((n true) (\p false))))
+(define! is_zero (num -> bool) (\n ((n bool.true) (\p bool.false))))
 
-; Hybrid equality: pure in-net reduction for 0..5, FFI for >= 6
+; --- Church Numerals & Self-Iterating Folds ---
+(define c_zero (\f (\x x)))
+(define c_succ (\n (\f (\x (f (n f x))))))
+(define c_add  (\a (\b (\f (\x (a f (b f x)))))))
+(define c_mul  (\a (\b (\f (a (b f))))))
+(define c_pow  (\b (\e (e b))))
+(define c_to_scott (\cn (cn num.succ 0)))
+
+(load "ffi.lin")
+
+; --- Hybrid Equality (Pure in-net 0..5, FFI fallback) ---
 (define! eq (num -> num -> bool)
   (\a (\b
-    ((a (is_zero b))
-      (\pa ((b false)
-        (\pb ((pa (is_zero pb))
-          (\ppa ((pb false)
-            (\ppb ((ppa (is_zero ppb))
-              (\pppa ((ppb false)
-                (\pppb ((pppa (is_zero pppb))
-                  (\ppppa ((pppb false)
-                    (\ppppb ((ppppa (is_zero ppppb))
-                      (\pppppa ((ppppb false)
-                        (\pppppb ((pppppa (is_zero pppppb))
+    ((a (num.is_zero b))
+      (\pa ((b bool.false)
+        (\pb ((pa (num.is_zero pb))
+          (\ppa ((pb bool.false)
+            (\ppb ((ppa (num.is_zero ppb))
+              (\pppa ((ppb bool.false)
+                (\pppb ((pppa (num.is_zero pppb))
+                  (\ppppa ((pppb bool.false)
+                    (\ppppb ((ppppa (num.is_zero ppppb))
+                      (\pppppa ((ppppb bool.false)
+                        (\pppppb ((pppppa (num.is_zero pppppb))
                           (\_ (ccall2 "lin_eq" a b))))))))))))))))))))))))))
 
-; Hybrid arithmetic: pure in-net reduction for 0..4, FFI for larger
+; --- Hybrid Arithmetic ---
 (define! add (num -> num -> num)
   (\a (\b
     ((a b)
-      (\pa ((pa (succ b))
-        (\ppa ((ppa (succ (succ b)))
-          (\pppa ((pppa (succ (succ (succ b))))
-            (\ppppa ((ppppa (succ (succ (succ (succ b)))))
+      (\pa ((pa (num.succ b))
+        (\ppa ((ppa (num.succ (num.succ b)))
+          (\pppa ((pppa (num.succ (num.succ (num.succ b))))
+            (\ppppa ((ppppa (num.succ (num.succ (num.succ (num.succ b)))))
               (\_ (ccall2 "lin_add" a b))))))))))))))
 
 (define! sub (num -> num -> num)
   (\a (\b
     ((b a)
-      (\pb ((pb (pred a))
-        (\ppb ((ppb (pred (pred a)))
-          (\pppb ((pppb (pred (pred (pred a))))
-            (\ppppa ((ppppa (pred (pred (pred (pred a)))))
+      (\pb ((pb (num.pred a))
+        (\ppb ((ppb (num.pred (num.pred a)))
+          (\pppb ((pppb (num.pred (num.pred (num.pred a))))
+            (\ppppa ((ppppa (num.pred (num.pred (num.pred (num.pred a)))))
               (\_ (ccall2 "lin_sub" a b))))))))))))))
 
 (define! mul (num -> num -> num)
   (\a (\b
     ((a 0)
       (\pa ((pa b)
-        (\ppa ((ppa ((add b) b))
-          (\pppa ((pppa ((add b) ((add b) b)))
-            (\ppppa ((ppppa ((add b) ((add b) ((add b) b))))
+        (\ppa ((ppa ((num.add b) b))
+          (\pppa ((pppa ((num.add b) ((num.add b) b)))
+            (\ppppa ((ppppa ((num.add b) ((num.add b) ((num.add b) b))))
               (\_ (ccall2 "lin_mul" a b))))))))))))))
+
 (define! div (num -> num -> num) (\a (\b (ccall2 "lin_div" a b))))
 (define! mod (num -> num -> num) (\a (\b (ccall2 "lin_mod" a b))))
 
-; Hybrid comparisons: pure in-net reduction for 0..5, FFI for larger
+; --- Hybrid Comparisons ---
 (define! lt (num -> num -> bool)
   (\a (\b
-    ((a (not (is_zero b)))
-      (\pa ((b false)
-        (\pb ((pa (not (is_zero pb)))
-          (\ppa ((pb false)
-            (\ppb ((ppa (not (is_zero ppb)))
-              (\pppa ((ppb false)
-                (\pppb ((pppa (not (is_zero pppb)))
-                  (\ppppa ((pppb false)
-                    (\ppppb ((ppppa (not (is_zero ppppb)))
-                      (\pppppa ((ppppb false)
-                        (\pppppb ((pppppa (not (is_zero pppppb)))
+    ((a (bool.not (num.is_zero b)))
+      (\pa ((b bool.false)
+        (\pb ((pa (bool.not (num.is_zero pb)))
+          (\ppa ((pb bool.false)
+            (\ppb ((ppa (bool.not (num.is_zero ppb)))
+              (\pppa ((ppb bool.false)
+                (\pppb ((pppa (bool.not (num.is_zero pppb)))
+                  (\ppppa ((pppb bool.false)
+                    (\ppppb ((ppppa (bool.not (num.is_zero ppppb)))
+                      (\pppppa ((ppppb bool.false)
+                        (\pppppb ((pppppa (bool.not (num.is_zero pppppb)))
                           (\_ (ccall2 "lin_lt" a b))))))))))))))))))))))))))
 
-(define! gt  (num -> num -> bool) (\a (\b ((lt b) a))))
-(define! leq (num -> num -> bool) (\a (\b (not ((lt b) a)))))
-(define! geq (num -> num -> bool) (\a (\b (not ((lt a) b)))))
+(define! gt  (num -> num -> bool) (\a (\b ((num.lt b) a))))
+(define! leq (num -> num -> bool) (\a (\b (bool.not ((num.lt b) a)))))
+(define! geq (num -> num -> bool) (\a (\b (bool.not ((num.lt a) b)))))
 
 ; Scott aliases
-(define zero_s zero)
-(define succ_s succ)
-(define pred_s pred)
-(define is_zero_s is_zero)
+(define zero_s num.zero)
+(define succ_s num.succ)
+(define pred_s num.pred)
+(define is_zero_s num.is_zero)
+
+(namespace _)
+(open num)
+(define! zero num num.zero)
+(define! succ (num -> num) num.succ)
+(define! pred (num -> num) num.pred)
+(define! is_zero (num -> bool) num.is_zero)
+(define! eq (num -> num -> bool) num.eq)
+(define! add (num -> num -> num) num.add)
+(define! sub (num -> num -> num) num.sub)
+(define! mul (num -> num -> num) num.mul)
+(define! div (num -> num -> num) num.div)
+(define! mod (num -> num -> num) num.mod)
+(define! lt  (num -> num -> bool) num.lt)
+(define! leq (num -> num -> bool) num.leq)
+(define! gt  (num -> num -> bool) num.gt)
+(define! geq (num -> num -> bool) num.geq)
+(define zero_s num.zero_s)
+(define succ_s num.succ_s)
+(define pred_s num.pred_s)
+(define is_zero_s num.is_zero_s)
+(define c_zero num.c_zero)
+(define c_succ num.c_succ)
+(define c_add num.c_add)
+(define c_mul num.c_mul)
+(define c_pow num.c_pow)
+(define c_to_scott num.c_to_scott)

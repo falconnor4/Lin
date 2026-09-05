@@ -1,7 +1,13 @@
-; lin standard library: math utilities & combinators
+; ==============================================================================
+; Lin Standard Library: Math Utilities & Arithmetic Combinators
+; ==============================================================================
+; Numerical bounds, squaring, cubing, absolute difference, and signum.
+; ==============================================================================
+
 (load "bool.lin")
 (load "num.lin")
 
+(namespace math)
 (define min (\a (\b (if ((leq a) b) a b))))
 (define max (\a (\b (if ((geq a) b) a b))))
 (define clamp (\lo (\hi (\x ((max lo) ((min hi) x))))))
@@ -9,3 +15,13 @@
 (define cube (\x ((mul x) (sqr x))))
 (define abs_diff (\a (\b (if ((geq a) b) ((sub a) b) ((sub b) a)))))
 (define sign (\x (if (is_zero x) 0 1)))
+
+(namespace _)
+(open math)
+(define min math.min)
+(define max math.max)
+(define clamp math.clamp)
+(define sqr math.sqr)
+(define cube math.cube)
+(define abs_diff math.abs_diff)
+(define sign math.sign)

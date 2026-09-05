@@ -61,9 +61,9 @@ static void env_push(const char *name, Scheme s) {
 }
 
 static Scheme *env_find(const char *name) {
-  for (int i = envn - 1; i >= 0; i--)
-    if (!strcmp(env[i].name, name)) return &env[i].s;
-  return NULL;
+  for (int i = envn - 1; i >= 0; i--) if (!strcmp(env[i].name, name)) return &env[i].s;
+  Def *d = def_find(name);
+  return (d && d->typed) ? &d->sch : NULL;
 }
 
 static void fv(Type *t, int *set, int *n) {

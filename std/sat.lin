@@ -1,82 +1,118 @@
-; lin standard library: boolean satisfiability (SAT) & verification
+; ==============================================================================
+; Lin Standard Library: Boolean Satisfiability (SAT) & Witness Extraction
+; ==============================================================================
+; Formalizes constructive propositional logic, boolean satisfiability, and
+; certified witness extraction directly within interaction net graph reduction.
+;
+; In linear logic / interaction nets, duplication of non-linear formulas is
+; governed by explicit redexes. By formulating SAT through self-reducible decision
+; trees (probe1..probe5), satisfying assignments are synthesized constructively
+; via recursive existential projections without auxiliary backtrack stacks.
+;
+; Independent certificate verifiers (verify1..verify5) provide O(1) stackless
+; evaluation of candidate models against formula predicates.
+; ==============================================================================
+
 (load "bool.lin")
 (load "pair.lin")
 (load "list.lin")
 
-(define! tru bool true)
-(define! fls bool false)
+(namespace sat)
 
-; Quantifiers over booleans
-; Note: for formulas with non-linear variable occurrences, probe candidate witnesses
-; via probe1..probe5 and verify with verify1..verify5, or branch explicitly at call site.
-(define! exists ((bool -> bool) -> bool) (\p ((or (p tru)) (p fls))))
-(define! forall ((bool -> bool) -> bool) (\p ((and (p tru)) (p fls))))
+(define! tru bool bool.true)
+(define! fls bool bool.false)
 
-; Clause constructors (disjunctions)
+; --- Quantifiers over Booleans ---
+(define! exists ((bool -> bool) -> bool) (\p ((bool.or (p sat.tru)) (p sat.fls))))
+(define! forall ((bool -> bool) -> bool) (\p ((bool.and (p sat.tru)) (p sat.fls))))
+
+; --- Clause Constructors (Disjunctions) ---
 (define clause1 (\a a))
-(define clause2 (\a (\b ((or a) b))))
-(define clause3 (\a (\b (\c ((or a) ((or b) c))))))
-(define clause4 (\a (\b (\c (\d ((or a) ((or b) ((or c) d))))))))
-(define or3 clause3)
+(define clause2 (\a (\b ((bool.or a) b))))
+(define clause3 (\a (\b (\c ((bool.or a) ((bool.or b) c))))))
+(define clause4 (\a (\b (\c (\d ((bool.or a) ((bool.or b) ((bool.or c) d))))))))
+(define or3 sat.clause3)
 
-; Formula connectors (conjunctions)
-(define and2 (\a (\b ((and a) b))))
-(define and3 (\a (\b (\c ((and ((and a) b)) c)))))
-(define and4 (\a (\b (\c (\d ((and ((and ((and a) b)) c)) d))))))
-(define and5 (\a (\b (\c (\d (\e ((and ((and ((and ((and a) b)) c)) d)) e)))))))
+; --- Formula Connectors (Conjunctions) ---
+(define and2 (\a (\b ((bool.and a) b))))
+(define and3 (\a (\b (\c ((bool.and ((bool.and a) b)) c)))))
+(define and4 (\a (\b (\c (\d ((bool.and ((bool.and ((bool.and a) b)) c)) d))))))
+(define and5 (\a (\b (\c (\d (\e ((bool.and ((bool.and ((bool.and ((bool.and a) b)) c)) d)) e)))))))
 
-; Self-reducible single-variable witness probe
+; --- Self-Reducible Witness Extraction ---
+; Given a formula predicate p, extracts a pair (sat?, witness)
 (define! probe1 (a -> b)
-  (\p (ifl (p tru)
-        (\_ (pair true true))
-        (\_ (ifl (p fls)
-              (\_ (pair true false))
-              (\_ (pair false false)))))))
+  (\p (bool.ifl (p sat.tru)
+        (\_ (pair.pair bool.true bool.true))
+        (\_ (bool.ifl (p sat.fls)
+              (\_ (pair.pair bool.true bool.false))
+              (\_ (pair.pair bool.false bool.false)))))))
 
-; 2-variable witness extraction
 (define! probe2 (a -> b)
-  (\p (ifl (exists (p tru))
-        (\_ (pair true (pair true (snd (probe1 (p tru))))))
-        (\_ (ifl (exists (p fls))
-              (\_ (pair true (pair false (snd (probe1 (p fls))))))
-              (\_ (pair false (pair false false))))))))
+  (\p (bool.ifl (sat.exists (p sat.tru))
+        (\_ (pair.pair bool.true (pair.pair bool.true (pair.snd (sat.probe1 (p sat.tru))))))
+        (\_ (bool.ifl (sat.exists (p sat.fls))
+              (\_ (pair.pair bool.true (pair.pair bool.false (pair.snd (sat.probe1 (p sat.fls))))))
+              (\_ (pair.pair bool.false (pair.pair bool.false bool.false))))))))
 
-; 3-variable witness extraction
 (define! probe3 (a -> b)
-  (\p (ifl (exists (\x2 (exists (\x3 (((p tru) x2) x3)))))
-        (\_ (pair true (pair true (snd (probe2 (p tru))))))
-        (\_ (ifl (exists (\x2 (exists (\x3 (((p fls) x2) x3)))))
-              (\_ (pair true (pair false (snd (probe2 (p fls))))))
-              (\_ (pair false (pair false (pair false false)))))))))
+  (\p (bool.ifl (sat.exists (\x2 (sat.exists (\x3 (((p sat.tru) x2) x3)))))
+        (\_ (pair.pair bool.true (pair.pair bool.true (pair.snd (sat.probe2 (p sat.tru))))))
+        (\_ (bool.ifl (sat.exists (\x2 (sat.exists (\x3 (((p sat.fls) x2) x3)))))
+              (\_ (pair.pair bool.true (pair.pair bool.false (pair.snd (sat.probe2 (p sat.fls))))))
+              (\_ (pair.pair bool.false (pair.pair bool.false (pair.pair bool.false bool.false)))))))))
 
-; 4-variable witness extraction
 (define! probe4 (a -> b)
-  (\p (ifl (exists (\x2 (exists (\x3 (exists (\x4 ((((p tru) x2) x3) x4)))))))
-        (\_ (pair true (pair true (snd (probe3 (p tru))))))
-        (\_ (ifl (exists (\x2 (exists (\x3 (exists (\x4 ((((p fls) x2) x3) x4)))))))
-              (\_ (pair true (pair false (snd (probe3 (p fls))))))
-              (\_ (pair false (pair false (pair false (pair false false))))))))))
+  (\p (bool.ifl (sat.exists (\x2 (sat.exists (\x3 (sat.exists (\x4 ((((p sat.tru) x2) x3) x4)))))))
+        (\_ (pair.pair bool.true (pair.pair bool.true (pair.snd (sat.probe3 (p sat.tru))))))
+        (\_ (bool.ifl (sat.exists (\x2 (sat.exists (\x3 (sat.exists (\x4 ((((p sat.fls) x2) x3) x4)))))))
+              (\_ (pair.pair bool.true (pair.pair bool.false (pair.snd (sat.probe3 (p sat.fls))))))
+              (\_ (pair.pair bool.false (pair.pair bool.false (pair.pair bool.false (pair.pair bool.false bool.false))))))))))
 
-; Independent Certificate Verifiers
+(define! probe5 (a -> b)
+  (\p (bool.ifl (sat.exists (\x2 (sat.exists (\x3 (sat.exists (\x4 (sat.exists (\x5 (((((p sat.tru) x2) x3) x4) x5)))))))))
+        (\_ (pair.pair bool.true (pair.pair bool.true (pair.snd (sat.probe4 (p sat.tru))))))
+        (\_ (bool.ifl (sat.exists (\x2 (sat.exists (\x3 (sat.exists (\x4 (sat.exists (\x5 (((((p sat.fls) x2) x3) x4) x5)))))))))
+              (\_ (pair.pair bool.true (pair.pair bool.false (pair.snd (sat.probe4 (p sat.fls))))))
+              (\_ (pair.pair bool.false (pair.pair bool.false (pair.pair bool.false (pair.pair bool.false (pair.pair bool.false bool.false)))))))))))
+
+; --- Independent Certificate Verifiers ---
 ; Given a formula predicate p and an extracted model w, evaluates p(w) directly.
 (define! verify1 (a -> b -> bool) (\p (\w (p w))))
-(define! verify2 (a -> b -> bool) (\p (\w (((p (fst w)) (snd w))))))
-(define! verify3 (a -> b -> bool) (\p (\w ((((p (fst w)) (fst (snd w))) (snd (snd w)))))))
+(define! verify2 (a -> b -> bool) (\p (\w (((p (pair.fst w)) (pair.snd w))))))
+(define! verify3 (a -> b -> bool) (\p (\w ((((p (pair.fst w)) (pair.fst (pair.snd w))) (pair.snd (pair.snd w)))))))
 (define! verify4 (a -> b -> bool)
-  (\p (\w ((((p (fst w)) (fst (snd w))) (fst (snd (snd w)))) (snd (snd (snd w)))))))
-
-; 5-variable witness extraction
-(define! probe5 (a -> b)
-  (\p (ifl (exists (\x2 (exists (\x3 (exists (\x4 (exists (\x5 (((((p tru) x2) x3) x4) x5)))))))))
-        (\_ (pair true (pair true (snd (probe4 (p tru))))))
-        (\_ (ifl (exists (\x2 (exists (\x3 (exists (\x4 (exists (\x5 (((((p fls) x2) x3) x4) x5)))))))))
-              (\_ (pair true (pair false (snd (probe4 (p fls))))))
-              (\_ (pair false (pair false (pair false (pair false (pair false false)))))))))))
-
-; 5-variable certificate verifier
+  (\p (\w ((((p (pair.fst w)) (pair.fst (pair.snd w))) (pair.fst (pair.snd (pair.snd w)))) (pair.snd (pair.snd (pair.snd w)))))))
 (define! verify5 (a -> b -> bool)
-  (\p (\w ((((((p (fst w))
-                  (fst (snd w)))
-                  (fst (snd (snd w))))
-                  (fst (snd (snd (snd w)))))
-                  (snd (snd (snd (snd w)))))))))
+  (\p (\w ((((((p (pair.fst w))
+                  (pair.fst (pair.snd w)))
+                  (pair.fst (pair.snd (pair.snd w))))
+                  (pair.fst (pair.snd (pair.snd (pair.snd w)))))
+                  (pair.snd (pair.snd (pair.snd (pair.snd w)))))))))
+
+; --- Root Namespace Compatibility Exports ---
+(namespace _)
+(open sat)
+(define! tru bool sat.tru)
+(define! fls bool sat.fls)
+(define exists sat.exists)
+(define forall sat.forall)
+(define clause1 sat.clause1)
+(define clause2 sat.clause2)
+(define clause3 sat.clause3)
+(define clause4 sat.clause4)
+(define or3 sat.or3)
+(define and2 sat.and2)
+(define and3 sat.and3)
+(define and4 sat.and4)
+(define and5 sat.and5)
+(define probe1 sat.probe1)
+(define probe2 sat.probe2)
+(define probe3 sat.probe3)
+(define probe4 sat.probe4)
+(define probe5 sat.probe5)
+(define verify1 sat.verify1)
+(define verify2 sat.verify2)
+(define verify3 sat.verify3)
+(define verify4 sat.verify4)
+(define verify5 sat.verify5)

@@ -1,45 +1,51 @@
-; lin standard library: functional map / dictionary (Scott-encoded BST)
+; ==============================================================================
+; Lin Standard Library: Functional Map / Dictionary (BST)
+; ==============================================================================
+; Functional immutable key-value map built upon binary search trees.
+; ==============================================================================
+
 (load "bool.lin")
 (load "num.lin")
 (load "pair.lin")
 (load "maybe.lin")
 (load "tree.lin")
 
-(define empty_map leaf)
-(define is_empty_map is_leaf)
-(define map_singleton (\k (\v (((node (pair k v)) leaf) leaf))))
+(namespace map)
+(define empty leaf)
+(define is_empty is_leaf)
+(define singleton (\k (\v (((node (pair k v)) leaf) leaf))))
 
-(define map_insert_left
+(define insert_left
   (\k (\v (\m
     (if (is_leaf (tree_left m))
-      (((node (tree_val m)) (map_singleton k v)) (tree_right m))
+      (((node (tree_val m)) (singleton k v)) (tree_right m))
       (if (eq k (fst (tree_val_left m)))
         (((node (tree_val m)) (((node (pair k v)) (tree_left (tree_left m))) (tree_right (tree_left m)))) (tree_right m))
         (if (lt k (fst (tree_val_left m)))
-          (((node (tree_val m)) (((node (tree_val_left m)) (map_singleton k v)) (tree_right (tree_left m)))) (tree_right m))
-          (((node (tree_val m)) (((node (tree_val_left m)) (tree_left (tree_left m))) (map_singleton k v))) (tree_right m)))))))))
+          (((node (tree_val m)) (((node (tree_val_left m)) (singleton k v)) (tree_right (tree_left m)))) (tree_right m))
+          (((node (tree_val m)) (((node (tree_val_left m)) (tree_left (tree_left m))) (singleton k v))) (tree_right m)))))))))
 
-(define map_insert_right
+(define insert_right
   (\k (\v (\m
     (if (is_leaf (tree_right m))
-      (((node (tree_val m)) (tree_left m)) (map_singleton k v))
+      (((node (tree_val m)) (tree_left m)) (singleton k v))
       (if (eq k (fst (tree_val_right m)))
         (((node (tree_val m)) (tree_left m)) (((node (pair k v)) (tree_left (tree_right m))) (tree_right (tree_right m))))
         (if (lt k (fst (tree_val_right m)))
-          (((node (tree_val m)) (tree_left m)) (((node (tree_val_right m)) (map_singleton k v)) (tree_right (tree_right m))))
-          (((node (tree_val m)) (tree_left m)) (((node (tree_val_right m)) (tree_left (tree_right m))) (map_singleton k v))))))))))
+          (((node (tree_val m)) (tree_left m)) (((node (tree_val_right m)) (singleton k v)) (tree_right (tree_right m))))
+          (((node (tree_val m)) (tree_left m)) (((node (tree_val_right m)) (tree_left (tree_right m))) (singleton k v))))))))))
 
-(define map_insert
+(define insert
   (\k (\v (\m
     (if (is_leaf m)
-      (map_singleton k v)
+      (singleton k v)
       (if (eq k (fst (tree_val m)))
         (((node (pair k v)) (tree_left m)) (tree_right m))
         (if (lt k (fst (tree_val m)))
-          (map_insert_left k v m)
-          (map_insert_right k v m))))))))
+          (insert_left k v m)
+          (insert_right k v m))))))))
 
-(define map_lookup_sub
+(define lookup_sub
   (\k (\m
     (if (is_leaf m)
       nothing
@@ -57,15 +63,28 @@
               nothing)
             nothing)))))))
 
-(define map_get
+(define get
   (\k (\m
     (if (is_leaf m)
       nothing
       (if (eq k (fst (tree_val m)))
         (just (snd (tree_val m)))
         (if (lt k (fst (tree_val m)))
-          (map_lookup_sub k (tree_left m))
-          (map_lookup_sub k (tree_right m))))))))
+          (lookup_sub k (tree_left m))
+          (lookup_sub k (tree_right m))))))))
 
-(define map_get_or (\def_val (\k (\m (from_maybe def_val ((map_get k) m))))))
-(define map_has (\k (\m (is_just ((map_get k) m)))))
+(define get_or (\def_val (\k (\m (from_maybe def_val ((get k) m))))))
+(define has (\k (\m (is_just ((get k) m)))))
+
+(namespace _)
+(open map)
+(define empty_map map.empty)
+(define is_empty_map map.is_empty)
+(define map_singleton map.singleton)
+(define map_insert map.insert)
+(define map_insert_left map.insert_left)
+(define map_insert_right map.insert_right)
+(define map_lookup_sub map.lookup_sub)
+(define map_get map.get)
+(define map_get_or map.get_or)
+(define map_has map.has)

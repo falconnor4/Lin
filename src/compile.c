@@ -28,23 +28,14 @@ static _Noreturn void cfail(const char *fmt, ...) {
 }
 
 static void push_var(const char *name, Port bind) {
-  if (csp >= ccsp) {
-    ccsp = ccsp ? ccsp * 2 : 64;
-    cstack = realloc(cstack, (size_t)ccsp * sizeof(CVar));
-  }
+  if (csp >= ccsp) cstack = realloc(cstack, (size_t)(ccsp = ccsp ? ccsp * 2 : 64) * sizeof(CVar));
   CVar *e = &cstack[csp++];
   snprintf(e->name, NAME, "%s", name);
-  e->bind = bind;
-  e->count = 0;
-  e->extra = NULL;
-  e->nextra = e->mextra = 0;
+  e->bind = bind; e->count = 0; e->extra = NULL; e->nextra = e->mextra = 0;
 }
 
 static void add_extra(CVar *e, Port p) {
-  if (e->nextra >= e->mextra) {
-    e->mextra = e->mextra ? e->mextra * 2 : 8;
-    e->extra = realloc(e->extra, (size_t)e->mextra * sizeof(Port));
-  }
+  if (e->nextra >= e->mextra) e->extra = realloc(e->extra, (size_t)(e->mextra = e->mextra ? e->mextra * 2 : 8) * sizeof(Port));
   e->extra[e->nextra++] = p;
 }
 
@@ -105,10 +96,8 @@ static Port ct(Term *t, Scope sc) {
   }
   case TAPP: {
     Port a = net_alloc(N, APP, sc, "");
-    Port f = ct(t->l, sc);
-    net_link(N, (Port){a.node, 0}, f, 1);
-    Port g = ct(t->r, sc);
-    net_link(N, (Port){a.node, 2}, g, 1);
+    net_link(N, (Port){a.node, 0}, ct(t->l, sc), 1);
+    net_link(N, (Port){a.node, 2}, ct(t->r, sc), 1);
     return (Port){a.node, 1};
   }
   case TDEF: return ct(t->l, sc);
@@ -117,12 +106,8 @@ static Port ct(Term *t, Scope sc) {
 }
 
 int compile(Term *t, Net *n, char *err, int errsz) {
-  N = n;
-  csp = 0;
-  if (cstack == NULL) {
-    ccsp = 64;
-    cstack = malloc((size_t)ccsp * sizeof(CVar));
-  }
+  N = n; csp = 0;
+  if (!cstack) { ccsp = 64; cstack = malloc((size_t)ccsp * sizeof(CVar)); }
   if (setjmp(CJ)) {
     snprintf(err, errsz, "%s", CMSG);
     return 0;

@@ -1,11 +1,34 @@
-; lin standard library: either / result type (Scott-encoded)
+; ==============================================================================
+; Lin Standard Library: Either / Result Monad (Scott-Encoded)
+; ==============================================================================
+; Provides disjoint union / error handling types with O(1) destructors.
+; ==============================================================================
+
 (load "bool.lin")
 
-(define left (\x (\l (\r (l x)))))
+(namespace either)
+
+; --- Constructors ---
+(define left  (\x (\l (\r (l x)))))
 (define right (\y (\l (\r (r y)))))
-(define is_left (\e ((e (\_ true)) (\_ false))))
-(define is_right (\e ((e (\_ false)) (\_ true))))
+
+; --- Predicates ---
+(define is_left  (\e ((e (\_ bool.true)) (\_ bool.false))))
+(define is_right (\e ((e (\_ bool.false)) (\_ bool.true))))
+
+; --- Eliminators & Combinators ---
 (define either (\fl (\fr (\e ((e fl) fr)))))
-(define either_map (\f (\e ((e left) (\y (right (f y)))))))
-(define either_bind (\e (\f ((e left) (\y (f y))))))
+(define map    (\f (\e ((e either.left) (\y (either.right (f y)))))))
+(define bind   (\e (\f ((e either.left) (\y (f y))))))
 (define from_right (\d (\e ((e (\_ d)) (\y y)))))
+
+(namespace _)
+(open either)
+(define left either.left)
+(define right either.right)
+(define is_left either.is_left)
+(define is_right either.is_right)
+(define either either.either)
+(define either_map either.map)
+(define either_bind either.bind)
+(define from_right either.from_right)
