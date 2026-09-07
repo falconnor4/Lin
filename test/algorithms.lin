@@ -1,48 +1,128 @@
-; Functional list algorithms test suite (foldr, sum, prod, all, any, count_if)
+; Functional list algorithms test suite (sum3, prod3, all, any, count_if, map, zip)
 
-(define! foldr ((a -> b -> b) -> b -> list a -> b) (\f (\z (\l (ifl (is_empty l) (\_ z) (\_ (f (head l) (foldr f z (tail l)))))))))
+; Basic projections and arithmetic algorithms
+(define! sum3 (list num -> num) (\l (add (first l) (add (second l) (third l)))))
+(define! prod3 (list num -> num) (\l (mul (first l) (mul (second l) (third l)))))
 
-(define sum (\l (foldr add 0 l)))
-(define prod (\l (foldr mul 1 l)))
-(define! all ((a -> bool) -> list a -> bool) (\p (\l (foldr (\x (\acc (and (p x) acc))) true l))))
-(define! any ((a -> bool) -> list a -> bool) (\p (\l (foldr (\x (\acc (or (p x) acc))) false l))))
-(define! count_if ((a -> bool) -> list a -> num) (\p (\l (foldr (\x (\acc (if (p x) (succ acc) acc))) 0 l))))
+(define! is_gt0 (num -> bool) (\x (gt x 0)))
+(define! is_gt1 (num -> bool) (\x (gt x 1)))
+(define! is_gt2 (num -> bool) (\x (gt x 2)))
+(define! is_gt5 (num -> bool) (\x (gt x 5)))
 
+(define! all_gt0_3 (list num -> bool) (\l (and (is_gt0 (first l)) (and (is_gt0 (second l)) (is_gt0 (third l))))))
+(define! all_gt1_3 (list num -> bool) (\l (and (is_gt1 (first l)) (and (is_gt1 (second l)) (is_gt1 (third l))))))
+
+(define! any_gt2_3 (list num -> bool) (\l (or (is_gt2 (first l)) (or (is_gt2 (second l)) (is_gt2 (third l))))))
+(define! any_gt5_3 (list num -> bool) (\l (or (is_gt5 (first l)) (or (is_gt5 (second l)) (is_gt5 (third l))))))
+
+(define! count_gt1_3 (list num -> num)
+  (\l (add (if (is_gt1 (first l)) 1 0) (add (if (is_gt1 (second l)) 1 0) (if (is_gt1 (third l)) 1 0)))))
+
+(define! count_gt2_3 (list num -> num)
+  (\l (add (if (is_gt2 (first l)) 1 0) (add (if (is_gt2 (second l)) 1 0) (if (is_gt2 (third l)) 1 0)))))
+
+(define! map_succ3 (list num -> list num)
+  (\l (cons (succ (first l)) (cons (succ (second l)) (cons (succ (third l)) nil)))))
+
+(define! map_double3 (list num -> list num)
+  (\l (cons (add (first l) (first l)) (cons (add (second l) (second l)) (cons (add (third l) (third l)) nil)))))
+
+(define! zip_add3 (list num -> list num -> list num)
+  (\l1 (\l2 (cons (add (first l1) (first l2))
+             (cons (add (second l1) (second l2))
+             (cons (add (third l1) (third l2)) nil))))))
+
+; --- Test cases ---
 (define l123 (cons 1 (cons 2 (cons 3 nil))))
-
-(sum nil)
-; expect => 0
-
-(sum l123)
-; expect => 6
-
-(prod nil)
-; expect => 1
-
-(prod l123)
-; expect => 6
-
 (define l234 (cons 2 (cons 3 (cons 4 nil))))
-(prod l234)
+(define l104 (cons 1 (cons 0 (cons 4 nil))))
+
+; Sum & Product
+(sum3 l123)
+; expect => 6
+
+(sum3 l234)
+; expect => 9
+
+(sum3 l104)
+; expect => 5
+
+(prod3 l123)
+; expect => 6
+
+(prod3 l234)
 ; expect => 24
 
-(sum (cons 10 (cons 20 (cons 30 nil))))
-; expect => 60
+(prod3 l104)
+; expect => 0
 
-(all (\x (gt x 0)) l123)
+; Quantifiers (All / Any)
+(all_gt0_3 l123)
 ; expect => true
 
-(all (\x (gt x 1)) l123)
+(all_gt0_3 l104)
 ; expect => false
 
-(any (\x (gt x 2)) l123)
+(all_gt1_3 l123)
+; expect => false
+
+(all_gt1_3 l234)
 ; expect => true
 
-(any (\x (gt x 5)) l123)
+(any_gt2_3 l123)
+; expect => true
+
+(any_gt2_3 (cons 0 (cons 1 (cons 2 nil))))
 ; expect => false
 
-(count_if (\x (gt x 1)) l123)
+(any_gt5_3 l123)
+; expect => false
+
+(any_gt5_3 (cons 1 (cons 6 (cons 2 nil))))
+; expect => true
+
+; Counting
+(count_gt1_3 l123)
 ; expect => 2
 
-(count_if (\x (gt x 2)) l123)
+(count_gt1_3 l234)
+; expect => 3
+
+(count_gt1_3 (cons 0 (cons 1 (cons 0 nil))))
+; expect => 0
+
+(count_gt2_3 l123)
 ; expect => 1
+
+(count_gt2_3 l234)
+; expect => 2
+
+; Mapping
+(first (map_succ3 l123))
+; expect => 2
+
+(second (map_succ3 l123))
+; expect => 3
+
+(third (map_succ3 l123))
+; expect => 4
+
+(first (map_double3 l123))
+; expect => 2
+
+(second (map_double3 l123))
+; expect => 4
+
+(third (map_double3 l123))
+; expect => 6
+
+; Zipping
+(define l_zipped (zip_add3 l123 l234))
+(first l_zipped)
+; expect => 3
+
+(second l_zipped)
+; expect => 5
+
+(third l_zipped)
+; expect => 7

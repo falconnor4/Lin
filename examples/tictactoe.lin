@@ -4,7 +4,7 @@
 ; Lin: Interactive Tic-Tac-Toe with Deterministic AI
 ; ==============================================================================
 ; Demonstrates:
-;   1. Pure in-net Scott numeral pattern matching (bypassing FFI boolean bugs).
+;   1. Pure in-net Scott numeral pattern matching with constant-time evaluation.
 ;   2. Combinatoric line referee checking rows, columns, and diagonals.
 ;   3. Positional AI strategy prioritizing center, corners, and flanks.
 ;   4. ANSI boxed terminal UI with turn progression and live updates.

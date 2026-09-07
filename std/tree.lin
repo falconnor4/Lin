@@ -38,3 +38,6 @@
 (define tree_has_right tree.has_right)
 (define tree_val_left tree.val_left)
 (define tree_val_right tree.val_right)
+(define c_leaf tree.c_leaf)
+(define c_node tree.c_node)
+(define c_fold tree.c_fold)

@@ -70,7 +70,7 @@
 (let ((f (\n (if (eq n 0) 1 (mul n 2))))) (f 5))
 ; expect => 10
 
-(let ((f (\x (add x 1)))) (f (f 10)))
+(let ((f (\x (succ x)))) (f (f 10)))
 ; expect => 12
 
 ; --- let with pairs ---
@@ -82,13 +82,13 @@
 
 ; --- let with std values (capture safety) ---
 (let ((x nil)) x)
-; expect => (\c (\n true))
+; expect => ""
 
 (let ((x cons)) x)
 ; expect => (\h (\t (\c (\n ((c h) t)))))
 
-(let ((h (cons 1 nil))) h)
-; expect => (\c (\n ((c 1) (\c (\n true)))))
+(let ((h (cons 65 nil))) h)
+; expect => "A"
 
 (let ((h (cons 1 (cons 2 nil)))) (head h))
 ; expect => 1

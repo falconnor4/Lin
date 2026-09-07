@@ -15,12 +15,20 @@ static inline int scope_bit(const Net *n, Scope s, int i) {
 }
 Scope scope_nil(void) { Scope s; s.raw = 0; return s; }
 
+#define MAX_SC_CAP (1 << 28)
+
 static int in_parallel;
 static void sc_ensure_cap(Net *n, int need) {
   if (need <= n->sccap) return;
   int nc = n->sccap ? n->sccap * 2 : 256;
-  while (nc < need && nc > 0) nc *= 2;
-  n->sca = realloc(n->sca, (size_t)nc * sizeof(uint64_t)); n->sccap = nc;
+  while (nc < need && nc > 0 && nc < MAX_SC_CAP) nc *= 2;
+  if (nc <= 0 || nc > MAX_SC_CAP) nc = (need > MAX_SC_CAP) ? need : MAX_SC_CAP;
+  uint64_t *new_sca = realloc(n->sca, (size_t)nc * sizeof(uint64_t));
+  if (!new_sca) {
+    fprintf(stderr, "error: scope gauge capacity limit exceeded\n");
+    exit(1);
+  }
+  n->sca = new_sca; n->sccap = nc;
 }
 
 static int sc_alloc(Net *n, int len) {
@@ -80,11 +88,12 @@ void net_free(Net *n) {
 static void net_ensure_cap(Net *n, int need) {
   if (need <= n->cap) return;
   int nc = n->cap ? n->cap * 2 : 256;
-  while (nc < need) nc *= 2;
-  n->tag = realloc(n->tag, nc); n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
+  while (nc < need && nc > 0) nc *= 2;
+  if (nc <= 0) nc = need;
+  n->tag = realloc(n->tag, (size_t)nc); n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
   n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope)); n->name = realloc(n->name, (size_t)nc * sizeof(char *));
   memset(n->name + n->cap, 0, (size_t)(nc - n->cap) * sizeof(char *));
-  n->dead = realloc(n->dead, nc); memset(n->dead + n->cap, 0, (size_t)(nc - n->cap)); n->cap = nc;
+  n->dead = realloc(n->dead, (size_t)nc); memset(n->dead + n->cap, 0, (size_t)(nc - n->cap)); n->cap = nc;
 }
 
 Port net_alloc(Net *n, int tag, Scope sc, const char *name) {

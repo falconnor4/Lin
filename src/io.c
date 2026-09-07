@@ -155,6 +155,15 @@ static int run_ffi(Net *n, Port p, long *out_int, char *out_str, size_t max_str)
   if (!strcmp(fn, "lin_mul")) return (*out_int = c_args[0] * c_args[1], 1);
   if (!strcmp(fn, "lin_div")) return (*out_int = c_args[1] ? c_args[0] / c_args[1] : 0, 1);
   if (!strcmp(fn, "lin_mod")) return (*out_int = c_args[1] ? c_args[0] % c_args[1] : 0, 1);
+  if (!strcmp(fn, "lin_pow")) {
+    long base = c_args[0], exp = c_args[1], res = 1;
+    while (exp > 0) {
+      if (exp & 1) res *= base;
+      base *= base;
+      exp >>= 1;
+    }
+    return (*out_int = res, 1);
+  }
   if (!strcmp(fn, "lin_eq") || !strcmp(fn, "lin_lt") || !strcmp(fn, "lin_leq") || !strcmp(fn, "lin_gt") || !strcmp(fn, "lin_streq")) {
     *out_int = !strcmp(fn, "lin_streq") ? (argc >= 2 && !strcmp((char *)c_args[0], (char *)c_args[1])) :
                !strcmp(fn, "lin_eq") ? c_args[0] == c_args[1] : !strcmp(fn, "lin_lt") ? c_args[0] < c_args[1] : !strcmp(fn, "lin_leq") ? c_args[0] <= c_args[1] : c_args[0] > c_args[1];
@@ -277,7 +286,10 @@ static Port net_alloc_string(Net *n, const char *s) {
 
 static void chomp(char *s) { size_t l = strlen(s); if (l > 0 && s[l - 1] == '\n') s[l - 1] = 0; }
 static void read_stream(FILE *f, char *buf, size_t sz, int is_pipe) {
-  if (!f) return; size_t nr = fread(buf, 1, sz - 1, f); buf[nr] = 0; chomp(buf);
+  if (!f) return;
+  size_t nr = fread(buf, 1, sz - 1, f);
+  buf[nr] = 0;
+  chomp(buf);
   if (is_pipe) pclose(f); else fclose(f);
 }
 static void read_stdin(char *buf, size_t sz) { if (!fgets(buf, (int)sz, stdin)) buf[0] = 0; else chomp(buf); }

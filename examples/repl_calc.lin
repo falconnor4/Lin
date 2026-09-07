@@ -1,0 +1,148 @@
+(load "std/std.lin")
+
+; ==============================================================================
+; Lin: Interactive Reverse Polish Notation (RPN) Stack Calculator
+; ==============================================================================
+; Demonstrates:
+;   1. Pure functional stack state manipulation via Scott lists.
+;   2. Arithmetic transformations (add, sub, mul, pow) on optimal interaction nets.
+;   3. Dynamic ANSI terminal formatting and stack depth inspection.
+;   4. Interactive event loop driven by linear continuations.
+; ==============================================================================
+
+; --- Pure In-Net Exact Scott Numeral Matchers (0..9) ---
+(define! is_0 (num -> bool) (\n ((n bool.true) (\_ bool.false))))
+(define! is_1 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.true) (\_ bool.false))))))
+(define! is_2 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.true) (\_ bool.false))))))))
+(define! is_3 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.true) (\_ bool.false))))))))))
+(define! is_4 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.true) (\_ bool.false))))))))))))
+(define! is_5 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.true) (\_ bool.false))))))))))))))
+(define! is_6 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.true) (\_ bool.false))))))))))))))))
+(define! is_7 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.true) (\_ bool.false))))))))))))))))))
+(define! is_8 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.false) (\p8 ((p8 bool.true) (\_ bool.false))))))))))))))))))))
+(define! is_9 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.false) (\p6 ((p6 bool.false) (\p7 ((p7 bool.false) (\p8 ((p8 bool.false) (\p9 ((p9 bool.true) (\_ bool.false))))))))))))))))))))))
+
+; --- Stack Operations ---
+(define! stack_push (num -> list num -> list num) (\x (\s (cons x s))))
+
+(define! stack_pop (list num -> list num)
+  (\s (ifl (is_empty s) (\_ nil) (\_ (tail s)))))
+
+(define! stack_dup (list num -> list num)
+  (\s (ifl (is_empty s) (\_ nil) (\_ (cons (head s) s)))))
+
+(define! stack_add (list num -> list num)
+  (\s (ifl (is_empty s) (\_ nil)
+        (\_ (ifl (is_empty (tail s)) (\_ s)
+              (\_ (cons (add (second s) (first s)) (tail (tail s)))))))))
+
+(define! stack_sub (list num -> list num)
+  (\s (ifl (is_empty s) (\_ nil)
+        (\_ (ifl (is_empty (tail s)) (\_ s)
+              (\_ (cons (sub (second s) (first s)) (tail (tail s)))))))))
+
+(define! stack_mul (list num -> list num)
+  (\s (ifl (is_empty s) (\_ nil)
+        (\_ (ifl (is_empty (tail s)) (\_ s)
+              (\_ (cons (mul (second s) (first s)) (tail (tail s)))))))))
+
+(define! stack_pow (list num -> list num)
+  (\s (ifl (is_empty s) (\_ nil)
+        (\_ (ifl (is_empty (tail s)) (\_ s)
+              (\_ (cons (pow (second s) (first s)) (tail (tail s)))))))))
+
+; --- Stack Transition Dispatch ---
+(define! apply_cmd (num -> list num -> list num)
+  (\cmd (\s
+    (ifl (is_1 cmd) (\_ (stack_push 1 s))
+    (\_ (ifl (is_2 cmd) (\_ (stack_push 2 s))
+    (\_ (ifl (is_3 cmd) (\_ (stack_push 5 s))
+    (\_ (ifl (is_4 cmd) (\_ (stack_add s))
+    (\_ (ifl (is_5 cmd) (\_ (stack_sub s))
+    (\_ (ifl (is_6 cmd) (\_ (stack_mul s))
+    (\_ (ifl (is_7 cmd) (\_ (stack_pow s))
+    (\_ (ifl (is_8 cmd) (\_ (stack_dup s))
+    (\_ (ifl (is_9 cmd) (\_ (stack_pop s))
+    (\_ s)))))))))))))))))))))
+
+; --- Stack Formatting Helpers ---
+(define! val_str (num -> list num)
+  (\v (if (eq v 0) "0"
+      (if (eq v 1) "1"
+      (if (eq v 2) "2"
+      (if (eq v 3) "3"
+      (if (eq v 4) "4"
+      (if (eq v 5) "5"
+      (if (eq v 6) "6"
+      (if (eq v 7) "7"
+      (if (eq v 8) "8"
+      (if (eq v 9) "9"
+      (if (eq v 10) "10" "val")))))))))))))
+
+(define! top_str (list num -> list num)
+  (\s (if (is_empty s) "<empty>" (val_str (first s)))))
+
+(define! snd_str (list num -> list num)
+  (\s (if (or (is_empty s) (is_empty (tail s))) "<empty>" (val_str (second s)))))
+
+(define! trd_str (list num -> list num)
+  (\s (if (or (is_empty s) (or (is_empty (tail s)) (is_empty (tail (tail s))))) "<empty>" (val_str (third s)))))
+
+; --- Stack Display ---
+(define! render_stack (list num -> a -> b)
+  (\s (\next
+    (io_print "\n========================================================\n"
+    (io_print "       LIN RPN CALCULATOR // INTERACTION STACK          \n"
+    (io_print "========================================================\n"
+    (io_print "  [Current Stack Depth: "
+    (io_print (if (is_empty s) "0" (if (is_empty (tail s)) "1" (if (is_empty (tail (tail s))) "2" "3+")))
+    (io_print "]\n"
+    (io_print "  Top 3 Elements:\n"
+    (io_print "    [1] (top): "
+    (io_print (top_str s)
+    (io_print "\n    [2] (snd): "
+    (io_print (snd_str s)
+    (io_print "\n    [3] (trd): "
+    (io_print (trd_str s)
+    (io_print "\n--------------------------------------------------------\n"
+    (io_print "  [1] Push 1    [2] Push 2    [3] Push 5\n"
+    (io_print "  [4] Add (+)   [5] Sub (-)   [6] Mul (*)\n"
+    (io_print "  [7] Pow (^)   [8] Dup       [9] Drop / Pop\n"
+    (io_print "  [0] Quit\n"
+    (io_print "========================================================\n"
+    next))))))))))))))))))))))
+
+; --- Interactive Loop Turns ---
+(define! repl_done (a)
+  (io_print "\n[RPN Calculator Exit] Final evaluation complete. Goodbye!\n" io_done))
+
+(define! repl_turn3 (list num -> a)
+  (\s
+    (render_stack s
+      (io_prompt "Enter Command (0-9): " (\cmd
+        (ifl (is_0 cmd)
+          (\_ repl_done)
+          (\_ (let ((next_s (apply_cmd cmd s)))
+                (io_print "\nOperation applied successfully.\n" repl_done)))))))))
+
+(define! repl_turn2 (list num -> a)
+  (\s
+    (render_stack s
+      (io_prompt "Enter Command (0-9): " (\cmd
+        (ifl (is_0 cmd)
+          (\_ repl_done)
+          (\_ (let ((next_s (apply_cmd cmd s)))
+                (repl_turn3 next_s)))))))))
+
+(define! repl_turn1 (list num -> a)
+  (\s
+    (render_stack s
+      (io_prompt "Enter Command (0-9): " (\cmd
+        (ifl (is_0 cmd)
+          (\_ repl_done)
+          (\_ (let ((next_s (apply_cmd cmd s)))
+                (repl_turn2 next_s)))))))))
+
+; Initial state: stack initialized with [2, 5]
+(define initial_stack (cons 2 (cons 5 nil)))
+(repl_turn1 initial_stack)

@@ -116,7 +116,7 @@
             printf "\n''${C_BOLD}Running Lin Confluence & Stability Test Suite''${C_RESET}\n"
 
             printf "\n''${C_TIER}[Tier 1: Core Interaction Calculus & Primitives]''${C_RESET}\n"
-            for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin; do
+            for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/test_escapes_utf8.lin test/types.lin; do
               run_test "$f"
             done
 
@@ -131,7 +131,7 @@
             done
 
             printf "\n''${C_TIER}[Tier 4: Non-Trivial Workloads & Confluence Invariants]''${C_RESET}\n"
-            for f in test/graph.lin test/map.lin test/set.lin test/queue.lin test/stream.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin; do
+            for f in test/graph.lin test/map.lin test/set.lin test/queue.lin test/stream.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin test/trees.lin test/lists.lin test/algorithms.lin test/recursion.lin test/maybe_either.lin; do
               run_test "$f"
             done
 
@@ -177,6 +177,19 @@
             else
               fail=$((fail + 1))
               printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/line_binary.line"
+            fi
+
+            printf "\n''${C_TIER}[Tier 6: Command Line Interface & Flag Invariants]''${C_RESET}\n"
+            t0=$(date +%s%3N 2>/dev/null || date +%s)
+            if bash test/test_cli_flags.sh "$LIN_BIN" >/dev/null 2>&1; then
+              pass=$((pass + 1))
+              total_checks=$((total_checks + 7))
+              t1=$(date +%s%3N 2>/dev/null || date +%s)
+              dur=$((t1 - t0))
+              printf "  ''${C_PASS}PASS''${C_RESET} %-32s ''${C_DIM}( 7 checks, %3dms)''${C_RESET}\n" "test/test_cli_flags.sh" "$dur"
+            else
+              fail=$((fail + 1))
+              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/test_cli_flags.sh"
             fi
 
             t_end=$(date +%s%3N 2>/dev/null || date +%s)

@@ -1,0 +1,99 @@
+; ==============================================================================
+; Test Suite: Maybe and Either Monads / Sum Types
+; ==============================================================================
+(load "std/maybe.lin")
+(load "std/either.lin")
+
+; --- Maybe / Option Tests ---
+
+(is_nothing nothing)
+; expect => true
+
+(is_just nothing)
+; expect => false
+
+(is_nothing (just 42))
+; expect => false
+
+(is_just (just 42))
+; expect => true
+
+(from_maybe 0 nothing)
+; expect => 0
+
+(from_maybe 0 (just 42))
+; expect => 42
+
+(from_maybe 99 (just 0))
+; expect => 0
+
+; Functor map over maybe
+(from_maybe 0 (maybe_map succ (just 41)))
+; expect => 42
+
+(is_nothing (maybe_map succ nothing))
+; expect => true
+
+; Monadic bind over maybe
+(from_maybe 0 (maybe_bind (just 20) (\x (just (add x 22)))))
+; expect => 42
+
+(is_nothing (maybe_bind nothing (\x (just (add x 1)))))
+; expect => true
+
+(is_nothing (maybe_bind (just 5) (\x nothing)))
+; expect => true
+
+; Alternative / fallback (maybe_or)
+(from_maybe 0 (maybe_or (just 10) (just 20)))
+; expect => 10
+
+(from_maybe 0 (maybe_or nothing (just 20)))
+; expect => 20
+
+(is_nothing (maybe_or nothing nothing))
+; expect => true
+
+; --- Either / Result Tests ---
+
+(is_left (left 10))
+; expect => true
+
+(is_right (left 10))
+; expect => false
+
+(is_left (right 20))
+; expect => false
+
+(is_right (right 20))
+; expect => true
+
+(from_right 0 (left 99))
+; expect => 0
+
+(from_right 0 (right 42))
+; expect => 42
+
+; Elimination / fold
+(either (\x (add x 1)) (\y (mul y 2)) (left 5))
+; expect => 6
+
+(either (\x (add x 1)) (\y (mul y 2)) (right 5))
+; expect => 10
+
+; Functor map over right
+(from_right 0 (either_map succ (right 41)))
+; expect => 42
+
+(is_left (either_map succ (left 10)))
+; expect => true
+
+; Monadic bind over right
+(from_right 0 (either_bind (right 20) (\y (right (add y 22)))))
+; expect => 42
+
+(is_left (either_bind (left 99) (\y (right (add y 1)))))
+; expect => true
+
+(is_left (either_bind (right 5) (\y (left 0))))
+; expect => true

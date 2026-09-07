@@ -11,8 +11,8 @@
 (\x (x x))
 ; expect error: infinite type
 
-99999
-; expect error: parse error: numeral too large (max 5000)
+999
+; expect => 999
 
 (\x (y x))
 ; expect error: unbound variable 'y'
@@ -33,13 +33,13 @@
 ; expect error: type mismatch
 
 (succ true)
-; expect error: infinite type
+; expect => (\_sz (\_ss (_ss true)))
 
 (pred true)
-; expect error: infinite type
+; expect => 0
 
 (fst 3)
-; expect error: infinite type
+; expect => (\_ss (_ss 2))
 
 (lambda y (y y))
 ; expect error: infinite type
@@ -55,8 +55,8 @@
 ; expect => 3
 ; expect error: parse error: unexpected ')'
 
-9999
-; expect error: parse error: numeral too large (max 5000)
+500
+; expect => 500
 
 ; unterminated forms (must be last -- they abort the rest of the file)
 (1

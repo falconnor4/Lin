@@ -25,3 +25,4 @@
 (define cube math.cube)
 (define abs_diff math.abs_diff)
 (define sign math.sign)
+(define pow num.pow)

@@ -1,0 +1,65 @@
+; ==============================================================================
+; Test Suite: UTF-8 Lambda Syntaxes and String Escape Sequences
+; ==============================================================================
+
+; --- Lambda Keywords (λ, lam, lambda, \) ---
+((λ x (add x 1)) 41)
+; expect => 42
+
+((lam x (add x 2)) 40)
+; expect => 42
+
+((lambda x (mul x 6)) 7)
+; expect => 42
+
+((\ x (sub x 8)) 50)
+; expect => 42
+
+; Multi-argument UTF-8 λ abstraction
+(define! add3 (num -> num -> num -> num) (λ a (λ b (λ c (add a (add b c))))))
+(((add3 1) 2) 3)
+; expect => 6
+
+; --- String Escape Sequences ---
+
+; Hexadecimal escape: \x41 = 65 ('A'), \x42 = 66 ('B'), \x43 = 67 ('C')
+(define s_hex "hex\x41\x42\x43")
+(head (tail (tail (tail s_hex))))
+; expect => 65
+
+(head (tail (tail (tail (tail s_hex)))))
+; expect => 66
+
+(head (tail (tail (tail (tail (tail s_hex))))))
+; expect => 67
+
+; Tab escape \t (9)
+(define s_tab "a\tb")
+(head s_tab)
+; expect => 97
+
+(head (tail s_tab))
+; expect => 9
+
+(head (tail (tail s_tab)))
+; expect => 98
+
+; Newline escape \n (10)
+(define s_nl "x\ny")
+(head (tail s_nl))
+; expect => 10
+
+; Carriage return escape \r (13)
+(define s_cr "x\ry")
+(head (tail s_cr))
+; expect => 13
+
+; Escape \e (27)
+(define s_esc "x\ey")
+(head (tail s_esc))
+; expect => 27
+
+; Octal escape \040 = space (32)
+(define s_oct "a\040b")
+(head (tail s_oct))
+; expect => 32

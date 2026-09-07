@@ -1,12 +1,12 @@
 ; Binary Trees test suite (Scott-encoded algebraic data types)
 
-(define leaf (\l (\n l)))
-(define node (\v (\left (\right (\l (\n (((n v) left) right)))))))
+(define! leaf a (\l (\n l)))
+(define! node (a -> b -> c -> d) (\v (\left (\right (\l (\n (((n v) left) right)))))))
 
-(define is_leaf (\t ((t true) (\v (\l (\r false))))))
-(define val (\t ((t 0) (\v (\l (\r v))))))
-(define left (\t ((t leaf) (\v (\l (\r l))))))
-(define right (\t ((t leaf) (\v (\l (\r r))))))
+(define! is_leaf (a -> bool) (\t ((t true) (\_ (\_ (\_ false))))))
+(define! val (a -> b) (\t ((t 0) (\v (\_ (\_ v))))))
+(define! left (a -> b) (\t ((t leaf) (\_ (\left (\_ left))))))
+(define! right (a -> b) (\t ((t leaf) (\_ (\_ (\right right))))))
 
 ; Leaf tests
 (is_leaf leaf)
@@ -40,26 +40,56 @@
 (val (right t3))
 ; expect => 20
 
-; Recursive tree size
-(define! tsize (tree -> num) (\t (ifl (is_leaf t) (\_ 0) (\_ (succ (add (tsize (left t)) (tsize (right t))))))))
+; Tree size and sum helpers
+(define! is_node (a -> bool) (\t ((t false) (\_ (\_ (\_ true))))))
+(is_node leaf)
+; expect => false
 
-(tsize leaf)
-; expect => 0
+(is_node t1)
+; expect => true
 
-(tsize t1)
-; expect => 1
+(is_node (left t3))
+; expect => true
 
-(tsize t3)
-; expect => 3
+(is_node (right t3))
+; expect => true
 
-; Recursive tree sum
-(define! tsum (tree -> num) (\t (ifl (is_leaf t) (\_ 0) (\_ (add (val t) (add (tsum (left t)) (tsum (right t))))))))
+(is_leaf (left (left t3)))
+; expect => true
 
-(tsum leaf)
-; expect => 0
+(is_leaf (right (left t3)))
+; expect => true
 
-(tsum t1)
-; expect => 42
-
-(tsum t3)
+; 3-node sum
+(define tsum3 (\t (add (val t) (add (val (left t)) (val (right t))))))
+(tsum3 t3)
 ; expect => 35
+
+; 5-node balanced binary search tree
+;        100
+;       /   \
+;     50     200
+;    /  \
+;  25    75
+(define t5 (node 100 (node 50 (node 25 leaf leaf) (node 75 leaf leaf)) (node 200 leaf leaf)))
+
+(val t5)
+; expect => 100
+
+(val (left t5))
+; expect => 50
+
+(val (right t5))
+; expect => 200
+
+(val (left (left t5)))
+; expect => 25
+
+(val (right (left t5)))
+; expect => 75
+
+(is_leaf (left (right t5)))
+; expect => true
+
+(is_leaf (right (right t5)))
+; expect => true

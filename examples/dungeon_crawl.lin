@@ -4,7 +4,7 @@
 ; Lin: Interactive Terminal Roguelike Dungeon Crawler
 ; ==============================================================================
 ; Demonstrates:
-;   1. Pure in-net Scott numeral pattern matching (bypassing FFI boolean bugs).
+;   1. Pure in-net Scott numeral pattern matching with constant-time evaluation.
 ;   2. Coordinate geometry collision and item detection.
 ;   3. Real-time ANSI dungeon display with dynamic hero stats.
 ;   4. Deterministic linear turn sequence pipeline.

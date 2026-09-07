@@ -41,7 +41,7 @@ static Def *lookup_raw(const char *s) {
   return NULL;
 }
 Def *def_find(const char *name) {
-  char qn[NAME]; Def *d;
+  char qn[NAME * 2 + 2]; Def *d;
   if (strchr(name, '.')) return lookup_raw(name);
   if (curr_ns[0]) { snprintf(qn, sizeof qn, "%s.%s", curr_ns, name); if ((d = lookup_raw(qn))) return d; }
   for (int o = n_open_ns - 1; o >= 0; o--) {
@@ -115,8 +115,8 @@ static Term *y_term(void) {
 static void qualify_free(Term *t, Guard *b) {
   if (!t) return;
   if (t->type == TVAR && !strchr(t->name, '.') && !guard_has(b, t->name) && curr_ns[0]) {
-    char qn[NAME]; snprintf(qn, sizeof qn, "%s.%s", curr_ns, t->name);
-    if (lookup_raw(qn)) snprintf(t->name, NAME, "%s", qn);
+    char qn[NAME * 2 + 2]; snprintf(qn, sizeof qn, "%s.%s", curr_ns, t->name);
+    if (lookup_raw(qn)) { strncpy(t->name, qn, NAME - 1); t->name[NAME - 1] = 0; }
   }
   int bound = (t->type == TLAM);
   if (bound) guard_push(b, t->name);
@@ -134,8 +134,12 @@ static void process_def(Term *t) {
   if (!ok) { printf("error: %s\n", err); return; }
   Guard b = {0}; qualify_free(t->l, &b); free(b.names);
   Def *d = &defs[ndefs++];
-  if (curr_ns[0] && !strchr(t->name, '.')) snprintf(d->name, NAME, "%s.%s", curr_ns, t->name);
-  else snprintf(d->name, NAME, "%s", t->name);
+  if (curr_ns[0] && !strchr(t->name, '.')) {
+    char qn[NAME * 2 + 2]; snprintf(qn, sizeof qn, "%s.%s", curr_ns, t->name);
+    strncpy(d->name, qn, NAME - 1); d->name[NAME - 1] = 0;
+  } else {
+    strncpy(d->name, t->name, NAME - 1); d->name[NAME - 1] = 0;
+  }
   d->sch = sch; d->typed = 1;
   d->term = rec ? term_new(TAPP, "", y_term(), term_new(TLAM, t->name, t->l, NULL)) : t->l;
   d->expanded = NULL;

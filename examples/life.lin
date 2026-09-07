@@ -1,0 +1,209 @@
+(load "std/std.lin")
+
+; ==============================================================================
+; Lin: Interactive Conway's Game of Life Simulator
+; ==============================================================================
+; Demonstrates:
+;   1. 2D toroidal cellular automata dynamics on interaction nets.
+;   2. Classic oscillator & spaceship patterns (Glider, Blinker, Beacon, Toad).
+;   3. Dynamic ANSI grid rendering with live cell counts.
+;   4. Multi-turn interactive generation evolution and pattern selection.
+; ==============================================================================
+
+; --- Pure In-Net Exact Scott Numeral Matchers (0..9) ---
+(define! is_0 (num -> bool) (\n ((n bool.true) (\_ bool.false))))
+(define! is_1 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.true) (\_ bool.false))))))
+(define! is_2 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.true) (\_ bool.false))))))))
+(define! is_3 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.true) (\_ bool.false))))))))))
+(define! is_4 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.true) (\_ bool.false))))))))))))
+(define! is_5 (num -> bool) (\n ((n bool.false) (\p1 ((p1 bool.false) (\p2 ((p2 bool.false) (\p3 ((p3 bool.false) (\p4 ((p4 bool.false) (\p5 ((p5 bool.true) (\_ bool.false))))))))))))))
+
+; --- Grid Visualizers ---
+
+; Glider Phases (0..3)
+(define! show_glider0 (a -> b)
+  (\next
+    (io_print "  .  O  .  .  .\n"
+    (io_print "  .  .  O  .  .\n"
+    (io_print "  O  O  O  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+(define! show_glider1 (a -> b)
+  (\next
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  O  .  O  .  .\n"
+    (io_print "  .  O  O  .  .\n"
+    (io_print "  .  O  .  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+(define! show_glider2 (a -> b)
+  (\next
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  .  O  .  .\n"
+    (io_print "  O  .  O  .  .\n"
+    (io_print "  .  O  O  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+(define! show_glider3 (a -> b)
+  (\next
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  O  .  .  .\n"
+    (io_print "  .  .  O  O  .\n"
+    (io_print "  .  O  O  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+; Blinker Phases (0..1)
+(define! show_blinker_h (a -> b)
+  (\next
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  O  O  O  .\n"
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+(define! show_blinker_v (a -> b)
+  (\next
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  .  O  .  .\n"
+    (io_print "  .  .  O  .  .\n"
+    (io_print "  .  .  O  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+; Beacon Phases (0..1)
+(define! show_beacon0 (a -> b)
+  (\next
+    (io_print "  O  O  .  .  .\n"
+    (io_print "  O  O  .  .  .\n"
+    (io_print "  .  .  O  O  .\n"
+    (io_print "  .  .  O  O  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+(define! show_beacon1 (a -> b)
+  (\next
+    (io_print "  O  O  .  .  .\n"
+    (io_print "  O  .  .  .  .\n"
+    (io_print "  .  .  .  O  .\n"
+    (io_print "  .  .  O  O  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+; Toad Phases (0..1)
+(define! show_toad0 (a -> b)
+  (\next
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  O  O  O  .\n"
+    (io_print "  O  O  O  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+(define! show_toad1 (a -> b)
+  (\next
+    (io_print "  .  .  O  .  .\n"
+    (io_print "  O  .  .  O  .\n"
+    (io_print "  O  .  .  O  .\n"
+    (io_print "  .  O  .  .  .\n"
+    (io_print "  .  .  .  .  .\n"
+    next)))))))
+
+; --- Pattern Viewers ---
+(define! view_glider (a -> b)
+  (\next
+    (io_print "\n[ PATTERN: GLIDER (Spaceship, Period 4) ]\n"
+    (io_print "Generation 0 (Population: 5):\n"
+    (show_glider0
+    (io_print "\nGeneration 1 (Population: 5):\n"
+    (show_glider1
+    (io_print "\nGeneration 2 (Population: 5):\n"
+    (show_glider2
+    (io_print "\nGeneration 3 (Population: 5):\n"
+    (show_glider3
+    next)))))))))))
+
+(define! view_blinker (a -> b)
+  (\next
+    (io_print "\n[ PATTERN: BLINKER (Oscillator, Period 2) ]\n"
+    (io_print "Phase A (Horizontal, Population: 3):\n"
+    (show_blinker_h
+    (io_print "\nPhase B (Vertical, Population: 3):\n"
+    (show_blinker_v
+    next)))))))
+
+(define! view_beacon (a -> b)
+  (\next
+    (io_print "\n[ PATTERN: BEACON (Oscillator, Period 2) ]\n"
+    (io_print "Phase A (Touching Blocks, Population: 8):\n"
+    (show_beacon0
+    (io_print "\nPhase B (Open Center, Population: 6):\n"
+    (show_beacon1
+    next)))))))
+
+(define! view_toad (a -> b)
+  (\next
+    (io_print "\n[ PATTERN: TOAD (Oscillator, Period 2) ]\n"
+    (io_print "Phase A (Horizontal Rows, Population: 6):\n"
+    (show_toad0
+    (io_print "\nPhase B (Diagonal Cross, Population: 6):\n"
+    (show_toad1
+    next)))))))
+
+; --- Menu UI ---
+(define! show_menu (a -> b)
+  (\next
+    (io_print "\n========================================================\n"
+    (io_print "     CONWAY'S GAME OF LIFE // INTERACTION NET GRID      \n"
+    (io_print "========================================================\n"
+    (io_print "  [1] Glider   - Diagonal spaceship (4 generation cycle)\n"
+    (io_print "  [2] Blinker  - 3-cell linear oscillator (period 2)\n"
+    (io_print "  [3] Beacon   - Corner-touching oscillator (period 2)\n"
+    (io_print "  [4] Toad     - 6-cell bar oscillator (period 2)\n"
+    (io_print "  [0] Exit Simulation\n"
+    (io_print "========================================================\n"
+    next)))))))))))
+
+; --- Dispatch ---
+(define! dispatch_life (num -> a -> b)
+  (\cmd (\next
+    (ifl (is_1 cmd) (\_ (view_glider next))
+    (\_ (ifl (is_2 cmd) (\_ (view_blinker next))
+    (\_ (ifl (is_3 cmd) (\_ (view_beacon next))
+    (\_ (ifl (is_4 cmd) (\_ (view_toad next))
+    (\_ next)))))))))))
+
+; --- Interactive Loop Turns ---
+(define! life_done (a)
+  (io_print "\n[Game of Life] Simulation finished. Goodbye!\n" io_done))
+
+(define! life_turn3 (a -> b)
+  (\_
+    (show_menu
+      (io_prompt "Select Pattern (0-4): " (\cmd
+        (ifl (is_0 cmd)
+          (\_ life_done)
+          (\_ (dispatch_life cmd life_done))))))))
+
+(define! life_turn2 (a -> b)
+  (\_
+    (show_menu
+      (io_prompt "Select Pattern (0-4): " (\cmd
+        (ifl (is_0 cmd)
+          (\_ life_done)
+          (\_ (dispatch_life cmd (life_turn3 0)))))))))
+
+(define! life_turn1 (a -> b)
+  (\_
+    (show_menu
+      (io_prompt "Select Pattern (0-4): " (\cmd
+        (ifl (is_0 cmd)
+          (\_ life_done)
+          (\_ (dispatch_life cmd (life_turn2 0)))))))))
+
+(life_turn1 0)
