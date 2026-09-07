@@ -61,6 +61,20 @@ static int guard_has(Guard *g, const char *name) {
   return 0;
 }
 
+/* Non-recursive define: evaluate once, cache the reduced net so each reference
+   clones that value instead of re-expanding/re-reducing. Recursive or too-big
+   bodies keep the textual path. */
+static void def_precompile(Def *d) {
+  if (d->comp_tried) return;
+  d->comp_tried = 1;
+  if (d->rec) return;
+  char err[512]; Term *ex = expand_defs(d->term);
+  Net src; net_init(&src, 1 << 14);
+  if (!compile(ex, &src, err, sizeof err)) { net_free(&src); term_free(ex); return; }
+  if (net_reduce(&src, STEP_LIMIT) >= STEP_LIMIT) { net_free(&src); term_free(ex); return; }
+  d->compiled = net_copy(&src); net_free(&src); term_free(ex);
+}
+
 static Term *expand(Term *t, Guard *g) {
   if (!t) return NULL;
   if (t->type == TVAR) {
@@ -71,6 +85,8 @@ static Term *expand(Term *t, Guard *g) {
       guard_push(g, d->name); Term *body = term_copy(d->term);
       d->expanded = expand(body, g); term_free(body); g->count--;
     }
+    def_precompile(d);
+    if (d->compiled) return term_new(TDEF, d->name, NULL, NULL); /* value marker */
     return term_copy(d->expanded);
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
@@ -140,9 +156,9 @@ static void process_def(Term *t) {
   } else {
     strncpy(d->name, t->name, NAME - 1); d->name[NAME - 1] = 0;
   }
-  d->sch = sch; d->typed = 1;
+  d->sch = sch; d->typed = 1; d->rec = rec;
   d->term = rec ? term_new(TAPP, "", y_term(), term_new(TLAM, t->name, t->l, NULL)) : t->l;
-  d->expanded = NULL;
+  d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;
   t->l = NULL;
 }
 

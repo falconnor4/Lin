@@ -65,7 +65,8 @@ int net_print(Net *n);
 long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
-typedef struct { char name[NAME]; Term *term, *expanded; Scheme sch; int typed; } Def;
+typedef struct { char name[NAME]; Term *term, *expanded; Scheme sch; int typed, rec;
+                 Net *compiled; int comp_tried; } Def;
 extern Def *defs;
 extern int ndefs, lin_threads;
 Def *def_find(const char *name);

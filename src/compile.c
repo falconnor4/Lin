@@ -55,6 +55,36 @@ static Port dup_tree(Port *ts, int nts, Scope sc) {
   return cur;
 }
 
+/* Rebuild a source-net scope in the target gauge table. sso scopes are
+   self-contained; heap-backed ones re-register bit-by-bit into N->sca. */
+static Scope sc_rebuild(Net *d, int i) {
+  Scope s = d->scope[i];
+  if (!s.sso.is_heap) return s;
+  Scope r = scope_nil();
+  for (unsigned b = 0; b < (unsigned)s.heap.len; b++) r = scope_ext(N, r, (int)d->sca[s.heap.off + b]);
+  return r;
+}
+
+/* Clone a pre-reduced define value (closed normal-form net) into N and return
+   its value port.  The source ROOT<->value clamp is cut so the clone ties only
+   to the caller. */
+static Port ct_splice(Def *d, Scope sc) {
+  (void)sc; Net *s = d->compiled;
+  int n = s->nn, *map = malloc(sizeof(int) * (size_t)(n ? n : 1));
+  for (int i = 0; i < n; i++) map[i] = net_alloc(N, s->tag[i], sc_rebuild(s, i), s->name[i]).node;
+  Port val = s->wire[0]; int vn = val.node;
+  for (int i = 0; i < n; i++) {
+    if (s->dead[i]) continue;
+    for (int p = 0; p < 3; p++) {
+      Port w = s->wire[i * 3 + p];
+      if (w.node < 0 || (i == 0 && p == 0) || (i == vn && p == (int)val.port)) continue;
+      net_link(N, (Port){map[i], p}, (Port){map[w.node], w.port}, 0);
+    }
+  }
+  Port r = (Port){map[vn], val.port}; free(map);
+  return r;
+}
+
 static Port ct(Term *t, Scope sc) {
   switch (t->type) {
   case TVAR: {
@@ -100,7 +130,11 @@ static Port ct(Term *t, Scope sc) {
     net_link(N, (Port){a.node, 2}, ct(t->r, sc), 1);
     return (Port){a.node, 1};
   }
-  case TDEF: return ct(t->l, sc);
+  case TDEF: {
+    Def *dd = def_find(t->name);
+    if (!t->l && dd && dd->compiled) return ct_splice(dd, sc); /* precompiled value */
+    return ct(t->l, sc);
+  }
   }
   return (Port){-1, 0};
 }
@@ -240,7 +274,7 @@ static Term *eg_extract(EGraph *g, int c, int d) {
 Term *egraph_optimize(Term *t) {
   if (!t) return NULL;
   EGraph g = {0}; int root = eg_add_term(&g, t); eg_saturate(&g);
-  Term *res = eg_extract(&g, root, 0);
+  Term *res = (root < 0) ? NULL : eg_extract(&g, root, 0);
   free(g.nodes); free(g.classes); free(g.node_cls); return res ? res : term_copy(t);
 }
 
