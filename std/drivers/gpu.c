@@ -244,12 +244,9 @@ static inline int gpu_classify(Net *n, Port p1, Port p2) {
 
 static int gpu_reduce_wave(Net *n, long limit, int *changed) {
   vk_ensure_init();
-  int wave_cnt = n->atop;
-  if (wave_cnt <= 0 || n->steps >= limit) return 0;
-
-  Port *curr = malloc((size_t)wave_cnt * sizeof(Port));
-  memcpy(curr, n->act, (size_t)wave_cnt * sizeof(Port));
-  n->atop = 0;
+  if (n->atop <= 0 || n->steps >= limit) return 0;
+  static Port *curr = NULL; static int curr_cap = 0;
+  int wave_cnt = wave_snapshot(n, &curr, &curr_cap);
 
   int np = wave_cnt / 2;
   GpuRedex *grid = malloc((size_t)np * sizeof(GpuRedex));
@@ -262,7 +259,6 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
     if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
     grid[n_valid++] = (GpuRedex){p1, p2, gpu_classify(n, p1, p2)};
   }
-  free(curr);
   if (n_valid == 0) { free(grid); return 1; }
 
   // Zero-divergence warp bucketing

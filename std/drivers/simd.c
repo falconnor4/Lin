@@ -155,12 +155,9 @@ static int simd_fold_ffi(Net *n, int lam, int app) {
 }
 
 static int simd_reduce_wave(Net *n, long limit, int *changed) {
-  int wave_cnt = n->atop;
-  if (wave_cnt <= 0 || n->steps >= limit) return 0;
-
-  Port *curr = malloc((size_t)wave_cnt * sizeof(Port));
-  memcpy(curr, n->act, (size_t)wave_cnt * sizeof(Port));
-  n->atop = 0;
+  if (n->atop <= 0 || n->steps >= limit) return 0;
+  static Port *curr = NULL; static int curr_cap = 0;
+  int wave_cnt = wave_snapshot(n, &curr, &curr_cap);
 
   int batch_changed = 0;
   int np = wave_cnt / 2;
@@ -199,7 +196,6 @@ static int simd_reduce_wave(Net *n, long limit, int *changed) {
     gen[ngen++] = p1; gen[ngen++] = p2;
   }
 
-  free(curr);
   if (ngen > 0) lin_reduce_wave_parallel(n, gen, ngen, changed);
   free(gen);
   *changed += batch_changed;

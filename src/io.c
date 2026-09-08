@@ -173,11 +173,14 @@ static int run_ffi(Net *n, Port p, long *out_int, char *out_str, size_t max_str)
   if (!strcmp(fn, "getenv")) return (snprintf(out_str, max_str, "%s", getenv(argc > 0 ? (char *)c_args[0] : "") ?: "(null)"), 2);
   if (!strcmp(fn, "exit")) { exit(argc > 0 ? (int)c_args[0] : 0); return 1; }
   if (!strcmp(fn, "puts")) return (*out_int = puts(argc > 0 ? (char *)c_args[0] : ""), 1);
-  if (!strcmp(fn, "driver_set")) {
+  if (fn[0] == 'd' && fn[1] == 'r' && (!strcmp(fn, "driver_set") || !strcmp(fn, "driver_add") || !strcmp(fn, "driver_clear"))) {
+    if (!strcmp(fn, "driver_clear")) { lin_driver_clear(); return (*out_int = 1, 1); }
     const char *dn = argc > 0 ? (char *)c_args[0] : "cpu";
     void *s = !strcmp(dn, "cpu") ? NULL : !strcmp(dn, "gpu") ? &lin_gpu_driver : !strcmp(dn, "simd") ? &lin_simd_driver : dlsym(RTLD_DEFAULT, dn);
-    if (!strcmp(dn, "cpu") || s) { lin_set_driver((LinDriver *)s); return (*out_int = 1, 1); }
-    return (*out_int = 0, 1);
+    if (strcmp(dn, "cpu") && !s) return (*out_int = 0, 1);
+    if (strcmp(fn, "driver_add")) lin_driver_clear(); /* set resets first; add appends */
+    if (s) lin_driver_add((LinDriver *)s);
+    return (*out_int = 1, 1);
   }
   if (!strcmp(fn, "driver_get")) { LinDriver *d = lin_get_driver(); return (snprintf(out_str, max_str, "%s", d ? d->name : "cpu"), 2); }
 

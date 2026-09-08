@@ -81,3 +81,29 @@
 ; Verify combinator application under restored CPU
 (and2 (fst (fst (fst res_cpu))) (fst (fst (fst res_gpu))))
 ; expect => true
+
+; --- 5. Driver Pipeline: SIMD + GPU resident simultaneously ---
+; Add both accelerators; the base engine stays the correctness fallback.
+(add_driver "simd")
+; expect => 1
+(add_driver "gpu")
+; expect => 1
+
+; Most-recently-added (gpu) is queried as the active driver
+(get_driver)
+; expect => gpu
+
+; Pipeline still reduces correctly with SIMD+GPU stacked ahead of cpu
+(define res_pipe (wave_64 true))
+(fst (fst (fst res_pipe)))
+; expect => true
+
+(define res_pipe_f (wave_64 false))
+(fst (fst (fst res_pipe_f)))
+; expect => false
+
+; Reset to base cpu
+(clear_drivers)
+; expect => 1
+(get_driver)
+; expect => cpu

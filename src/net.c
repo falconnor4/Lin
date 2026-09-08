@@ -223,9 +223,12 @@ static void net_compact(Net *n, const unsigned char *reach) {
 }
 
 typedef struct { Port p1, p2; } Pair;
-static LinDriver *cur_drv;
-void lin_set_driver(LinDriver *d) { cur_drv = d; }
-LinDriver *lin_get_driver(void) { return cur_drv; }
+/* Driver pipeline: ordered, first-accept-wins; base engine reduces any wave no
+   driver claims.  Keeps SIMD + GPU resident; most-recently-added has priority. */
+static LinDriver *drv[8]; static int ndrv;
+void lin_driver_add(LinDriver *d) { if (ndrv < 8) drv[ndrv++] = d; }
+void lin_driver_clear(void) { ndrv = 0; }
+LinDriver *lin_get_driver(void) { return ndrv ? drv[ndrv - 1] : NULL; }
 
 /* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs,
    an even count) with the base engine's parallel-safe interaction core:
@@ -297,26 +300,27 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
   }
 }
 
+/* Snapshot the active redex list into `*out` (grown via `*cap`), voiding `atop`. */
+int wave_snapshot(Net *n, Port **out, int *cap) {
+  int cnt = n->atop; if (cnt <= 0) return 0;
+  if (cnt > *cap) { free(*out); *out = malloc((size_t)(*cap = cnt) * sizeof(Port)); }
+  memcpy(*out, n->act, (size_t)cnt * sizeof(Port));
+  n->atop = 0;
+  return cnt;
+}
+
 long net_reduce(Net *n, long limit) {
-  /* Interaction nets are self-collecting: a redex that matters is always
-     reachable from the ROOT, and net_link() enqueues every port0-port0 value
-     pair it creates, so the incremental active list alone drives the whole
-     reduction to normal form.  The reach-BFS + compact pass therefore runs
-     only to reclaim memory once allocation has doubled past the last
-     reclaimed live set (memory stays ~2x the live net).  The wavefront loop
-     lets an offloading driver (SIMD/GPU) grab each wave first; otherwise the
-     wave is snapshotted and handed to the shared interaction core. */
+  /* Self-collecting nets reduce by the active list; the BFS+compact below
+     reclaims memory after it doubles.  Waves go to the first claiming driver. */
   Port *curr = NULL; int curr_cap = 0;
   unsigned char *reach = NULL; int *q = NULL; long qcap = 0, gcmark = 1L << 20;
   while (n->steps < limit) {
     int changed = 0;
     while (n->atop > 0 && n->steps < limit) {
-      if (cur_drv && cur_drv->reduce_wave(n, limit, &changed)) continue;
-      int wave_cnt = n->atop;
-      if (wave_cnt > curr_cap) curr = realloc(curr, (size_t)(curr_cap = wave_cnt) * sizeof(Port));
-      memcpy(curr, n->act, (size_t)wave_cnt * sizeof(Port));
-      n->atop = 0;
-      lin_reduce_wave_parallel(n, curr, wave_cnt, &changed);
+      int handled = 0;
+      for (int di = ndrv - 1; di >= 0 && !handled; di--) handled = drv[di]->reduce_wave(n, limit, &changed);
+      if (handled) continue;
+      lin_reduce_wave_parallel(n, curr, wave_snapshot(n, &curr, &curr_cap), &changed);
     }
     if (changed == 0 && n->atop == 0) break;
     if (n->atop == 0 && (long)n->nn > gcmark) {
@@ -329,8 +333,8 @@ long net_reduce(Net *n, long limit) {
           if (w.node >= 0 && w.node < (int)n->nn && !n->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; } } }
       net_compact(n, reach);
       gcmark = (long)n->nn * 2 + 64;
-      for (int i = 1; i < n->nn; i++) { Port w = n->wire[i * 3];
-        if (w.port == 0 && w.node > i) act_push(n, (Port){i, 0}, w); }
+      for (int i = 1; i < n->nn; i++) if (n->wire[i * 3].port == 0 && n->wire[i * 3].node > i)
+        act_push(n, (Port){i, 0}, n->wire[i * 3]);
     }
   }
   free(reach); free(q); free(curr);
