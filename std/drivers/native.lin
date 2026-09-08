@@ -1,0 +1,22 @@
+; ==============================================================================
+; Lin Standard Library: Native small-integer arithmetic mode
+; ==============================================================================
+; Routes the scalar arithmetic / comparison primitives through the FFI closure
+; representation so that a capable reducer (e.g. the SIMD driver) can fold them
+; to native small-integer results *during* reduction, instead of expanding them
+; step-by-step through Scott numerals.  Optional and driver-opt-in: without a
+; folding reducer the pure-Scott numeric module remains the default and every
+; driver stays correct (though slower for small integers).
+; ==============================================================================
+
+(load "num.lin")
+(load "math.lin")
+(load "../ffi.lin")
+
+; --- Native arithmetic: produce an FFI closure the reducer can fold ---
+(define! add (num -> num -> num) (\a (\b (ccall2 "lin_add" a b))))
+(define! sub (num -> num -> num) (\a (\b (ccall2 "lin_sub" a b))))
+(define! mul (num -> num -> num) (\a (\b (ccall2 "lin_mul" a b))))
+(define! div (num -> num -> num) (\a (\b (ccall2 "lin_div" a b))))
+(define! mod (num -> num -> num) (\a (\b (ccall2 "lin_mod" a b))))
+(define! pow (num -> num -> num) (\a (\b (ccall2 "lin_pow" a b))))

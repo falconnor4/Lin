@@ -2,7 +2,7 @@
 
 Welcome to the interactive demonstration and showcase suite for **Lin**, an optimal functional programming language based on Girard's Linear Logic, Yves Lafont's Interaction Combinators, and Jean-Yves Girard's Geometry of Interaction (GoI).
 
-This directory contains ten terminal applications, simulations, and mathematical demonstrations illustrating the core properties of the Lin runtime: confluent graph reduction, Lévy-optimal sharing, pure Scott and Church data encodings, constructive Curry-Howard proof terms, and discrete dynamical systems.
+This directory contains eleven terminal applications, simulations, and mathematical demonstrations illustrating the core properties of the Lin runtime: confluent graph reduction, Lévy-optimal sharing, pure Scott and Church data encodings, constructive Curry-Howard proof terms, discrete dynamical systems, and a GPU-offloaded 3D wireframe.
 
 ---
 
@@ -27,6 +27,7 @@ You can also run any individual example directly:
 ./lin examples/logic_proofs.lin
 ./lin examples/repl_calc.lin
 ./lin examples/life.lin
+./lin examples/gpu_cube3d.lin
 ```
 
 ---
@@ -291,6 +292,43 @@ A 2D toroidal cellular automata simulator with interactive generation advancemen
 ============================================================
 Next Pattern: [1] Glider  [2] Blinker  [3] Beacon  [4] Toad  [0] Quit
 Select:
+```
+
+---
+
+### 11. `gpu_cube3d.lin` - GPU-Offloaded 3D Wireframe Cube (Per-Pixel)
+
+A rotating 3D wireframe cube that activates Lin's wavefront GPU offloading driver and
+rasterizes every pixel *live in Lin* — nothing is pre-baked.
+
+- **Launch Command**: `./lin examples/gpu_cube3d.lin`
+- **Key Features**:
+  - Loads `std/drivers/gpu.lin` and reports the active wavefront driver.
+  - Rotates the cube in the 24-element 90-degree rotation group (a coordinate permutation plus a `4 - v` sign-flip) — no multiply or divide.
+  - Projects the 3D vertices with an oblique projection `(col, row) = (6 + x - z, 6 + y - z)`.
+  - **Per-pixel rasterization**: each of the 9x9 viewport cells is classified by testing it against the cube's 12 projected edges (horizontal, vertical, and +1 diagonals), then depth-shaded (`#` near, `+` mid, `.` far). The oblique projection turns the cube's three axes into slopes 0, infinity, and +1, so a whole frame needs only `eq`/`leq`/`add`/`sub` on small integers — no multiply or divide.
+- **Theoretical Foundations**:
+  - 90-degree rotations as permutation matrices in the rotation group $SO(3)$.
+  - The 8 projected vertices are bound once per frame in a `let` (not per pixel), while the edge tests themselves are recomputed per cell — a genuine demonstration of Lin's arithmetic.
+  - On hosts without a working Vulkan device the driver falls back to its own host reducer; the demo calls `set_driver "cpu"` so the animation runs at a usable speed.
+
+```
+Lin 3D cube -- GPU offloading driver: gpu
+#####....
+##..##...
+#.+.#.+..
+#...#....
+#####....
+.#...#...
+..+...+..
+.........
+.........
+#########
+#...#....
+#...#....
+#...#....
+#########
+.........
 ```
 
 ---

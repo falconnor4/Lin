@@ -369,7 +369,7 @@ int main(int argc, char **argv) {
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
   if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
 #ifdef _OPENMP
-  omp_set_num_threads(lin_threads > 0 ? lin_threads : 1);
+  if (lin_threads > 0) omp_set_num_threads(lin_threads); /* default: all cores, honor OMP_NUM_THREADS */
 #endif
 
   if (argc > 1 && (!strcmp(argv[1], "build") || !strcmp(argv[1], "--build"))) {

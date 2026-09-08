@@ -147,11 +147,13 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
 /* the four rules of the scope-gauge calculus (wave-opt-reduction main.hs).
    ERA is an inert terminal: era-principal pairs are simply dropped. */
 static int SC_O; /* scope-oblivious mode: annihilate gauge-mismatched dups */
+static int lin_trace = -1; /* cached LIN_TRACE */
 int net_interact(Net *n, Port p1, Port p2) {
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
   if (t1 > t2) { Port t = p1; p1 = p2; p2 = t; int u = t1; t1 = t2; t2 = u; }
   int n1 = p1.node, n2 = p2.node;
-  if (getenv("LIN_TRACE"))
+  if (lin_trace < 0) lin_trace = getenv("LIN_TRACE") != NULL;
+  if (lin_trace)
     fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
 
   if (t1 == LAM && t2 == APP) {
@@ -225,116 +227,113 @@ static LinDriver *cur_drv;
 void lin_set_driver(LinDriver *d) { cur_drv = d; }
 LinDriver *lin_get_driver(void) { return cur_drv; }
 
-static void reduce_wavefront(Net *n, long limit, int *changed) {
+/* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs,
+   an even count) with the base engine's parallel-safe interaction core:
+   spatial-disjoint pairs are solved concurrently via OpenMP, the rest (and a
+   single-threaded build) serially.  Exposed so driver reducers (e.g. the SIMD
+   driver) can fan out a real wave in parallel while handling their own
+   optimisations; the base correctness rules all live here. */
+void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
 #ifdef _OPENMP
   ensure_tact();
   int nth = omp_get_max_threads();
-#endif
-  Port *curr = NULL;
-  int curr_cap = 0;
-  while (n->atop > 0 && n->steps < limit) {
-    if (cur_drv && cur_drv->reduce_wave(n, limit, changed)) continue;
-    int wave_cnt = n->atop;
-    if (wave_cnt > curr_cap) curr = realloc(curr, (size_t)(curr_cap = wave_cnt) * sizeof(Port));
-    memcpy(curr, n->act, (size_t)wave_cnt * sizeof(Port));
-    n->atop = 0;
-#ifdef _OPENMP
-    if (nth > 1 && wave_cnt >= 8) {
-      int np = wave_cnt / 2, nsec = (n->nn + 63) >> 6;
-      Pair *inter = malloc((size_t)np * sizeof(Pair)), *bound = malloc((size_t)np * sizeof(Pair));
-      int n_int = 0, n_bnd = 0, sc_need = 0;
-      for (int i = 0; i < wave_cnt; i += 2) {
-        Port p1 = curr[i], p2 = curr[i + 1];
-        if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
-        if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
-        if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
-        int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
-        if (ok) {
-          int c[4] = { WIRE(n, ((Port){u, 1})).node, WIRE(n, ((Port){u, 2})).node,
-                       WIRE(n, ((Port){v, 1})).node, WIRE(n, ((Port){v, 2})).node };
-          for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
-        }
-        if (ok) inter[n_int++] = (Pair){p1, p2}; else bound[n_bnd++] = (Pair){p1, p2};
-        int lu = scope_len(n->scope[u]), lv = scope_len(n->scope[v]);
-        if (1 + lu + lv > 57 || n->scope[u].sso.is_heap || n->scope[v].sso.is_heap) sc_need += 2 * (1 + lu + lv);
-      }
-      if (n_int > 0) {
-        int *head = malloc((size_t)nsec * sizeof(int)), *next = malloc((size_t)n_int * sizeof(int));
-        memset(head, -1, (size_t)nsec * sizeof(int));
-        for (int i = 0; i < n_int; i++) { int s = inter[i].p1.node >> 6; next[i] = head[s]; head[s] = i; }
-        net_ensure_cap(n, n->nn + n_int * 4); sc_ensure_cap(n, n->scn + sc_need);
-        in_parallel = 1; int batch_changed = 0;
-        #pragma omp parallel for reduction(+:batch_changed) schedule(dynamic)
-        for (int s = 0; s < nsec; s++)
-          for (int i = head[s]; i >= 0; i = next[i])
-            if (WIRE(n, inter[i].p1).node == inter[i].p2.node && !n->dead[inter[i].p1.node] && !n->dead[inter[i].p2.node])
-              if (net_interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
-        in_parallel = 0; n->steps += n_int; *changed += batch_changed;
-        for (int t = 0; t < nth; t++) {
-          for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
-          t_act[t].top = 0;
-        }
-        free(head); free(next);
-      }
-      for (int i = 0; i < n_bnd; i++) {
-        Port p1 = bound[i].p1, p2 = bound[i].p2;
-        if (p1.node >= 0 && p2.node >= 0 && !n->dead[p1.node] && !n->dead[p2.node] &&
-            WIRE(n, p1).node == p2.node && WIRE(n, p2).node == p1.node && !p1.port && !p2.port) {
-          if (net_interact(n, p1, p2)) *changed += 1;
-          n->steps++;
-        }
-      }
-      free(inter); free(bound); continue;
-    }
-#endif
+
+  if (nth > 1 && wave_cnt >= 8) {
+    int np = wave_cnt / 2, nsec = (n->nn + 63) >> 6;
+    Pair *inter = malloc((size_t)np * sizeof(Pair)), *bound = malloc((size_t)np * sizeof(Pair));
+    int n_int = 0, n_bnd = 0, sc_need = 0;
     for (int i = 0; i < wave_cnt; i += 2) {
-      if (n->steps >= limit) {
-        for (int j = i; j < wave_cnt; j += 2) act_push(n, curr[j], curr[j + 1]);
-        break;
-      }
       Port p1 = curr[i], p2 = curr[i + 1];
       if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
       if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
       if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
-      if (net_interact(n, p1, p2)) *changed += 1;
-      n->steps++;
+      int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
+      if (ok) {
+        int c[4] = { WIRE(n, ((Port){u, 1})).node, WIRE(n, ((Port){u, 2})).node,
+                     WIRE(n, ((Port){v, 1})).node, WIRE(n, ((Port){v, 2})).node };
+        for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
+      }
+      if (ok) inter[n_int++] = (Pair){p1, p2}; else bound[n_bnd++] = (Pair){p1, p2};
+      int lu = scope_len(n->scope[u]), lv = scope_len(n->scope[v]);
+      if (1 + lu + lv > 57 || n->scope[u].sso.is_heap || n->scope[v].sso.is_heap) sc_need += 2 * (1 + lu + lv);
     }
+    if (n_int > 0) {
+      int *head = malloc((size_t)nsec * sizeof(int)), *next = malloc((size_t)n_int * sizeof(int));
+      memset(head, -1, (size_t)nsec * sizeof(int));
+      for (int i = 0; i < n_int; i++) { int s = inter[i].p1.node >> 6; next[i] = head[s]; head[s] = i; }
+      net_ensure_cap(n, n->nn + n_int * 4); sc_ensure_cap(n, n->scn + sc_need);
+      in_parallel = 1; int batch_changed = 0;
+      #pragma omp parallel for reduction(+:batch_changed) schedule(dynamic)
+      for (int s = 0; s < nsec; s++)
+        for (int i = head[s]; i >= 0; i = next[i])
+          if (WIRE(n, inter[i].p1).node == inter[i].p2.node && !n->dead[inter[i].p1.node] && !n->dead[inter[i].p2.node])
+            if (net_interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
+      in_parallel = 0; n->steps += n_int; *changed += batch_changed;
+      for (int t = 0; t < nth; t++) {
+        for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
+        t_act[t].top = 0;
+      }
+      free(head); free(next);
+    }
+    for (int i = 0; i < n_bnd; i++) {
+      Port p1 = bound[i].p1, p2 = bound[i].p2;
+      if (p1.node >= 0 && p2.node >= 0 && !n->dead[p1.node] && !n->dead[p2.node] &&
+          WIRE(n, p1).node == p2.node && WIRE(n, p2).node == p1.node && !p1.port && !p2.port) {
+        if (net_interact(n, p1, p2)) *changed += 1;
+        n->steps++;
+      }
+    }
+    free(inter); free(bound);
+    return;
   }
-  free(curr);
+#endif
+  for (int i = 0; i < wave_cnt; i += 2) {
+    Port p1 = curr[i], p2 = curr[i + 1];
+    if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
+    if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
+    if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
+    if (net_interact(n, p1, p2)) *changed += 1;
+    n->steps++;
+  }
 }
 
 long net_reduce(Net *n, long limit) {
+  /* Interaction nets are self-collecting: a redex that matters is always
+     reachable from the ROOT, and net_link() enqueues every port0-port0 value
+     pair it creates, so the incremental active list alone drives the whole
+     reduction to normal form.  The reach-BFS + compact pass therefore runs
+     only to reclaim memory once allocation has doubled past the last
+     reclaimed live set (memory stays ~2x the live net).  The wavefront loop
+     lets an offloading driver (SIMD/GPU) grab each wave first; otherwise the
+     wave is snapshotted and handed to the shared interaction core. */
+  Port *curr = NULL; int curr_cap = 0;
+  unsigned char *reach = NULL; int *q = NULL; long qcap = 0, gcmark = 1L << 20;
   while (n->steps < limit) {
     int changed = 0;
-    n->atop = 0;
-    unsigned char *reach = calloc((size_t)n->nn, 1);
-    int *q = malloc(sizeof(int) * (size_t)(n->nn + 1)), qh = 0, qt = 0;
-    reach[0] = 1; q[qt++] = 0;
-    while (qh < qt) {
-      int u = q[qh++];
-      for (int p = 0; p < 3; p++) {
-        Port w = WIRE(n, ((Port){u, p}));
-        if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; }
-      }
+    while (n->atop > 0 && n->steps < limit) {
+      if (cur_drv && cur_drv->reduce_wave(n, limit, &changed)) continue;
+      int wave_cnt = n->atop;
+      if (wave_cnt > curr_cap) curr = realloc(curr, (size_t)(curr_cap = wave_cnt) * sizeof(Port));
+      memcpy(curr, n->act, (size_t)wave_cnt * sizeof(Port));
+      n->atop = 0;
+      lin_reduce_wave_parallel(n, curr, wave_cnt, &changed);
     }
-    net_compact(n, reach); free(reach); free(q);
-    for (int i = 1; i < n->nn; i++) {
-      Port w = n->wire[i * 3];
-      if (w.port == 0 && w.node > i) act_push(n, (Port){i, 0}, w);
+    if (changed == 0 && n->atop == 0) break;
+    if (n->atop == 0 && (long)n->nn > gcmark) {
+      if ((long)n->nn + 1 > qcap) { free(reach); free(q); qcap = (long)n->nn + 1;
+        reach = malloc((size_t)qcap); q = malloc((size_t)qcap * sizeof(int)); }
+      memset(reach, 0, (size_t)qcap);
+      int qh = 0, qt = 1; reach[0] = 1; q[0] = 0;
+      while (qh < qt) { int u = q[qh++];
+        for (int p = 0; p < 3; p++) { Port w = WIRE(n, ((Port){u, p}));
+          if (w.node >= 0 && w.node < (int)n->nn && !n->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; } } }
+      net_compact(n, reach);
+      gcmark = (long)n->nn * 2 + 64;
+      for (int i = 1; i < n->nn; i++) { Port w = n->wire[i * 3];
+        if (w.port == 0 && w.node > i) act_push(n, (Port){i, 0}, w); }
     }
-    reduce_wavefront(n, limit, &changed);
-    if (getenv("LIN_DUMP"))
-      for (int i = 0; i < n->nn; i++) {
-        if (n->dead[i]) continue;
-        for (int pp = 0; pp < 3; pp++) {
-          Port w = n->wire[i * 3 + pp];
-          if (w.node >= 0 && (n->wire[w.node * 3 + w.port].node != i || n->wire[w.node * 3 + w.port].port != pp))
-            fprintf(stderr, "ASYMMETRY %d.%d -> %d.%d back %d.%d\n", i, pp, w.node, w.port,
-                    n->wire[w.node * 3 + w.port].node, n->wire[w.node * 3 + w.port].port);
-        }
-      }
-    if (changed == 0) break;
   }
+  free(reach); free(q); free(curr);
   return n->steps;
 }
 

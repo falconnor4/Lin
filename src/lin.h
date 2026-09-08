@@ -36,6 +36,7 @@ Net *net_copy(const Net *n); Scope scope_nil(void);
 Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
 typedef struct LinDriver { const char *name; int (*reduce_wave)(Net *n, long limit, int *changed); } LinDriver;
 void lin_set_driver(LinDriver *d); LinDriver *lin_get_driver(void); extern LinDriver lin_gpu_driver, lin_simd_driver;
+void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
