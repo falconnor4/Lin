@@ -91,15 +91,16 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
   return -1;
 }
 
-static int run_ffi(Net *n, Port p, long *out_int, char *out_str, size_t max_str);
+typedef struct { int kind; long iv; char sv[4096]; } Val; /* kind: 0 none, 1 int, 2 str, 3 bool */
+static Val run_ffi(Net *n, Port p);
 
 static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_max) {
   p = skip_dup(n, p);
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
   if (!strcmp(NNM(n, p.node), "_ffi")) {
-    long fv = 0; int fr = run_ffi(n, p, &fv, str_buf, str_max);
-    if (fr == 1 || fr == 3) { *out_val = fv; return 1; }
-    if (fr == 2) { *out_val = (long)(intptr_t)str_buf; return 1; }
+    Val v = run_ffi(n, p);
+    if (v.kind == 1 || v.kind == 3) { *out_val = v.iv; return 1; }
+    if (v.kind == 2) { snprintf(str_buf, str_max, "%s", v.sv); *out_val = (long)(intptr_t)str_buf; return 1; }
   }
   if (!strncmp(NNM(n, p.node), "_bt", 3)) { int b = net_read_bool(n, p); if (b >= 0) { *out_val = b; return 1; } }
   if (NNM(n, p.node)[0] == 'c' || !strncmp(NNM(n, p.node), "_cl", 3)) {
@@ -134,70 +135,77 @@ static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], i
 }
 
 /* Check if root is an FFI invocation: \_ffi. \_ret. ((_ffi fn) args) */
-static int run_ffi(Net *n, Port p, long *out_int, char *out_str, size_t max_str) {
+/* Builtin dispatch: try one named FFI.  Simple int/bool/str builtins are one
+   table row each (name -> kind/expr); anything else resolves via dlsym (always
+   an int result).  Side-effectors that must run and not return a value
+   (exit) are handled specially before the table. */
+#define B1(n, e) if (!strcmp(fn, n)) { v.kind = 1, v.iv = (long)(e); return v; }
+#define B3(n, e) if (!strcmp(fn, n)) { v.kind = 3, v.iv = (long)(e); return v; }
+static Val run_ffi(Net *n, Port p) {
+  Val v = {0, 0, {0}};
   p = skip_dup(n, p);
-  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || strcmp(NNM(n, p.node), "_ffi")) return 0;
-  Port r = skip_dup(n, wire((Port){p.node, 2}));
-  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || strcmp(NNM(n, r.node), "_ret")) return 0;
-  Port a2 = skip_dup(n, wire((Port){r.node, 2}));
-  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
-  Port a1 = skip_dup(n, wire((Port){a2.node, 0}));
-  if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || strcmp(NNM(n, p.node), "_ffi")) return v;
+  Port r = skip_dup(n, wire((Port){p.node, 2})); if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || strcmp(NNM(n, r.node), "_ret")) return v;
+  Port a2 = skip_dup(n, wire((Port){r.node, 2})); if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return v;
+  Port a1 = skip_dup(n, wire((Port){a2.node, 0})); if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return v;
 
   char fn[256];
-  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
+  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return v;
   long c_args[8] = {0}; char sbufs[8][4096];
   int argc = unpack_args(n, wire((Port){a2.node, 2}), c_args, sbufs, 8);
 
-  *out_int = 0; out_str[0] = 0;
-  if (!strcmp(fn, "lin_add")) return (*out_int = c_args[0] + c_args[1], 1);
-  if (!strcmp(fn, "lin_sub")) return (*out_int = c_args[0] >= c_args[1] ? c_args[0] - c_args[1] : 0, 1);
-  if (!strcmp(fn, "lin_mul")) return (*out_int = c_args[0] * c_args[1], 1);
-  if (!strcmp(fn, "lin_div")) return (*out_int = c_args[1] ? c_args[0] / c_args[1] : 0, 1);
-  if (!strcmp(fn, "lin_mod")) return (*out_int = c_args[1] ? c_args[0] % c_args[1] : 0, 1);
-  if (!strcmp(fn, "lin_pow")) {
-    long base = c_args[0], exp = c_args[1], res = 1;
-    while (exp > 0) {
-      if (exp & 1) res *= base;
-      base *= base;
-      exp >>= 1;
-    }
-    return (*out_int = res, 1);
-  }
-  if (!strcmp(fn, "lin_eq") || !strcmp(fn, "lin_lt") || !strcmp(fn, "lin_leq") || !strcmp(fn, "lin_gt") || !strcmp(fn, "lin_streq")) {
-    *out_int = !strcmp(fn, "lin_streq") ? (argc >= 2 && !strcmp((char *)c_args[0], (char *)c_args[1])) :
-               !strcmp(fn, "lin_eq") ? c_args[0] == c_args[1] : !strcmp(fn, "lin_lt") ? c_args[0] < c_args[1] : !strcmp(fn, "lin_leq") ? c_args[0] <= c_args[1] : c_args[0] > c_args[1];
-    return 3;
-  }
-  if (!strcmp(fn, "dlopen")) return (*out_int = (long)(intptr_t)dlopen(argc > 0 ? (char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL), 1);
-  if (!strcmp(fn, "getenv")) return (snprintf(out_str, max_str, "%s", getenv(argc > 0 ? (char *)c_args[0] : "") ?: "(null)"), 2);
-  if (!strcmp(fn, "exit")) { exit(argc > 0 ? (int)c_args[0] : 0); return 1; }
-  if (!strcmp(fn, "puts")) return (*out_int = puts(argc > 0 ? (char *)c_args[0] : ""), 1);
-  if (fn[0] == 'd' && fn[1] == 'r' && (!strcmp(fn, "driver_set") || !strcmp(fn, "driver_add") || !strcmp(fn, "driver_clear"))) {
-    if (!strcmp(fn, "driver_clear")) { lin_driver_clear(); return (*out_int = 1, 1); }
+  if (!strcmp(fn, "exit")) { exit(argc > 0 ? (int)c_args[0] : 0); return v; }
+  if (!strcmp(fn, "driver_get")) { LinDriver *d = lin_get_driver(); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", d ? d->name : "cpu"); return v; }
+  if (!strcmp(fn, "driver_set") || !strcmp(fn, "driver_add") || !strcmp(fn, "driver_clear")) {
+    if (!strcmp(fn, "driver_clear")) { lin_driver_clear(); v.kind = 1; v.iv = 1; return v; }
     const char *dn = argc > 0 ? (char *)c_args[0] : "cpu";
     void *s = !strcmp(dn, "cpu") ? NULL : !strcmp(dn, "gpu") ? &lin_gpu_driver : !strcmp(dn, "simd") ? &lin_simd_driver : dlsym(RTLD_DEFAULT, dn);
-    if (strcmp(dn, "cpu") && !s) return (*out_int = 0, 1);
-    if (strcmp(fn, "driver_add")) lin_driver_clear(); /* set resets first; add appends */
+    if (strcmp(dn, "cpu") && !s) { v.kind = 1; v.iv = 0; return v; }
+    if (strcmp(fn, "driver_add")) lin_driver_clear();   /* set resets first; add appends */
     if (s) lin_driver_add((LinDriver *)s);
-    return (*out_int = 1, 1);
+    v.kind = 1; v.iv = 1; return v;
   }
-  if (!strcmp(fn, "driver_get")) { LinDriver *d = lin_get_driver(); return (snprintf(out_str, max_str, "%s", d ? d->name : "cpu"), 2); }
-
+  B1("lin_add", c_args[0] + c_args[1]);
+  B1("lin_sub", c_args[0] >= c_args[1] ? c_args[0] - c_args[1] : 0);
+  B1("lin_mul", c_args[0] * c_args[1]);
+  B1("lin_div", c_args[1] ? c_args[0] / c_args[1] : 0);
+  B1("lin_mod", c_args[1] ? c_args[0] % c_args[1] : 0);
+  B1("lin_pow", ({ long b = c_args[0], e = c_args[1], r = 1; while (e > 0) { if (e & 1) r *= b; b *= b; e >>= 1; } r; }));
+  B3("lin_streq", argc >= 2 && !strcmp((char *)c_args[0], (char *)c_args[1]));
+  B3("lin_eq", c_args[0] == c_args[1]);  B3("lin_lt", c_args[0] < c_args[1]);
+  B3("lin_leq", c_args[0] <= c_args[1]); B3("lin_gt", c_args[0] > c_args[1]);
+  B1("dlopen", (long)(intptr_t)dlopen(argc > 0 ? (char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL));
+  B1("puts", puts(argc > 0 ? (char *)c_args[0] : ""));
+  if (!strcmp(fn, "getenv")) { char *ev = getenv(argc > 0 ? (char *)c_args[0] : ""); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", ev ? ev : "(null)"); return v; }
   fflush(stdout); void *sym = dlsym(RTLD_DEFAULT, fn);
-  if (!sym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return 0; }
+  if (!sym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
   long (*f)() = (long (*)())sym;
-  *out_int = (argc <= 0) ? f() : (argc == 1) ? f(c_args[0]) : (argc == 2) ? f(c_args[0], c_args[1]) :
-             (argc == 3) ? f(c_args[0], c_args[1], c_args[2]) : f(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]);
-  return 1;
+  v.kind = 1; v.iv = (argc <= 0) ? f() : (argc == 1) ? f(c_args[0]) : (argc == 2) ? f(c_args[0], c_args[1]) :
+           (argc == 3) ? f(c_args[0], c_args[1], c_args[2]) : f(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]);
+  return v;
+}
+
+/* Render one decoded value to a stream (1=int, 2=str, 3=bool); returns 1 if a
+   value rendered, 0 if none. */
+static int render_val(FILE *f, Val v) {
+  if (v.kind == 1) fprintf(f, "%ld", v.iv);
+  else if (v.kind == 2) fputs(v.sv, f);
+  else if (v.kind == 3) fputs(v.iv ? "true" : "false", f);
+  else return 0;
+  fflush(f); return 1;
+}
+
+/* Decode a non-FFI port as a value: string (2), int (1), or bool (3). */
+static Val decode(Net *n, Port p) {
+  Val v = {0, 0, {0}};
+  if (net_read_string(n, p, v.sv, sizeof(v.sv)) >= 0) v.kind = 2;
+  else if ((v.iv = net_read_int(n, p)) >= 0) v.kind = 1;
+  else if ((v.iv = net_read_bool(n, p)) >= 0) v.kind = 3;
+  return v;
 }
 
 static int net_try_ffi(Net *n, Port p) {
-  long v = 0; char s[4096] = {0}; int r = run_ffi(n, p, &v, s, sizeof(s));
-  if (r == 1) { printf("%ld", v); fflush(stdout); return 1; }
-  if (r == 2) { fputs(s, stdout); fflush(stdout); return 1; }
-  if (r == 3) { fputs(v ? "true" : "false", stdout); fflush(stdout); return 1; }
-  return 0;
+  return render_val(stdout, run_ffi(n, p));
 }
 
 static unsigned char *vis_print = NULL;
@@ -233,10 +241,9 @@ int net_print(Net *n) {
   Port r = dup_hop(n, wire((Port){0, 0}));
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     if (net_try_ffi(n, r)) return 0;
-    char sbuf[4096]; int slen = net_read_string(n, r, sbuf, sizeof(sbuf));
-    if (slen >= 0) { printf("\"%s\"", sbuf); return 0; }
-    long v = net_read_int(n, r); if (v >= 0) { printf("%ld", v); return 0; }
-    int b = net_read_bool(n, r); if (b >= 0) { fputs(b ? "true" : "false", stdout); return 0; }
+    Val v = decode(n, r);
+    if (v.kind == 2) { printf("\"%s\"", v.sv); return 0; }
+    if (render_val(stdout, v)) return 0;
   }
   vis_print = calloc((size_t)(n->nn + 1), 1);
   print_port(r, 0);
@@ -321,14 +328,8 @@ int net_run_io(Net *n, long step_limit) {
         if (dst_fd == 2) out_fp = stderr;
       }
       if (!net_try_ffi(n, msg_p)) {
-        char msg[4096];
-        int slen = net_read_string(n, msg_p, msg, sizeof(msg));
-        if (slen >= 0) fputs(msg, out_fp);
-        else {
-          long v = net_read_int(n, msg_p);
-          if (v >= 0) fprintf(out_fp, "%ld", v);
-          else { int b = net_read_bool(n, msg_p); fputs(b >= 0 ? (b ? "true" : "false") : "?", out_fp); }
-        }
+        Val mv = decode(n, msg_p);
+        if (!render_val(out_fp, mv)) fputs("?", out_fp);
       }
       fflush(out_fp);
       Port next_p = wire((Port){body.node, 2});
@@ -349,12 +350,11 @@ int net_run_io(Net *n, long step_limit) {
       Port src_p = (a0.node >= 0 && n->tag[a0.node] == APP) ? dup_hop(n, wire((Port){a0.node, 2})) : (Port){-1, 0};
 
       char in_buf[4096] = {0};
-      long res_int = -1, ffi_int = 0;
-      int is_int = 0;
-      char ffi_str[4096] = {0};
-      int ffi_res = (src_p.node >= 0) ? run_ffi(n, src_p, &ffi_int, ffi_str, sizeof(ffi_str)) : 0;
-      if (ffi_res == 1) { res_int = ffi_int; is_int = 1; }
-      else if (ffi_res == 2) snprintf(in_buf, sizeof(in_buf), "%s", ffi_str);
+      long res_int = -1; int is_int = 0;
+      Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0, 0, {0}};
+      if (fv.kind == 1) { res_int = fv.iv; is_int = 1; }
+      else if (fv.kind == 3) is_int = 2;                      /* bool result */
+      else if (fv.kind == 2) snprintf(in_buf, sizeof(in_buf), "%s", fv.sv);
       else if (src_p.node < 0) read_stdin(in_buf, sizeof(in_buf));
       else {
         long fd = net_read_int(n, src_p);
@@ -372,7 +372,7 @@ int net_run_io(Net *n, long step_limit) {
       }
       char *endptr = NULL;
       long val = (!is_int && in_buf[0]) ? strtol(in_buf, &endptr, 10) : -1;
-      Port arg = (ffi_res == 3) ? net_alloc_bool(n, (int)ffi_int) : is_int ? net_alloc_scott(n, res_int) : (in_buf[0] && endptr && !*endptr && val >= 0) ? net_alloc_scott(n, val) : net_alloc_string(n, in_buf);
+      Port arg = (is_int == 2) ? net_alloc_bool(n, (int)fv.iv) : is_int ? net_alloc_scott(n, res_int) : (in_buf[0] && endptr && !*endptr && val >= 0) ? net_alloc_scott(n, val) : net_alloc_string(n, in_buf);
       Port app = net_alloc(n, APP, scope_nil(), "");
       net_link(n, (Port){app.node, 0}, cb, 1); net_link(n, (Port){app.node, 2}, arg, 1); net_link(n, (Port){0, 0}, (Port){app.node, 1}, 1);
       net_reduce(n, step_limit); did_io = 1; continue;
