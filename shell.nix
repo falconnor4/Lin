@@ -5,7 +5,7 @@ let
 in
 pkgs.mkShell {
   inputsFrom = [ lin ];
-  packages = [ pkgs.gnumake pkgs.gdb pkgs.valgrind ];
+  packages = [ pkgs.gnumake pkgs.gdb pkgs.valgrind pkgs.vulkan-headers pkgs.vulkan-loader pkgs.glslang pkgs.vulkan-tools ];
   shellHook = ''
     nix() {
       if [ "$1" = "test" ]; then

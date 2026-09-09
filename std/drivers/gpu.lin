@@ -1,10 +1,8 @@
 ; lin standard library: wavefront gpu accelerator driver
 ;
-; The Vulkan GPU driver was removed from the core to keep the engine small,
-; portable, and crash-free (it triggered UB at -O2).  Hardware accelerators are
-; now loadable plugins: a GPU/SIMD reducer can be compiled to a shared object
-; and registered at runtime via (set_driver "/path/to/plugin.so").
-;
-; For portability this file keeps the CPU engine active.
+; Loads the Vulkan compute driver (std/drivers/gpu.so) as a plugin.  The driver
+; probes for a usable device at load time; if none is available it stays a
+; no-op and the base CPU engine transparently performs the reduction, so this
+; file is safe to load on any host.
 (load "driver.lin")
-(set_driver "cpu")
+(set_driver "gpu")

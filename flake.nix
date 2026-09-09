@@ -17,14 +17,15 @@
             version = "0.1.0";
             src = ./.;
 
-            nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeBuildInputs = [ pkgs.makeWrapper pkgs.vulkan-headers pkgs.vulkan-loader pkgs.glslang ];
 
             buildPhase = ''
               runHook preBuild
               $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl
               for d in std/drivers/*.c; do
                 $CC -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared \
-                  -o "''${d%.c}.so" "$d" -ldl
+                  -I${pkgs.vulkan-headers}/include \
+                  -o "''${d%.c}.so" "$d" -ldl -L${pkgs.vulkan-loader}/lib
               done
               runHook postBuild
             '';

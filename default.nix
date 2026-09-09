@@ -5,17 +5,26 @@ pkgs.stdenv.mkDerivation {
   version = "0.1.0";
   src = ./.;
 
-  nativeBuildInputs = [ pkgs.makeWrapper ];
+  nativeBuildInputs = [ pkgs.makeWrapper pkgs.vulkan-headers pkgs.vulkan-loader pkgs.glslang ];
+
+  # Vulkan headers + loader so the gpu/simd driver plugins (std/drivers/*.so)
+  # compile against the real ABI rather than hand-rolled structs.
+  NIX_CFLAGS_COMPILE = "-I${pkgs.vulkan-headers}/include";
 
   buildPhase = ''
     runHook preBuild
-    $CC -O2 -Wall -Wextra -std=c99 -fopenmp -o lin src/*.c -ldl
+    $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl
+    for d in std/drivers/*.c; do
+      $CC -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared \
+        -I${pkgs.vulkan-headers}/include \
+        -o "''${d%.c}.so" "$d" -ldl -L${pkgs.vulkan-loader}/lib
+    done
     runHook postBuild
   '';
 
   installPhase = ''
     runHook preInstall
-    mkdir -p $out/bin $out/share/lin/std
+    mkdir -p $out/bin $out/share/lin/std $out/share/lin/std/drivers
     cp lin $out/bin/
     cp -r std/* $out/share/lin/std/
     wrapProgram $out/bin/lin \
