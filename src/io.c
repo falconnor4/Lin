@@ -9,6 +9,56 @@ static Net *N;
 #define NNM(n, i) ((i) >= 0 && (i) < (n)->nn && (n)->name[i] ? (n)->name[i] : "")
 static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 
+/* ---------------- datatype registry ---------------- */
+#define MAX_CTOR 64
+static Constructor ctors[MAX_CTOR];
+static int nctors = 0;
+
+static int ctor_lookup(const char *name) {
+  if (!name || !name[0]) return -1;
+  for (int i = 0; i < nctors; i++)
+    if (!strcmp(ctors[i].carrier, name) || (ctors[i].carrier2 && !strcmp(ctors[i].carrier2, name))) return i;
+  return -1;
+}
+int ctor_tag(const char *name) { int i = ctor_lookup(name); return i >= 0 ? ctors[i].tag : -1; }
+int ctor_register(const char *name, int tag, const char *c1, const char *c2) {
+  (void)name;
+  if (nctors >= MAX_CTOR) return -1;
+  ctors[nctors++] = (Constructor){.tag = tag, .carrier = c1, .carrier2 = c2};
+  return nctors - 1;
+}
+void ctor_init_builtins(void) {
+  if (nctors) return;
+  ctor_register("_sz", DT_NUM, "_sz", "_ss");
+  ctor_register("_bt", DT_BOOL, "_bt", "_bf");
+  ctor_register("_cl", DT_STR, "_cl", "_nl");
+  ctor_register("c", DT_STR, "c", "n");   /* std list cons/nil string spine */
+  ctor_register("_ffi", DT_FFI, "_ffi", "_ret");
+  /* monadic IO/effect continuations: an open set of effect kinds keyed here,
+     so new effects are added by registration rather than new branches */
+  ctor_register("_iod", DT_EFF, "_iod", NULL);
+  ctor_register("_iop", DT_EFF, "_iop", NULL);
+  ctor_register("_ior", DT_EFF, "_ior", NULL);
+  ctor_register("_iow", DT_EFF, "_iow", NULL);
+}
+
+static Port alloc_scott(Net *n, long k) {
+  Scope sc = scope_nil(); Port cur = (Port){-1, 0};
+  for (long i = 0; i <= k; i++) {
+    Port sz = net_alloc(n, LAM, sc, "_sz"), ss = net_alloc(n, LAM, sc, "_ss");
+    net_link(n, (Port){sz.node, 2}, (Port){ss.node, 0}, 0);
+    if (i == 0) net_link(n, (Port){ss.node, 2}, (Port){sz.node, 1}, 0);
+    else {
+      Port app = net_alloc(n, APP, sc, "");
+      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0);
+      net_link(n, (Port){app.node, 2}, cur, 0);
+      net_link(n, (Port){ss.node, 2}, (Port){app.node, 1}, 0);
+    }
+    cur = (Port){sz.node, 0};
+  }
+  return cur;
+}
+
 /* --- Geometry of Interaction (GoI) Value Marshaling --- */
 
 static inline Port dup_hop(Net *n, Port p) {
@@ -23,9 +73,9 @@ long net_read_int(Net *n, Port p) {
   N = n; long count = 0; Port cur = p;
   for (int step = 0; step < n->nn; step++) {
     cur = dup_hop(n, cur);
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || strncmp(NNM(n, cur.node), "_sz", 3)) return -1;
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != DT_NUM) return -1;
     int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
-    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || strncmp(NNM(n, ss_p.node), "_ss", 3)) return -1;
+    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != DT_NUM) return -1;
     int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
     if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return -1;
     if (body.node == sz && body.port == 1) return count;
@@ -41,9 +91,9 @@ long net_read_int(Net *n, Port p) {
 /* Extract Church boolean: _bt / _bf */
 int net_read_bool(Net *n, Port p) {
   N = n;
-  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM || strncmp(NNM(n, p.node), "_bt", 3)) return -1;
+  if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM || ctor_tag(NNM(n, p.node)) != DT_BOOL) return -1;
   Port bf = wire((Port){p.node, 2});
-  if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM || strncmp(NNM(n, bf.node), "_bf", 3)) return -1;
+  if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM || ctor_tag(NNM(n, bf.node)) != DT_BOOL) return -1;
   Port cur = wire((Port){bf.node, 2});
   for (int step = 0; step < n->nn; step++) {
     if (cur.node < 0 || n->dead[cur.node]) return -1;
@@ -67,11 +117,11 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
   for (int step = 0; step < n->nn && len + 1 < max; step++) {
     cur = skip_dup(n, cur);
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
-    if (NNM(n, cur.node)[0] != 'c' && strncmp(NNM(n, cur.node), "_cl", 3)) break;
+    if (ctor_tag(NNM(n, cur.node)) != DT_STR) break;
 
     Port bn = skip_dup(n, wire((Port){cur.node, 2}));
     if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) break;
-    if (NNM(n, bn.node)[0] != 'n' && strncmp(NNM(n, bn.node), "_nl", 3)) break;
+    if (ctor_tag(NNM(n, bn.node)) != DT_STR) break;
 
     Port body = skip_dup(n, wire((Port){bn.node, 2}));
     if (body.node < 0) break;
@@ -91,19 +141,18 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
   return -1;
 }
 
-typedef struct { int kind; long iv; char sv[4096]; } Val; /* kind: 0 none, 1 int, 2 str, 3 bool */
 static Val run_ffi(Net *n, Port p);
 
 static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_max) {
   p = skip_dup(n, p);
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
-  if (!strcmp(NNM(n, p.node), "_ffi")) {
+  if (ctor_tag(NNM(n, p.node)) == DT_FFI) {
     Val v = run_ffi(n, p);
     if (v.kind == 1 || v.kind == 3) { *out_val = v.iv; return 1; }
     if (v.kind == 2) { snprintf(str_buf, str_max, "%s", v.sv); *out_val = (long)(intptr_t)str_buf; return 1; }
   }
-  if (!strncmp(NNM(n, p.node), "_bt", 3)) { int b = net_read_bool(n, p); if (b >= 0) { *out_val = b; return 1; } }
-  if (NNM(n, p.node)[0] == 'c' || !strncmp(NNM(n, p.node), "_cl", 3)) {
+  if (ctor_tag(NNM(n, p.node)) == DT_BOOL) { int b = net_read_bool(n, p); if (b >= 0) { *out_val = b; return 1; } }
+  if (ctor_tag(NNM(n, p.node)) == DT_STR) {
     int len = net_read_string(n, p, str_buf, str_max); if (len >= 0) { *out_val = (long)(intptr_t)str_buf; return 1; }
   }
   long v = net_read_int(n, p); return v >= 0 ? (*out_val = v, 1) : 0;
@@ -112,7 +161,7 @@ static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_m
 static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], int max_args) {
   int argc = 0; Port cur = skip_dup(n, arg_p);
   if (cur.node >= 0 && cur.node < n->nn && n->tag[cur.node] == LAM &&
-      (NNM(n, cur.node)[0] == 'c' || !strncmp(NNM(n, cur.node), "_cl", 3))) {
+      ctor_tag(NNM(n, cur.node)) == DT_STR) {
     Port bn = skip_dup(n, wire((Port){cur.node, 2}));
     if (bn.node >= 0 && bn.port == 0 && n->tag[bn.node] == LAM) {
       for (int step = 0; step < n->nn && argc < max_args; step++) {
@@ -141,11 +190,28 @@ static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], i
    (exit) are handled specially before the table. */
 #define B1(n, e) if (!strcmp(fn, n)) { v.kind = 1, v.iv = (long)(e); return v; }
 #define B3(n, e) if (!strcmp(fn, n)) { v.kind = 3, v.iv = (long)(e); return v; }
+/* Resolve a wavefront reduction driver by name: "cpu" -> base engine, else a
+   LinDriver symbol looked up by exact name, by lin_<name>_driver, or by loading
+   <LIN_STD_DIR>/drivers/<name>.so as a plugin.  Open, uniform plugin protocol. */
+static void *resolve_driver(const char *dn) {
+  if (!strcmp(dn, "cpu")) return NULL;
+  char sym[NAME + 16]; snprintf(sym, sizeof sym, "lin_%s_driver", dn);
+  void *s = dlsym(RTLD_DEFAULT, dn);
+  if (!s) s = dlsym(RTLD_DEFAULT, sym);
+  if (!s) {
+    const char *dir = getenv("LIN_STD_DIR");
+    char path[4096];
+    snprintf(path, sizeof path, "%s/drivers/%s.so", dir ? dir : "std", dn);
+    if (dlopen(path, RTLD_NOW | RTLD_GLOBAL)) s = dlsym(RTLD_DEFAULT, sym);
+  }
+  return s;
+}
+
 static Val run_ffi(Net *n, Port p) {
   Val v = {0, 0, {0}};
   p = skip_dup(n, p);
-  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || strcmp(NNM(n, p.node), "_ffi")) return v;
-  Port r = skip_dup(n, wire((Port){p.node, 2})); if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || strcmp(NNM(n, r.node), "_ret")) return v;
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || ctor_tag(NNM(n, p.node)) != DT_FFI) return v;
+  Port r = skip_dup(n, wire((Port){p.node, 2})); if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || ctor_tag(NNM(n, r.node)) != DT_FFI) return v;
   Port a2 = skip_dup(n, wire((Port){r.node, 2})); if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return v;
   Port a1 = skip_dup(n, wire((Port){a2.node, 0})); if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return v;
 
@@ -159,7 +225,7 @@ static Val run_ffi(Net *n, Port p) {
   if (!strcmp(fn, "driver_set") || !strcmp(fn, "driver_add") || !strcmp(fn, "driver_clear")) {
     if (!strcmp(fn, "driver_clear")) { lin_driver_clear(); v.kind = 1; v.iv = 1; return v; }
     const char *dn = argc > 0 ? (char *)c_args[0] : "cpu";
-    void *s = !strcmp(dn, "cpu") ? NULL : !strcmp(dn, "gpu") ? &lin_gpu_driver : !strcmp(dn, "simd") ? &lin_simd_driver : dlsym(RTLD_DEFAULT, dn);
+    void *s = resolve_driver(dn);
     if (strcmp(dn, "cpu") && !s) { v.kind = 1; v.iv = 0; return v; }
     if (strcmp(fn, "driver_add")) lin_driver_clear();   /* set resets first; add appends */
     if (s) lin_driver_add((LinDriver *)s);
@@ -251,28 +317,14 @@ int net_print(Net *n) {
   return 0;
 }
 
-static Port net_alloc_bool(Net *n, int val) {
+Port net_alloc_bool(Net *n, int val) {
   Scope sc = scope_nil(); Port bt = net_alloc(n, LAM, sc, "_bt"), bf = net_alloc(n, LAM, sc, "_bf");
   net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0);
   net_link(n, (Port){bf.node, 2}, (Port){val ? bt.node : bf.node, 1}, 0);
   return (Port){bt.node, 0};
 }
 
-static Port net_alloc_scott(Net *n, long k) {
-  Scope sc = scope_nil(); Port cur = (Port){-1, 0};
-  for (long i = 0; i <= k; i++) {
-    Port sz = net_alloc(n, LAM, sc, "_sz"), ss = net_alloc(n, LAM, sc, "_ss");
-    net_link(n, (Port){sz.node, 2}, (Port){ss.node, 0}, 0);
-    if (i == 0) { net_link(n, (Port){ss.node, 2}, (Port){sz.node, 1}, 0); }
-    else {
-      Port app = net_alloc(n, APP, sc, "");
-      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0); net_link(n, (Port){app.node, 2}, cur, 0);
-      net_link(n, (Port){ss.node, 2}, (Port){app.node, 1}, 0);
-    }
-    cur = (Port){sz.node, 0};
-  }
-  return cur;
-}
+Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k); }
 
 static Port net_alloc_string(Net *n, const char *s) {
   Scope sc = scope_nil();
@@ -304,8 +356,14 @@ static void read_stream(FILE *f, char *buf, size_t sz, int is_pipe) {
 }
 static void read_stdin(char *buf, size_t sz) { if (!fgets(buf, (int)sz, stdin)) buf[0] = 0; else chomp(buf); }
 
-static inline int is_io_tag(const char *s) {
-  return !strcmp(s, "_iod") || !strcmp(s, "_iop") || !strcmp(s, "_ior") || !strcmp(s, "_iow");
+static inline int is_io_tag(const char *s) { return ctor_tag(s) == DT_EFF; }
+
+/* Apply effect continuation `fn` to value `arg`, relink ROOT, and re-reduce:
+   the single monadic step shared by every effect (print/read/wait/ffi). */
+static void eff_apply(Net *n, Port fn, Port arg) {
+  Port app = net_alloc(n, APP, scope_nil(), "");
+  net_link(n, (Port){app.node, 0}, fn, 1); net_link(n, (Port){app.node, 2}, arg, 1);
+  net_link(n, (Port){0, 0}, (Port){app.node, 1}, 1);
 }
 
 int net_run_io(Net *n, long step_limit) {
@@ -333,11 +391,9 @@ int net_run_io(Net *n, long step_limit) {
       }
       fflush(out_fp);
       Port next_p = wire((Port){body.node, 2});
-      if (next_p.node >= 0 && next_p.node < n->nn && !n->dead[next_p.node] && n->tag[next_p.node] == LAM && !is_io_tag(NNM(n, next_p.node))) {
-        Port app = net_alloc(n, APP, scope_nil(), ""), unit = net_alloc_scott(n, 0);
-        net_link(n, (Port){app.node, 0}, next_p, 1); net_link(n, (Port){app.node, 2}, unit, 1);
-        net_link(n, (Port){0, 0}, (Port){app.node, 1}, 1);
-      } else net_link(n, (Port){0, 0}, next_p, 1);
+      if (next_p.node >= 0 && next_p.node < n->nn && !n->dead[next_p.node] && n->tag[next_p.node] == LAM && !is_io_tag(NNM(n, next_p.node)))
+        eff_apply(n, next_p, net_alloc_scott(n, 0));
+      else net_link(n, (Port){0, 0}, next_p, 1);
       net_reduce(n, step_limit);
       did_io = 1;
       continue;
@@ -373,8 +429,7 @@ int net_run_io(Net *n, long step_limit) {
       char *endptr = NULL;
       long val = (!is_int && in_buf[0]) ? strtol(in_buf, &endptr, 10) : -1;
       Port arg = (is_int == 2) ? net_alloc_bool(n, (int)fv.iv) : is_int ? net_alloc_scott(n, res_int) : (in_buf[0] && endptr && !*endptr && val >= 0) ? net_alloc_scott(n, val) : net_alloc_string(n, in_buf);
-      Port app = net_alloc(n, APP, scope_nil(), "");
-      net_link(n, (Port){app.node, 0}, cb, 1); net_link(n, (Port){app.node, 2}, arg, 1); net_link(n, (Port){0, 0}, (Port){app.node, 1}, 1);
+      eff_apply(n, cb, arg);
       net_reduce(n, step_limit); did_io = 1; continue;
     }
     break;

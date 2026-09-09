@@ -6,3 +6,4 @@ scratch/
 result
 result-*
 *.line
+*.so

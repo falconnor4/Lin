@@ -7,7 +7,7 @@
 #define NAME 256
 
 /* ---------------- core terms (pure untyped lambda) ---------------- */
-enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN };
+enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE };
 typedef struct Type { int kind, id; struct Type *a, *b; } Type;
 typedef struct Term {
   int type;
@@ -31,12 +31,11 @@ typedef struct {
 Port net_alloc(Net *n, int tag, Scope sc, const char *name);
 void net_link(Net *n, Port a, Port b, int enqueue);
 void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, Port a, Port b);
-long net_reduce(Net *n, long limit); long net_reduce_readback(Net *n, long limit);
+long net_reduce(Net *n, long limit);
 Net *net_copy(const Net *n); Scope scope_nil(void);
 Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
 typedef struct LinDriver { const char *name; int (*reduce_wave)(Net *n, long limit, int *changed); } LinDriver;
 void lin_driver_add(LinDriver *d); void lin_driver_clear(void); LinDriver *lin_get_driver(void);
-extern LinDriver lin_gpu_driver, lin_simd_driver;
 int wave_snapshot(Net *n, Port **out, int *cap);
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 
@@ -59,10 +58,27 @@ int compile(Term *t, Net *n, char *err, int errsz);
 Term *egraph_optimize(Term *t);
 int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const char *path);
 
+/* ---------------- datatype registry ----------------
+   A value domain (num, bool, string, ffi/effect) is keyed by its carrier node
+   names; builtins are pre-registered so the readback layer decodes and renders
+   them, and user code can register more (see `datatype`).  Decoders consult
+   this table (ctor_tag) instead of comparing specific name strings. */
+enum { DT_NUM, DT_BOOL, DT_STR, DT_FFI, DT_EFF, DT_MAX };
+typedef struct {
+  int tag;                 /* builtin DT_* or -1 for user types */
+  const char *carrier;     /* primary lambda carrier name, e.g. "_sz" */
+  const char *carrier2;    /* second carrier (num=_ss, bool=_bf, str=_nl), or NULL */
+} Constructor;
 /* ---------------- readback ---------------- */
+typedef struct { int kind; long iv; char sv[4096]; } Val;   /* kind: 0 none,1 int,2 str,3 bool */
 long net_read_int(Net *n, Port p); int net_read_bool(Net *n, Port p);
 int net_read_string(Net *n, Port p, char *buf, size_t max); int net_run_io(Net *n, long step_limit);
 int net_print(Net *n);
+/* datatype registry (populated by builtins + `datatype` forms) */
+int  ctor_tag(const char *name); /* builtin domain DT_*, or -1 */
+int  ctor_register(const char *name, int tag, const char *c1, const char *c2);
+void ctor_init_builtins(void);
+Port net_alloc_scott(Net *n, long k); Port net_alloc_bool(Net *n, int v);
 
 /* ---------------- goi ---------------- */
 long long goi_det(Net *n);

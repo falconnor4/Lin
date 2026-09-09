@@ -140,6 +140,37 @@ static void qualify_free(Term *t, Guard *b) {
   if (bound) b->count--;
 }
 
+/* (datatype Name (Ctor f...) ...): generate Scott-encoded constructors.
+   For m constructors C0..C_{m-1} with C_i of arity k_i:
+     C_i = \f1..\fk_i \d0..\d_{m-1} (((d_i f1) f2) ..)
+   Each constructor becomes an ordinary (inferred) definition so it type-checks
+   and is usable exactly like a hand-written Scott encoding. */
+static void process_def(Term *t);
+static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
+  (void)dn;
+  char dslot[NAME]; snprintf(dslot, sizeof dslot, "_d%d", idx);
+  /* curried application (d_idx f1 f2 ...) */
+  Term *app = term_new(TVAR, dslot, NULL, NULL);
+  for (Term *f = fields; f; f = f->r) app = term_new(TAPP, "", app, term_new(TVAR, f->name, NULL, NULL));
+  /* dispatch binders are innermost: \f1..\fk \d0..\d_{m-1} (d_i f1..fk) */
+  Term *lam = app;
+  for (int i = m - 1; i >= 0; i--) { char dn2[NAME]; snprintf(dn2, sizeof dn2, "_d%d", i); lam = term_new(TLAM, dn2, lam, NULL); }
+  char (*fs)[NAME] = NULL; int nf = 0, cap = 0;
+  for (Term *f = fields; f; f = f->r) { fs = realloc(fs, (size_t)(cap = cap ? cap * 2 : 8) * sizeof *fs); snprintf(fs[nf++], NAME, "%s", f->name); }
+  for (int i = nf - 1; i >= 0; i--) lam = term_new(TLAM, fs[i], lam, NULL);
+  free(fs);
+  return lam;
+}
+
+static void process_datatype(Term *t) {
+  int m = 0; for (Term *c = t->l; c; c = c->r) m++;
+  int idx = 0;
+  for (Term *c = t->l; c; c = c->r, idx++) {
+    Term *lam = scott_ctor(t->name, idx, c->l, m);
+    process_def(term_new(TDEF, c->name, lam, NULL)); /* takes ownership of lam */
+  }
+}
+
 static void process_def(Term *t) {
   if (ndefs >= defcap) defs = realloc(defs, (size_t)(defcap = defcap ? defcap * 2 : 128) * sizeof(Def));
   char err[512]; Scheme sch;
@@ -206,6 +237,10 @@ static int resolve_path(const char *rel, char *out, size_t out_sz) {
 }
 
 static int load_file(const char *path);
+static void load_std(void) {
+  const char *std = getenv("LIN_STD") ? getenv("LIN_STD") : "std/std.lin";
+  if (!load_file(std)) fprintf(stderr, "warning: standard library not found at '%s'\n", std);
+}
 
 static int building = 0;
 static Term *build_term = NULL;
@@ -222,6 +257,7 @@ static void form_cb(Term *t, const char *perr, void *ud) {
   else if (t->type == TNS) set_namespace(t->name);
   else if (t->type == TOPEN) open_namespace(t->name);
   else if (t->type == TDEF || t->type == TDEFX) process_def(t);
+  else if (t->type == TDATATYPE) process_datatype(t);
   else if (building) { if (build_term) term_free(build_term); build_term = term_copy(t); }
   else eval_form(t);
   term_free(t);
@@ -366,6 +402,7 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char **argv) {
   bump_stack();
+  ctor_init_builtins();
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
   if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
 #ifdef _OPENMP
@@ -373,8 +410,7 @@ int main(int argc, char **argv) {
 #endif
 
   if (argc > 1 && (!strcmp(argv[1], "build") || !strcmp(argv[1], "--build"))) {
-    const char *std = getenv("LIN_STD") ? getenv("LIN_STD") : "std/std.lin";
-    if (!load_file(std)) fprintf(stderr, "warning: standard library not found at '%s'\n", std);
+    load_std();
     if (argc < 3) { fprintf(stderr, "usage: lin build <file.lin> [-o <file.line>]\n"); return 1; }
     const char *in_f = argv[2], *out_f = NULL;
     for (int i = 3; i < argc; i++) if (!strcmp(argv[i], "-o") && i + 1 < argc) out_f = argv[++i];
@@ -391,9 +427,7 @@ int main(int argc, char **argv) {
 
   if (argc == 2 && run_line_file(argv[1])) return 0;
 
-  const char *std = getenv("LIN_STD") ? getenv("LIN_STD") : "std/std.lin";
-  if (!load_file(std)) fprintf(stderr, "warning: standard library not found at '%s'\n", std);
-
+  load_std();
   int ran_eval = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) { print_usage(argv[0]); return 0; }

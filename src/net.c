@@ -146,7 +146,6 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
 
 /* the four rules of the scope-gauge calculus (wave-opt-reduction main.hs).
    ERA is an inert terminal: era-principal pairs are simply dropped. */
-static int SC_O; /* scope-oblivious mode: annihilate gauge-mismatched dups */
 static int lin_trace = -1; /* cached LIN_TRACE */
 int net_interact(Net *n, Port p1, Port p2) {
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
@@ -169,8 +168,8 @@ int net_interact(Net *n, Port p1, Port p2) {
   }
 
   if (t1 == DUP && t2 == DUP) {
-    if (!SC_O && !scope_eq(n, n->scope[n1], n->scope[n2]))
-      return 0; /* gauge mismatch (except during readback expansion) */
+    if (!scope_eq(n, n->scope[n1], n->scope[n2]))
+      return 0; /* gauge mismatch (dropped) */
     Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
     Port b1 = WIRE(n, ((Port){n2, 1})), b2 = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;
@@ -224,7 +223,7 @@ static void net_compact(Net *n, const unsigned char *reach) {
 
 typedef struct { Port p1, p2; } Pair;
 /* Driver pipeline: ordered, first-accept-wins; base engine reduces any wave no
-   driver claims.  Keeps SIMD + GPU resident; most-recently-added has priority. */
+   driver claims.  Drivers (e.g. SIMD) register here; most-recently-added wins. */
 static LinDriver *drv[8]; static int ndrv;
 void lin_driver_add(LinDriver *d) { if (ndrv < 8) drv[ndrv++] = d; }
 void lin_driver_clear(void) { ndrv = 0; }
@@ -339,13 +338,6 @@ long net_reduce(Net *n, long limit) {
   }
   free(reach); free(q); free(curr);
   return n->steps;
-}
-
-/* readback expansion: continue reduction ignoring scope gauge, unfolding
-   shared croissants back into the explicit value net.  Only used for
-   decoding closed normal forms; the ordinary reducer keeps the gauge. */
-long net_reduce_readback(Net *n, long limit) {
-  int save = SC_O; SC_O = 1; long s = net_reduce(n, limit); SC_O = save; return s;
 }
 
 Net *net_copy(const Net *n) {

@@ -1,7 +1,7 @@
 ; lin standard library: hardware accelerator driver interface
 (load "ffi.lin")
 
-; set the sole active wavefront reduction driver: "cpu", "gpu", "simd", or dynamic plugin symbol
+; set the sole active wavefront reduction driver: "cpu", "simd", or a dynamic plugin symbol
 (define set_driver (\name (ccall1 "driver_set" name)))
 
 ; add a driver to the pipeline (most-recently-added has priority); "cpu" clears to base

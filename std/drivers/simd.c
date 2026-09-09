@@ -23,31 +23,6 @@ static Port WP(Net *n, int node, int port) { return n->wire[node * 3 + port]; }
  *  all native-arithmetic logic lives in this driver file.
  * ---------------------------------------------------------------------- */
 
-static Port simd_alloc_scott(Net *n, long k) {
-  Scope sc = scope_nil(); Port cur = (Port){-1, 0};
-  for (long i = 0; i <= k; i++) {
-    Port sz = net_alloc(n, LAM, sc, "_sz"), ss = net_alloc(n, LAM, sc, "_ss");
-    net_link(n, (Port){sz.node, 2}, (Port){ss.node, 0}, 0);
-    if (i == 0) net_link(n, (Port){ss.node, 2}, (Port){sz.node, 1}, 0);
-    else {
-      Port app = net_alloc(n, APP, sc, "");
-      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0);
-      net_link(n, (Port){app.node, 2}, cur, 0);
-      net_link(n, (Port){ss.node, 2}, (Port){app.node, 1}, 0);
-    }
-    cur = (Port){sz.node, 0};
-  }
-  return cur;
-}
-
-static Port simd_alloc_bool(Net *n, int val) {
-  Scope sc = scope_nil();
-  Port bt = net_alloc(n, LAM, sc, "_bt"), bf = net_alloc(n, LAM, sc, "_bf");
-  net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0);
-  net_link(n, (Port){bf.node, 2}, (Port){val ? bt.node : bf.node, 1}, 0);
-  return (Port){bt.node, 0};
-}
-
 static const char *nm(Net *n, int id) { return n->name[id] ? n->name[id] : ""; }
 
 static Port dhop(Net *n, Port p) {
@@ -82,17 +57,17 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool) {
   ev_arglist(n, argp, a, &na);
   if (na < 2) return 0; /* every lin_* op needs both saturated args */
   *is_bool = 0;
-  if (!strncmp(fn, "lin_add", 7)) *v = a[0] + a[1];
+  if      (!strncmp(fn, "lin_add", 7)) *v = a[0] + a[1];
   else if (!strncmp(fn, "lin_sub", 7)) *v = a[0] >= a[1] ? a[0] - a[1] : 0;
   else if (!strncmp(fn, "lin_mul", 7)) *v = a[0] * a[1];
   else if (!strncmp(fn, "lin_div", 7)) *v = a[1] ? a[0] / a[1] : 0;
   else if (!strncmp(fn, "lin_mod", 7)) *v = a[1] ? a[0] % a[1] : 0;
   else if (!strncmp(fn, "lin_pow", 7)) { long b0 = a[0], e = a[1], res = 1; while (e > 0) { if (e & 1) res *= b0; b0 *= b0; e >>= 1; } *v = res; }
-  else if (!strncmp(fn, "lin_eq", 6)) { *v = a[0] == a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_lt", 6)) { *v = a[0] < a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_leq", 7)) { *v = a[0] <= a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_gt", 6)) { *v = a[0] > a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_geq", 7)) { *v = a[0] >= a[1]; *is_bool = 1; }
+  else if (!strncmp(fn, "lin_eq", 6))   { *v = a[0] == a[1]; *is_bool = 1; }
+  else if (!strncmp(fn, "lin_lt", 6))   { *v = a[0] <  a[1]; *is_bool = 1; }
+  else if (!strncmp(fn, "lin_leq", 7))  { *v = a[0] <= a[1]; *is_bool = 1; }
+  else if (!strncmp(fn, "lin_gt", 6))   { *v = a[0] >  a[1]; *is_bool = 1; }
+  else if (!strncmp(fn, "lin_geq", 7))  { *v = a[0] >= a[1]; *is_bool = 1; }
   else return 0;
   return 1;
 }
@@ -103,11 +78,11 @@ static Port ev_arglist_arg(Net *n, Port p, long *v, int *is_b) {
   Port q = dhop(n, p);
   if (q.node < 0 || q.node >= n->nn || n->dead[q.node] || n->tag[q.node] != LAM)
     return (Port){-1, 0};
-  if (!strcmp(nm(n, q.node), "_ffi")) {
+  if (ctor_tag(nm(n, q.node)) == DT_FFI) {
     if (ev_ffi(n, (Port){q.node, 0}, v, is_b)) return p;
     return (Port){-1, 0};
   }
-  if (!strncmp(nm(n, q.node), "_bt", 3)) { int b = net_read_bool(n, q); if (b < 0) return (Port){-1, 0}; *v = b; *is_b = 0; return p; }
+  if (ctor_tag(nm(n, q.node)) == DT_BOOL) { int b = net_read_bool(n, q); if (b < 0) return (Port){-1, 0}; *v = b; *is_b = 0; return p; }
   long x = net_read_int(n, q);
   if (x < 0) return (Port){-1, 0};
   *v = x; *is_b = 0; return p;
@@ -117,7 +92,7 @@ static Port ev_arglist_arg(Net *n, Port p, long *v, int *is_b) {
 static Port ev_arglist(Net *n, Port argp, long out[2], int *nout) {
   *nout = 0; Port cur = dhop(n, argp);
   if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) return (Port){-1, 0};
-  if (nm(n, cur.node)[0] != 'c' && strncmp(nm(n, cur.node), "_cl", 3)) {
+  if (ctor_tag(nm(n, cur.node)) != DT_STR) {
     int ib = 0; if (ev_arglist_arg(n, argp, &out[0], &ib).node >= 0) *nout = 1;
     return cur;
   }
@@ -144,7 +119,7 @@ static int simd_fold_ffi(Net *n, int lam, int app) {
   long v; int is_bool = 0;
   if (!ev_ffi(n, (Port){lam, 0}, &v, &is_bool)) return 0;
 
-  Port res = is_bool ? simd_alloc_bool(n, (int)v) : simd_alloc_scott(n, v);
+  Port res = is_bool ? net_alloc_bool(n, (int)v) : net_alloc_scott(n, v);
   /* Substitute the computed datum for the `_ffi` closure: the consumer APP is
      kept alive and re-paired with `res`, so the ordinary LAM/APP rule (a
      Church-boole / Scott-numeral application) completes the selection in a
@@ -187,9 +162,9 @@ static int simd_reduce_wave(Net *n, long limit, int *changed) {
 
     int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
     int folded = 0;
-    if (t1 == LAM && t2 == APP && !strcmp(nm(n, p1.node), "_ffi"))
+    if (t1 == LAM && t2 == APP && ctor_tag(nm(n, p1.node)) == DT_FFI)
       folded = simd_fold_ffi(n, p1.node, p2.node);
-    else if (t2 == LAM && t1 == APP && !strcmp(nm(n, p2.node), "_ffi"))
+    else if (t2 == LAM && t1 == APP && ctor_tag(nm(n, p2.node)) == DT_FFI)
       folded = simd_fold_ffi(n, p2.node, p1.node);
     if (folded) { batch_changed++; n->steps++; continue; }
 

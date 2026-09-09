@@ -21,7 +21,11 @@
 
             buildPhase = ''
               runHook preBuild
-              $CC -O2 -Wall -Wextra -std=c99 -fopenmp -o lin src/*.c std/drivers/*.c -ldl
+              $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl
+              for d in std/drivers/*.c; do
+                $CC -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared \
+                  -o "''${d%.c}.so" "$d" -ldl
+              done
               runHook postBuild
             '';
 

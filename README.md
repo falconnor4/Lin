@@ -103,6 +103,29 @@ zero        ; => 0
 
 Arbitrary-magnitude integer literals are supported directly.
 
+### User-Defined Algebraic Data Types & Pattern Matching
+
+Lin generalizes algebraic datatypes beyond the built-in numerals, booleans, and
+lists. Declare your own Scott-encoded ADTs and dispatch on them by shape:
+
+```scheme
+(datatype List (nil) (cons head tail))
+
+(match (cons 1 (cons 2 nil))
+  (nil 0)
+  ((cons h t) (add h 10)))   ; => 11
+
+(datatype Option (none) (some val) (err msg))
+(match (some 5) (none 0) ((some v) v) ((err m) 9))  ; => 5
+```
+
+`(datatype Name (Ctor field...) ...)` introduces each constructor as a
+Scott-encoded function (`C_i = \f1..\fk \d0..\d_{m-1} (d_i f1 ... fk)`), and
+`(match scrut (pat body) ...)` compiles to positional Scott dispatch: the
+scrutinee is applied to one value (nullary / `_`) or field-binding lambda per
+case. Constructors type-check through ordinary Hindley-Milner let-generalization,
+so no special type machinery is required.
+
 ### Standard Library
 
 The standard library (`std/`) is written in pure Lin:

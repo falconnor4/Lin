@@ -1,0 +1,32 @@
+; datatype & match: user-declared Scott-encoded ADTs + pattern dispatch
+
+(datatype List (nil) (cons head tail))
+
+(match (cons 1 (cons 2 nil))
+  (nil 0)
+  ((cons h t) (add h 10)))
+; expect => 11
+
+(match (cons 3 (cons 2 nil))
+  (nil 0)
+  ((cons h t) (add h 2)))
+; expect => 5
+
+(match nil
+  (nil 7)
+  ((cons h t) 0))
+; expect => 7
+
+(match (cons 1 nil)
+  (nil 7)
+  ((cons h t) (mul h 6)))
+; expect => 6
+
+; A 3-constructor ADT exercises multi-way dispatch.
+(datatype Option (none) (some val) (err msg))
+(match (some 5) (none 0) ((some v) v) ((err m) 9))
+; expect => 5
+(match (err "x") (none 0) ((some v) v) ((err m) 13))
+; expect => 13
+(match none (none 7) ((some v) 0) ((err m) 0))
+; expect => 7

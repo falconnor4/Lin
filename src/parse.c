@@ -196,6 +196,66 @@ static Term *parse_term(void) {
       skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
       return term_new(isOpen ? TOPEN : TNS, name, NULL, NULL);
     }
+    if (!strcmp(kw, "match")) {
+      /* (match scrut (pat body) ...)  => scrut applied to one lambda per case.
+         pat is `_` (wildcard), a lone name (nullary), or (Name v1...vk).
+         Purely positional Scott dispatch: no type/registry dependency. */
+      Term *scrut = parse_term();
+      Term *app = scrut;
+      skipws();
+      while (S[P] == '(') {
+        P++; skipws();
+        if (S[P] == ')') { P++; break; }
+        int k = 0; char (*vs)[NAME] = NULL;
+        if (S[P] == '(') { /* (Ctor v1...vk) -> bind the fields */
+          P++; skipws();
+          char ctorhead[NAME]; if (!sym(ctorhead, NAME)) pfail("match: bad pattern");
+          int cap = 0;
+          for (;;) {
+            skipws(); if (S[P] == ')') { P++; break; }
+            char vn[NAME]; if (!sym(vn, NAME)) pfail("match: bad field");
+            vs = realloc(vs, (size_t)(cap = cap ? cap * 2 : 4) * sizeof *vs);
+            snprintf(vs[k++], NAME, "%s", vn);
+          }
+        } else {
+          char pn[NAME]; if (!sym(pn, NAME)) pfail("match: bad pattern"); /* nullary/_ */
+        }
+        Term *body = parse_tail(parse_term());
+        Term *lam = body; /* nullary / wildcard: pass the value directly */
+        for (int i = k - 1; i >= 0; i--) lam = term_new(TLAM, vs[i], lam, NULL);
+        free(vs);
+        app = term_new(TAPP, "", app, lam);
+        skipws();
+      }
+      skipws(); if (S[P] == ')') P++; /* consume match close */
+      return app;
+    }
+    if (!strcmp(kw, "datatype") || !strcmp(kw, "data")) {
+      skipws(); char dn[NAME]; if (!sym(dn, NAME)) pfail("datatype: expected name");
+      /* constructors: (Name f1 f2 ...) */
+      Term *ctrs = NULL, *tail = NULL;
+      skipws();
+      while (S[P] == '(') {
+        P++; skipws();
+        if (S[P] == ')') { P++; continue; }
+        char cn[NAME]; if (!sym(cn, NAME)) pfail("datatype: expected constructor");
+        Term *fields = NULL, *ftail = NULL;
+        skipws();
+        while (S[P] != ')') {
+          char fn[NAME]; if (!sym(fn, NAME)) pfail("datatype: expected field");
+          Term *fv = term_new(TVAR, fn, NULL, NULL);
+          if (!fields) fields = ftail = fv; else { ftail->r = fv; ftail = fv; }
+          skipws();
+        }
+        P++; /* consume ')' */
+        Term *c = term_new(TVAR, cn, fields, NULL);
+        if (!ctrs) ctrs = tail = c; else { tail->r = c; tail = c; }
+        skipws();
+      }
+      skipws(); if (S[P] == ')') P++; /* consume datatype close */
+      Term *dt = term_new(TDATATYPE, dn, ctrs, NULL);
+      return dt;
+    }
     if (!strcmp(kw, "let")) {
       skipws(); if (S[P] != '(') pfail("let: expected '('"); P++;
       char (*names)[NAME] = NULL; Term **vals = NULL; int nb = 0, ncap = 0;
