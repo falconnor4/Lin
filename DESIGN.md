@@ -82,8 +82,9 @@ make test       # build all + run the full suite
 ## Test status
 
 44 suites pass / 0 fail (786 assertions), including on-device GPU reduction on
-AMD Radeon 760M (RADV).  The GPU path is host-authoritative (correctness
-guaranteed); `LIN_GPU_SELFTEST=1` runs a differential bit-exact check of the
-kernel against `lin_reduce_wave_parallel` and reports 0 mismatches — the
-on-device kernel is proven bit-identical to the base engine, gating the
-authoritative (self-reducing) commit in a future step.
+AMD Radeon 760M (RADV).  The GPU driver **commits authoritatively**: the
+on-device kernel rewrites the fixed-allocation rules (beta / annihilate /
+erase) into the host net, the host handles only the allocating commute rule
+and the active-list rebuild, and `LIN_GPU_SELFTEST=1` reports 0 mismatches
+(bit-exact vs. `lin_reduce_wave_parallel`).  `LIN_GPU_SELFTEST=1` remains the
+regression gate for any kernel change.

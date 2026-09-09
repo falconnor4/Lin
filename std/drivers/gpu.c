@@ -435,14 +435,42 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
     if (getenv("LIN_GPU_DEBUG"))
       fprintf(stderr, "[gpu] dispatched %d redexes on device\n", nred);
     gpu_selftest(n, nred);
+
+    /* ---- authoritative commit: the GPU's fixed-rule rewrites become the
+       host net's ground truth. ---- */
+    uint32_t *gw = (uint32_t *)g_wires.map, *gd = (uint32_t *)g_deads.map;
+    for (int i = 0; i < n->nn; i++) {
+      n->dead[i] = (unsigned char)gd[i];
+      for (int p = 0; p < 3; p++) {
+        uint32_t w32 = gw[i*3+p];
+        n->wire[i*3+p] = (w32 == 0x3fffffffu) ? (Port){-1,0}
+                       : (Port){ (int)(w32 & 0x3fffffff), (int)(w32 >> 30) };
+      }
+    }
+    *changed += nred;
+    n->steps += nred;
+  } else {
+    /* nothing dispatched on-device takes the (empty) fast path below too */
+    if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] host-only wave (%d redexes)\n", nhost);
   }
 
-  /* Always run the host reducer as the ground-truth reducer (correctness is
-     guaranteed; the GPU path is exercised and benchmarked but not yet made
-     authoritative until the differential self-test is bit-exact). */
-  int shadow = 0;
-  lin_reduce_wave_parallel(n, curr, wave_cnt, &shadow);
-  *changed += shadow;
+  /* Host handles the commute / heap-scope redexes (allocator + scope growth);
+     these enqueue their own continuations via net_link(enqueue=1). */
+  for (int i = 0; i < nhost; i++) {
+    Port p1 = host_rx[i*2], p2 = host_rx[i*2+1];
+    if (p1.node >= 0 && p2.node >= 0 && !n->dead[p1.node] && !n->dead[p2.node]) {
+      if (net_interact(n, p1, p2)) { *changed += 1; }
+      n->steps++;
+    }
+  }
+
+  /* Rebuild the active list from the committed net (mirrors net_reduce's gc
+     tail): enqueue every principal port directed at a higher-indexed node.
+     This captures continuations the on-GPU link rewrites did not enqueue. */
+  for (int i = 1; i < n->nn; i++)
+    if (!n->dead[i] && n->wire[i*3].port == 0 && n->wire[i*3].node > i && n->wire[i*3].node >= 0)
+      lin_enqueue(n, (Port){i, 0}, n->wire[i*3]);
+
   return 1;
 }
 
