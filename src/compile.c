@@ -279,9 +279,22 @@ Term *egraph_optimize(Term *t) {
 }
 
 /* ---------------- .line Binary Container ---------------- */
+/* The absolute path of the running `lin` binary; embedded in .line shebangs so
+   a built container always re-invokes the exact engine that produced it
+   (instead of a PATH-ambiguous `#!/usr/bin/env lin` that can resolve to a
+   stale `lin`). */
+static char self_path[4096] = "lin";
+
+void lin_set_self_path(const char *p) {
+  if (!p || !*p) return;
+  char *rp = realpath(p, NULL);
+  snprintf(self_path, sizeof self_path, "%s", rp ? rp : p);
+  free(rp);
+}
+
 int net_save_line(Net *n, const char *path) {
   FILE *f = fopen(path, "wb"); if (!f) return 0;
-  fputs("#!/usr/bin/env lin\n", f); fwrite("LINE", 1, 4, f);
+  fprintf(f, "#!%s\n", self_path); fwrite("LINE", 1, 4, f);
   uint32_t nnamed = 0; for (int i = 0; i < n->nn; i++) if (n->name[i] && n->name[i][0]) nnamed++;
   uint32_t meta[4] = { 2, (uint32_t)n->nn, (uint32_t)n->scn, nnamed };
   fwrite(meta, sizeof(uint32_t), 4, f);

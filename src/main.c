@@ -403,6 +403,7 @@ static void print_usage(const char *prog) {
 int main(int argc, char **argv) {
   bump_stack();
   ctor_init_builtins();
+  lin_set_self_path(argv[0]);
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
   if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
 #ifdef _OPENMP

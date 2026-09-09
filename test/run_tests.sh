@@ -101,7 +101,7 @@ for spec in "test/line_binary.lin:LINE_BINARY_OK: 43" "test/line_ffi.lin:FFI_LIN
   "$LIN_BIN" build "$src" -o "$TMP_DIR/$name.line"
   lok=1
   [ -x "$TMP_DIR/$name.line" ] || { echo "FAIL: $name.line not executable"; lok=0; }
-  head -n 1 "$TMP_DIR/$name.line" | grep -q '^#!/usr/bin/env lin' || { echo "FAIL: $name.line missing lin shebang"; lok=0; }
+  head -n 1 "$TMP_DIR/$name.line" | grep -q '^#!' || { echo "FAIL: $name.line missing shebang"; lok=0; }
   out1=$("$LIN_BIN" "$TMP_DIR/$name.line")
   [ "$out1" = "$want" ] || { echo "FAIL: $name engine output '$out1' (want '$want')"; lok=0; }
   if [ -x /usr/bin/env ]; then

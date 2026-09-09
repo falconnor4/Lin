@@ -57,6 +57,7 @@ Type *type_list(Type *e); Scheme scheme_all(Type *t);
 int compile(Term *t, Net *n, char *err, int errsz);
 Term *egraph_optimize(Term *t);
 int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const char *path);
+void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
 
 /* ---------------- datatype registry ----------------
    A value domain (num, bool, string, ffi/effect) is keyed by its carrier node
