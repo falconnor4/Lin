@@ -112,6 +112,11 @@ static void act_push(Net *n, Port a, Port b) {
   n->act[n->atop++] = a; n->act[n->atop++] = b;
 }
 
+/* Plugin hook: enqueue an active redex pair into the net's active list.  Used
+   by driver plugins (e.g. the GPU kernel) that commit link-rewrites directly
+   and must rebuild the continuation set exactly like the base engine does. */
+void lin_enqueue(Net *n, Port a, Port b) { act_push(n, a, b); }
+
 typedef struct { Port *p; int top, cap; } ActBuf;
 static ActBuf *t_act;
 static int n_tact;

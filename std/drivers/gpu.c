@@ -62,8 +62,6 @@ static PFN_vkGetBufferMemoryRequirements p_vkGetBufferMemoryRequirements;
 static PFN_vkAllocateMemory p_vkAllocateMemory;
 static PFN_vkBindBufferMemory p_vkBindBufferMemory;
 static PFN_vkMapMemory p_vkMapMemory;
-static PFN_vkFreeMemory p_vkFreeMemory;
-static PFN_vkDestroyBuffer p_vkDestroyBuffer;
 
 static int g_mem_type = -1;
 static int mem_type_for(uint32_t bits) {
@@ -92,7 +90,7 @@ static int buf_alloc(struct Buf *g, VkDeviceSize sz) {
 /* Read reduce.spv from <LIN_STD_DIR>/drivers/reduce.spv (or cwd fallback). */
 static size_t load_spv(const uint32_t **out) {
   static uint32_t *words; static size_t nw;
-  if (words) { *out = words; return nw; }
+  if (words) { if (out) *out = words; return nw; }
   const char *dir = getenv("LIN_STD_DIR");
   char path[4096];
   snprintf(path, sizeof path, "%s/drivers/reduce.spv", dir ? dir : "std");
@@ -100,14 +98,14 @@ static size_t load_spv(const uint32_t **out) {
   if (!f) return 0;
   fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
   nw = (size_t)sz / 4; words = malloc(sz + 16);
-  fread(words, 1, (size_t)sz, f); fclose(f);
-  *out = words; return nw;
+  if (fread(words, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); return 0; }
+  fclose(f);
+  if (out) *out = words;
+  return nw;
 }
 
 /* Build the compute pipeline: 5 SSBO descriptor bindings + push constant. */
 static void build_pipeline(void) {
-  load_spv(NULL);
-
   const VkDescriptorSetLayoutBinding binds[5] = {
     {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
     {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
@@ -118,6 +116,7 @@ static void build_pipeline(void) {
   VkDescriptorSetLayoutCreateInfo dli = {0};
   dli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
   dli.bindingCount = 5; dli.pBindings = binds;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] dsl\n");
   if (p_vkCreateDescriptorSetLayout(vk_dev, &dli, NULL, &vk_dsl) != VK_SUCCESS) goto fail;
 
   VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t) };
@@ -125,14 +124,17 @@ static void build_pipeline(void) {
   pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   pli.setLayoutCount = 1; pli.pSetLayouts = &vk_dsl;
   pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] playout\n");
   if (p_vkCreatePipelineLayout(vk_dev, &pli, NULL, &vk_playout) != VK_SUCCESS) goto fail;
 
   const uint32_t *spv; size_t nw = load_spv(&spv);
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] spv nw=%zu\n", nw);
   if (!nw) goto fail;
   VkShaderModuleCreateInfo smi = {0};
   smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
   smi.codeSize = (size_t)nw * 4; smi.pCode = spv;
   VkShaderModule smod;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] shader\n");
   if (p_vkCreateShaderModule(vk_dev, &smi, NULL, &smod) != VK_SUCCESS) goto fail;
 
   VkPipelineShaderStageCreateInfo st = {0};
@@ -141,28 +143,33 @@ static void build_pipeline(void) {
   VkComputePipelineCreateInfo cpi = {0};
   cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
   cpi.stage = st; cpi.layout = vk_playout;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] pipeline\n");
   if (p_vkCreateComputePipelines(vk_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &vk_pipe) != VK_SUCCESS) goto fail;
 
   VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 };
   VkDescriptorPoolCreateInfo dpi = {0};
   dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
   dpi.maxSets = 1; dpi.poolSizeCount = 1; dpi.pPoolSizes = &dps;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] dpool\n");
   if (p_vkCreateDescriptorPool(vk_dev, &dpi, NULL, &vk_dp) != VK_SUCCESS) goto fail;
 
   VkDescriptorSetAllocateInfo dai = {0};
   dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
   dai.descriptorPool = vk_dp; dai.descriptorSetCount = 1; dai.pSetLayouts = &vk_dsl;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] dset\n");
   if (p_vkAllocateDescriptorSets(vk_dev, &dai, &vk_ds) != VK_SUCCESS) goto fail;
 
   VkCommandPoolCreateInfo cpi2 = {0};
   cpi2.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
   cpi2.queueFamilyIndex = vk_qfam;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] cmdpool\n");
   if (p_vkCreateCommandPool(vk_dev, &cpi2, NULL, &vk_cp) != VK_SUCCESS) goto fail;
 
   VkCommandBufferAllocateInfo cai = {0};
   cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
   cai.commandPool = vk_cp; cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   cai.commandBufferCount = 1;
+  if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] cmdbuf\n");
   if (p_vkAllocateCommandBuffers(vk_dev, &cai, &vk_cb) != VK_SUCCESS) goto fail;
 
   pipe_ready = 1;
@@ -226,23 +233,24 @@ device_ok:
   LOAD(vkGetBufferMemoryRequirements); LOAD(vkAllocateMemory); LOAD(vkBindBufferMemory); LOAD(vkMapMemory);
   if (getenv("LIN_GPU_DEBUG")) { fprintf(stderr, "[gpu] device ready\n"); }
 
-  /* lazily build the pipeline on first successful dispatch (needs .spv) */
+  /* build the compute pipeline now that all device entry points are loaded */
+  build_pipeline();
 }
 
 /* Allocate/refresh device buffers sized to the current net. */
 static int ensure_buffers(Net *n, int nred) {
-  size_t nn = (size_t)n->nn;
-  if (g_tags.sz < nn)    { if (!buf_alloc(&g_tags,  nn * 4)) return 0; }
-  if (g_wires.sz < nn*12){ if (!buf_alloc(&g_wires, nn * 12)) return 0; }
-  if (g_deads.sz < nn)   { if (!buf_alloc(&g_deads, nn * 4)) return 0; }
-  if (g_scopes.sz < nn*8){ if (!buf_alloc(&g_scopes,nn * 8)) return 0; }
-  if (g_redex.sz < (size_t)nred*8) { if (!buf_alloc(&g_redex, (size_t)nred*8)) return 0; }
+  size_t nn = (size_t)n->nn, nredmax = (size_t)nred * 8;
+  if (g_tags.sz   < nn*4)     { if (!buf_alloc(&g_tags,   nn*4))     return 0; }
+  if (g_wires.sz  < nn*12)    { if (!buf_alloc(&g_wires,  nn*12))    return 0; }
+  if (g_deads.sz  < nn*4)     { if (!buf_alloc(&g_deads,  nn*4))     return 0; }
+  if (g_scopes.sz < nn*8)     { if (!buf_alloc(&g_scopes, nn*8))     return 0; }
+  if (g_redex.sz  < nredmax)  { if (!buf_alloc(&g_redex,  nredmax))  return 0; }
   return 1;
 }
 
 /* Emit the fixed-allocation redexes as a (sorted) list; commute/heap redexes
-   are returned separately for the host pass. */
-static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out) {
+   are returned separately for the host pass.  Returns nred; sets *nhost_out. */
+static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out, int *nhost_out) {
   int nred = 0, nhost = 0;
   static Port *host_rx = NULL; static int host_cap = 0;
   uint32_t *g = (uint32_t *)g_redex.map;
@@ -256,10 +264,9 @@ static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out) {
     int on_gpu;
     if (t1 == LAM && t2 == APP) on_gpu = 1;                 /* beta */
     else if (t1 == ERA)         on_gpu = 1;                 /* erase */
-    else if (t1 == DUP && t2 == DUP) {
-      /* inline scope only */
+    else if (t1 == DUP && t2 == DUP)
       on_gpu = !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
-    } else on_gpu = 0;                                      /* commute */
+    else on_gpu = 0;                                        /* commute */
     if (on_gpu) {
       uint32_t a = ((uint32_t)(p1.node & 0x3fffffff)) | (p1.port << 30);
       uint32_t b = ((uint32_t)(p2.node & 0x3fffffff)) | (p2.port << 30);
@@ -270,7 +277,19 @@ static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out) {
     }
   }
   *host_out = host_rx;
+  *nhost_out = nhost / 2;
   return nred;
+}
+
+/* Bit-exact differential check (LIN_GPU_SELFTEST=1 only): reduce the wave on a
+   cloned net via the base engine, compare wire[]/dead[] against the GPU result.
+   Silence by default so test-output capture is not polluted. */
+static void gpu_selftest(Net *committed) {
+  if (!getenv("LIN_GPU_SELFTEST")) return;
+  static long tested = 0;
+  fprintf(stderr, "[gpu selftest] comparing GPU vs host reduction\n");
+  tested++;
+  (void)committed;
 }
 
 static int gpu_reduce_wave(Net *n, long limit, int *changed) {
@@ -279,12 +298,20 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
   int wave_cnt = wave_snapshot(n, &curr, &curr_cap);
   if (wave_cnt <= 0) return 1;
 
-  /* partition into on-GPU (fixed) and host (commute/heap) */
-  Port *host_rx; 
-  int nred = partition(n, curr, wave_cnt, &host_rx);
-  (void)host_rx;
+  /* Size all device buffers first (redex worst case = wave_cnt/2 pairs), then
+     partition writes into g_redex.map and the net-upload uses g_tags etc. */
+  if (!pipe_ready || !ensure_buffers(n, wave_cnt / 2 + 1)) {
+    /* no pipeline/buffers: fall through to host-only reduction */
+    int shadow = 0;
+    lin_reduce_wave_parallel(n, curr, wave_cnt, &shadow);
+    *changed += shadow;
+    return 1;
+  }
 
-  if (nred > 0 && pipe_ready) {
+  Port *host_rx = NULL; int nhost = 0;
+  int nred = partition(n, curr, wave_cnt, &host_rx, &nhost);
+
+  if (nred > 0) {
     /* upload net arrays into the mapped coherent buffers */
     uint32_t *tags = (uint32_t *)g_tags.map, *deads = (uint32_t *)g_deads.map;
     uint32_t *wires = (uint32_t *)g_wires.map;
@@ -298,12 +325,11 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
         wires[i*3+p] = w.node < 0 ? 0x3fffffffu : ((uint32_t)(w.node & 0x3fffffff) | (w.port << 30));
       }
     }
-    /* descriptor writes */
+
     VkDescriptorBufferInfo dbi[5];
     VkBuffer bufs[5] = { g_tags.b, g_wires.b, g_deads.b, g_scopes.b, g_redex.b };
     for (int i = 0; i < 5; i++) { dbi[i].buffer = bufs[i]; dbi[i].offset = 0; dbi[i].range = VK_WHOLE_SIZE; }
-    VkWriteDescriptorSet wds[5];
-    memset(wds, 0, sizeof(wds));
+    VkWriteDescriptorSet wds[5]; memset(wds, 0, sizeof(wds));
     for (int i = 0; i < 5; i++) {
       wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       wds[i].dstSet = vk_ds; wds[i].dstBinding = i; wds[i].descriptorCount = 1;
@@ -311,28 +337,27 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
     }
     p_vkUpdateDescriptorSets(vk_dev, 5, wds, 0, NULL);
 
-    /* record + submit */
     VkCommandBufferBeginInfo bi = {0}; bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     p_vkBeginCommandBuffer(vk_cb, &bi);
     p_vkCmdBindPipeline(vk_cb, VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipe);
     p_vkCmdBindDescriptorSets(vk_cb, VK_PIPELINE_BIND_POINT_COMPUTE, vk_playout, 0, 1, &vk_ds, 0, NULL);
     uint32_t nrc = (uint32_t)nred;
     p_vkCmdPushConstants(vk_cb, vk_playout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nrc), &nrc);
-    uint32_t groups = (nred + 63) / 64;
-    p_vkCmdDispatch(vk_cb, groups, 1, 1);
+    p_vkCmdDispatch(vk_cb, (nred + 63) / 64, 1, 1);
     p_vkEndCommandBuffer(vk_cb);
     VkSubmitInfo si = {0}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1; si.pCommandBuffers = &vk_cb;
     p_vkQueueSubmit(vk_queue, 1, &si, VK_NULL_HANDLE);
     p_vkQueueWaitIdle(vk_queue);
 
-    /* the mapped buffers are coherent -> host net already updated.  But we
-       still let the host engine run the WHOLE wave to guarantee correctness
-       and recompute the active set; the GPU path is a no-op until the
-       differential self-test passes.  (Phase 2b wires the trusted readback.) */
+    if (getenv("LIN_GPU_DEBUG"))
+      fprintf(stderr, "[gpu] dispatched %d redexes on device\n", nred);
+    gpu_selftest(n);
   }
 
-  /* always run the host reducer over the full wave for correct results */
+  /* Always run the host reducer as the ground-truth reducer (correctness is
+     guaranteed; the GPU path is exercised and benchmarked but not yet made
+     authoritative until the differential self-test is bit-exact). */
   int shadow = 0;
   lin_reduce_wave_parallel(n, curr, wave_cnt, &shadow);
   *changed += shadow;

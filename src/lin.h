@@ -38,6 +38,7 @@ typedef struct LinDriver { const char *name; int (*reduce_wave)(Net *n, long lim
 void lin_driver_add(LinDriver *d); void lin_driver_clear(void); LinDriver *lin_get_driver(void);
 int wave_snapshot(Net *n, Port **out, int *cap);
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
+void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
