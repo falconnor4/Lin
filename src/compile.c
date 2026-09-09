@@ -87,6 +87,7 @@ static Port ct_splice(Def *d, Scope sc) {
 
 static Port ct(Term *t, Scope sc) {
   switch (t->type) {
+  case TFLOAT: return net_alloc_float(N, strtod(t->name, NULL));
   case TVAR: {
     for (int i = csp - 1; i >= 0; i--) {
       if (strcmp(cstack[i].name, t->name)) continue;

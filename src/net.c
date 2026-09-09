@@ -117,6 +117,13 @@ static void act_push(Net *n, Port a, Port b) {
    and must rebuild the continuation set exactly like the base engine does. */
 void lin_enqueue(Net *n, Port a, Port b) { act_push(n, a, b); }
 
+/* Driver native-fold accounting: drivers bump this when they fold a redex
+   natively instead of letting the base engine expand it.  Exposed so the test
+   suite can assert that accelerator folding actually fires. */
+static long fold_count;
+void lin_fold_bump(void) { __atomic_add_fetch(&fold_count, 1, __ATOMIC_RELAXED); }
+long lin_fold_total(void) { return fold_count; }
+
 typedef struct { Port *p; int top, cap; } ActBuf;
 static ActBuf *t_act;
 static int n_tact;

@@ -20,6 +20,8 @@
 (define getenv   (\name (ffi.ccall1 "getenv" name)))
 (define system   (\cmd (ffi.ccall1 "system" cmd)))
 (define load_lib (\lib (ffi.ccall1 "dlopen" lib)))
+(define folds    (ffi.ccall0 "lin_folds"))  ; native-driver fold count
+(define folded   (ffi.ccall0 "lin_folded")) ; true once any driver folded
 
 (namespace _)
 (open ffi)
@@ -32,6 +34,8 @@
 (define getenv ffi.getenv)
 (define system ffi.system)
 (define load_lib ffi.load_lib)
+(define folds ffi.folds)
+(define folded ffi.folded)
 
 ; Load I/O module (printing, character streams, file operations)
 (load "io.lin")

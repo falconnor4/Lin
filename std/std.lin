@@ -29,6 +29,7 @@
 
 (load "bool.lin")
 (load "num.lin")
+(load "float.lin")
 (load "math.lin")
 (load "pair.lin")
 (load "list.lin")
@@ -47,6 +48,7 @@
 ; --- Open All Standard Namespaces into Current Scope ---
 (open bool)
 (open num)
+(open float)
 (open math)
 (open pair)
 (open list)

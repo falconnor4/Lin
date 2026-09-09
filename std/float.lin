@@ -1,0 +1,72 @@
+; ==============================================================================
+; Lin Standard Library: Floating-Point Arithmetic & Trigonometry
+; ==============================================================================
+; A float is a Scott numeral carrying the IEEE-754 bit pattern of a double,
+; keyed under the _fsz/_fss spine (so it never collides with integer numerals).
+; All operations reduce through FFI closures (lin_fadd, lin_fsin, ...) to the
+; C math library; the SIMD driver may later fold these natively during
+; reduction.  Readback renders a float as %g.
+; ==============================================================================
+
+(load "bool.lin")
+(load "num.lin")
+(load "ffi.lin")
+
+(namespace float)
+
+; --- Construction ---
+; Parse a decimal string into a float, e.g. (float "2.5").
+(define! float (a -> num) (\s (ccall1 "lin_parse_float" s)))
+; Promote an integer to a float.
+(define! i2f (num -> num) (\i (ccall1 "lin_float" i)))
+
+; --- Arithmetic (binary) ---
+(define! fadd (num -> num -> num) (\a (\b (ccall2 "lin_fadd" a b))))
+(define! fsub (num -> num -> num) (\a (\b (ccall2 "lin_fsub" a b))))
+(define! fmul (num -> num -> num) (\a (\b (ccall2 "lin_fmul" a b))))
+(define! fdiv (num -> num -> num) (\a (\b (ccall2 "lin_fdiv" a b))))
+(define! fpow (num -> num -> num) (\a (\b (ccall2 "lin_fpow" a b))))
+(define! fatan2 (num -> num -> num) (\a (\b (ccall2 "lin_fatan2" a b))))
+
+; --- Unary ---
+(define! fsqrt (num -> num) (\x (ccall1 "lin_fsqrt" x)))
+(define! fsin  (num -> num) (\x (ccall1 "lin_fsin" x)))
+(define! fcos  (num -> num) (\x (ccall1 "lin_fcos" x)))
+(define! ftan  (num -> num) (\x (ccall1 "lin_ftan" x)))
+
+; --- Comparison (bool) ---
+(define! feq  (num -> num -> bool) (\a (\b (ccall2 "lin_feq" a b))))
+(define! flt  (num -> num -> bool) (\a (\b (ccall2 "lin_flt" a b))))
+(define! fleq (num -> num -> bool) (\a (\b (ccall2 "lin_fleq" a b))))
+(define! fgt (num -> num -> bool) (\a (\b (not (fleq a b)))))
+(define! fgeq (num -> num -> bool) (\a (\b (not (flt a b)))))
+
+; --- Coercion / constants ---
+; Truncate toward zero (floor) to an integer.
+(define! ffloor (num -> num) (\x (ccall1 "lin_ffloor" x)))
+(define pi (float "3.14159265358979323846"))
+(define e  (float "2.71828182845904523536"))
+
+(namespace _)
+(open float)
+(define float float.float)
+(define i2f float.i2f)
+(define fadd float.fadd)
+(define fsub float.fsub)
+(define fmul float.fmul)
+(define fdiv float.fdiv)
+(define fpow float.fpow)
+(define fatan2 float.fatan2)
+(define fsqrt float.fsqrt)
+(define fsin float.fsin)
+(define fcos float.fcos)
+(define ftan float.ftan)
+(define feq float.feq)
+(define flt float.flt)
+(define fleq float.fleq)
+(define fgt float.fgt)
+(define fgeq float.fgeq)
+(define ffloor float.ffloor)
+(define i2f float.i2f)
+(define pi float.pi)
+(define e float.e)

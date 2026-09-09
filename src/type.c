@@ -136,6 +136,7 @@ static Type *infer(Term *t) {
     unify(f, tarrow(x, r)); return r;
   }
   case TDEFX: return infer(t->l);
+  case TFLOAT: return tvar();   /* float literal: fresh polymorphic type */
   }
   return NULL;
 }

@@ -66,6 +66,13 @@ static int isnum(const char *s) {
     if (!isdigit((unsigned char)*p)) return 0;
   return 1;
 }
+/* A float literal: digits with a '.', or an exponent (e/E). */
+static int isfloat(const char *s) {
+  if (!*s || !isdigit((unsigned char)*s) || (!strpbrk(s, ".eE"))) return 0;
+  for (const char *p = s; *p; p++)
+    if (!isdigit((unsigned char)*p) && *p != '.' && *p != 'e' && *p != 'E') return 0;
+  return 1;
+}
 
 static Term *scott(long k) {
   Term *cur = term_new(TLAM, "_sz", term_new(TLAM, "_ss", term_new(TVAR, "_sz", 0, 0), 0), 0);
@@ -128,6 +135,7 @@ static Term *parse_tail(Term *f) {
 
 static Term *parse_atom(const char *kw) {
   if (isnum(kw)) return scott(atol(kw));
+  if (isfloat(kw)) { Term *t = term_new(TFLOAT, kw, NULL, NULL); return t; }
   return term_new(TVAR, kw, NULL, NULL);
 }
 

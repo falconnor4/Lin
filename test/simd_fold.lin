@@ -1,0 +1,42 @@
+; --- SIMD native fold: assert the accelerator actually folds during reduction.
+;     ffi.folded is true only once the SIMD driver has rewired a saturated
+;     _ffi arithmetic closure natively (a value a Scott consumer then uses),
+;     rather than deferring it to readback. ---
+
+(load "std/drivers/simd.lin")
+; expect => 1
+(load "std/drivers/native.lin")
+(load "std/std.lin")
+(get_driver)
+; expect => simd
+
+; --- integer fold: `sub` (native.lin FFI) consumed by Scott `is_zero` ---
+(is_zero (sub 42 42))
+; expect => true
+
+; a driver fold fired and is observable
+(folded)
+; expect => true
+
+; --- float fold: `fsqrt` folded natively and consumed by `ffloor` ---
+(ffloor (fsqrt 144.0))
+; expect => 12
+
+; float arithmetic composing through folds still yields exact values
+(ffloor (fmul (fsqrt 16.0) (fadd 1.0 1.0)))
+; expect => 8
+
+(folded)
+; expect => true
+
+; integer + float arithmetic stay correct when both fold
+(mul (add 20 22) 2)
+; expect => 84
+
+(feq (fadd 2.5 3.5) 6.0)
+; expect => true
+
+(set_driver "cpu")
+; expect => 1
+(get_driver)
+; expect => cpu

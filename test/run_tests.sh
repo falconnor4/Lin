@@ -66,12 +66,12 @@ run_test() {
 printf "Running Lin Confluence & Stability Test Suite against %s\n" "$LIN_BIN"
 
 printf "[Tier 1: Core Interaction Calculus & Primitives]\n"
-for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin; do
+for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin; do
   run_test "$f"
 done
 
 printf "[Tier 2: Foreign Function Interface & System Drivers]\n"
-for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin test/gpu_dispatch.lin test/unison.lin; do
+for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin test/gpu_dispatch.lin test/unison.lin test/simd_fold.lin; do
   run_test "$f"
 done
 

@@ -4,12 +4,41 @@
 #include <string.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <math.h>
 
 static Net *N;
 #define NNM(n, i) ((i) >= 0 && (i) < (n)->nn && (n)->name[i] ? (n)->name[i] : "")
 static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 
-/* ---------------- datatype registry ---------------- */
+/* ---------------- float box (side table) ----------------
+   A concrete float in the net is a `_fsz`-spine Scott numeral whose value is a
+   small index into a process-global double table.  Indexing (not bit-packing)
+   sidesteps the sign-bit problem: a double's IEEE bits are not stored in the
+   numeral, so no giant/negative Scott counts arise. */
+static double *fltbox; static int nfltbox, cfltbox;
+
+static Port alloc_scott_named(Net *n, long k, const char *szn, const char *ssn) {
+  Scope sc = scope_nil(); Port cur = (Port){-1, 0};
+  for (long i = 0; i <= k; i++) {
+    Port sz = net_alloc(n, LAM, sc, szn), ss = net_alloc(n, LAM, sc, ssn);
+    net_link(n, (Port){sz.node, 2}, (Port){ss.node, 0}, 0);
+    if (i == 0) net_link(n, (Port){ss.node, 2}, (Port){sz.node, 1}, 0);
+    else {
+      Port app = net_alloc(n, APP, sc, "");
+      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0);
+      net_link(n, (Port){app.node, 2}, cur, 0);
+      net_link(n, (Port){ss.node, 2}, (Port){app.node, 1}, 0);
+    }
+    cur = (Port){sz.node, 0};
+  }
+  return cur;
+}
+
+Port net_alloc_float(Net *n, double d) {
+  if (nfltbox >= cfltbox) { cfltbox = cfltbox ? cfltbox * 2 : 64; fltbox = realloc(fltbox, (size_t)cfltbox * sizeof(double)); }
+  int idx = nfltbox++; fltbox[idx] = d;
+  return alloc_scott_named(n, idx, "_fsz", "_fss");
+}
 #define MAX_CTOR 64
 static Constructor ctors[MAX_CTOR];
 static int nctors = 0;
@@ -34,6 +63,7 @@ void ctor_init_builtins(void) {
   ctor_register("_cl", DT_STR, "_cl", "_nl");
   ctor_register("c", DT_STR, "c", "n");   /* std list cons/nil string spine */
   ctor_register("_ffi", DT_FFI, "_ffi", "_ret");
+  ctor_register("_fsz", DT_FLOAT, "_fsz", "_fss"); /* float box: Scott index into fltbox */
   /* monadic IO/effect continuations: an open set of effect kinds keyed here,
      so new effects are added by registration rather than new branches */
   ctor_register("_iod", DT_EFF, "_iod", NULL);
@@ -86,6 +116,26 @@ long net_read_int(Net *n, Port p) {
     return -1;
   }
   return -1;
+}
+
+/* Extract a float box (`_fsz` spine whose value is a fltbox index). */
+int net_read_float(Net *n, Port p, double *out) {
+  N = n; long count = 0; Port cur = p;
+  for (int step = 0; step < n->nn; step++) {
+    cur = dup_hop(n, cur);
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != DT_FLOAT) return 0;
+    int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
+    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != DT_FLOAT) return 0;
+    int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
+    if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return 0;
+    if (body.node == sz && body.port == 1) { if (count < nfltbox) { *out = fltbox[count]; return 1; } return 0; }
+    if (n->tag[body.node] == APP) {
+      Port fn = dup_hop(n, wire((Port){body.node, 0}));
+      if (fn.node == ss && fn.port == 1) { count++; cur = wire((Port){body.node, 2}); continue; }
+    }
+    return 0;
+  }
+  return 0;
 }
 
 /* Extract Church boolean: _bt / _bf */
@@ -148,9 +198,10 @@ static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_m
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
   if (ctor_tag(NNM(n, p.node)) == DT_FFI) {
     Val v = run_ffi(n, p);
-    if (v.kind == 1 || v.kind == 3) { *out_val = v.iv; return 1; }
+    if (v.kind == 1 || v.kind == 3 || v.kind == 4) { *out_val = v.iv; return 1; }
     if (v.kind == 2) { snprintf(str_buf, str_max, "%s", v.sv); *out_val = (long)(intptr_t)str_buf; return 1; }
   }
+  if (ctor_tag(NNM(n, p.node)) == DT_FLOAT) { double d; if (net_read_float(n, p, &d)) { memcpy(out_val, &d, 8); return 1; } }
   if (ctor_tag(NNM(n, p.node)) == DT_BOOL) { int b = net_read_bool(n, p); if (b >= 0) { *out_val = b; return 1; } }
   if (ctor_tag(NNM(n, p.node)) == DT_STR) {
     int len = net_read_string(n, p, str_buf, str_max); if (len >= 0) { *out_val = (long)(intptr_t)str_buf; return 1; }
@@ -208,7 +259,7 @@ static void *resolve_driver(const char *dn) {
 }
 
 static Val run_ffi(Net *n, Port p) {
-  Val v = {0, 0, {0}};
+  Val v = {0};
   p = skip_dup(n, p);
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || ctor_tag(NNM(n, p.node)) != DT_FFI) return v;
   Port r = skip_dup(n, wire((Port){p.node, 2})); if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || ctor_tag(NNM(n, r.node)) != DT_FFI) return v;
@@ -237,6 +288,24 @@ static Val run_ffi(Net *n, Port p) {
   B1("lin_div", c_args[1] ? c_args[0] / c_args[1] : 0);
   B1("lin_mod", c_args[1] ? c_args[0] % c_args[1] : 0);
   B1("lin_pow", ({ long b = c_args[0], e = c_args[1], r = 1; while (e > 0) { if (e & 1) r *= b; b *= b; e >>= 1; } r; }));
+  /* float builtins: args are IEEE-754 bits carried as longs; result kind=4 */
+  #define FA(n, e) if (!strcmp(fn, n)) { double a, b; memcpy(&a, &c_args[0], 8); memcpy(&b, &c_args[1], 8); double r = (e); long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
+  #define FU(n, e) if (!strcmp(fn, n)) { double a; memcpy(&a, &c_args[0], 8); double r = (e); long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
+  #define FC(n, e) if (!strcmp(fn, n)) { double a, b; memcpy(&a, &c_args[0], 8); memcpy(&b, &c_args[1], 8); v.kind = 3; v.iv = (e); return v; }
+  FA("lin_fadd", a + b);   FA("lin_fsub", a - b);
+  FA("lin_fmul", a * b);   FA("lin_fdiv", b != 0.0 ? a / b : 0.0);
+  FU("lin_fsqrt", a >= 0.0 ? sqrt(a) : 0.0);
+  FU("lin_fsin", sin(a));  FU("lin_fcos", cos(a));  FU("lin_ftan", tan(a));
+  FA("lin_fatan2", atan2(a, b));   FA("lin_fpow", pow(a, b));
+  FC("lin_feq", a == b);   FC("lin_flt", a < b);   FC("lin_fleq", a <= b);
+  #undef FA
+  #undef FU
+  #undef FC
+  B1("lin_ffloor", ({ double a; memcpy(&a, &c_args[0], 8); (long)floor(a); }));
+  if (!strcmp(fn, "lin_folds")) { v.kind = 1; v.iv = lin_fold_total(); return v; }
+  B3("lin_folded", lin_fold_total() > 0);
+  if (!strcmp(fn, "lin_parse_float")) { double d = strtod(argc > 0 ? (char*)c_args[0] : "0", NULL); long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
+  if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
   B3("lin_streq", argc >= 2 && !strcmp((char *)c_args[0], (char *)c_args[1]));
   B3("lin_eq", c_args[0] == c_args[1]);  B3("lin_lt", c_args[0] < c_args[1]);
   B3("lin_leq", c_args[0] <= c_args[1]); B3("lin_gt", c_args[0] > c_args[1]);
@@ -251,22 +320,24 @@ static Val run_ffi(Net *n, Port p) {
   return v;
 }
 
-/* Render one decoded value to a stream (1=int, 2=str, 3=bool); returns 1 if a
-   value rendered, 0 if none. */
+/* Render one decoded value to a stream (1=int, 2=str, 3=bool, 4=float); returns
+   1 if a value rendered, 0 if none. */
 static int render_val(FILE *f, Val v) {
   if (v.kind == 1) fprintf(f, "%ld", v.iv);
   else if (v.kind == 2) fputs(v.sv, f);
   else if (v.kind == 3) fputs(v.iv ? "true" : "false", f);
+  else if (v.kind == 4) { double d; memcpy(&d, &v.iv, 8); fprintf(f, "%g", d); }
   else return 0;
   fflush(f); return 1;
 }
 
-/* Decode a non-FFI port as a value: string (2), int (1), or bool (3). */
+/* Decode a non-FFI port as a value: string (2), int (1), bool (3), float (4). */
 static Val decode(Net *n, Port p) {
-  Val v = {0, 0, {0}};
+  Val v = {0};
   if (net_read_string(n, p, v.sv, sizeof(v.sv)) >= 0) v.kind = 2;
-  else if ((v.iv = net_read_int(n, p)) >= 0) v.kind = 1;
-  else if ((v.iv = net_read_bool(n, p)) >= 0) v.kind = 3;
+  else { double d; if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; } }
+  if (!v.kind && (v.iv = net_read_int(n, p)) >= 0) v.kind = 1;
+  if (!v.kind && (v.iv = net_read_bool(n, p)) >= 0) v.kind = 3;
   return v;
 }
 
@@ -407,7 +478,7 @@ int net_run_io(Net *n, long step_limit) {
 
       char in_buf[4096] = {0};
       long res_int = -1; int is_int = 0;
-      Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0, 0, {0}};
+      Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0};
       if (fv.kind == 1) { res_int = fv.iv; is_int = 1; }
       else if (fv.kind == 3) is_int = 2;                      /* bool result */
       else if (fv.kind == 2) snprintf(in_buf, sizeof(in_buf), "%s", fv.sv);

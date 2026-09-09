@@ -1,0 +1,69 @@
+; Floating-point arithmetic, trigonometry, and coercion via the float domain.
+
+(fadd (float "2.5") (float "3.5"))
+; expect => 6
+
+(fsub (float "10") (float "4.25"))
+; expect => 5.75
+
+(fmul (float "6") (float "7"))
+; expect => 42
+
+(fdiv (float "22") (float "7"))
+; expect => 3.14286
+
+(fsqrt (float "144"))
+; expect => 12
+
+(fsqrt (float "2"))
+; expect => 1.41421
+
+(fsin (fdiv pi (float "2")))
+; expect => 1
+
+(fcos (float "0"))
+; expect => 1
+
+; floating-point == is exact bit comparison (0.1+0.2 != 0.3)
+(feq (fadd (float "0.1") (float "0.2")) (float "0.3"))
+; expect => false
+
+(feq (fdiv (float "6") (float "2")) (float "3"))
+; expect => true
+
+(flt (float "1.5") (float "2.5"))
+; expect => true
+
+(fleq (float "2") (float "2"))
+; expect => true
+
+; truncation to integer
+(ffloor (fadd (float "42") (float "0.9")))
+; expect => 42
+
+; integer -> float promotion
+(i2f 42)
+; expect => 42
+
+; nested float arithmetic (result of one feeds another)
+(ffloor (fmul (fsqrt (float "16")) (fadd (float "1") (float "1"))))
+; expect => 8
+
+; float literal syntax (parse-time IEEE-754 box, no string FFI)
+(fadd 2.5 3.5)
+; expect => 6
+
+(fmul 6.0 7.0)
+; expect => 42
+
+(fsqrt 144.0)
+; expect => 12
+
+(fdiv 22.0 7.0)
+; expect => 3.14286
+
+(fsin (fdiv 3.14159265358979323846 2.0))
+; expect => 1
+
+(ffloor (fmul (fsqrt 16.0) (fadd 1.0 1.0)))
+; expect => 8

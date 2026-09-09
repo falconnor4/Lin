@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 #define SIMD_WIDTH 8
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
@@ -45,9 +46,10 @@ static int rd_fn(Net *n, Port p, char *fn, int fnmax) {
 }
 
 /* Evaluate a single `_ffi` closure whose args are saturated (recursively),
-   returning 1 and storing value / is_bool, else 0.  Also used to read an
-   argument, so nested arithmetic composes into a single native fold. */
-static int ev_ffi(Net *n, Port p, long *v, int *is_bool) {
+   returning 1 and storing value/type, else 0.  is_bool: result is a Church
+   boole; is_float: result is an IEEE-754 double (bits carried in *v as long).
+   Also used to read an argument, so nested arithmetic composes. */
+static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   char fn[256];
   if (!rd_fn(n, p, fn, sizeof(fn))) return 0;
   Port r = dhop(n, WP(n, p.node, 2));
@@ -55,8 +57,29 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool) {
   if (a2.node < 0) return 0;
   long a[2]; int na = 0; Port argp = WP(n, a2.node, 2);
   ev_arglist(n, argp, a, &na);
-  if (na < 2) return 0; /* every lin_* op needs both saturated args */
-  *is_bool = 0;
+  *is_bool = 0; *is_float = 0;
+
+  /* float binary ops: args are IEEE bits carried as longs */
+  if      (!strncmp(fn, "lin_fadd", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = x + y; memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_fsub", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = x - y; memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_fmul", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = x * y; memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_fdiv", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = y != 0.0 ? x / y : 0.0; memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_fpow", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = pow(x, y); memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_fatan2", 10)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = atan2(x, y); memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  /* float unary ops */
+  if      (!strncmp(fn, "lin_fsqrt", 9)) { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = x >= 0.0 ? sqrt(x) : 0.0; memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_fsin", 8))  { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = sin(x); memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_fcos", 8))  { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = cos(x); memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  else if (!strncmp(fn, "lin_ftan", 8))  { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = tan(x); memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  /* float comparisons -> bool */
+  if      (!strncmp(fn, "lin_feq", 7))  { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); *v = x == y; *is_bool = 1; return 1; }
+  else if (!strncmp(fn, "lin_flt", 7))  { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); *v = x < y;  *is_bool = 1; return 1; }
+  else if (!strncmp(fn, "lin_fleq", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); *v = x <= y; *is_bool = 1; return 1; }
+  /* int/string <-> float coercion */
+  if (!strncmp(fn, "lin_float", 9)) { double rr = (double)a[0]; memcpy(v, &rr, 8); *is_float = 1; return 1; }
+  if (!strncmp(fn, "lin_ffloor", 10)) { double x; memcpy(&x, &a[0], 8); *v = (long)floor(x); return 1; }
+
+  if (na < 2) return 0; /* every scalar lin_* op needs both saturated args */
   if      (!strncmp(fn, "lin_add", 7)) *v = a[0] + a[1];
   else if (!strncmp(fn, "lin_sub", 7)) *v = a[0] >= a[1] ? a[0] - a[1] : 0;
   else if (!strncmp(fn, "lin_mul", 7)) *v = a[0] * a[1];
@@ -72,15 +95,21 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool) {
   return 1;
 }
 
-/* Read a single argument: a Scott numeral, a Church boole, or a nested
-   saturated `_ffi` closure (evaluated recursively). */
+/* Read a single argument: a Scott numeral, a Church boole, a float box, or a
+   nested saturated `_ffi` closure (evaluated recursively).  A float arg stores
+   its IEEE-754 bits in *v. */
 static Port ev_arglist_arg(Net *n, Port p, long *v, int *is_b) {
   Port q = dhop(n, p);
   if (q.node < 0 || q.node >= n->nn || n->dead[q.node] || n->tag[q.node] != LAM)
     return (Port){-1, 0};
   if (ctor_tag(nm(n, q.node)) == DT_FFI) {
-    if (ev_ffi(n, (Port){q.node, 0}, v, is_b)) return p;
+    int is_f = 0;
+    if (ev_ffi(n, (Port){q.node, 0}, v, is_b, &is_f)) return p;
     return (Port){-1, 0};
+  }
+  if (ctor_tag(nm(n, q.node)) == DT_FLOAT) {
+    double d; if (!net_read_float(n, q, &d)) return (Port){-1, 0};
+    memcpy(v, &d, 8); *is_b = 0; return p;
   }
   if (ctor_tag(nm(n, q.node)) == DT_BOOL) { int b = net_read_bool(n, q); if (b < 0) return (Port){-1, 0}; *v = b; *is_b = 0; return p; }
   long x = net_read_int(n, q);
@@ -116,16 +145,20 @@ static Port ev_arglist(Net *n, Port argp, long out[2], int *nout) {
 /* Fold a saturated `_ffi` arithmetic closure `lam` applied to `app`.
    On success rewires the numeric/boole result and returns 1, else 0. */
 static int simd_fold_ffi(Net *n, int lam, int app) {
-  long v; int is_bool = 0;
-  if (!ev_ffi(n, (Port){lam, 0}, &v, &is_bool)) return 0;
+  long v; int is_bool = 0, is_float = 0;
+  if (!ev_ffi(n, (Port){lam, 0}, &v, &is_bool, &is_float)) return 0;
 
-  Port res = is_bool ? net_alloc_bool(n, (int)v) : net_alloc_scott(n, v);
+  Port res;
+  if (is_bool) res = net_alloc_bool(n, (int)v);
+  else if (is_float) { double d; memcpy(&d, &v, 8); res = net_alloc_float(n, d); }
+  else res = net_alloc_scott(n, v);
   /* Substitute the computed datum for the `_ffi` closure: the consumer APP is
      kept alive and re-paired with `res`, so the ordinary LAM/APP rule (a
-     Church-boole / Scott-numeral application) completes the selection in a
-     later wave rather than expanding the closure step by step. */
+     Church-boole / Scott-numeral / float-box application) completes the
+     selection in a later wave rather than expanding the closure step by step. */
   n->dead[lam] = 1;
   net_link(n, res, (Port){app, 0}, 1);
+  lin_fold_bump();
   return 1;
 }
 
