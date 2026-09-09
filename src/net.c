@@ -241,7 +241,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
   ensure_tact();
   int nth = omp_get_max_threads();
 
-  if (nth > 1 && wave_cnt >= 8) {
+  if (nth > 1 && wave_cnt >= 512) {
     int np = wave_cnt / 2, nsec = (n->nn + 63) >> 6;
     Pair *inter = malloc((size_t)np * sizeof(Pair)), *bound = malloc((size_t)np * sizeof(Pair));
     int n_int = 0, n_bnd = 0, sc_need = 0;
