@@ -71,7 +71,7 @@ for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin t
 done
 
 printf "[Tier 2: Foreign Function Interface & System Drivers]\n"
-for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin test/gpu_dispatch.lin; do
+for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin test/gpu_dispatch.lin test/unison.lin; do
   run_test "$f"
 done
 

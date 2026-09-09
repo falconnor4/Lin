@@ -129,52 +129,45 @@ static int simd_fold_ffi(Net *n, int lam, int app) {
   return 1;
 }
 
-static int simd_reduce_wave(Net *n, long limit, int *changed) {
-  if (n->atop <= 0 || n->steps >= limit) return 0;
-  static Port *curr = NULL; static int curr_cap = 0;
-  int wave_cnt = wave_snapshot(n, &curr, &curr_cap);
-
-  int batch_changed = 0;
-  int np = wave_cnt / 2;
-  if (getenv("LIN_SIMD_DEBUG"))
-    fprintf(stderr, "[simd] %d wavefront redexes: native folds + OpenMP fan-out\n", np);
-
-  /* Partition the wave: native small-int arithmetic closures are folded here,
-     serially (each one allocates and rewires the net); every remaining redex
-     is handed to the base engine's OpenMP-aware interaction core, so the bulk
-     of the reduction fans out across cores instead of a single thread. */
-  Port *gen = malloc((size_t)wave_cnt * sizeof(Port));
-  int ngen = 0;
-
-  for (int i = 0; i < wave_cnt; i += 2) {
-    if (n->steps >= limit) {
-      for (int j = i; j < wave_cnt; j += 2) {
-        if (n->atop + 2 > n->actcap)
-          n->act = realloc(n->act, (size_t)(n->actcap = n->actcap ? n->actcap * 2 : 256) * sizeof(Port));
-        n->act[n->atop++] = curr[j]; n->act[n->atop++] = curr[j + 1];
-      }
-      break;
-    }
-    Port p1 = curr[i], p2 = curr[i + 1];
-    if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node] || p1.port || p2.port) continue;
-    if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
-    if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port) continue;
-
-    int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
-    int folded = 0;
-    if (t1 == LAM && t2 == APP && ctor_tag(nm(n, p1.node)) == DT_FFI)
-      folded = simd_fold_ffi(n, p1.node, p2.node);
-    else if (t2 == LAM && t1 == APP && ctor_tag(nm(n, p2.node)) == DT_FFI)
-      folded = simd_fold_ffi(n, p2.node, p1.node);
-    if (folded) { batch_changed++; n->steps++; continue; }
-
-    gen[ngen++] = p1; gen[ngen++] = p2;
+/* claim: a saturated `_ffi` arithmetic closure (LAM x APP) — the native-num
+   class this driver folds.  Side-effect free; used to partition the wave. */
+static int simd_claim(const Net *n, Port p1, Port p2) {
+  const char *nmc(const Net *nn, int id) {
+    return (id >= 0 && id < nn->nn && nn->name[id]) ? nn->name[id] : "";
   }
-
-  if (ngen > 0) lin_reduce_wave_parallel(n, gen, ngen, changed);
-  free(gen);
-  *changed += batch_changed;
-  return 1;
+  if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) return 0;
+  if (p1.port || p2.port) return 0;
+  if (WIRE(n,p1).node != p2.node || WIRE(n,p1).port != p2.port) return 0;
+  if (WIRE(n,p2).node != p1.node || WIRE(n,p2).port != p1.port) return 0;
+  if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP)
+    return ctor_tag(nmc(n, p1.node)) == DT_FFI;
+  if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP)
+    return ctor_tag(nmc(n, p2.node)) == DT_FFI;
+  return 0;
 }
 
-LinDriver lin_simd_driver = {"simd", simd_reduce_wave};
+/* reduce: fold every native-num redex in this slice (already claimed) into a
+   native machine-int result.  Returns redexes consumed. */
+static int simd_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
+  int consumed = 0;
+  for (int i = 0; i < nred; i++) {
+    if (n->steps >= limit) return consumed;
+    Port p1 = redexes[i*2], p2 = redexes[i*2+1];
+    if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node] || p1.port || p2.port) continue;
+    if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
+    int folded = 0;
+    if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP)
+      folded = simd_fold_ffi(n, p1.node, p2.node);
+    else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP)
+      folded = simd_fold_ffi(n, p2.node, p1.node);
+    if (folded) { consumed++; (*changed)++; n->steps++; }
+  }
+  return consumed;
+}
+
+LinDriver lin_simd_driver = {
+  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI,
+  .name = "simd", .description = "native small-integer Scott arithmetic fold",
+  .caps = LIN_CAP_NATIVE_NUM, .priority = 10,
+  .claim = simd_claim, .reduce = simd_reduce,
+};

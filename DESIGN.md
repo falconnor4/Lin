@@ -54,17 +54,26 @@ while still admitting hardware acceleration as an opt-in concern.
 
 ## Driver architecture
 
+- **Formalized driver ABI** (`LinDriver` in `src/lin.h`): every driver is a
+  versioned, capability-declaring plugin — `magic`/`abi` validated on load,
+  `caps` (native-num / fixed / commute), `priority` (lower runs first),
+  a side-effect-free `claim(n, p1, p2)` predicate, and a `reduce(...)` that
+  consumes its claimed slice.  `lin_driver_add` rejects bad-magic/abi drivers
+  and keeps the pipeline priority-sorted.
+- **Waves fan out in unison**: the core (`net_reduce`) snapshots a wave once,
+  partitions redexes by each driver's `claim` in priority order, dispatches
+  each driver's slice, and hands the unclaimed remainder to the base engine.
+  SIMD (native numeric folds) and the GPU (fixed rules) — and any future
+  driver — therefore compose on a single wave rather than first-accept-wins.
 - `std/drivers/simd.so`: native small-integer fold of `lin_*` FFI closures
-  (enabled by `std/drivers/native.lin`).  Its argument walk is a *restricted*
-  evaluator (pure arithmetic only), deliberately separate from `run_ffi`
-  (which fires side effects and must never run during reduction).
-- `std/drivers/gpu.so`: Vulkan compute driver.  Probes for a compute-capable
-  device (via `dlopen`'d `libvulkan`), builds a compute pipeline from
-  `reduce.spv` (compiled from `reduce.comp` by `glslang`), and dispatches
-  fixed-allocation redexes with mapped HOST_VISIBLE|HOST_COHERENT buffers.
-  Robust: on any probe/init failure it becomes a no-op and the CPU engine
-  takes over.  The commute (allocating) rule and heap scope-gauges stay host
-  side.
+  (`LIN_CAP_NATIVE_NUM`, priority 10).
+- `std/drivers/gpu.so`: Vulkan compute driver (`LIN_CAP_FIXED`, priority 20).
+  Probes for a compute-capable device (via `dlopen`'d `libvulkan`), builds a
+  compute pipeline from `reduce.spv` (compiled from `reduce.comp` by
+  `glslang`), and dispatches beta / annihilate-inline / erase rewrites with
+  mapped HOST_VISIBLE|HOST_COHERENT buffers.  Robust: on probe/init failure it
+  becomes a no-op and the CPU engine takes over.  Commute (allocating) rule
+  and heap scope-gauges stay on the base engine.
 
 ## Line budget
 

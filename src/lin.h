@@ -34,7 +34,37 @@ void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, 
 long net_reduce(Net *n, long limit);
 Net *net_copy(const Net *n); Scope scope_nil(void);
 Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
-typedef struct LinDriver { const char *name; int (*reduce_wave)(Net *n, long limit, int *changed); } LinDriver;
+
+/* ---------------- driver ABI ----------------
+   A driver reduces a *class* of redexes (native arithmetic, fixed-allocation
+   interaction rules, ...).  The core waves fan out to every registered driver
+   in priority order: each driver *claims* the redexes it can handle and leaves
+   the rest for lower-priority drivers and, finally, the base engine.  This is
+   how SIMD + GPU + future accelerators compose in unison on one wave. */
+#define LIN_DRIVER_MAGIC 0x4C494E44u         /* 'LIND' */
+#define LIN_DRIVER_ABI   1u
+
+/* redex-class capability bits */
+#define LIN_CAP_NATIVE_NUM 0x01u              /* satur `_ffi` lin_* arithmetic */
+#define LIN_CAP_FIXED      0x02u              /* beta / annihilate / erase */
+#define LIN_CAP_COMMUTE    0x04u              /* LAM|APP x DUP (allocating)  */
+
+typedef struct LinDriver {
+  uint32_t magic;                            /* must be LIN_DRIVER_MAGIC */
+  uint32_t abi;                              /* must be >= LIN_DRIVER_ABI  */
+  const char *name;
+  const char *description;
+  uint64_t caps;                             /* OR of LIN_CAP_* bits       */
+  int priority;                              /* lower runs earlier         */
+  /* Does this driver handle this principal-port redex?  Must be side-effect
+     free (pure check); used to partition a wave among drivers. */
+  int (*claim)(const Net *n, Port p1, Port p2);
+  /* Reduce a wave slice (pairs in `redexes`, count `nred`).  When `own` is 1
+     the driver is authoritative for this slice; when 0 it just processes what
+     it can and reports.  Returns number of redexes consumed. */
+  int (*reduce)(Net *n, Port *redexes, int nred, long limit, int *changed);
+} LinDriver;
+
 void lin_driver_add(LinDriver *d); void lin_driver_clear(void); LinDriver *lin_get_driver(void);
 int wave_snapshot(Net *n, Port **out, int *cap);
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);

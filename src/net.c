@@ -227,12 +227,26 @@ static void net_compact(Net *n, const unsigned char *reach) {
 }
 
 typedef struct { Port p1, p2; } Pair;
-/* Driver pipeline: ordered, first-accept-wins; base engine reduces any wave no
-   driver claims.  Drivers (e.g. SIMD) register here; most-recently-added wins. */
-static LinDriver *drv[8]; static int ndrv;
-void lin_driver_add(LinDriver *d) { if (ndrv < 8) drv[ndrv++] = d; }
+/* Driver pipeline: drivers are kept sorted by priority (ascending); the core
+   waves fan out to every driver in that order.  Each driver *claims* the
+   redexes it handles via ->claim and leaves the rest for lower-priority
+   drivers and the base engine, so SIMD + GPU + future drivers compose in
+   unison on one wave. */
+static LinDriver *drv[16]; static int ndrv;
+void lin_driver_add(LinDriver *d) {
+  if (!d || ndrv >= 16) return;
+  if (d->magic != LIN_DRIVER_MAGIC || d->abi != LIN_DRIVER_ABI) {
+    fprintf(stderr, "driver '%s': rejected (bad ABI magic 0x%x/abi %u)\n",
+            d->name ? d->name : "?", d->magic, d->abi);
+    return;
+  }
+  /* insertion-sort by priority ascending (stable: later-add wins ties) */
+  int i = ndrv;
+  while (i > 0 && drv[i-1]->priority > d->priority) { drv[i] = drv[i-1]; i--; }
+  drv[i] = d; ndrv++;
+}
 void lin_driver_clear(void) { ndrv = 0; }
-LinDriver *lin_get_driver(void) { return ndrv ? drv[ndrv - 1] : NULL; }
+LinDriver *lin_get_driver(void) { return ndrv ? drv[ndrv-1] : NULL; }
 
 /* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs,
    an even count) with the base engine's parallel-safe interaction core:
@@ -315,16 +329,46 @@ int wave_snapshot(Net *n, Port **out, int *cap) {
 
 long net_reduce(Net *n, long limit) {
   /* Self-collecting nets reduce by the active list; the BFS+compact below
-     reclaims memory after it doubles.  Waves go to the first claiming driver. */
+     reclaims memory after it doubles.  Waves fan out to every driver in
+     priority order: each claims the redexes it handles, the base engine takes
+     the remainder. */
   Port *curr = NULL; int curr_cap = 0;
   unsigned char *reach = NULL; int *q = NULL; long qcap = 0, gcmark = 1L << 20;
+  /* per-driver slice buckets (rebuilt each wave) */
+  Port *slices[16] = {0}; int scaps[16] = {0}, scnts[16] = {0};
   while (n->steps < limit) {
     int changed = 0;
     while (n->atop > 0 && n->steps < limit) {
-      int handled = 0;
-      for (int di = ndrv - 1; di >= 0 && !handled; di--) handled = drv[di]->reduce_wave(n, limit, &changed);
-      if (handled) continue;
-      lin_reduce_wave_parallel(n, curr, wave_snapshot(n, &curr, &curr_cap), &changed);
+      int cnt = wave_snapshot(n, &curr, &curr_cap);
+      if (cnt <= 0) break;
+      int np = cnt / 2;
+
+      /* partition the wave up-front by driver claim (priority order) */
+      for (int di = 0; di < ndrv; di++) scnts[di] = 0;
+      int base_cnt = 0;
+      static Port *base_rx = NULL; static int base_cap = 0;
+      for (int i = 0; i < np; i++) {
+        Port p1 = curr[i*2], p2 = curr[i*2+1];
+        int assigned = 0;
+        for (int di = 0; di < ndrv && !assigned; di++) {
+          if (!drv[di]->claim || !drv[di]->claim(n, p1, p2)) continue;
+          if (scnts[di] + 2 > scaps[di]) { scaps[di] = scaps[di] ? scaps[di]*2 : 256; slices[di] = realloc(slices[di], (size_t)scaps[di]*sizeof(Port)); }
+          slices[di][scnts[di]++] = p1; slices[di][scnts[di]++] = p2;
+          assigned = 1;
+        }
+        if (!assigned) {
+          if (base_cnt + 2 > base_cap) { base_cap = base_cap ? base_cap*2 : 256; base_rx = realloc(base_rx, (size_t)base_cap*sizeof(Port)); }
+          base_rx[base_cnt++] = p1; base_rx[base_cnt++] = p2;
+        }
+      }
+
+      /* dispatch each driver's slice (authoritative for its class) */
+      for (int di = 0; di < ndrv; di++) {
+        if (!scnts[di]) continue;
+        drv[di]->reduce(n, slices[di], scnts[di]/2, limit, &changed);
+      }
+      /* base engine handles the unclaimed remainder */
+      if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
     }
     if (changed == 0 && n->atop == 0) break;
     if (n->atop == 0 && (long)n->nn > gcmark) {
@@ -342,6 +386,7 @@ long net_reduce(Net *n, long limit) {
     }
   }
   free(reach); free(q); free(curr);
+  for (int di = 0; di < ndrv; di++) free(slices[di]);
   return n->steps;
 }
 

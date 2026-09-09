@@ -1,0 +1,32 @@
+; Multi-driver unison: SIMD (native numeric folds) + GPU (fixed rules) compose
+; on a single wave via the priority fan-out.  Results must be exact regardless
+; of which driver handles each redex class; the base engine catches the rest.
+
+(load "std/drivers/simd.lin")
+; expect => 1
+(load "std/drivers/native.lin")
+(load "std/drivers/gpu.lin")
+; expect => 1
+
+(get_driver)
+; expect => gpu
+
+; native-num (SIMD) + beta-heavy (GPU) arithmetic
+((add 20) 22)
+; expect => 42
+((mul 6) 7)
+; expect => 42
+(add (mul 5 7) (add 6 1))
+; expect => 42
+
+; structure (GPU fixed rules) after SIMD numeric folds
+(fst (pair 7 8))
+; expect => 7
+(second (list3 10 20 30))
+; expect => 20
+
+(add_driver "simd")
+; expect => 1
+(get_driver)
+; expect => gpu
+; (get_driver reports the highest-priority driver: gpu, at priority 20)

@@ -254,57 +254,6 @@ static int ensure_buffers(Net *n, int nred) {
 static unsigned char *gpu_sector_used;
 static int gpu_sector_cap;
 
-/* Emit the fixed-allocation redexes as a (sorted) list; commute/heap redexes
-   are returned separately for the host pass.  Returns nred; sets *nhost_out. */
-static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out, int *nhost_out) {
-  int nred = 0, nhost = 0;
-  static Port *host_rx = NULL; static int host_cap = 0;
-  uint32_t *g = (uint32_t *)g_redex.map;
-  for (int i = 0; i < wave_cnt; i += 2) {
-    Port p1 = curr[i], p2 = curr[i+1];
-    if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
-    if (WIRE(n,p1).node != p2.node || WIRE(n,p1).port != p2.port) continue;
-    if (WIRE(n,p2).node != p1.node || WIRE(n,p2).port != p1.port || p1.port || p2.port) continue;
-    int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
-    if (t1 > t2) { int tt=t1; t1=t2; t2=tt; }
-    int on_gpu;
-    if (t1 == LAM && t2 == APP) on_gpu = 1;                 /* beta */
-    else if (t1 == DUP && t2 == DUP)
-      on_gpu = !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
-    else on_gpu = 0;                                        /* commute */
-
-    /* spatial disjointness (mirror lin_reduce_wave_parallel): both nodes and
-       all 4 neighbour ports must lie in the same 64-node sector, else the
-       concurrent GPU rewrite would race with another redex in the wave. */
-    if (on_gpu) {
-      int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
-      if (ok) {
-        int c[4] = { WIRE(n, ((Port){u, 1})).node, WIRE(n, ((Port){u, 2})).node,
-                     WIRE(n, ((Port){v, 1})).node, WIRE(n, ((Port){v, 2})).node };
-        for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
-      }
-      /* at most one redex per 64-node sector per dispatch: matches the base
-         engine's concurrency granularity (different sectors run in parallel,
-         same sector sequentially), preventing same-sector aux-port races. */
-      if (ok && gpu_sector_used[su]) ok = 0;
-      if (ok) gpu_sector_used[su] = 1;
-      if (!ok) on_gpu = 0;
-    }
-
-    if (on_gpu) {
-      uint32_t a = ((uint32_t)(p1.node & 0x3fffffff)) | (p1.port << 30);
-      uint32_t b = ((uint32_t)(p2.node & 0x3fffffff)) | (p2.port << 30);
-      g[nred*2] = a; g[nred*2+1] = b; nred++;
-    } else {
-      if (nhost + 2 > host_cap) { host_cap = host_cap ? host_cap*2 : 64; host_rx = realloc(host_rx, (size_t)host_cap * sizeof(Port)); }
-      host_rx[nhost++] = p1; host_rx[nhost++] = p2;
-    }
-  }
-  *host_out = host_rx;
-  *nhost_out = nhost / 2;
-  return nred;
-}
-
 /* Bit-exact differential check (LIN_GPU_SELFTEST=1): reduce the SAME fixed
    redexes on a host clone of the net and compare wire[]/dead[] against what
    the GPU just wrote into its mapped buffers.  Reports a running tally. */
@@ -365,48 +314,76 @@ static void gpu_selftest(Net *n, int nred) {
   (void)shadow;
 }
 
-static int gpu_reduce_wave(Net *n, long limit, int *changed) {
-  if (!gpu_ready || n->atop <= 0 || n->steps >= limit) return 0;
-  static Port *curr = NULL; static int curr_cap = 0;
-  int wave_cnt = wave_snapshot(n, &curr, &curr_cap);
-  if (wave_cnt <= 0) return 1;
+/* claim: a fixed-allocation redex (beta, inline-scope annihilate).  Commute /
+   heap-scope annihilate / `_ffi` closures are NOT claimed (SIMD claims `_ffi`
+   at higher priority; commute is the base engine's). */
+static int gpu_claim(const Net *n, Port p1, Port p2) {
+  if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) return 0;
+  /* principal-port validity (mirrors lin_reduce_wave_parallel) */
+  if (p1.port || p2.port) return 0;
+  if (WIRE(n,p1).node != p2.node || WIRE(n,p1).port != p2.port) return 0;
+  if (WIRE(n,p2).node != p1.node || WIRE(n,p2).port != p1.port) return 0;
+  int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
+  if (t1 > t2) { int t = t1; t1 = t2; t2 = t; }
+  if (t1 == LAM && t2 == APP) return 1;                 /* beta */
+  if (t1 == DUP && t2 == DUP)
+    return !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
+  return 0;                                              /* commute / erase */
+}
+
+/* reduce: dispatch the (already-claimed) fixed-rule slice on-device, commit,
+   and fall back to net_interact for the sector-non-disjoint subset.  The core
+   has already routed commute redexes to the base engine. */
+static int gpu_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
+  if (!gpu_ready || nred <= 0 || n->steps >= limit) return 0;
 
   /* reset the per-sector usage bitmap for this wave */
   int nsec = (n->nn + 63) >> 6;
-  if (nsec > gpu_sector_cap) {
-    gpu_sector_used = realloc(gpu_sector_used, (size_t)nsec);
-    gpu_sector_cap = nsec;
-  }
+  if (nsec > gpu_sector_cap) { gpu_sector_used = realloc(gpu_sector_used, (size_t)nsec); gpu_sector_cap = nsec; }
   memset(gpu_sector_used, 0, (size_t)nsec);
 
-  /* Size all device buffers first (redex worst case = wave_cnt/2 pairs), then
-     partition writes into g_redex.map and the net-upload uses g_tags etc. */
-  if (!pipe_ready || !ensure_buffers(n, wave_cnt / 2 + 1)) {
-    /* no pipeline/buffers: fall through to host-only reduction */
-    int shadow = 0;
-    lin_reduce_wave_parallel(n, curr, wave_cnt, &shadow);
-    *changed += shadow;
-    return 1;
+  if (!ensure_buffers(n, nred)) {
+    /* no buffers: host-fallback every fixed redex via net_interact */
+    for (int i = 0; i < nred; i++) { if (net_interact(n, redexes[i*2], redexes[i*2+1])) (*changed)++; n->steps++; }
+    return nred;
   }
 
-  Port *host_rx = NULL; int nhost = 0;
-  int nred = partition(n, curr, wave_cnt, &host_rx, &nhost);
+  /* sector-disjoint filter: on-GPU subset vs host-fallback subset */
+  uint32_t *g = (uint32_t *)g_redex.map;
+  int ng = 0;
+  for (int i = 0; i < nred; i++) {
+    Port p1 = redexes[i*2], p2 = redexes[i*2+1];
+    int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
+    if (ok) {
+      int c[4] = { WIRE(n, ((Port){u,1})).node, WIRE(n, ((Port){u,2})).node,
+                   WIRE(n, ((Port){v,1})).node, WIRE(n, ((Port){v,2})).node };
+      for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
+    }
+    if (ok && gpu_sector_used[su]) ok = 0;
+    if (ok) {
+      gpu_sector_used[su] = 1;
+      g[ng*2]   = ((uint32_t)(p1.node & 0x3fffffff)) | (p1.port << 30);
+      g[ng*2+1] = ((uint32_t)(p2.node & 0x3fffffff)) | (p2.port << 30);
+      ng++;
+    } else {
+      /* host fallback for this redex */
+      if (net_interact(n, p1, p2)) (*changed)++;
+      n->steps++;
+    }
+  }
 
-  if (nred > 0) {
+  if (ng > 0) {
     /* upload net arrays into the mapped coherent buffers */
     uint32_t *tags = (uint32_t *)g_tags.map, *deads = (uint32_t *)g_deads.map;
     uint32_t *wires = (uint32_t *)g_wires.map;
     uint64_t *scopes = (uint64_t *)g_scopes.map;
     for (int i = 0; i < n->nn; i++) {
-      tags[i] = n->tag[i];
-      deads[i] = n->dead[i];
-      scopes[i] = n->scope[i].raw;
+      tags[i] = n->tag[i]; deads[i] = n->dead[i]; scopes[i] = n->scope[i].raw;
       for (int p = 0; p < 3; p++) {
         Port w = n->wire[i*3+p];
         wires[i*3+p] = w.node < 0 ? 0x3fffffffu : ((uint32_t)(w.node & 0x3fffffff) | (w.port << 30));
       }
     }
-
     VkDescriptorBufferInfo dbi[5];
     VkBuffer bufs[5] = { g_tags.b, g_wires.b, g_deads.b, g_scopes.b, g_redex.b };
     for (int i = 0; i < 5; i++) { dbi[i].buffer = bufs[i]; dbi[i].offset = 0; dbi[i].range = VK_WHOLE_SIZE; }
@@ -418,14 +395,13 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
     }
     p_vkUpdateDescriptorSets(vk_dev, 5, wds, 0, NULL);
 
-
     VkCommandBufferBeginInfo bi = {0}; bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     p_vkBeginCommandBuffer(vk_cb, &bi);
     p_vkCmdBindPipeline(vk_cb, VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipe);
     p_vkCmdBindDescriptorSets(vk_cb, VK_PIPELINE_BIND_POINT_COMPUTE, vk_playout, 0, 1, &vk_ds, 0, NULL);
-    uint32_t nrc = (uint32_t)nred;
+    uint32_t nrc = (uint32_t)ng;
     p_vkCmdPushConstants(vk_cb, vk_playout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(nrc), &nrc);
-    p_vkCmdDispatch(vk_cb, (nred + 63) / 64, 1, 1);
+    p_vkCmdDispatch(vk_cb, (ng + 63) / 64, 1, 1);
     p_vkEndCommandBuffer(vk_cb);
     VkSubmitInfo si = {0}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1; si.pCommandBuffers = &vk_cb;
@@ -433,11 +409,10 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
     p_vkQueueWaitIdle(vk_queue);
 
     if (getenv("LIN_GPU_DEBUG"))
-      fprintf(stderr, "[gpu] dispatched %d redexes on device\n", nred);
-    gpu_selftest(n, nred);
+      fprintf(stderr, "[gpu] dispatched %d redexes on device\n", ng);
+    gpu_selftest(n, ng);
 
-    /* ---- authoritative commit: the GPU's fixed-rule rewrites become the
-       host net's ground truth. ---- */
+    /* authoritative commit: GPU rewrites become the host net's ground truth */
     uint32_t *gw = (uint32_t *)g_wires.map, *gd = (uint32_t *)g_deads.map;
     for (int i = 0; i < n->nn; i++) {
       n->dead[i] = (unsigned char)gd[i];
@@ -447,31 +422,22 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
                        : (Port){ (int)(w32 & 0x3fffffff), (int)(w32 >> 30) };
       }
     }
-    *changed += nred;
-    n->steps += nred;
-  } else {
-    /* nothing dispatched on-device takes the (empty) fast path below too */
-    if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] host-only wave (%d redexes)\n", nhost);
-  }
-
-  /* Host handles the commute / heap-scope redexes (allocator + scope growth);
-     these enqueue their own continuations via net_link(enqueue=1). */
-  for (int i = 0; i < nhost; i++) {
-    Port p1 = host_rx[i*2], p2 = host_rx[i*2+1];
-    if (p1.node >= 0 && p2.node >= 0 && !n->dead[p1.node] && !n->dead[p2.node]) {
-      if (net_interact(n, p1, p2)) { *changed += 1; }
-      n->steps++;
-    }
+    *changed += ng;
+    n->steps += ng;
   }
 
   /* Rebuild the active list from the committed net (mirrors net_reduce's gc
-     tail): enqueue every principal port directed at a higher-indexed node.
-     This captures continuations the on-GPU link rewrites did not enqueue. */
+     tail): enqueue every principal port directed at a higher-indexed node. */
   for (int i = 1; i < n->nn; i++)
     if (!n->dead[i] && n->wire[i*3].port == 0 && n->wire[i*3].node > i && n->wire[i*3].node >= 0)
       lin_enqueue(n, (Port){i, 0}, n->wire[i*3]);
 
-  return 1;
+  return nred;
 }
 
-LinDriver lin_gpu_driver = { "gpu", gpu_reduce_wave };
+LinDriver lin_gpu_driver = {
+  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI,
+  .name = "gpu", .description = "Vulkan compute: fixed-rule interaction reduction",
+  .caps = LIN_CAP_FIXED, .priority = 20,
+  .claim = gpu_claim, .reduce = gpu_reduce,
+};
