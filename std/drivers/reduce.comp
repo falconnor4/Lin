@@ -1,0 +1,78 @@
+#version 450
+/* Lin interaction-net reduction kernel (Shape B): fixed-allocation rules only.
+ *   beta      LAM(0) x APP(1)  -> rewire, dead both
+ *   annihilate DUP(2) x DUP(2) -> rewire (inline scopes), dead both
+ *   erase     ERA(3) x any     -> dead both
+ * Commute (LAM|APP x DUP) and heap scopes -> host.
+ *
+ * ABI (must match src/lin.h):
+ *   Port  = uint32 = (node & 0x3FFFFFFF) | (port << 30); NONE = 0x3FFFFFFF
+ *   tag   = 0 LAM, 1 APP, 2 DUP, 3 ERA, 4 ROOT   (also byte-readable)
+ *   Scope = uint64; is_heap is bit 0.  Read as uvec2 for portability.
+ */
+#define NODE_MASK 0x3FFFFFFFu
+#define NME       0x3FFFFFFFu
+
+layout(std430, set = 0, binding = 0) readonly buffer TagsB   { uint tags[];  };
+layout(std430, set = 0, binding = 1)          buffer WiresB  { uint wires[]; };
+layout(std430, set = 0, binding = 2)          buffer DeadsB  { uint deads[]; };
+layout(std430, set = 0, binding = 3) readonly buffer ScopesB { uvec2 scopes[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RedexB  { uint redex[]; };
+
+layout(push_constant) uniform PC { uint redex_count; } pc;
+
+uint wread(uint n, uint p) { return wires[n * 3u + p]; }
+void wwrite(uint n, uint p, uint v) { wires[n * 3u + p] = v; }
+void linkP(uint a, uint b) {
+  uint na = a & NODE_MASK, pa = a >> 30;
+  uint nb = b & NODE_MASK, pb = b >> 30;
+  if (na == NME || nb == NME) return;
+  wwrite(na, pa, b);
+  wwrite(nb, pb, a);
+}
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if (i >= pc.redex_count) return;
+  uint pa = redex[i * 2u];
+  uint pb = redex[i * 2u + 1u];
+  uint n1 = pa & NODE_MASK, p1 = pa >> 30;
+  uint n2 = pb & NODE_MASK, p2 = pb >> 30;
+  if (n1 == NME || n2 == NME) return;
+
+  uint t1 = tags[n1], t2 = tags[n2];
+  if (t1 > t2) {
+    uint tt=t1; t1=t2; t2=tt;
+    uint n=n1; n1=n2; n2=n;
+    uint pp=p1; p1=p2; p2=pp;
+    uint pv=pa; pa=pb; pb=pv;
+  }
+
+  if (t1 == 0u && t2 == 1u) {              /* beta */
+    uint lv = wread(n1,1), lb = wread(n1,2);
+    uint ar = wread(n2,1), aa = wread(n2,2);
+    deads[n1] = 1u; deads[n2] = 1u;
+    if ((lv & NODE_MASK) == n1 && (lv >> 30) == 2u &&
+        (lb & NODE_MASK) == n1 && (lb >> 30) == 1u)
+      linkP(aa, ar);                       /* identity: V = (\x.x) V */
+    else { linkP(lv, aa); linkP(lb, ar); }
+    return;
+  }
+
+  if (t1 == 2u && t2 == 2u) {              /* annihilate */
+    uvec2 s1 = scopes[n1], s2 = scopes[n2];
+    if ((s1.x & 1u) != 0u || (s2.x & 1u) != 0u) return; /* heap -> host */
+    if (s1.x != s2.x || s1.y != s2.y) return;           /* gauge mismatch */
+    uint a1 = wread(n1,1), a2 = wread(n1,2);
+    uint b1 = wread(n2,1), b2 = wread(n2,2);
+    deads[n1] = 1u; deads[n2] = 1u;
+    if ((a1 & NODE_MASK) == n2 && (a1 >> 30) == 1u) linkP(a2, b2);
+    else if ((a2 & NODE_MASK) == n2 && (a2 >> 30) == 2u) linkP(a1, b1);
+    else if ((a1 & NODE_MASK) == n2 && (a1 >> 30) == 2u) linkP(a2, b1);
+    else if ((a2 & NODE_MASK) == n2 && (a2 >> 30) == 1u) linkP(a1, b2);
+    else { linkP(a1, b1); linkP(a2, b2); }
+    return;
+  }
+
+  if (t1 == 3u) { deads[n1] = 1u; deads[n2] = 1u; return; } /* erase */
+}
