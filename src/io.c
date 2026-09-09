@@ -327,6 +327,36 @@ static Val run_ffi(Net *n, Port p) {
   return v;
 }
 
+/* Fold a saturated _ffi closure (LAM x APP) into a concrete net value during
+   reduction, so FFI results (notably float comparisons -> Church booleans)
+   become usable by Scott consumers instead of only materialising at readback.
+   Only PURE `lin_*` arithmetic/comparison closures are folded; side-effecting
+   FFI (puts, exit, dlopen, driver_set, getenv) stays readback-only. */
+int lin_fold_ffi(Net *n, Port lam, Port app) {
+  /* read the fn name; only fold pure arithmetic/comparison ops */
+  N = n;
+  Port r = wire((Port){lam.node, 2});
+  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
+  Port a2 = wire((Port){r.node, 2});
+  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
+  Port a1 = wire((Port){a2.node, 0});
+  if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
+  char fn[256];
+  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
+  if (strncmp(fn, "lin_", 4)) return 0;      /* only pure lin_* builtins fold */
+  if (!strncmp(fn, "lin_streq", 9)) return 0; /* needs C strings, keep readback */
+
+  Val v = run_ffi(n, (Port){lam.node, 0});
+  if (v.kind != 1 && v.kind != 3 && v.kind != 4) return 0;
+  Port res;
+  if (v.kind == 1) res = net_alloc_scott(n, v.iv);
+  else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);
+  else { double d; memcpy(&d, &v.iv, 8); res = net_alloc_float(n, d); }
+  n->dead[lam.node] = 1;
+  net_link(n, res, (Port){app.node, 0}, 1);
+  return 1;
+}
+
 /* Render one decoded value to a stream (1=int, 2=str, 3=bool, 4=float); returns
    1 if a value rendered, 0 if none. */
 static int render_val(FILE *f, Val v) {

@@ -67,3 +67,14 @@
 
 (ffloor (fmul (fsqrt 16.0) (fadd 1.0 1.0)))
 ; expect => 8
+
+; float comparison materialises a Church boolean during reduction, so it
+; branches correctly with `if` (no accelerator driver required)
+(if (flt 1.0 2.0) 42 0)
+; expect => 42
+(if (flt 2.0 1.0) 42 0)
+; expect => 0
+(if (feq 2.5 2.5) 7 8)
+; expect => 7
+(if (fleq 2.0 2.0) 1 2)
+; expect => 1

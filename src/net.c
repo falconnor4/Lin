@@ -168,6 +168,11 @@ int net_interact(Net *n, Port p1, Port p2) {
     fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
 
   if (t1 == LAM && t2 == APP) {
+    /* a saturated _ffi closure folds to a concrete value (int/bool/float) here
+       rather than beta-reducing, so e.g. float comparisons materialise as
+       Church booleans usable by `if` — independent of any accelerator driver. */
+    const char *lnm = n->name[n1] ? n->name[n1] : "";
+    if (ctor_tag(lnm) == DT_FFI && lin_fold_ffi(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
     Port lv = WIRE(n, ((Port){n1, 1})), lb = WIRE(n, ((Port){n1, 2}));
     Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;

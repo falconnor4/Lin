@@ -99,6 +99,10 @@ long net_read_int(Net *n, Port p); int net_read_bool(Net *n, Port p);
 int net_read_float(Net *n, Port p, double *out);
 int net_read_string(Net *n, Port p, char *buf, size_t max); int net_run_io(Net *n, long step_limit);
 int net_print(Net *n);
+/* Fold a saturated _ffi closure (LAM x APP) natively into a concrete net value
+   (Scott int / Church bool / float box), so FFI results materialize during
+   reduction instead of only at readback.  Returns 1 on success. */
+int lin_fold_ffi(Net *n, Port lam, Port app);
 /* datatype registry (populated by builtins + `datatype` forms) */
 int  ctor_tag(const char *name); /* builtin domain DT_*, or -1 */
 int  ctor_register(const char *name, int tag, const char *c1, const char *c2);
