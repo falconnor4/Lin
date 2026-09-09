@@ -1,4 +1,7 @@
 ; Dynamic per-pixel GPU-offloaded 3D wireframe cube (Lin)
+; NOTE: the GPU driver (std/drivers/gpu.lin) fans a wavefront out over Vulkan
+; when a Vulkan device is available and otherwise reduces on the host CPU, so
+; this demo never hangs - it just runs slower on machines without Vulkan.
 ; Each pixel is computed live in Lin: per-cell edge tests on the oblique
 ; projection, with the 8 projected vertices hoisted into a `let` so they are
 ; computed once per frame (not once per pixel).  Only +1 diagonal, horizontal

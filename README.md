@@ -35,12 +35,22 @@ Lin is written in C99 and uses OpenMP for lock-free parallel graph reduction:
 # Build via Nix (default)
 make build
 
-# Run tests via Nix
+# Run tests via Nix (committed tree only - see note below)
+make nix-test
+
+# Trusted working-tree build + full suite (41+ suites, incl. .line containers)
 make test
 
 # Or compile directly with gcc/clang
 make lin
 ```
+
+> **Note on nix & dirty trees.** `nix build` / `nix flake check` / `nix run
+> .#test` evaluate from the **git-committed** content (flake `src = ./.` stages
+> tracked, committed files), so uncommitted edits to `src/*.c` are NOT seen and
+> results can be stale. For day-to-day development use `make test`, which builds
+> `./lin` straight from the working tree and runs the full suite
+> (`test/run_tests.sh`) against it. `nix-test` remains the reproducible CI path.
 
 ### Usage
 
