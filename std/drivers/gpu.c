@@ -65,7 +65,9 @@ static PFN_vkMapMemory p_vkMapMemory;
 
 static int g_mem_type = -1;
 static int mem_type_for(uint32_t bits) {
-  if (g_mem_type >= 0) return g_mem_type;
+  /* validity of a cached type depends on THIS buffer's memoryTypeBits */
+  if (g_mem_type >= 0 && (bits & (1u << g_mem_type))) return g_mem_type;
+  g_mem_type = -1;
   VkPhysicalDeviceMemoryProperties mp; p_vkPMemProps(vk_phys, &mp);
   VkMemoryPropertyFlags need = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
@@ -350,21 +352,9 @@ static void gpu_selftest(Net *n, int nred) {
     if (getenv("LIN_GPU_SELFTEST_DUMP")) {
       for (int i = 0; i < nred; i++) {
         uint32_t a = ((uint32_t*)g_redex.map)[i*2], b = ((uint32_t*)g_redex.map)[i*2+1];
-        int na = (int)(a & 0x3fffffff), pa = (int)(a >> 30);
-        int nb = (int)(b & 0x3fffffff), pb = (int)(b >> 30);
         fprintf(stderr, "  redex %d: n%d.%d(tag%d) x n%d.%d(tag%d)\n", i,
-                na, pa, n->tag[na], nb, pb, n->tag[nb]);
-        if (n->tag[na] == DUP && n->tag[nb] == DUP) {
-          fprintf(stderr, "    GPU aux: n%d: [%08x, %08x]  n%d: [%08x, %08x]\n",
-                  na, ((uint32_t*)g_wires.map)[na*3+1], ((uint32_t*)g_wires.map)[na*3+2],
-                  nb, ((uint32_t*)g_wires.map)[nb*3+1], ((uint32_t*)g_wires.map)[nb*3+2]);
-          Port hw1 = h->wire[na*3+1], hw2 = h->wire[na*3+2], hw3 = h->wire[nb*3+1], hw4 = h->wire[nb*3+2];
-          fprintf(stderr, "    host aux: n%d: [%08x, %08x]  n%d: [%08x, %08x]\n",
-                  na, hw1.node<0?0x3fffffffu:((uint32_t)(hw1.node&0x3fffffff)|(hw1.port<<30)),
-                      hw2.node<0?0x3fffffffu:((uint32_t)(hw2.node&0x3fffffff)|(hw2.port<<30)),
-                  nb, hw3.node<0?0x3fffffffu:((uint32_t)(hw3.node&0x3fffffff)|(hw3.port<<30)),
-                      hw4.node<0?0x3fffffffu:((uint32_t)(hw4.node&0x3fffffff)|(hw4.port<<30)));
-        }
+                (int)(a & 0x3fffffff), (int)(a >> 30), n->tag[a & 0x3fffffff],
+                (int)(b & 0x3fffffff), (int)(b >> 30), n->tag[b & 0x3fffffff]);
       }
     }
   }
@@ -427,6 +417,7 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
       wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wds[i].pBufferInfo = &dbi[i];
     }
     p_vkUpdateDescriptorSets(vk_dev, 5, wds, 0, NULL);
+
 
     VkCommandBufferBeginInfo bi = {0}; bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     p_vkBeginCommandBuffer(vk_cb, &bi);

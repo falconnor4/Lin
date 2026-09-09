@@ -10,6 +10,7 @@
  *   tag   = 0 LAM, 1 APP, 2 DUP, 3 ERA, 4 ROOT   (also byte-readable)
  *   Scope = uint64; is_heap is bit 0.  Read as uvec2 for portability.
  */
+layout(local_size_x = 64) in;
 #define NODE_MASK 0x3FFFFFFFu
 #define NME       0x3FFFFFFFu
 
