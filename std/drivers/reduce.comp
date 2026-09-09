@@ -2,7 +2,7 @@
 /* Lin interaction-net reduction kernel (Shape B): fixed-allocation rules only.
  *   beta      LAM(0) x APP(1)  -> rewire, dead both
  *   annihilate DUP(2) x DUP(2) -> rewire (inline scopes), dead both
- *   erase     ERA(3) x any     -> dead both
+ *   (ERA pairs are inert: net_interact drops them with no dead-mark) 
  * Commute (LAM|APP x DUP) and heap scopes -> host.
  *
  * ABI (must match src/lin.h):
@@ -74,5 +74,5 @@ void main() {
     return;
   }
 
-  if (t1 == 3u) { deads[n1] = 1u; deads[n2] = 1u; return; } /* erase */
+
 }

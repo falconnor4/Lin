@@ -263,10 +263,23 @@ static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out, int *nho
     if (t1 > t2) { int tt=t1; t1=t2; t2=tt; }
     int on_gpu;
     if (t1 == LAM && t2 == APP) on_gpu = 1;                 /* beta */
-    else if (t1 == ERA)         on_gpu = 1;                 /* erase */
     else if (t1 == DUP && t2 == DUP)
       on_gpu = !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
     else on_gpu = 0;                                        /* commute */
+
+    /* spatial disjointness (mirror lin_reduce_wave_parallel): both nodes and
+       all 4 neighbour ports must lie in the same 64-node sector, else the
+       concurrent GPU rewrite would race with another redex in the wave. */
+    if (on_gpu) {
+      int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
+      if (ok) {
+        int c[4] = { WIRE(n, ((Port){u, 1})).node, WIRE(n, ((Port){u, 2})).node,
+                     WIRE(n, ((Port){v, 1})).node, WIRE(n, ((Port){v, 2})).node };
+        for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
+      }
+      if (!ok) on_gpu = 0;
+    }
+
     if (on_gpu) {
       uint32_t a = ((uint32_t)(p1.node & 0x3fffffff)) | (p1.port << 30);
       uint32_t b = ((uint32_t)(p2.node & 0x3fffffff)) | (p2.port << 30);
@@ -281,15 +294,42 @@ static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out, int *nho
   return nred;
 }
 
-/* Bit-exact differential check (LIN_GPU_SELFTEST=1 only): reduce the wave on a
-   cloned net via the base engine, compare wire[]/dead[] against the GPU result.
-   Silence by default so test-output capture is not polluted. */
-static void gpu_selftest(Net *committed) {
+/* Bit-exact differential check (LIN_GPU_SELFTEST=1): reduce the SAME fixed
+   redexes on a host clone of the net and compare wire[]/dead[] against what
+   the GPU just wrote into its mapped buffers.  Reports a running tally. */
+static long selftest_mismatches = 0, selftest_runs = 0;
+
+static void gpu_selftest(Net *n, int nred) {
   if (!getenv("LIN_GPU_SELFTEST")) return;
-  static long tested = 0;
-  fprintf(stderr, "[gpu selftest] comparing GPU vs host reduction\n");
-  tested++;
-  (void)committed;
+  selftest_runs++;
+
+  /* clone n, replay only the fixed redexes through the host reducer */
+  Net *h = net_copy(n);
+  int shadow = 0;
+  for (int i = 0; i < nred; i++) {
+    uint32_t a = ((uint32_t*)g_redex.map)[i*2], b = ((uint32_t*)g_redex.map)[i*2+1];
+    Port pa = (Port){ (int)(a & 0x3fffffff), (int)(a >> 30) };
+    Port pb = (Port){ (int)(b & 0x3fffffff), (int)(b >> 30) };
+    if (net_interact(h, pa, pb)) shadow++;
+  }
+
+  /* compare host clone vs GPU-committed buffers (wire + dead) */
+  long bad = 0;
+  uint32_t *gw = (uint32_t *)g_wires.map;
+  uint32_t *gd = (uint32_t *)g_deads.map;
+  for (int i = 0; i < n->nn && !bad; i++) {
+    if ((unsigned char)gd[i] != h->dead[i]) { bad = 1; break; }
+    for (int p = 0; p < 3; p++) {
+      Port hw = h->wire[i*3+p];
+      uint32_t hw32 = hw.node < 0 ? 0x3fffffffu : ((uint32_t)(hw.node & 0x3fffffff) | (hw.port << 30));
+      if (gw[i*3+p] != hw32) { bad = 1; break; }
+    }
+  }
+  if (bad) selftest_mismatches++;
+  fprintf(stderr, "[gpu selftest] %s (run %ld, %ld/%ld waves mismatched)\n",
+          bad ? "MISMATCH" : "OK", selftest_runs, selftest_mismatches, selftest_runs);
+  net_free(h);
+  (void)shadow;
 }
 
 static int gpu_reduce_wave(Net *n, long limit, int *changed) {
@@ -352,7 +392,7 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
 
     if (getenv("LIN_GPU_DEBUG"))
       fprintf(stderr, "[gpu] dispatched %d redexes on device\n", nred);
-    gpu_selftest(n);
+    gpu_selftest(n, nred);
   }
 
   /* Always run the host reducer as the ground-truth reducer (correctness is

@@ -1,0 +1,33 @@
+; GPU driver integration: loads the Vulkan compute driver (std/drivers/gpu.so)
+; and reduces through the plugin path.  The driver is host-authoritative (the
+; base engine guarantees correctness), so these results are exact regardless
+; of whether a physical GPU device is present; the on-device kernel is
+; exercised and, with LIN_GPU_SELFTEST=1, bit-exact checked.
+
+(load "std/drivers/gpu.lin")
+; expect => 1
+
+(get_driver)
+; expect => gpu
+
+; beta-heavy: nested applications exercise the LAM x APP rule
+(((add 20) 22))
+; expect => 42
+
+; a larger reduction fanning across many waves
+(mul 6 7)
+; expect => 42
+
+; erase/identity path: (\x. x) applied
+((\x x) 42)
+; expect => 42
+
+; pairing + projection stress (DUP x DUP annihilate path)
+(fst (pair 7 8))
+; expect => 7
+
+(set_driver "cpu")
+; expect => 1
+
+(get_driver)
+; expect => cpu
