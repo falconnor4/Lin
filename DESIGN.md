@@ -11,7 +11,8 @@ parallel (wavefront fan-out), implemented compactly.
 The **base engine** (`src/`) is pure interaction-net reduction: the four
 scope-gauge rules (beta, annihilate, commute, erase) plus readback/effects,
 with no hardware-specific or opportunistic fast paths baked in.  That purity is
-what keeps the core small (~2140 lines, ≤ 2222 target), auditable, and correct.
+what keeps the core small (~2320 lines incl. `lin.h`, ≤ 2500 target), auditable,
+and correct.
 
 **All optimizations live in drivers** (`std/drivers/*.so`), loaded as plugins
 through the `lin_driver_add` pipeline.  A driver may fold a class of redexes
@@ -77,8 +78,9 @@ while still admitting hardware acceleration as an opt-in concern.
 
 ## Line budget
 
-Core engine `src/*.c` is ~2140 lines (≤ 2222 target); drivers are out-of-core
-plugins, so growth there does not count against the core budget.
+Core engine `src/` (`.c` + `lin.h`) is ~2320 lines (≤ 2500 target); drivers
+are out-of-core plugins (`std/drivers/*.so`), so growth there does not count
+against the core budget.
 
 ## Build
 
