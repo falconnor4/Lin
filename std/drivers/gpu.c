@@ -248,6 +248,10 @@ static int ensure_buffers(Net *n, int nred) {
   return 1;
 }
 
+/* per-sector usage bitmap: at most one on-GPU redex per 64-node sector */
+static unsigned char *gpu_sector_used;
+static int gpu_sector_cap;
+
 /* Emit the fixed-allocation redexes as a (sorted) list; commute/heap redexes
    are returned separately for the host pass.  Returns nred; sets *nhost_out. */
 static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out, int *nhost_out) {
@@ -277,6 +281,11 @@ static int partition(Net *n, Port *curr, int wave_cnt, Port **host_out, int *nho
                      WIRE(n, ((Port){v, 1})).node, WIRE(n, ((Port){v, 2})).node };
         for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
       }
+      /* at most one redex per 64-node sector per dispatch: matches the base
+         engine's concurrency granularity (different sectors run in parallel,
+         same sector sequentially), preventing same-sector aux-port races. */
+      if (ok && gpu_sector_used[su]) ok = 0;
+      if (ok) gpu_sector_used[su] = 1;
       if (!ok) on_gpu = 0;
     }
 
@@ -303,26 +312,60 @@ static void gpu_selftest(Net *n, int nred) {
   if (!getenv("LIN_GPU_SELFTEST")) return;
   selftest_runs++;
 
-  /* clone n, replay only the fixed redexes through the host reducer */
+  /* clone n, replay only the fixed redexes through the host reducer using the
+   SAME concurrent wavefront reducer (lin_reduce_wave_parallel) that production
+   uses, so the oracle matches the actual host reduction semantics (sequential
+   net_interact would differ because concurrent reduction reorders). */
   Net *h = net_copy(n);
   int shadow = 0;
+  /* reconstruct the fixed redex pair list as Port[] for the wave reducer */
+  Port *fp = malloc(sizeof(Port) * (size_t)nred * 2);
   for (int i = 0; i < nred; i++) {
     uint32_t a = ((uint32_t*)g_redex.map)[i*2], b = ((uint32_t*)g_redex.map)[i*2+1];
-    Port pa = (Port){ (int)(a & 0x3fffffff), (int)(a >> 30) };
-    Port pb = (Port){ (int)(b & 0x3fffffff), (int)(b >> 30) };
-    if (net_interact(h, pa, pb)) shadow++;
+    fp[i*2]   = (Port){ (int)(a & 0x3fffffff), (int)(a >> 30) };
+    fp[i*2+1] = (Port){ (int)(b & 0x3fffffff), (int)(b >> 30) };
   }
+  lin_reduce_wave_parallel(h, fp, nred * 2, &shadow);
+  free(fp);
 
   /* compare host clone vs GPU-committed buffers (wire + dead) */
   long bad = 0;
   uint32_t *gw = (uint32_t *)g_wires.map;
   uint32_t *gd = (uint32_t *)g_deads.map;
+  int difftag = -1, diffport = -1; uint32_t gv = 0, hv = 0; unsigned char gd8 = 0, hd8 = 0;
   for (int i = 0; i < n->nn && !bad; i++) {
-    if ((unsigned char)gd[i] != h->dead[i]) { bad = 1; break; }
+    if ((unsigned char)gd[i] != h->dead[i]) { bad = 1; difftag = i; gd8 = (unsigned char)gd[i]; hd8 = h->dead[i]; break; }
     for (int p = 0; p < 3; p++) {
       Port hw = h->wire[i*3+p];
       uint32_t hw32 = hw.node < 0 ? 0x3fffffffu : ((uint32_t)(hw.node & 0x3fffffff) | (hw.port << 30));
-      if (gw[i*3+p] != hw32) { bad = 1; break; }
+      if (gw[i*3+p] != hw32) { bad = 1; difftag = i; diffport = p; gv = gw[i*3+p]; hv = hw32; break; }
+    }
+  }
+  if (bad && getenv("LIN_GPU_SELFTEST")) {
+    if (diffport >= 0)
+      fprintf(stderr, "[gpu self] first diff node %d port %d: gpu=0x%08x host=0x%08x (replaying %d redexes)\n",
+              difftag, diffport, gv, hv, nred);
+    else
+      fprintf(stderr, "[gpu self] first diff node %d dead: gpu=%u host=%u\n", difftag, gd8, hd8);
+    if (getenv("LIN_GPU_SELFTEST_DUMP")) {
+      for (int i = 0; i < nred; i++) {
+        uint32_t a = ((uint32_t*)g_redex.map)[i*2], b = ((uint32_t*)g_redex.map)[i*2+1];
+        int na = (int)(a & 0x3fffffff), pa = (int)(a >> 30);
+        int nb = (int)(b & 0x3fffffff), pb = (int)(b >> 30);
+        fprintf(stderr, "  redex %d: n%d.%d(tag%d) x n%d.%d(tag%d)\n", i,
+                na, pa, n->tag[na], nb, pb, n->tag[nb]);
+        if (n->tag[na] == DUP && n->tag[nb] == DUP) {
+          fprintf(stderr, "    GPU aux: n%d: [%08x, %08x]  n%d: [%08x, %08x]\n",
+                  na, ((uint32_t*)g_wires.map)[na*3+1], ((uint32_t*)g_wires.map)[na*3+2],
+                  nb, ((uint32_t*)g_wires.map)[nb*3+1], ((uint32_t*)g_wires.map)[nb*3+2]);
+          Port hw1 = h->wire[na*3+1], hw2 = h->wire[na*3+2], hw3 = h->wire[nb*3+1], hw4 = h->wire[nb*3+2];
+          fprintf(stderr, "    host aux: n%d: [%08x, %08x]  n%d: [%08x, %08x]\n",
+                  na, hw1.node<0?0x3fffffffu:((uint32_t)(hw1.node&0x3fffffff)|(hw1.port<<30)),
+                      hw2.node<0?0x3fffffffu:((uint32_t)(hw2.node&0x3fffffff)|(hw2.port<<30)),
+                  nb, hw3.node<0?0x3fffffffu:((uint32_t)(hw3.node&0x3fffffff)|(hw3.port<<30)),
+                      hw4.node<0?0x3fffffffu:((uint32_t)(hw4.node&0x3fffffff)|(hw4.port<<30)));
+        }
+      }
     }
   }
   if (bad) selftest_mismatches++;
@@ -337,6 +380,14 @@ static int gpu_reduce_wave(Net *n, long limit, int *changed) {
   static Port *curr = NULL; static int curr_cap = 0;
   int wave_cnt = wave_snapshot(n, &curr, &curr_cap);
   if (wave_cnt <= 0) return 1;
+
+  /* reset the per-sector usage bitmap for this wave */
+  int nsec = (n->nn + 63) >> 6;
+  if (nsec > gpu_sector_cap) {
+    gpu_sector_used = realloc(gpu_sector_used, (size_t)nsec);
+    gpu_sector_cap = nsec;
+  }
+  memset(gpu_sector_used, 0, (size_t)nsec);
 
   /* Size all device buffers first (redex worst case = wave_cnt/2 pairs), then
      partition writes into g_redex.map and the net-upload uses g_tags etc. */

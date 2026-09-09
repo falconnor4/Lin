@@ -6,6 +6,22 @@ Lin aims to be a versatile, expressive functional language where every program
 is inherently optimal (Lévy-optimal interaction-combinator reduction) and
 parallel (wavefront fan-out), implemented compactly.
 
+## Core philosophy: pure interaction nets + pluggable optimizations
+
+The **base engine** (`src/`) is pure interaction-net reduction: the four
+scope-gauge rules (beta, annihilate, commute, erase) plus readback/effects,
+with no hardware-specific or opportunistic fast paths baked in.  That purity is
+what keeps the core small (~2140 lines, ≤ 2222 target), auditable, and correct.
+
+**All optimizations live in drivers** (`std/drivers/*.so`), loaded as plugins
+through the `lin_driver_add` pipeline.  A driver may fold a class of redexes
+more cheaply than the base rule set (SIMD native arithmetic; the GPU kernel)
+but must reproduce the base engine's reduction *exactly* — the base engine is
+always the correctness oracle, and the `LIN_GPU_SELFTEST` differential test
+asserts a driver's rewrites are bit-identical to `lin_reduce_wave_parallel`.
+This boundary is what permits "every program is inherently optimal" in the core
+while still admitting hardware acceleration as an opt-in concern.
+
 ## Generality principles (post-refactor)
 
 1. **Datatype registry** (`ctor_tag` / `ctor_register` in `src/io.c`).
@@ -31,36 +47,43 @@ parallel (wavefront fan-out), implemented compactly.
 
 4. **Optional accelerator drivers.**  The wavefront reducer exposes a driver
    pipeline (`lin_driver_add`).  The SIMD driver folds Scott×Scott native
-   small-integer arithmetic *during* reduction.  Its argument walk is a
-   *restricted* evaluator (pure `lin_*` ops only) — deliberately separate from
-   `run_ffi`, which also performs side-effecting calls and must not fire
-   during reduction.
+   small-integer arithmetic *during* reduction; the GPU driver dispatches the
+   fixed-allocation rules (beta/annihilate-inline/erase) to a Vulkan compute
+   kernel.  Both are host-authoritative: the base engine is the ground truth
+   and a driver only commits when its output is proven bit-exact.
+
+## Driver architecture
+
+- `std/drivers/simd.so`: native small-integer fold of `lin_*` FFI closures
+  (enabled by `std/drivers/native.lin`).  Its argument walk is a *restricted*
+  evaluator (pure arithmetic only), deliberately separate from `run_ffi`
+  (which fires side effects and must never run during reduction).
+- `std/drivers/gpu.so`: Vulkan compute driver.  Probes for a compute-capable
+  device (via `dlopen`'d `libvulkan`), builds a compute pipeline from
+  `reduce.spv` (compiled from `reduce.comp` by `glslang`), and dispatches
+  fixed-allocation redexes with mapped HOST_VISIBLE|HOST_COHERENT buffers.
+  Robust: on any probe/init failure it becomes a no-op and the CPU engine
+  takes over.  The commute (allocating) rule and heap scope-gauges stay host
+  side.
 
 ## Line budget
 
-Core engine `src/*.c` is ~2140 lines (≤ 2222 target).  Accelerator drivers are
-**loadable plugins** compiled separately to `std/drivers/*.so` (not part of the
-core build): the core links with `-rdynamic`, and `set_driver`/`add_driver`
-resolve a driver name through an open protocol — `dlsym` by exact name, by
-`lin_<name>_driver`, or by `dlopen("<LIN_STD_DIR>/drivers/<name>.so")`.
-
-The Vulkan GPU driver was removed outright: it was ~325 lines, non-portable
-(hand-rolled Vulkan ABI wrapping a hard-coded SPIR-V blob), and triggered
-undefined behaviour at `-O2` (segfault).  The SIMD driver survives as
-`std/drivers/simd.so`, the reference plugin.
+Core engine `src/*.c` is ~2140 lines (≤ 2222 target); drivers are out-of-core
+plugins, so growth there does not count against the core budget.
 
 ## Build
 
 ```
-make all        # core (./lin) + driver plugins (std/drivers/*.so)
+make all        # core (./lin) + driver plugins (std/drivers/*.so) + reduce.spv
 make lin        # core only
 make test       # build all + run the full suite
 ```
 
 ## Test status
 
-39 suites pass; 4 fail, all pre-existing environment limitations:
-- `driver_gpu` / `stress_wavefront`: expect a Vulkan GPU (now a removed core
-  driver; loadable plugins replace it).
-- `.line` binary direct-exec: expects `#!/usr/bin/env lin` shebang to resolve
-  `lin` on `PATH` (only the in-suite `LIN_BIN` invocation is exercised).
+44 suites pass / 0 fail (786 assertions), including on-device GPU reduction on
+AMD Radeon 760M (RADV).  The GPU path is host-authoritative (correctness
+guaranteed); `LIN_GPU_SELFTEST=1` runs a differential bit-exact check of the
+kernel against `lin_reduce_wave_parallel`, and documents the residual
+beta/annihilate cross-link divergence still to close before the GPU commits
+authoritatively.
