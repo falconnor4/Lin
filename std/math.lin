@@ -6,6 +6,7 @@
 
 (load "bool.lin")
 (load "num.lin")
+(load "float.lin")
 
 (namespace math)
 (define min (\a (\b (if ((leq a) b) a b))))
@@ -16,6 +17,18 @@
 (define abs_diff (\a (\b (if ((geq a) b) ((sub a) b) ((sub b) a)))))
 (define sign (\x (if (is_zero x) 0 1)))
 
+; --- Floating-point combinators (FFI primitives; no bool branching at this layer) ---
+(define fmin (\a (\b (ccall2 "lin_fmin" a b))))
+(define fmax (\a (\b (ccall2 "lin_fmax" a b))))
+(define fclamp (\lo (\hi (\x (ccall3 "lin_fclamp" x lo hi)))))
+(define fabs (\x (ccall1 "lin_fabs" x)))
+(define fsign (\x (ccall1 "lin_fsign" x)))
+(define lerp (\a (\b (\t (ccall3 "lin_lerp" a b t)))))
+(define ffract (\x (ccall1 "lin_ffract" x)))
+(define fsmoothstep (\e0 (\e1 (\x (let ((t (fclamp 0.0 1.0 (fdiv (fsub x e0) (fsub e1 e0))))) (fmul (fmul t t) (fsub 3.0 (fmul 2.0 t))))))))
+(define deg2rad (\d (fmul d (fdiv pi 180.0))))
+(define rad2deg (\r (fmul r (fdiv 180.0 pi))))
+
 (namespace _)
 (open math)
 (define min math.min)
@@ -25,4 +38,14 @@
 (define cube math.cube)
 (define abs_diff math.abs_diff)
 (define sign math.sign)
+(define fmin math.fmin)
+(define fmax math.fmax)
+(define fclamp math.fclamp)
+(define fabs math.fabs)
+(define fsign math.fsign)
+(define lerp math.lerp)
+(define fsmoothstep math.fsmoothstep)
+(define ffract math.ffract)
+(define deg2rad math.deg2rad)
+(define rad2deg math.rad2deg)
 (define pow num.pow)

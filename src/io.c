@@ -294,10 +294,17 @@ static Val run_ffi(Net *n, Port p) {
   #define FC(n, e) if (!strcmp(fn, n)) { double a, b; memcpy(&a, &c_args[0], 8); memcpy(&b, &c_args[1], 8); v.kind = 3; v.iv = (e); return v; }
   FA("lin_fadd", a + b);   FA("lin_fsub", a - b);
   FA("lin_fmul", a * b);   FA("lin_fdiv", b != 0.0 ? a / b : 0.0);
+  FA("lin_fmin", a < b ? a : b);   FA("lin_fmax", a > b ? a : b);
   FU("lin_fsqrt", a >= 0.0 ? sqrt(a) : 0.0);
   FU("lin_fsin", sin(a));  FU("lin_fcos", cos(a));  FU("lin_ftan", tan(a));
+  FU("lin_fabs", fabs(a));
+  FU("lin_fsign", a >= 0.0 ? 1.0 : -1.0);
+  FU("lin_ffract", a - floor(a));
   FA("lin_fatan2", atan2(a, b));   FA("lin_fpow", pow(a, b));
   FC("lin_feq", a == b);   FC("lin_flt", a < b);   FC("lin_fleq", a <= b);
+  /* 3-arg lerp (a, b, t) -> a + (b-a)*t, needs a 3rd arg */
+  if (!strcmp(fn, "lin_lerp") && argc >= 3) { double x, y, t; memcpy(&x, &c_args[0], 8); memcpy(&y, &c_args[1], 8); memcpy(&t, &c_args[2], 8); double r = x + (y - x) * t; long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
+  if (!strcmp(fn, "lin_fclamp") && argc >= 3) { double x, lo, hi; memcpy(&x, &c_args[0], 8); memcpy(&lo, &c_args[1], 8); memcpy(&hi, &c_args[2], 8); double r = x < lo ? lo : (x > hi ? hi : x); long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
   #undef FA
   #undef FU
   #undef FC
@@ -364,6 +371,7 @@ static void print_port(Port p, int depth) {
   case LAM:
     if (p.port == 1) { fputs(NNM(N, p.node), stdout); break; }
     if (p.port == 0) {
+      double d; if (net_read_float(N, p, &d)) { printf("%g", d); break; }
       long v = net_read_int(N, p); if (v >= 0) { printf("%ld", v); break; }
       int b = net_read_bool(N, p); if (b >= 0) { fputs(b ? "true" : "false", stdout); break; }
       printf("(\\%s ", NNM(N, p.node)); print_port(wire((Port){p.node, 2}), depth + 1); putchar(')'); break;

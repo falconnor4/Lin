@@ -1,0 +1,67 @@
+; Float-combinator + linear-algebra standard library (built on the float domain).
+
+; --- float math combinators ---
+(lerp 0.0 10.0 0.5)
+; expect => 5
+
+(fclamp 0.0 10.0 -5.0)
+; expect => 0
+
+(fclamp 0.0 10.0 20.0)
+; expect => 10
+
+(fabs -3.5)
+; expect => 3.5
+
+(fsign -42.0)
+; expect => -1
+
+(fsign 7.0)
+; expect => 1
+
+(ffract 3.75)
+; expect => 0.75
+
+(fmin 3.0 7.0)
+; expect => 3
+
+(fmax 3.0 7.0)
+; expect => 7
+
+(deg2rad 180.0)
+; expect => 3.14159
+
+(rad2deg 3.14159265358979323846)
+; expect => 180
+
+; --- vector combinators ---
+(v2len (vec2 3.0 4.0))
+; expect => 5
+
+(v2dot (vec2 3.0 4.0) (vec2 3.0 4.0))
+; expect => 25
+
+(v3dot (vec3 1.0 0.0 0.0) (vec3 0.0 1.0 0.0))
+; expect => 0
+
+(v3x (v3cross (vec3 1.0 0.0 0.0) (vec3 0.0 1.0 0.0)))
+; expect => 0
+
+(v3z (v3cross (vec3 1.0 0.0 0.0) (vec3 0.0 1.0 0.0)))
+; expect => 1
+
+(v3x (v3add (vec3 1.0 2.0 3.0) (vec3 4.0 5.0 6.0)))
+; expect => 5
+
+(v3y (v3scale 2.0 (vec3 1.0 2.0 3.0)))
+; expect => 4
+
+(v3len (vec3 0.0 3.0 4.0))
+; expect => 5
+
+; rotating the x-axis by 90deg about z lands on y-axis: dot with y = 1
+(v3dot (rotate_z (deg2rad 90.0) (vec3 1.0 0.0 0.0)) (vec3 0.0 1.0 0.0))
+; expect => 1
+
+(v2x (v2norm (vec2 3.0 4.0)))
+; expect => 0.6

@@ -66,10 +66,14 @@ static int isnum(const char *s) {
     if (!isdigit((unsigned char)*p)) return 0;
   return 1;
 }
-/* A float literal: digits with a '.', or an exponent (e/E). */
+/* A float literal: optionally '-'/'+', digits with a '.', or an exponent. */
 static int isfloat(const char *s) {
-  if (!*s || !isdigit((unsigned char)*s) || (!strpbrk(s, ".eE"))) return 0;
-  for (const char *p = s; *p; p++)
+  if (!*s) return 0;
+  const char *p = s;
+  if (*p == '-' || *p == '+') p++;
+  if (!isdigit((unsigned char)*p)) return 0;
+  if (!strpbrk(p, ".eE")) return 0;
+  for (; *p; p++)
     if (!isdigit((unsigned char)*p) && *p != '.' && *p != 'e' && *p != 'E') return 0;
   return 1;
 }

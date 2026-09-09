@@ -1,0 +1,85 @@
+; ==============================================================================
+; Lin Standard Library: Vectors & Linear Algebra (floating point)
+; ==============================================================================
+; Vectors are Scott-encoded tuples over the float domain, so the vector ops are
+; combinators (pure higher-order functions) — exactly the layer a 3D renderer
+; needs on top of the float primitives.
+;   vec2 / vec3  = (list2 x y) / (list3 x y z), floats.
+; ==============================================================================
+
+(load "list.lin")
+(load "float.lin")
+(load "math.lin")
+
+(namespace vector)
+
+(define vec2 (\x (\y (list.list2 x y))))
+(define vec3 (\x (\y (\z (list.list3 x y z)))))
+(define v2x list.first)
+(define v2y list.second)
+(define v3x list.first)
+(define v3y list.second)
+(define v3z list.third)
+
+; --- vec2 ---
+(define v2add (\a (\b (vec2 (fadd (v2x a) (v2x b)) (fadd (v2y a) (v2y b))))))
+(define v2sub (\a (\b (vec2 (fsub (v2x a) (v2x b)) (fsub (v2y a) (v2y b))))))
+(define v2scale (\s (\v (vec2 (fmul s (v2x v)) (fmul s (v2y v))))))
+(define v2dot (\a (\b (fadd (fmul (v2x a) (v2x b)) (fmul (v2y a) (v2y b))))))
+(define v2len (\v (fsqrt (v2dot v v))))
+(define v2norm (\v (v2scale (fdiv (float "1.0") (v2len v)) v)))
+
+; --- vec3 ---
+(define v3add (\a (\b (vec3 (fadd (v3x a) (v3x b)) (fadd (v3y a) (v3y b)) (fadd (v3z a) (v3z b))))))
+(define v3sub (\a (\b (vec3 (fsub (v3x a) (v3x b)) (fsub (v3y a) (v3y b)) (fsub (v3z a) (v3z b))))))
+(define v3scale (\s (\v (vec3 (fmul s (v3x v)) (fmul s (v3y v)) (fmul s (v3z v))))))
+(define v3dot (\a (\b (fadd (fadd (fmul (v3x a) (v3x b)) (fmul (v3y a) (v3y b))) (fmul (v3z a) (v3z b))))))
+(define v3cross (\a (\b (vec3
+  (fsub (fmul (v3y a) (v3z b)) (fmul (v3z a) (v3y b)))
+  (fsub (fmul (v3z a) (v3x b)) (fmul (v3x a) (v3z b)))
+  (fsub (fmul (v3x a) (v3y b)) (fmul (v3y a) (v3x b)))))))
+(define v3len (\v (fsqrt (v3dot v v))))
+(define v3norm (\v (v3scale (fdiv (float "1.0") (v3len v)) v)))
+
+; --- rotations (right-handed, radians) about each axis ---
+(define rotate_z (\a (\v
+  (let ((sa (fsin a)) (ca (fcos a)))
+    (vec3 (fsub (fmul ca (v3x v)) (fmul sa (v3y v)))
+          (fadd (fmul sa (v3x v)) (fmul ca (v3y v)))
+          (v3z v))))))
+(define rotate_x (\a (\v
+  (let ((sa (fsin a)) (ca (fcos a)))
+    (vec3 (v3x v)
+          (fsub (fmul ca (v3y v)) (fmul sa (v3z v)))
+          (fadd (fmul sa (v3y v)) (fmul ca (v3z v))))))))
+(define rotate_y (\a (\v
+  (let ((sa (fsin a)) (ca (fcos a)))
+    (vec3 (fadd (fmul ca (v3x v)) (fmul sa (v3z v)))
+          (v3y v)
+          (fsub (fmul ca (v3z v)) (fmul sa (v3x v))))))))
+
+(namespace _)
+(open vector)
+(define vec2 vector.vec2)
+(define vec3 vector.vec3)
+(define v2x vector.v2x)
+(define v2y vector.v2y)
+(define v3x vector.v3x)
+(define v3y vector.v3y)
+(define v3z vector.v3z)
+(define v2add vector.v2add)
+(define v2sub vector.v2sub)
+(define v2scale vector.v2scale)
+(define v2dot vector.v2dot)
+(define v2len vector.v2len)
+(define v2norm vector.v2norm)
+(define v3add vector.v3add)
+(define v3sub vector.v3sub)
+(define v3scale vector.v3scale)
+(define v3dot vector.v3dot)
+(define v3cross vector.v3cross)
+(define v3len vector.v3len)
+(define v3norm vector.v3norm)
+(define rotate_x vector.rotate_x)
+(define rotate_y vector.rotate_y)
+(define rotate_z vector.rotate_z)
