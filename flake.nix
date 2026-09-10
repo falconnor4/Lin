@@ -21,11 +21,11 @@
 
             buildPhase = ''
               runHook preBuild
-              $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl
+              $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl -lm
               for d in std/drivers/*.c; do
                 $CC -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared \
                   -I${pkgs.vulkan-headers}/include \
-                  -o "''${d%.c}.so" "$d" -ldl -L${pkgs.vulkan-loader}/lib
+                  -o "''${d%.c}.so" "$d" -ldl -lm -L${pkgs.vulkan-loader}/lib
               done
               runHook postBuild
             '';

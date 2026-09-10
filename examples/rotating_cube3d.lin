@@ -1,0 +1,33 @@
+(load "std/std.lin")
+
+(define V0 (vec3 -1.0 -1.0 -1.0))
+
+(define V1 (vec3 -1.0 -1.0 1.0))
+
+(define V2 (vec3 -1.0 1.0 -1.0))
+
+(define V3 (vec3 -1.0 1.0 1.0))
+
+(define V4 (vec3 1.0 -1.0 -1.0))
+
+(define V5 (vec3 1.0 -1.0 1.0))
+
+(define V6 (vec3 1.0 1.0 -1.0))
+
+(define V7 (vec3 1.0 1.0 1.0))
+
+(define vert (\i (if (eq i 0) V0 (if (eq i 1) V1 (if (eq i 2) V2 (if (eq i 3) V3 (if (eq i 4) V4 (if (eq i 5) V5 (if (eq i 6) V6 V7)))))))))
+
+(define yaw (\f (deg2rad (fmul (i2f f) 30.0))))
+
+(define xfrm (\f (\v (rotate_y (yaw f) (rotate_x (deg2rad (fmul (i2f f) 15.0)) v)))))
+
+(define px (\f (\v (fadd (fmul 4.0 (v3x (xfrm f v))) 24.0))))
+
+(define py (\f (\v (fadd (fmul 4.0 (v3y (xfrm f v))) 12.0))))
+
+(define corner (\f (\i (\next (io_print (px f (vert i)) (io_print "," (io_print (py f (vert i)) (io_print "," next))))))))
+
+(define show_frame (\f (\next (io_print "f" (io_print (mul f 30) (io_print ":" (corner f 0 (corner f 1 (corner f 2 (corner f 3 (corner f 4 (corner f 5 (corner f 6 (corner f 7 (io_print "\n" next)))))))))))))))
+
+(show_frame 0 (show_frame 1 (show_frame 2 io_done)))

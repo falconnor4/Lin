@@ -10,14 +10,14 @@ build:
 # <= 2500 lines).  -rdynamic exports the core's symbols so dlopen'd driver
 # plugins (simd.so) can resolve net_alloc_scott / net_read_int / net_link &c.
 lin: $(SRCS) src/lin.h
-	$(CC) $(CFLAGS) -rdynamic -o $@ $(SRCS) -ldl
+	$(CC) $(CFLAGS) -rdynamic -o $@ $(SRCS) -ldl -lm
 
 # Accelerator drivers (e.g. SIMD native arithmetic) are optional loaded plugins,
 # compiled to std/drivers/*.so and dlopen'd at runtime by (set_driver "simd").
 plugins: $(DRIVERS)
 	@for d in $(DRIVERS); do \
 	  n=$${d%.c}.so; \
-	  $(CC) -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared -o $$n $$d -ldl; \
+	  $(CC) -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared -o $$n $$d -ldl -lm; \
 	done
 
 # Build core + plugins (trusted working-tree path).
