@@ -74,7 +74,7 @@ int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
 Type *type_var(void); Type *type_arrow(Type *a, Type *b);
-Type *type_list(Type *e); Scheme scheme_all(Type *t);
+Type *type_list(Type *e); Type *type_forall(Type *v, Type *body); Scheme scheme_all(Type *t);
 
 /* ---------------- compile & aot & .line ---------------- */
 int compile(Term *t, Net *n, char *err, int errsz);

@@ -14,6 +14,8 @@
 (define ccall1 (\fn (\a1 (ffi.ffi fn (list.cons a1 list.nil)))))
 (define ccall2 (\fn (\a1 (\a2 (ffi.ffi fn (list.cons a1 (list.cons a2 list.nil)))))))
 (define ccall3 (\fn (\a1 (\a2 (\a3 (ffi.ffi fn (list.cons a1 (list.cons a2 (list.cons a3 list.nil)))))))))
+(define ccall4 (\fn (\a1 (\a2 (\a3 (\a4 (ffi.ffi fn (list.cons a1 (list.cons a2 (list.cons a3 (list.cons a4 list.nil)))))))))))
+(define ccall5 (\fn (\a1 (\a2 (\a3 (\a4 (\a5 (ffi.ffi fn (list.cons a1 (list.cons a2 (list.cons a3 (list.cons a4 (list.cons a5 list.nil)))))))))))))
 
 ; Core POSIX & System Bindings
 (define exit     (\c (ffi.ccall1 "exit" c)))
@@ -30,6 +32,8 @@
 (define ccall1 ffi.ccall1)
 (define ccall2 ffi.ccall2)
 (define ccall3 ffi.ccall3)
+(define ccall4 ffi.ccall4)
+(define ccall5 ffi.ccall5)
 (define exit ffi.exit)
 (define getenv ffi.getenv)
 (define system ffi.system)

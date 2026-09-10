@@ -16,11 +16,12 @@
 (define! is_zero (num -> bool) (\n ((n bool.true) (\p bool.false))))
 
 ; --- Church Numerals & Self-Iterating Folds ---
-(define c_zero (\f (\x x)))
-(define c_succ (\n (\f (\x (f (n f x))))))
-(define c_add  (\a (\b (\f (\x (a f (b f x)))))))
-(define c_mul  (\a (\b (\f (a (b f))))))
-(define c_pow  (\b (\e (e b))))
+; Church numeral type: CNat a = (a -> a) -> a -> a, universally quantified.
+(define! c_zero (forall a ((a -> a) -> a -> a)) (\f (\x x)))
+(define! c_succ (forall a (((a -> a) -> a -> a) -> (a -> a) -> a -> a)) (\n (\f (\x (f (n f x))))))
+(define! c_add  (forall a (((a -> a) -> a -> a) -> ((a -> a) -> a -> a) -> (a -> a) -> a -> a)) (\a (\b (\f (\x (a f (b f x)))))))
+(define! c_mul  (forall a (((a -> a) -> a -> a) -> ((a -> a) -> a -> a) -> (a -> a) -> a -> a)) (\a (\b (\f (a (b f))))))
+(define! c_pow  (forall a (((a -> a) -> a -> a) -> ((a -> a) -> a -> a) -> (a -> a) -> a -> a)) (\b (\e (e b))))
 (define c_to_scott (\cn (cn num.succ 0)))
 
 (load "ffi.lin")

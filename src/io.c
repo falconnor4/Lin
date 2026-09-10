@@ -297,12 +297,10 @@ static Val run_ffi(Net *n, Port p) {
   FA("lin_fmin", a < b ? a : b);   FA("lin_fmax", a > b ? a : b);
   FU("lin_fsqrt", a >= 0.0 ? sqrt(a) : 0.0);
   FU("lin_fsin", sin(a));  FU("lin_fcos", cos(a));  FU("lin_ftan", tan(a));
-  FU("lin_fabs", fabs(a));
-  FU("lin_fsign", a >= 0.0 ? 1.0 : -1.0);
-  FU("lin_ffract", a - floor(a));
+  FU("lin_fabs", fabs(a)); FU("lin_fsign", a >= 0.0 ? 1.0 : -1.0); FU("lin_ffract", a - floor(a));
   FA("lin_fatan2", atan2(a, b));   FA("lin_fpow", pow(a, b));
   FC("lin_feq", a == b);   FC("lin_flt", a < b);   FC("lin_fleq", a <= b);
-  /* 3-arg lerp (a, b, t) -> a + (b-a)*t, needs a 3rd arg */
+  /* 3-arg float builtins: lerp(a,b,t), fclamp(x,lo,hi) */
   if (!strcmp(fn, "lin_lerp") && argc >= 3) { double x, y, t; memcpy(&x, &c_args[0], 8); memcpy(&y, &c_args[1], 8); memcpy(&t, &c_args[2], 8); double r = x + (y - x) * t; long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
   if (!strcmp(fn, "lin_fclamp") && argc >= 3) { double x, lo, hi; memcpy(&x, &c_args[0], 8); memcpy(&lo, &c_args[1], 8); memcpy(&hi, &c_args[2], 8); double r = x < lo ? lo : (x > hi ? hi : x); long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
   #undef FA

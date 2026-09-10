@@ -1,0 +1,44 @@
+; ==============================================================================
+; Lin 3D wireframe cube in a window
+;   - geometry, transform (rotate) + projection in Lin (stdlib floats/vectors)
+;   - window/framebuffer via the C helper liblinrender.so (SDL2), driven by FFI
+; Renders one wireframe cube frame, holds it ~4s so the window is clearly
+; visible, then closes.  Esc / window-X ends it early.
+; ==============================================================================
+
+(load "std/std.lin")
+
+; load the render helper (must be on LD_LIBRARY_PATH)
+(ffi.load_lib "liblinrender.so")
+
+; --- geometry: 8 cube corners in [-1,+1] ---
+(define V0 (vec3 -1.0 -1.0 -1.0))
+(define V1 (vec3 -1.0 -1.0 1.0))
+(define V2 (vec3 -1.0 1.0 -1.0))
+(define V3 (vec3 -1.0 1.0 1.0))
+(define V4 (vec3 1.0 -1.0 -1.0))
+(define V5 (vec3 1.0 -1.0 1.0))
+(define V6 (vec3 1.0 1.0 -1.0))
+(define V7 (vec3 1.0 1.0 1.0))
+
+(define vert (\i (if (eq i 0) V0 (if (eq i 1) V1 (if (eq i 2) V2 (if (eq i 3) V3
+  (if (eq i 4) V4 (if (eq i 5) V5 (if (eq i 6) V6 V7)))))))))
+
+; --- transform (fixed 30deg) + orthogonal projection to screen ints ---
+(define xfrm0 (\v (rotate_y (deg2rad 30.0) (rotate_x (deg2rad 15.0) v))))
+(define sx (\i (ffloor (fadd (fmul 50.0 (v3x (xfrm0 (vert i)))) 160.0))))
+(define sy (\i (ffloor (fadd (fmul 50.0 (v3y (xfrm0 (vert i)))) 120.0))))
+
+; one edge (i -> j) then continue
+(define seg (\i (\j (\next
+  (io_call "lin_render_seg" (list5 (sx i) (sy i) (sx j) (sy j) 0) next)))))
+
+; entry: open window, clear, draw the 12 edges, present, hold, close
+(io_call "lin_render_init" (list2 320 240) (\_
+  (io_call "lin_render_clear" (list1 0) (\_
+    (seg 0 1 (seg 0 2 (seg 1 3 (seg 2 3
+    (seg 4 5 (seg 4 6 (seg 5 7 (seg 6 7
+    (seg 0 4 (seg 1 5 (seg 2 6 (seg 3 7
+    (io_call "lin_render_present" (list1 0) (\_
+      (io_call "lin_render_wait" (list1 4000) (\_
+        (io_call "lin_render_close" (list1 0) (\_ io_done)))))))))))))))))))))

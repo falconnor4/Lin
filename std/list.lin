@@ -26,17 +26,17 @@
               (\_ (bool.and ((elem_eq (list.head l1)) (list.head l2))
                             (((eq elem_eq) (list.tail l1)) (list.tail l2)))))))))))
 
-; Church self-iterating lists & folds
-(define c_nil (\c (\n n)))
-(define c_cons (\h (\t (\c (\n (c h (t c n)))))))
-(define c_foldr (\f (\z (\l (l f z)))))
-(define c_foldl (\f (\z (\l ((l (\x (\g (\acc (g (f acc x))))) (\acc acc)) z)))))
-(define c_length (\l (l (\_ (\acc (num.succ acc))) 0)))
-(define c_map (\f (\l (\c (\n (l (\x (c (f x))) n))))))
-(define c_filter (\p (\l (\c (\n (l (\x (bool.if (p x) (c x) (\acc acc))) n))))))
-(define c_concat (\l1 (\l2 (\c (\n (l1 c (l2 c n)))))))
+; Church self-iterating lists & folds  (Clist a = forall r. (a -> r -> r) -> r -> r)
+(define! c_nil (forall a (forall r ((a -> r -> r) -> r -> r))) (\c (\n n)))
+(define! c_cons (forall a (a -> (forall r ((a -> r -> r) -> r -> r)) -> (forall r ((a -> r -> r) -> r -> r)))) (\h (\t (\c (\n (c h (t c n)))))))
+(define! c_foldr (forall a (forall r ((a -> r -> r) -> r -> (forall s ((a -> s -> s) -> s -> s)) -> r))) (\f (\z (\l (l f z)))))
+(define! c_foldl (forall a (forall b ((b -> a -> b) -> b -> (forall r ((a -> r -> r) -> r -> r)) -> b))) (\f (\z (\l ((l (\x (\g (\acc (g (f acc x))))) (\acc acc)) z)))))
+(define! c_length (forall a ((forall r ((a -> r -> r) -> r -> r)) -> num)) (\l (l (\_ (\acc (num.succ acc))) 0)))
+(define! c_map (forall a (forall b ((a -> b) -> (forall r ((a -> r -> r) -> r -> r)) -> (forall s ((b -> s -> s) -> s -> s))))) (\f (\l (\c (\n (l (\x (c (f x))) n))))))
+(define! c_filter (forall a ((a -> bool) -> (forall r ((a -> r -> r) -> r -> r)) -> (forall s ((a -> s -> s) -> s -> s)))) (\p (\l (\c (\n (l (\x (bool.if (p x) (c x) (\acc acc))) n))))))
+(define! c_concat (forall a ((forall r ((a -> r -> r) -> r -> r)) -> (forall s ((a -> s -> s) -> s -> s)) -> (forall t ((a -> t -> t) -> t -> t)))) (\l1 (\l2 (\c (\n (l1 c (l2 c n)))))))
 (define c_to_scott (\cl (cl list.cons list.nil)))
-(define c_reverse (\cl (list.c_foldl (\acc (\x (list.c_cons x acc))) list.c_nil cl)))
+(define! c_reverse (forall a ((forall r ((a -> r -> r) -> r -> r)) -> (forall s ((a -> s -> s) -> s -> s)))) (\cl (list.c_foldl (\acc (\x (list.c_cons x acc))) list.c_nil cl)))
 
 ; Positional constructors
 (define list1 (\a (list.cons a list.nil)))

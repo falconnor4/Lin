@@ -94,6 +94,17 @@ static char (*tvn)[NAME];
 static Type **tvt;
 static int tvnn, tvcap;
 
+static Type *named_tv(const char *nm) {
+  for (int i = 0; i < tvnn; i++) if (!strcmp(tvn[i], nm)) return tvt[i];
+  if (tvnn >= tvcap) {
+    tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);
+    tvt = realloc(tvt, (size_t)tvcap * sizeof *tvt);
+  }
+  snprintf(tvn[tvnn], NAME, "%s", nm);
+  tvt[tvnn] = type_var();
+  return tvt[tvnn++];
+}
+
 static Type *parse_type_atom(void) {
   skipws();
   if (S[P] == '(') {
@@ -103,17 +114,25 @@ static Type *parse_type_atom(void) {
   }
   char nm[NAME];
   if (!sym(nm, NAME)) pfail("type: expected name");
+  if (!strcmp(nm, "forall") || !strcmp(nm, "∀") || !strcmp(nm, "Forall")) {
+    /* (forall a b . body) : explicit rank-2 binder(s) */
+    Type *binders[64]; int nb = 0;
+    for (;;) {
+      skipws();
+      char bnd[NAME];
+      if (!sym(bnd, NAME) || !strcmp(bnd, ".")) break;
+      Type *bv = named_tv(bnd);
+      if (nb < 64) binders[nb++] = bv;
+    }
+    skipws();
+    Type *body = parse_type();
+    for (int i = nb - 1; i >= 0; i--) body = type_forall(binders[i], body);
+    return body;
+  }
   if (!strcmp(nm, "num")) return type_var();
   if (!strcmp(nm, "bool")) { Type *p = type_var(), *q = type_var(); return type_arrow(p, type_arrow(q, p)); }
   if (!strcmp(nm, "list")) return type_list(parse_type_atom());
-  for (int i = 0; i < tvnn; i++) if (!strcmp(tvn[i], nm)) return tvt[i];
-  if (tvnn >= tvcap) {
-    tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);
-    tvt = realloc(tvt, (size_t)tvcap * sizeof *tvt);
-  }
-  snprintf(tvn[tvnn], NAME, "%s", nm);
-  tvt[tvnn] = type_var();
-  return tvt[tvnn++];
+  return named_tv(nm);
 }
 
 static Type *parse_type(void) {

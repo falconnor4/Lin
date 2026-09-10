@@ -37,7 +37,15 @@ nix-test:
 bench:
 	nix run .#benchmarks
 
+# One-command window render: build the interpreter + the render helper, then
+# run the wireframe demo.  Needs SDL2 on the compile/link path (see
+# examples/render/Makefile for Nix SDL2_INC/SDL2_LIB overrides).
+render: lin
+	$(MAKE) -C examples/render all
+	LD_LIBRARY_PATH="$$PWD/examples/render:$${LD_LIBRARY_PATH}" \
+		./lin examples/render/render.lin
+
 clean:
 	rm -rf lin result test/line_binary.line std/drivers/*.so
 
-.PHONY: build test nix-test bench clean all plugins
+.PHONY: build test nix-test bench clean all plugins render

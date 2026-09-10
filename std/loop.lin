@@ -1,0 +1,60 @@
+; ==================================================================
+; Lin stdlib: general iteration via Church-numeral self-application.
+;
+;   (iter cn step z) == ((cn step) z) == step^cn(z)
+;     cn   : a Church numeral (c_zero / c_succ), i.e. \f \x. f^cn x
+;     step : unary  acc -> acc
+;     z    : initial accumulator
+; This is the general, parametric loop primitive: reduces concrete
+; values for any count cn (verified).  Unindexed by design; thread an
+; index through the accumulator as data if you need it.
+;
+; Church-count constants c0..cN are provided for convenience.
+; ==================================================================
+
+(define iter (\cn (\step (\z ((cn step) z)))))
+
+(define c0 num.c_zero)
+(define c1 (num.c_succ num.c_zero))
+(define c2 (num.c_succ (num.c_succ num.c_zero)))
+(define c3 (num.c_succ (num.c_succ (num.c_succ num.c_zero))))
+(define c4 (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero)))))
+(define c5 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero))))))
+(define c6 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero)))))))
+(define c7 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero))))))))
+(define c8 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero)))))))))
+(define c9 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero))))))))))
+(define c10 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero)))))))))))
+(define c11 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero))))))))))))
+(define c12 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero)))))))))))))
+(define c13 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero))))))))))))))
+(define c14 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero)))))))))))))))
+(define c15 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero))))))))))))))))
+(define c16 (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ (num.c_succ num.c_zero)))))))))))))))))
+
+; =============================================================================
+; Bounded INDEXED loops via literal-index _step unrolling (acc-first stepping).
+;   (loop_N f z) threads acc through f : acc -> idx -> acc with LITERAL indices
+; 0..N-1:  f_{N-1}( ... f_1 (f_0 z)).  Each index is a concrete Scott numeral,
+; so accumulating in Lin reduces when f's body is written with explicit, strict
+; application.  (Note: `add` juxtaposed through a shared/define'd step currently
+; does not force its accumulator in this reducer; inline steps work.)
+; =============================================================================
+
+(define loop_0 (\f (\z z)))
+(define loop_1 (\f (\z ((f z) 0))))
+(define loop_2 (\f (\z ((f ((f z) 0)) 1))))
+(define loop_3 (\f (\z ((f ((f ((f z) 0)) 1)) 2))))
+(define loop_4 (\f (\z ((f ((f ((f ((f z) 0)) 1)) 2)) 3))))
+(define loop_5 (\f (\z ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4))))
+(define loop_6 (\f (\z ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5))))
+(define loop_7 (\f (\z ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6))))
+(define loop_8 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7))))
+(define loop_9 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8))))
+(define loop_10 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8)) 9))))
+(define loop_11 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8)) 9)) 10))))
+(define loop_12 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8)) 9)) 10)) 11))))
+(define loop_13 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8)) 9)) 10)) 11)) 12))))
+(define loop_14 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8)) 9)) 10)) 11)) 12)) 13))))
+(define loop_15 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8)) 9)) 10)) 11)) 12)) 13)) 14))))
+(define loop_16 (\f (\z ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f ((f z) 0)) 1)) 2)) 3)) 4)) 5)) 6)) 7)) 8)) 9)) 10)) 11)) 12)) 13)) 14)) 15))))

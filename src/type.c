@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { TVR, TARROW, TLINK, TLIST };
+enum { TVR, TARROW, TLINK, TLIST, TFORALL };
 
 static jmp_buf TJ;
 static char TMSG[256];
@@ -21,6 +21,7 @@ static void tfail(const char *fmt, ...) {
 static Type *tvar(void) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, .id = next_id++}; return t; }
 static Type *tarrow(Type *a, Type *b) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARROW, .id = -1, .a = a, .b = b}; return t; }
 static Type *tlist(Type *e) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TLIST, .id = -1, .a = e}; return t; }
+static Type *tforall(Type *v, Type *body) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TFORALL, .id = -1, .a = v, .b = body}; return t; }
 
 static Type *find(Type *t) {
   while (t->kind == TLINK) {
@@ -35,6 +36,7 @@ static int occurs(Type *v, Type *t) {
   if (t == v) return 1;
   if (t->kind == TARROW) return occurs(v, t->a) || occurs(v, t->b);
   if (t->kind == TLIST) return occurs(v, t->a);
+  if (t->kind == TFORALL) return occurs(v, t->b);  /* quantified var scopes only in body */
   return 0;
 }
 
@@ -44,6 +46,12 @@ static void unify(Type *x, Type *y) {
   if (x == y) return;
   if (x->kind == TARROW && y->kind == TARROW) { unify(x->a, y->a); unify(x->b, y->b); return; }
   if (x->kind == TLIST && y->kind == TLIST) { unify(x->a, y->a); return; }
+  if (x->kind == TFORALL && y->kind == TFORALL) {
+    x->a->kind = TLINK; x->a->a = y->a;   /* share the quantified binders */
+    unify(x->b, y->b); return;
+  }
+  if (x->kind == TFORALL) { x->a->kind = TLINK; x->a->a = tvar(); unify(x->b, y); return; }
+  if (y->kind == TFORALL) { y->a->kind = TLINK; y->a->a = tvar(); unify(x, y->b); return; }
   if (x->kind == TVR) { if (occurs(x, y)) tfail("infinite type"); x->kind = TLINK; x->a = y; return; }
   if (y->kind == TVR) { if (occurs(y, x)) tfail("infinite type"); y->kind = TLINK; y->a = x; return; }
   tfail("type mismatch");
@@ -79,6 +87,7 @@ static void fv(Type *t, int *set, int *n) {
     fv(t->b, set, n);
   }
   if (t->kind == TLIST) fv(t->a, set, n);
+  if (t->kind == TFORALL) fv(t->b, set, n);
 }
 
 static int mid[256];
@@ -94,6 +103,7 @@ static Type *inst_rec(Type *t) {
   }
   if (t->kind == TARROW) return tarrow(inst_rec(t->a), inst_rec(t->b));
   if (t->kind == TLIST) return tlist(inst_rec(t->a));
+  if (t->kind == TFORALL) return tforall(t->a, inst_rec(t->b));
   return t;
 }
 
@@ -133,6 +143,8 @@ static Type *infer(Term *t) {
       Type *b = infer(t->l->l); envn--; return b;
     }
     Type *f = infer(t->l), *x = infer(t->r), *r = tvar();
+    f = find(f);
+    while (f->kind == TFORALL) { Type *v = f->a, *fresh = tvar(); v->kind = TLINK; v->a = fresh; f = f->b; }
     unify(f, tarrow(x, r)); return r;
   }
   case TDEFX: return infer(t->l);
@@ -170,6 +182,7 @@ static void print_rec(Type *t, int par) {
     return;
   }
   if (t->kind == TLIST) { printf("list "); print_rec(t->a, 1); return; }
+  if (t->kind == TFORALL) { printf("forall "); print_rec(t->a, 1); printf(". "); print_rec(t->b, 0); return; }
   putchar('?');
 }
 
@@ -177,6 +190,7 @@ void scheme_print(Scheme *s) { print_rec(s->t, 0); }
 Type *type_var(void) { return tvar(); }
 Type *type_arrow(Type *a, Type *b) { return tarrow(a, b); }
 Type *type_list(Type *e) { return tlist(e); }
+Type *type_forall(Type *v, Type *body) { return tforall(v, body); }
 
 Scheme scheme_all(Type *t) {
   int f[64], fn = 0; fv(t, f, &fn);

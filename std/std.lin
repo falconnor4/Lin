@@ -33,6 +33,7 @@
 (load "vector.lin")
 (load "math.lin")
 (load "pair.lin")
+(load "loop.lin")
 (load "list.lin")
 (load "maybe.lin")
 (load "either.lin")
