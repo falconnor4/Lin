@@ -85,6 +85,14 @@ static Term *scott(long k) {
   return cur;
 }
 
+/* Church numeral k as a term \_f \_x . _f^k _x (so (cn f x) = f^k x). */
+static Term *church_term(long k) {
+  Term *body = term_new(TVAR, "_x", 0, 0);
+  for (long i = 0; i < k; i++)
+    body = term_new(TAPP, "", term_new(TVAR, "_f", 0, 0), body);
+  return term_new(TLAM, "_f", term_new(TLAM, "_x", body, 0), 0);
+}
+
 static Term *parse_term(void);
 
 /* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'
@@ -200,6 +208,14 @@ static Term *parse_term(void) {
     if (islambda(kw)) {
       skipws(); char var[NAME]; if (!sym(var, NAME)) pfail("lambda: expected binder");
       Term *body = parse_term(); return term_new(TLAM, var, parse_tail(body), NULL);
+    }
+    if (!strcmp(kw, "church")) {
+      skipws();
+      char ck[NAME];
+      if (!sym(ck, NAME) || !isdigit((unsigned char)ck[0])) pfail("church: literal count expected");
+      long n = strtol(ck, NULL, 10);
+      skipws(); if (S[P] != ')') pfail("church: expected ')'"); else P++;
+      return church_term(n);
     }
     if (!strcmp(kw, "define") || !strcmp(kw, "define!")) {
       int typed = !strcmp(kw, "define!");

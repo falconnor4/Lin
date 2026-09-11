@@ -99,13 +99,14 @@ static inline Port dup_hop(Net *n, Port p) {
   return p;
 }
 
-long net_read_int(Net *n, Port p) {
+/* Walk a `carrier succ. body` spine (a boxed value), counting succ-layers. */
+static long net_read_spine(Net *n, Port p, int tag) {
   N = n; long count = 0; Port cur = p;
   for (int step = 0; step < n->nn; step++) {
     cur = dup_hop(n, cur);
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != DT_NUM) return -1;
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != tag) return -1;
     int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
-    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != DT_NUM) return -1;
+    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != tag) return -1;
     int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
     if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return -1;
     if (body.node == sz && body.port == 1) return count;
@@ -118,24 +119,12 @@ long net_read_int(Net *n, Port p) {
   return -1;
 }
 
-/* Extract a float box (`_fsz` spine whose value is a fltbox index). */
+long net_read_int(Net *n, Port p) { return net_read_spine(n, p, DT_NUM); }
+
 int net_read_float(Net *n, Port p, double *out) {
-  N = n; long count = 0; Port cur = p;
-  for (int step = 0; step < n->nn; step++) {
-    cur = dup_hop(n, cur);
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != DT_FLOAT) return 0;
-    int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
-    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != DT_FLOAT) return 0;
-    int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
-    if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return 0;
-    if (body.node == sz && body.port == 1) { if (count < nfltbox) { *out = fltbox[count]; return 1; } return 0; }
-    if (n->tag[body.node] == APP) {
-      Port fn = dup_hop(n, wire((Port){body.node, 0}));
-      if (fn.node == ss && fn.port == 1) { count++; cur = wire((Port){body.node, 2}); continue; }
-    }
-    return 0;
-  }
-  return 0;
+  long k = net_read_spine(n, p, DT_FLOAT);
+  if (k < 0 || k >= nfltbox) return 0;
+  *out = fltbox[k]; return 1;
 }
 
 /* Extract Church boolean: _bt / _bf */
