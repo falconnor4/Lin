@@ -318,6 +318,7 @@ static void gpu_selftest(Net *n, int nred) {
    heap-scope annihilate / `_ffi` closures are NOT claimed (SIMD claims `_ffi`
    at higher priority; commute is the base engine's). */
 static int gpu_claim(const Net *n, Port p1, Port p2) {
+  if (!gpu_ready) return 0;   /* no usable device => pure no-op, never claim */
   if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) return 0;
   /* principal-port validity (mirrors lin_reduce_wave_parallel) */
   if (p1.port || p2.port) return 0;
@@ -325,7 +326,16 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
   if (WIRE(n,p2).node != p1.node || WIRE(n,p2).port != p1.port) return 0;
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
   if (t1 > t2) { int t = t1; t1 = t2; t2 = t; }
-  if (t1 == LAM && t2 == APP) return 1;                 /* beta */
+  if (t1 == LAM && t2 == APP) {
+    /* `_ffi` closures must NOT be claimed: the base engine folds a saturated
+       `_ffi` LAM (lin_fold_ffi) into a concrete value BEFORE beta; if the GPU
+       claimed this LAM x APP it would beta-reduce on-device and skip the fold,
+       leaving the arithmetic window/`_ffi` residual (e.g. `add 18 24` under the
+       GPU driver).  Hand it to the base engine (which folds) instead. */
+    const char *lnm = p1.node < n->nn ? (n->name[p1.node] ? n->name[p1.node] : "") : "";
+    if (ctor_tag(lnm) == DT_FFI) return 0;
+    return 1;                                                 /* beta */
+  }
   if (t1 == DUP && t2 == DUP)
     return !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
   return 0;                                              /* commute / erase */

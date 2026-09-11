@@ -103,6 +103,11 @@ int net_print(Net *n);
    (Scott int / Church bool / float box), so FFI results materialize during
    reduction instead of only at readback.  Returns 1 on success. */
 int lin_fold_ffi(Net *n, Port lam, Port app);
+/* Fold a saturated _ffi closure appearing as a beta ARGUMENT (not head); see io.c */
+int lin_fold_ffi_arg(Net *n, Port lam, Port out);
+/* !=0 while def_precompile reduces an open (free-var) body: suppress folding so
+   the fold never runs on non-concrete operands and bakes a stale value. */
+extern int lin_precompile_depth;
 /* datatype registry (populated by builtins + `datatype` forms) */
 int  ctor_tag(const char *name); /* builtin domain DT_*, or -1 */
 int  ctor_register(const char *name, int tag, const char *c1, const char *c2);

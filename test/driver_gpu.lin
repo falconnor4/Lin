@@ -1,4 +1,9 @@
 ; hardware accelerator driver plugin test
+; Regression: a usable GPU device may be absent (`gpu_ready=0`).  The driver must
+; then be a pure no-op (claim nothing), and must never claim a saturated `_ffi`
+; closure (e.g. `lin_add`/`lin_lt`) — otherwise arithmetic/comparison would be
+; beta-reduced on-device or dropped without folding, leaving window/`_ffi`
+; residual (see std/drivers/gpu.c gpu_claim).  These guards keep reduction exact.
 (load "std/drivers/gpu.lin")
 ; expect => 1
 
@@ -7,6 +12,17 @@
 
 ((add 18) 24)
 ; expect => 42
+
+(mul 6 7)
+; expect => 42
+
+; comparison folds correctly under the gpu driver (no `_ffi` claim regression)
+(eq 4 4)
+; expect => true
+(leq 3 5)
+; expect => true
+(lt 5 3)
+; expect => false
 
 (second (list3 10 20 30))
 ; expect => 20

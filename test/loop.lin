@@ -1,0 +1,30 @@
+; Runtime iteration (`loop`): iterate a unary step over runtime Church counts.
+; loop n f x = f^n x, n a runtime Church numeral (no literal ladder).
+
+(define c0 (\f (\x x)))
+(define c3 (\f (\x (f (f (f x))))))
+(define c5 (\f (\x (f (f (f (f (f x))))))))
+(define c8 (\f (\x (f (f (f (f (f (f (f (f x)))))))))))
+(define c16 (\f (\x (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f (f x)))))))))))))))))))
+
+; loop applies succ n times from 0
+(eq (loop c0 num.succ 0) 0)
+; expect => true
+(eq (loop c3 num.succ 5) 8)
+; expect => true
+(eq (loop c5 num.succ 0) 5)
+; expect => true
+(eq (loop c8 num.succ 3) 11)
+; expect => true
+
+; count converts a runtime Church numeral to its Scott value
+(eq (count c0) 0)
+; expect => true
+(eq (count c5) 5)
+; expect => true
+(eq (count c16) 16)
+; expect => true
+
+; loop composes over a runtime-built Church numeral (add via c_pow identity)
+(eq (loop (c_add c3 c5) num.succ 0) 8)
+; expect => true

@@ -1,0 +1,33 @@
+; ==============================================================================
+; Lin Standard Library: Runtime Iteration (de-ladered `loop`)
+; ==============================================================================
+; `loop` applies a UNARY step `f` exactly `n` times to `x`, where `n` is a
+; RUNTIME Church numeral (a value, not a compile-time literal ladder):
+;
+;     loop n f x  =  f ( f ( ... ( f x ) ... ) )      (n applications)
+;
+; Church numerals ARE self-iterators (`n f x = f^n x`), so `loop` is literally
+; `\n \f \x. n f x` — no new combinator, pure λ-calculus.  The count may be any
+; runtime Church value (built with `num.c_add`/`num.c_mul`/`num.c_succ` on
+; `num.c_zero`), so the bound is data.
+;
+; NOTE ON COUNTS.  `loop` takes a CHURCH count.  Lin's native Scott numerals are
+; not self-iterators in this encoding, and a runtime Scott->Church conversion
+; (true self-recursion) currently reduces to a continuation knot in the base
+; reducer — see DESIGN.md "True self-recursion" / "lin_fold_ffi firing domain".
+; So the count must be supplied as a Church numeral; arithmetic inside the step
+; likewise needs the fold fix.  The pure form below is verified correct.
+; ==============================================================================
+
+(load "num.lin")
+
+(namespace loop)
+
+; iterate UNARY f n times over x (n a runtime Church numeral)
+(define loop (\n (\f (\x (n f x)))))
+(define count (\n (loop.loop n num.succ 0)))
+
+(namespace _)
+(open loop)
+(define loop loop.loop)
+(define count loop.count)

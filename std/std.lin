@@ -43,6 +43,7 @@
 (load "stream.lin")
 (load "string.lin")
 (load "ffi.lin")
+(load "loop.lin")
 (load "sat.lin")
 (load "io.lin")
 
@@ -63,6 +64,7 @@
 (open stream)
 (open str)
 (open ffi)
+(open loop)
 (open sat)
 (open io)
 

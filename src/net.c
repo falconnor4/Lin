@@ -177,8 +177,20 @@ int net_interact(Net *n, Port p1, Port p2) {
     Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;
     if (lv.node == n1 && lv.port == 2 && lb.node == n1 && lb.port == 1) {
-      net_link(n, aa, ar, 1); /* identity: V = (\x. x) V */
-      return 1;
+      /* identity: V = (\x. x) V — but V may itself be a saturated _ffi closure
+         (e.g. `arity` polymorphics), so fold the argument where possible. */
+      if (aa.node >= 0 && aa.port == 0 && aa.node < n->nn && !n->dead[aa.node] &&
+          n->tag[aa.node] == LAM && ctor_tag(n->name[aa.node] ? n->name[aa.node] : "") == DT_FFI) {
+        if (lin_fold_ffi_arg(n, aa, ar)) return 1;
+      }
+      net_link(n, aa, ar, 1); return 1;
+    }
+    /* eager argument fold: a saturated _ffi closure passed as data (not head)
+       would otherwise be beta-duplicated without ever folding (e.g.
+       `succ (mul 2 2)`).  Fold it so the substitution binds a concrete value. */
+    if (aa.node >= 0 && aa.port == 0 && aa.node < n->nn && !n->dead[aa.node] &&
+        n->tag[aa.node] == LAM && ctor_tag(n->name[aa.node] ? n->name[aa.node] : "") == DT_FFI) {
+      if (lin_fold_ffi_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
     }
     net_link(n, lv, aa, 1); net_link(n, lb, ar, 1);
     return 1;

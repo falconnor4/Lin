@@ -99,10 +99,24 @@ static inline Port dup_hop(Net *n, Port p) {
   return p;
 }
 
+static Val run_ffi(Net *n, Port p); /* fwd */
+static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold); /* fwd */
+
 long net_read_int(Net *n, Port p) {
   N = n; long count = 0; Port cur = p;
   for (int step = 0; step < n->nn; step++) {
     cur = dup_hop(n, cur);
+    /* An embedded saturated `_ffi` arithmetic closure (e.g. the `n` of
+       `\_sz \_ss (_ss (mul 2 2))`) never folded during reduction; fold it on
+       read so the surrounding numeral decodes.  Pure int/bool results only. */
+    if (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == LAM) {
+      const char *cn = n->name[cur.node];
+      if (cn && ctor_tag(cn) == DT_FFI) {
+        long v = -1;
+        Val vv; if (lin_ffi_peek(n, (Port){cur.node, 0}, &vv, 1) && vv.kind == 1) v = vv.iv;
+        if (v >= 0) cur = net_alloc_scott(n, v);
+      }
+    }
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != DT_NUM) return -1;
     int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
     if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != DT_NUM) return -1;
@@ -327,33 +341,108 @@ static Val run_ffi(Net *n, Port p) {
   return v;
 }
 
-/* Fold a saturated _ffi closure (LAM x APP) into a concrete net value during
-   reduction, so FFI results (notably float comparisons -> Church booleans)
-   become usable by Scott consumers instead of only materialising at readback.
-   Only PURE `lin_*` arithmetic/comparison closures are folded; side-effecting
-   FFI (puts, exit, dlopen, driver_set, getenv) stays readback-only. */
-int lin_fold_ffi(Net *n, Port lam, Port app) {
-  /* read the fn name; only fold pure arithmetic/comparison ops */
-  N = n;
+/* Compute a saturated _ffi closure's concrete value (pure lin_* only).
+   Returns 1 and fills *vout if `lam` is a saturated pure-arithmetic _ffi
+   closure; else 0.  Shared by the head-fold (LAM x APP) and the eager
+   argument-fold, so composed arithmetic materialises regardless of position. */
+int lin_precompile_depth = 0; /* set around def_precompile's net_reduce */
+static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
+  if (lin_precompile_depth > 0) return 0; /* free-var body: don't fold yet */
+  char fn[256];
   Port r = wire((Port){lam.node, 2});
   if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
   Port a2 = wire((Port){r.node, 2});
   if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
   Port a1 = wire((Port){a2.node, 0});
   if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
-  char fn[256];
   if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
   if (strncmp(fn, "lin_", 4)) return 0;      /* only pure lin_* builtins fold */
   if (!strncmp(fn, "lin_streq", 9)) return 0; /* needs C strings, keep readback */
-
+  /* Saturation guard: only fold a FULLY-saturated closure.  If any argument is
+     not yet a concrete value (a free-var / partially-applied placeholder), the
+     fold would read garbage operands and bake a wrong result.  Walk the arg
+     list and require every element be concrete. */
+  {
+    Port cur = skip_dup(n, wire((Port){a2.node, 2}));
+    if (cur.node < 0 || cur.node >= n->nn || n->tag[cur.node] != LAM ||
+        ctor_tag(NNM(n, cur.node)) != DT_STR) return 0; /* arg list is a cons spine */
+    Port bn = skip_dup(n, wire((Port){cur.node, 2}));
+    if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) return 0;
+    for (int step = 0; step < n->nn; step++) {
+      Port inner = skip_dup(n, wire((Port){cur.node, 2}));
+      if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
+      Port body = skip_dup(n, wire((Port){inner.node, 2}));
+      if (body.node < 0 || n->tag[body.node] != APP) break;
+      Port ia = skip_dup(n, wire((Port){body.node, 0}));
+      if (ia.node < 0 || n->tag[ia.node] != APP) break;
+      Port ap = skip_dup(n, wire((Port){ia.node, 2}));
+      /* require a concrete scalar: scott num, church bool, float, or string */
+      if (ap.node < 0 || ap.node >= n->nn || n->dead[ap.node] || n->tag[ap.node] != LAM) return 0;
+      if (ctor_tag(NNM(n, ap.node)) == DT_FLOAT) { double d; if (!net_read_float(n, ap, &d)) return 0; }
+      else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 0; }
+      else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 0; }
+      else if (net_read_int(n, ap) < 0) return 0;
+      cur = body; /* advance to next cons cell */
+    }
+  }
+  if (argfold) {
+    /* Eager argument-fold: only pure scalar INTEGER arithmetic/comparison
+       closures are re-entrancy-safe to fold mid-reduction.  String-arg ops
+       (lin_parse_float) and float-box results are excluded — they keep using
+       head-fold + readback, which avoids the strtod-on-garbage regression. */
+    static const char *safe[] = {
+      "lin_add","lin_sub","lin_mul","lin_div","lin_mod","lin_pow",
+      "lin_eq","lin_lt","lin_leq","lin_gt","lin_geq","lin_ffloor"
+    };
+    int ok = 0;
+    for (int s = 0; s < (int)(sizeof safe / sizeof safe[0]); s++) if (!strcmp(fn, safe[s])) { ok = 1; break; }
+    if (!ok) return 0;
+  }
   Val v = run_ffi(n, (Port){lam.node, 0});
   if (v.kind != 1 && v.kind != 3 && v.kind != 4) return 0;
+  if (argfold && v.kind == 4) return 0; /* floats stay on head-fold/readback */
+  *vout = v; return 1;
+}
+
+/* Fold a saturated _ffi closure into a concrete net value during reduction, so
+   FFI results (notably float comparisons -> Church booleans) become usable by
+   Scott consumers instead of only materialising at readback.  Only PURE `lin_*`
+   arithmetic/comparison closures are folded; side-effecting FFI (puts, exit,
+   dlopen, driver_set, getenv) stays readback-only. */
+int lin_fold_ffi(Net *n, Port lam, Port app) {
+  Val v; N = n;
+  if (!lin_ffi_peek(n, lam, &v, 0)) return 0;
   Port res;
   if (v.kind == 1) res = net_alloc_scott(n, v.iv);
   else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);
   else { double d; memcpy(&d, &v.iv, 8); res = net_alloc_float(n, d); }
   n->dead[lam.node] = 1;
   net_link(n, res, (Port){app.node, 0}, 1);
+  return 1;
+}
+
+/* Fold saturated `_ffi` closures wherever they are embedded (not just at a
+   beta head/arg), so closures captured inside a caller's body (e.g. the `n` of
+   `\_sz \_ss (_ss n)` in `succ (mul 2 2)`) still materialise at a fixed point.
+   Scans non-dead LAM nodes named `_ffi`; for each saturated pure-scalar closure,
+   replaces it in place by linking its concrete value to the closure's own
+   output wire.  Returns how many were folded (0 = none). */
+int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
+  Val v; N = n;
+  if (lam.port != 0 || lam.node < 0 || lam.node >= n->nn || n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
+  if (ctor_tag(n->name[lam.node] ? n->name[lam.node] : "") != DT_FFI) return 0;
+  if (!lin_ffi_peek(n, lam, &v, 1)) return 0;
+  /* Only fold concrete INTEGER / BOOL scalar results as beta arguments.  Float
+     closures keep using the head-fold + readback path (floats are box-index
+     encoded and re-linking mid-beta is unsafe), which also covers the
+     composed-float cases (`(fadd (float "2.5") (float "3.5"))`). */
+  if (v.kind != 1 && v.kind != 3) return 0;
+  Port res;
+  if (v.kind == 1) res = net_alloc_scott(n, v.iv);
+  else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);
+  else { double d; memcpy(&d, &v.iv, 8); res = net_alloc_float(n, d); }
+  n->dead[lam.node] = 1;
+  net_link(n, res, out, 1);
   return 1;
 }
 
