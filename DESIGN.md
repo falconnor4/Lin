@@ -366,6 +366,17 @@ the fold/scheduling fix above.
   de-ladered `num.lin` is committed as `std/num.lin` and the full suite is green.
   Nested `_ffi` closures are rebuilt as `simd.so` against the updated `lin.h`
   (the prebuilt `.so` was stale).
+- **Arithmetic moved out of the core into a driver plugin (goal 3).**  All pure
+  integer/float arithmetic & comparison dispatch (`lin_add`.., `lin_eq`..,
+  `lin_ffloor`, every `lin_f*` op, `lin_lerp`, `lin_fclamp`) now lives in
+  `std/drivers/arith.so`, not in `src/io.c run_ffi`.  The plugin registers a
+  scalar evaluator via a new `lin_arith_register` hook (constructor at dlopen;
+  `main()` calls `lin_arith_load()` at startup so the base engine folds
+  correctly); `run_ffi` delegates any `lin_*` fn the core doesn't own to that
+  hook, so folding/readback/composed paths share one plugin authority and the
+  core no longer reimplements math.  Non-movable C stays in the core
+  (memory/device/OS, float parsing `lin_parse_float`/`lin_float`, `lin_streq`,
+  `lin_folds`/`lin_folded`).  Suite stays green: 50 suites / 875 assertions.
 - **True self-recursion converges (round-28).**  Recursive defs are now compiled
   by *bounded self-unravelling* (`build_bound_rec`: `Y_k f = f(f(...(f base)...))`,
   k=24, `base = \args 0`) instead of the Y-fixpoint, which the reducer stranded
