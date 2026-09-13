@@ -76,12 +76,14 @@ void net_init(Net *n, int cap) {
   n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
   n->scope = malloc(cap * sizeof(Scope)); n->name = calloc(cap, sizeof(char *));
   n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
-  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0;
+  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0; n->declines = 0;
+  n->blocked = NULL; n->nblocked = 0; n->blockedcap = 0;
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
 void net_free(Net *n) {
   free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->sca);
+  free(n->blocked);
   if (n->name) { for (int i = 0; i < n->nn; i++) free(n->name[i]); free(n->name); }
 }
 
@@ -173,6 +175,29 @@ int net_interact(Net *n, Port p1, Port p2) {
        Church booleans usable by `if` — independent of any accelerator driver. */
     const char *lnm = n->name[n1] ? n->name[n1] : "";
     if (ctor_tag(lnm) == DT_FFI && lin_fold_ffi(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
+    /* A pure-lin `_ffi` closure whose operands are not yet concrete (e.g. a
+       still-live `(min 4 5)` result feeding `geq`) must not be β-squashed here:
+       the β-duplication strangles the operand sub-net before it materialises its
+       value.  Re-queue the head-redex so the operand's own redexes run first
+       (confluence-preserving deferral).  Bounded so a genuinely-stranded operand
+       (no live redex) falls through to the legacy β path instead of spinning.
+       During an open free-var precompile (lin_precompile_depth > 0) the operands
+       are legitimately free vars that will never become concrete now: deferring
+       would spin the whole precompile, so only defer for real reductions. */
+    if (lin_precompile_depth == 0 && ctor_tag(lnm) == DT_FFI && n->declines < (long)(1 << 15) &&
+        lin_ffi_needs_operand(n, (Port){n1, 0})) {
+      n->declines++;
+      /* Hold the pair on a separate BLOCKED list (NOT re-queued into `act`):
+         re-queuing into the active list would keep the inner reduce loop from
+         ever draining and spin forever.  The blocked pairs are re-added to the
+         active list only after the current wave fully drains (see net_reduce),
+         so the operand's own redexes run first. */
+      Port a = (Port){n1, 0}, b = (Port){n2, 0};
+      if (n->nblocked + 2 > n->blockedcap)
+        n->blocked = realloc(n->blocked, (size_t)(n->blockedcap = n->blockedcap ? n->blockedcap * 2 : 64) * sizeof(Port));
+      n->blocked[n->nblocked++] = a; n->blocked[n->nblocked++] = b;
+      return 1;
+    }
     Port lv = WIRE(n, ((Port){n1, 1})), lb = WIRE(n, ((Port){n1, 2}));
     Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;
@@ -394,6 +419,18 @@ long net_reduce(Net *n, long limit) {
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
     }
+    /* The active wave has fully drained.  Any FFI head-redexes we DEFERRED (their
+       operands weren't concrete yet) get another chance now that the wave's
+       operand computations have run — re-add them to the active list and loop. */
+    if (n->nblocked > 0) {
+      for (int i = 0; i + 1 < n->nblocked; i += 2) {
+        Port a = n->blocked[i], b = n->blocked[i + 1];
+        if (a.node < 0 || a.node >= n->nn || b.node < 0 || b.node >= n->nn || n->dead[a.node] || n->dead[b.node]) continue;
+        act_push(n, a, b);
+      }
+      n->nblocked = 0;
+      continue;
+    }
     if (changed == 0 && n->atop == 0) break;
     if (n->atop == 0 && (long)n->nn > gcmark) {
       if ((long)n->nn + 1 > qcap) { free(reach); free(q); qcap = (long)n->nn + 1;
@@ -425,5 +462,7 @@ Net *net_copy(const Net *n) {
   c->sca = n->scn ? malloc((size_t)n->scn * sizeof(uint64_t)) : NULL;
   if (n->scn) memcpy(c->sca, n->sca, (size_t)n->scn * sizeof(uint64_t));
   c->act = NULL; c->actcap = c->atop = 0; c->steps = 0;
+  /* blocked list is drained before net_copy is ever used; don't share the array */
+  c->blocked = NULL; c->nblocked = 0; c->blockedcap = 0;
   return c;
 }

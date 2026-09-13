@@ -25,7 +25,8 @@ typedef union { uint64_t raw; struct { uint64_t is_heap:1, len:6, bits:57; } sso
 typedef struct {
   int cap, nn; unsigned char *tag; Port *wire; Scope *scope; char **name;
   Port *act; int atop, actcap; unsigned char *dead; uint64_t *sca; int sccap, scn;
-  long steps;
+  Port *blocked; int nblocked, blockedcap;
+  long steps, declines;
 } Net;
 
 Port net_alloc(Net *n, int tag, Scope sc, const char *name);
@@ -103,6 +104,9 @@ int net_print(Net *n);
    (Scott int / Church bool / float box), so FFI results materialize during
    reduction instead of only at readback.  Returns 1 on success. */
 int lin_fold_ffi(Net *n, Port lam, Port app);
+/* non-destructive pre-scan: 1 if a pure-lin _ffi closure is blocked solely by a
+   non-concrete operand and should be deferred (re-queued) rather than β-squashed */
+int lin_ffi_needs_operand(Net *n, Port lam);
 /* Fold a saturated _ffi closure appearing as a beta ARGUMENT (not head); see io.c */
 int lin_fold_ffi_arg(Net *n, Port lam, Port out);
 /* !=0 while def_precompile reduces an open (free-var) body: suppress folding so

@@ -344,6 +344,28 @@ the fold/scheduling fix above.
 ## Status (honest)
 
 **Achieved and verified (all green: 50 suites / 875 assertions).**
+- **Round-32: the last-6 de-laddering blocker is closed — `num.lin` is now the
+  74-line direct-FFI version and the whole suite passes with it.**  Root cause was
+  a folding-routing gap in `lin_ffi_peek`/`lin_fold_ffi`, not precompile policy:
+  (a) the saturation walk only ever validated the *first* cons-cell operand
+  (`cur = body` landed on the APP node), so later non-concrete operands
+  (`(min 4 5)` as `geq`'s 2nd arg) slipped through and folded as garbage — fixed
+  by advancing via the cell's APP tail exactly like `unpack_args`; (b) once the
+  walk was correct, a saturated pure-`lin_*` head-closure with a still-live
+  operand was being β-squashed (not deferred), strangling the operand — fixed by a
+  **confluence-preserving deferral**: when `lin_ffi_needs_operand` reports a
+  non-concrete operand, the head-redex is parked on a per-net `blocked` list and
+  re-added to the active list only *after* the wave drains, so the operand's own
+  redexes materialise its value first; (c) `lin_ffi_needs_operand` recurses into
+  nested `_ffi` operands, so an outer closure whose operand is itself a closure
+  with a detached/not-yet-resolved operand (the `attacks`/nqueens deep case) is
+  deferred rather than baked with a wrong scalar.  Bounded by a per-net
+  `declines` budget (reset on every real fold) so a genuinely-stranded operand
+  falls back to the legacy β path instead of spinning; deferral is disabled during
+  open free-var precompiles (operands are legitimately free vars).  Result: the
+  de-ladered `num.lin` is committed as `std/num.lin` and the full suite is green.
+  Nested `_ffi` closures are rebuilt as `simd.so` against the updated `lin.h`
+  (the prebuilt `.so` was stale).
 - **True self-recursion converges (round-28).**  Recursive defs are now compiled
   by *bounded self-unravelling* (`build_bound_rec`: `Y_k f = f(f(...(f base)...))`,
   k=24, `base = \args 0`) instead of the Y-fixpoint, which the reducer stranded

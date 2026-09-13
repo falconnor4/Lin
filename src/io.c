@@ -391,13 +391,20 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
       else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 0; }
       else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 0; }
       else if (ctor_tag(NNM(n, ap.node)) == DT_FFI) {
-        /* pure-lin *closure* operand: fold it (run_ffi recurses) to a scalar */
+        /* pure-lin *closure* operand: fold it (run_ffi recurses) to a scalar.
+           If the nested closure itself isn't fully concrete (a detached/earlier
+           operand), folding would bake garbage — recurse to detect. */
         if (lin_precompile_depth > 0) return 0;            /* free-var context: not concrete */
+        if (lin_ffi_needs_operand(n, ap)) return 0;
         Val nv = run_ffi(n, ap);
         if (nv.kind != 1 && nv.kind != 3 && nv.kind != 4) return 0;
       }
       else if (net_read_int(n, ap) < 0) return 0;
-      cur = body; /* advance to next cons cell */
+      /* advance to next cons cell (tail of the current cell's APP), exactly as
+         unpack_args traverses; the previous `cur = body` landed on the APP node
+         so only the FIRST operand was ever validated, letting later non-concrete
+         operands fold as garbage (the `(min 4 5)`-as-if stranding). */
+      cur = skip_dup(n, wire((Port){body.node, 2}));
     }
   }
   if (argfold) {
@@ -419,6 +426,60 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   *vout = v; return 1;
 }
 
+/* Non-destructive pre-scan for the reducer: is `lam` a pure-lin `_ffi` closure
+   that is BLOCKED solely because one of its operands is not yet a concrete
+   scalar (e.g. a still-live `(if ...)` result like `(min 4 5)`), rather than
+   because the closure is malformed / partially applied?  If so, the reducer
+   should DEFER this head-redex (re-queue it, don't β-destroy the closure) so
+   the operand's own redexes get a chance to materialise its value first —
+   the confluence-preserving routing that fixes the composed-`if` stranding. */
+int lin_ffi_needs_operand(Net *n, Port lam) {
+  if (lam.node < 0 || lam.node >= n->nn || n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
+  if (n->name[lam.node] && ctor_tag(n->name[lam.node]) != DT_FFI) return 0;
+  char fn[256];
+  Port r = wire((Port){lam.node, 2});
+  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
+  Port a2 = wire((Port){r.node, 2});
+  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
+  Port a1 = wire((Port){a2.node, 0});
+  if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
+  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
+  if (strncmp(fn, "lin_", 4)) return 0;
+  if (!strncmp(fn, "lin_streq", 9)) return 0;
+  Port cur = skip_dup(n, wire((Port){a2.node, 2}));
+  if (cur.node < 0 || cur.node >= n->nn || n->tag[cur.node] != LAM ||
+      ctor_tag(NNM(n, cur.node)) != DT_STR) return 0;
+  Port tail = skip_dup(n, wire((Port){cur.node, 2}));
+  if (tail.node < 0 || tail.port != 0 || n->tag[tail.node] != LAM) return 0;
+  for (int step = 0; step < n->nn; step++) {
+    Port inner = skip_dup(n, wire((Port){cur.node, 2}));
+    if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
+    Port body = skip_dup(n, wire((Port){inner.node, 2}));
+    if (body.node < 0 || n->tag[body.node] != APP) break;
+    Port ia = skip_dup(n, wire((Port){body.node, 0}));
+    if (ia.node < 0 || n->tag[ia.node] != APP) break;
+    Port ap = skip_dup(n, wire((Port){ia.node, 2}));
+    if (ap.node < 0 || ap.node >= n->nn || n->dead[ap.node] || n->tag[ap.node] != LAM) return 1;
+    if (ctor_tag(NNM(n, ap.node)) == DT_FLOAT) { double d; if (!net_read_float(n, ap, &d)) return 1; }
+    else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 1; }
+    else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 1; }
+    else if (ctor_tag(NNM(n, ap.node)) == DT_FFI) {
+      if (lin_precompile_depth > 0) return 1;
+      /* A nested `_ffi` operand is only concrete if ITS OWN operands are all
+         concrete too.  Just folding it here (run_ffi) would silently bake garbage
+         when a nested add/eq closure has a detached/not-yet-resolved operand
+         (reads as 0), corrupting the outer closure with a wrong scalar.  Recurse
+         so a not-fully-concrete nested closure flags the OUTER as needing-defer. */
+      if (lin_ffi_needs_operand(n, ap)) return 1;
+      Val nv = run_ffi(n, ap);
+      if (nv.kind != 1 && nv.kind != 3 && nv.kind != 4) return 1;
+    }
+    else if (net_read_int(n, ap) < 0) return 1;
+    cur = skip_dup(n, wire((Port){body.node, 2}));
+  }
+  return 0;
+}
+
 /* Fold a saturated _ffi closure into a concrete net value during reduction, so
    FFI results (notably float comparisons -> Church booleans) become usable by
    Scott consumers instead of only materialising at readback.  Only PURE `lin_*`
@@ -438,6 +499,7 @@ int lin_fold_ffi(Net *n, Port lam, Port app) {
   else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);
   else { double d; memcpy(&d, &v.iv, 8); res = net_alloc_float(n, d); }
   n->dead[lam.node] = 1;
+  n->declines = 0; /* a fold is real progress: reset the deferral budget */
   net_link(n, res, (Port){app.node, 0}, 1);
   return 1;
 }
