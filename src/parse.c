@@ -166,10 +166,10 @@ static Term *parse_term(void) {
     }
     if (S[P] != '"') pfail("unterminated string literal");
     P++;
-    Term *body = term_new(TVAR, "nil", NULL, NULL);
+    Term *body = term_new(TVAR, "list.nil", NULL, NULL);
     for (int i = dlen - 1; i >= 0; i--) {
       Term *ch = scott(dec[i]);
-      body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "cons", NULL, NULL), ch), body);
+      body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "list.cons", NULL, NULL), ch), body);
     }
     return body;
   }

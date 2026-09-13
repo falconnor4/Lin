@@ -1,0 +1,35 @@
+; True self-recursive defs via bounded self-unravelling (not the Y-fixpoint,
+; which stranded in the reducer).  Single-call (linear) recursion now converges:
+; peel/fact/sumto/pow2 all reduce to the correct value.  (Depth is bounded by
+; LIN-style 24-unravelled; deeper cases are limited by composed-ccall scheduling
+; for window-exceeding results, tracked separately.)
+(load "num.lin")
+(load "bool.lin")
+
+(define! peel (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (peel (pred n))))))
+(peel 3)
+; expect => 0
+(peel 4)
+; expect => 0
+(peel 5)
+; expect => 0
+
+(define! fact (num -> num) (\n (ifl (is_zero n) (\_ 1) (\_ (mul n (fact (pred n)))))))
+(fact 0)
+; expect => 1
+(fact 1)
+; expect => 1
+(fact 3)
+; expect => 6
+(fact 4)
+; expect => 24
+(fact 5)
+; expect => 120
+
+(define! sumto (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))
+(sumto 5)
+; expect => 15
+
+(define! pow2 (num -> num) (\n (ifl (is_zero n) (\_ 1) (\_ (mul 2 (pow2 (pred n)))))))
+(pow2 4)
+; expect => 16

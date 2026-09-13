@@ -330,6 +330,7 @@ static Val run_ffi(Net *n, Port p) {
   B3("lin_streq", argc >= 2 && !strcmp((char *)c_args[0], (char *)c_args[1]));
   B3("lin_eq", c_args[0] == c_args[1]);  B3("lin_lt", c_args[0] < c_args[1]);
   B3("lin_leq", c_args[0] <= c_args[1]); B3("lin_gt", c_args[0] > c_args[1]);
+  B3("lin_geq", c_args[0] >= c_args[1]);
   B1("dlopen", (long)(intptr_t)dlopen(argc > 0 ? (char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL));
   B1("puts", puts(argc > 0 ? (char *)c_args[0] : ""));
   if (!strcmp(fn, "getenv")) { char *ev = getenv(argc > 0 ? (char *)c_args[0] : ""); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", ev ? ev : "(null)"); return v; }
@@ -346,6 +347,10 @@ static Val run_ffi(Net *n, Port p) {
    closure; else 0.  Shared by the head-fold (LAM x APP) and the eager
    argument-fold, so composed arithmetic materialises regardless of position. */
 int lin_precompile_depth = 0; /* set around def_precompile's net_reduce */
+/* Counted while def_precompile reduces: an _ffi closure was β-consumed as a
+   boolean/function but could not fold (open free-var operands).  A nonzero count
+   means the baked def would be broken, so def_precompile declines the cache. */
+int lin_stuck_ffi_count = 0;
 static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   if (lin_precompile_depth > 0) return 0; /* free-var body: don't fold yet */
   char fn[256];
@@ -376,11 +381,21 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
       Port ia = skip_dup(n, wire((Port){body.node, 0}));
       if (ia.node < 0 || n->tag[ia.node] != APP) break;
       Port ap = skip_dup(n, wire((Port){ia.node, 2}));
-      /* require a concrete scalar: scott num, church bool, float, or string */
+      /* require a concrete scalar: scott num, church bool, float, or string.
+         An operand that is ITSELF a pure `lin_*` _ffi closure is also concrete:
+         fold it recursively so a composed `(mul 6 (add 24 96))`-style operand
+         (the inner closure has not yet reduced to a numeral) still saturates the
+         outer closure instead of stranding it. */
       if (ap.node < 0 || ap.node >= n->nn || n->dead[ap.node] || n->tag[ap.node] != LAM) return 0;
       if (ctor_tag(NNM(n, ap.node)) == DT_FLOAT) { double d; if (!net_read_float(n, ap, &d)) return 0; }
       else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 0; }
       else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 0; }
+      else if (ctor_tag(NNM(n, ap.node)) == DT_FFI) {
+        /* pure-lin *closure* operand: fold it (run_ffi recurses) to a scalar */
+        if (lin_precompile_depth > 0) return 0;            /* free-var context: not concrete */
+        Val nv = run_ffi(n, ap);
+        if (nv.kind != 1 && nv.kind != 3 && nv.kind != 4) return 0;
+      }
       else if (net_read_int(n, ap) < 0) return 0;
       cur = body; /* advance to next cons cell */
     }
@@ -411,7 +426,13 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
    dlopen, driver_set, getenv) stays readback-only. */
 int lin_fold_ffi(Net *n, Port lam, Port app) {
   Val v; N = n;
-  if (!lin_ffi_peek(n, lam, &v, 0)) return 0;
+  if (!lin_ffi_peek(n, lam, &v, 0)) {
+    /* During an open free-var precompile, a _ffi closure consumed as a
+       boolean/function cannot fold (operands not concrete) and would be
+       β-destroyed; flag the containing def as uncacheable. */
+    if (lin_precompile_depth > 0) lin_stuck_ffi_count++;
+    return 0;
+  }
   Port res;
   if (v.kind == 1) res = net_alloc_scott(n, v.iv);
   else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);

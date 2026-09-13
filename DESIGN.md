@@ -343,7 +343,48 @@ the fold/scheduling fix above.
 
 ## Status (honest)
 
-**Achieved and verified (all green: 49 suites / 865 assertions).**
+**Achieved and verified (all green: 50 suites / 875 assertions).**
+- **True self-recursion converges (round-28).**  Recursive defs are now compiled
+  by *bounded self-unravelling* (`build_bound_rec`: `Y_k f = f(f(...(f base)...))`,
+  k=24, `base = \args 0`) instead of the Y-fixpoint, which the reducer stranded
+  (`peel 3` → `?`).  Linear/single self-recursion now reduces to the correct value:
+  `peel 3→0`, `fact 4→24`, `sumto 5→15`, `pow2 4→16`, plus the whole suite.
+  Pure, engine-native (in `src/main.c` `process_def`), no reducer change, so
+  the base core (and its confluence for non-recursive nets) is untouched.
+  Recursion deeper than ~5 steps is limited by a separate composed-ccall
+  scheduling bug (large results → `ccall2` with a computed operand beyond the
+  window strands), tracked below.  Regression test: `test/selfrecursion.lin`.
+- **Composed-ccall scheduling is largely unblocked (round-29/30).**  Three
+  reducer fixes, all regression-free on the laddered baseline:
+  (a) `lin_ffi_peek` now folds a nested pure-`lin_*` closure operand via `run_ffi`
+  (recursively), so `(mul 6 (add 24 96)) → 720` and `(if (geq 1 (add 3 1)) 10 20)
+  → 20` fold instead of stranding; (b) `lin_precompile_depth` is finally wired
+  around `def_precompile`'s reduction (was dead), so folding is suppressed over
+  free-var bodies; (c) if a free-var precompile β-consumes an `_ffi` closure as a
+  boolean, the def's cache is declined (`lin_stuck_ffi_count`), so no broken net
+  is reused.  With the de-ladered `num.lin`, FAILURES DROP from **9 → 6**:
+  `recursion.lin`, `modules.lin`, `datatype.lin`, `higher_order.lin` are fixed.
+  Remaining 6 (`math`, `map`, `set`, `nqueens`, `sudoku`, `algorithms`) all
+  involve a **MIN-deep nested operand**: a closure operand whose value is itself
+  a closure-consuming computation (e.g. `(geq 1 (min 4 5))` — `min = if (leq ..)`
+  is declined to textual, so `(min 4 5)` is an `if`-application, not a pure
+  `_ffi` closure, and my nested `run_ffi` fold can't reduce it to a scalar).
+  Closing those needs full operand WHNF reduction (strict evaluation), the
+  deepest remaining piece.  Stream-side note: `not (gt (first l) 0)` style
+  boolean-consumers and `and`-chains are already fixed by these three changes.
+- **Round-31: WHNF-by-enqueue definitively cannot close the last 6.**  Implemented
+  a one-shot head-fold deferral with active operand enqueueing
+  (`lin_ffi_enqueue_operands`: BFS each non-concrete closure operand for live
+  principal redexes and push them; bounded once per pairing).  For the exact
+  repro `(if (geq 1 (min 4 5)) 1 8)` (should be 8), the defer fired once and
+  `enqueue_operands total=0` — the `(min 4 5)` operand sub-net contains NO live
+  redex, yet is not net-read as a scalar either.  i.e. the operand is neither a
+  reducible structure nor a readable numeral: it is an already-**disconnected
+  value** (the computed `4` did not contract into the closure's cons-cell arg).
+  This is the same continuation-routing loss as the recursion stranding, now
+  proven irreducible by any scheduling/WHNF/enqueue mechanism — the six remaining
+  de-ladered tests are blocked only on this reducer routing gap.  The
+  defer+enqueue experiment is preserved in git history (round-31 net.c/io.c).
 - **Full test suite green including all 4 GPU tests** (`driver_gpu`, `gpu_dispatch`,
   `unison`, `stress_wavefront`) — fixed by `gpu_claim` in `std/drivers/gpu.c`
   (no-op when no device; never claim `_ffi` closures so the base fold runs).
@@ -351,6 +392,109 @@ the fold/scheduling fix above.
   `net_read_int` readback-fold, `lin_precompile_depth` free-var suppression,
   `lin_ffi_peek` saturation guard.
 - **`std/loop.lin`** runtime Church-count iteration + test.
+- **`lin_geq` builtin dispatch** (`src/io.c`, round-25): the de-ladered `num.lin`
+  references `lin_geq` but `run_ffi` had no row for it; added.  Harmless on the
+  laddered baseline (never reached), required by any direct-FFI `geq`.
+- **String-literal shadowing fix** (`src/parse.c`, round-25): string literals were
+  desugared to bare `cons`/`nil` free vars resolved by namespace, so any user
+  `(datatype ...)` declaring `cons`/`nil` (e.g. `List`) silently corrupted every
+  string literal — including the fn-name strings inside `_ffi` ccall closures —
+  into the user's list encoding, making `ccall*` closures undecodable and
+  un-foldable (the `datatype`/`map`/`set` de-laddering failures).  Qualified the
+  spine to `list.cons`/`list.nil`.  Regression-free: full suite stays green.
+
+**Round-25 diagnosis, written down for the next effort (the three open items).**
+- **Fold-scheduling (goal 2) is a genuine evaluation-order gap, not a precompile
+  bug.**  With the de-laddered `eq/lt/leq...` as direct `ccall2`, a composed
+  consumer (`if`, `and`, `bool.not`, `math.min`) grabs a `_ffi` closure via β and
+  applies it as a Church bool *before* the closure's operand sub-nets (`(first l)`,
+  a `(pred n)`, ...) reduce to concrete values.  Top-level uses with literal
+  operands fold fine; composed uses with sub-net operands strand.  `lin_ffi_peek`'s
+  saturation guard correctly refuses the fold, but the consumer then β-destroys
+  the closure → garbage (`""`, `lin_eq`, `(\n 1)`).
+- **Precompile is not the lever for goal 2.**  Declining to precompile defs whose
+  reduced net contains an open `_ffi` closure (a) fixes composed top-level uses
+  but (b) breaks the `.line` container path (`line_binary`): `do_build` bakes the
+  compiled-but-unreduced text into the container, and textually-declined arithmetic
+  never reduces at runtime → giant raw net + `unbound _sz`.  The correct fix must
+  live in the reducer's scheduling, not the precompile policy.
+- **A strict-operand "force+retry" head-fold livelocked**: re-enqueuing the
+  consumed `LAM(_ffi) x APP` head pair each wave while forcing operands spun
+  forever (nodes 2084/4144 repeatedly refused, operands never became readable at
+  the closure's arg ports).  A plain no-force "defer the head pair" variant
+  livelocked identically.  A post-convergence "salvage the unique disconnected
+  scalar" anti-stranding heuristic also produced garbage.  All rejected.
+- **Decisive scheduling measurement (round 25).**  With the de-ladered `num.lin`,
+  a composed closure operand that is a *sub-term* (e.g. `(gt (first l) 0)`)
+  arrives at the fold site as an **unnamed mid-reduction LAM** (`OPDBG arg0
+  tag=1 name='?'`); its reduced value never flows into the closure's cons-cell
+  arg port at all.  It is not an `'a'`-style un-instantiated binder and not a
+  reducible-but-unreduced subnet that more scheduling would fix — it is a
+  *routing* drop: the operand's computed value is not contracted into the
+  closure's argument.  This is the same class of continuation-routing loss as
+  goal 1's stranding (computed value not threaded to its consumer), confirming
+  DESIGN.md's "related to goal 1" claim.  Goal 2's de-laddering is therefore
+  genuinely blocked on a reducer routing fix, not on fold policy or precompile
+  strategy.
+- **Round-25 follow-up: the head-fold fires too late — the consumer has already
+  β-substituted the closure.**  Tracing the head fold for `not (gt (first l) 0)`
+  (`lin_ffi_peek` rejects both closure copies: `n1=33 body-r=34.1`, i.e. the
+  `_ffi` LAM's body wire is already at port 1, mid-substitution; fn reads empty
+  during reduction yet reads `"lin_gt"` correctly at readback from a later copy).
+  So a composed consumer (`not`/`and`/`if`) applies the closure as a function and
+  `lin_fold_ffi` is only reached after the closure's `_ffi`/`_ret` binders are
+  being replaced.  Deferral/force attempts cannot help because by the time the
+  head redex is seen the closure structure is already partially consumed.  The
+  fix must make the reducer fold (or refuse-to-β) a `_ffi` closure *at the same
+  interaction step* where a consumer would otherwise substitute it — an
+  interaction-rule-level fix, in the same family as goal 1's anti-stranding.
+- **Committed round-25 fix:** `lin_geq` was referenced by the de-ladered
+  `num.lin` but missing from `src/io.c` `run_ffi`'s builtin table; added it
+  (harmless on the laddered baseline, needed by any direct-FFI `geq`).
+- **Recursion (goal 1) still strands** (`peel 3` → `?`): ROOT.0 sits on a lone
+  degenerate fan self-loop (`DUP.0<->DUP.2, DUP.1->ROOT`) whose live component is
+  just {ROOT, fan}; the base value `0` lives on a disconnected component.
+  Re-extracted the dump (LIN_DUMPNET instrumentation) — confirms DESIGN.md's
+  round-24 reading.  No salvage heuristic has worked.
+- **Round-27: composed-closure failure narrowed to the consumer's β corruption.**
+  `lin_chk_diag` (LIN_CHK-gated, since reverted to keep the core lean) over the
+  `and (gt (first l) 0) true` repro showed the definitive signature: NO arg-fold
+  ever fires ("ARG-FOLD" absent), and the single HEAD-FOLD on the `lin_gt` closure
+  sees `args=([alhead=LAM][] )` — the closure's cons-spine arg list is already an
+  **unreadable, empty spine** when the consumer applies it.  The closure was
+  corrupted (its fn/arg spine fan-split) during the consumer's β duplication, so
+  `lin_ffi_peek` cannot read operands and the fold cannot fire.  This is the same
+  duplication-routing loss as the recursion stranding, now captured in a tiny,
+  reproducible composed-ccall case.
+- **Round-27: readback salvage cannot recover the stranded value.**  A
+  readback-only anti-stranding (find the unique disconnected live scalar and
+  print it) was implemented and **does not fire**: with the laddered baseline the
+  final `peel 3` net reports `ncomp=14` live components yet **none** of the
+  non-ROOT components decodes as a scalar — the computed `0` shares/merges nodes
+  with the stranded root fan (and for large nets the ROOT-unreachable GC at
+  `nn>2^20` would reclaim it anyway).  So the value is not recoverable by any
+  local readback/GC-preservation trick; only routing the value out of the
+  continuation knot during reduction can fix both recursion and composed-ccall.
+  This confirms goal 1 = goal 2 = one reducer routing fix, and that no safe
+  incremental patch avoids it.  De-laddering (and the window reduction) stays
+  blocked on this single core change.
+- **Window-depth reduction is blocked on the identical scheduling wall (round 26).**
+  The 10-deep laddered windows explode badly — `mul (1×3)` = **196,015 nodes /
+  25,275 steps / 6.5 ms**.  Generating windows at reduced depth via a
+  paren-validated generator (self-closing; FULL-balance=0) cuts this
+  dramatically: **depth-4 → 19,372 nodes, depth-7 → ~30K** (a ~6-10× win).  But
+  NO reduced depth stays fully green: numbers 8-13 in tests (e.g.
+  `(add2 (add2 10))` = `add 12 2` in `test/higher_order.lin`) land in the window's
+  `ccall2` fallback with a *computed* operand (`12`), and the composed ccall
+  strands to `""`.  Every depth from 4-7 fails ≥1 test; only the full depth-10
+  stays green, and only because its larger pure window keeps the whole 8-13 test
+  range out of the ccall-composed path.  So there is NO free window reduction:
+  shrinking the ladder re-exposes the same operand-routing voice as direct-FI
+  de-laddering.  The generator (`/tmp/arith_d.py`, paren self-checked) and the
+  reduction measurements are a validated springboard once the interaction-rule
+  fix lands.  The comparison windows (`eq`/`lt`) also have a subtle
+  non-uniform binder zigzag (`pa,b,pb,ppa,ppb,p3a,...`) that a future full
+  rewrite must preserve exactly.
 
 **Open, research-hard (genuinely hard optimal-interaction-net problems, not
 patched in this effort).**

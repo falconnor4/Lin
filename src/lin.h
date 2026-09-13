@@ -108,6 +108,8 @@ int lin_fold_ffi_arg(Net *n, Port lam, Port out);
 /* !=0 while def_precompile reduces an open (free-var) body: suppress folding so
    the fold never runs on non-concrete operands and bakes a stale value. */
 extern int lin_precompile_depth;
+/* bumped when a foldable head-closure is consumed unfolded during precompile */
+extern int lin_stuck_ffi_count;
 /* datatype registry (populated by builtins + `datatype` forms) */
 int  ctor_tag(const char *name); /* builtin domain DT_*, or -1 */
 int  ctor_register(const char *name, int tag, const char *c1, const char *c2);

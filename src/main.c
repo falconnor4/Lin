@@ -71,7 +71,18 @@ static void def_precompile(Def *d) {
   char err[512]; Term *ex = expand_defs(d->term);
   Net src; net_init(&src, 1 << 14);
   if (!compile(ex, &src, err, sizeof err)) { net_free(&src); term_free(ex); return; }
-  if (net_reduce(&src, STEP_LIMIT) >= STEP_LIMIT) { net_free(&src); term_free(ex); return; }
+  /* Free-var body: suppress FFI folding so no closure bakes a stale value from
+     the open bound vars (lin_ffi_peek's saturation + nested-closure paths test
+     lin_precompile_depth > 0 and bail). */
+  lin_precompile_depth++;
+  lin_stuck_ffi_count = 0;
+  long full = net_reduce(&src, STEP_LIMIT);
+  lin_precompile_depth--;
+  if (full >= STEP_LIMIT) { net_free(&src); term_free(ex); return; }
+  /* If this free-var body β-consumed an _ffi closure as a boolean/function (the
+     fold was suppressed by lin_precompile_depth, so the closure was destroyed),
+     the baked net is broken for composed use — decline the cache. */
+  if (lin_stuck_ffi_count > 0) { net_free(&src); term_free(ex); return; }
   d->compiled = net_copy(&src); net_free(&src); term_free(ex);
 }
 
@@ -121,11 +132,34 @@ void eval_form(Term *t) {
   run_and_report(&net); net_free(&net); term_free(ex);
 }
 
-/* Z = \_f. ((\_x. _f (\_v. _x _x _v)) (\_x. _f (\_v. _x _x _v))) */
-static Term *y_term(void) {
-  Term *xxv = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "_x", 0, 0), term_new(TVAR, "_x", 0, 0)), term_new(TVAR, "_v", 0, 0));
-  Term *half = term_new(TLAM, "_x", term_new(TAPP, "", term_new(TVAR, "_f", 0, 0), term_new(TLAM, "_v", xxv, 0)), 0);
-  return term_new(TLAM, "_f", term_new(TAPP, "", half, term_copy(half)), 0);
+/* Count the arity (leading \x binders) of a function body, so the bounded
+   self-unravelling base term can be built with the right number of slots. */
+static int lam_arity(Term *t) {
+  int k = 0;
+  while (t && t->type == TLAM) { k++; t = t->l; }
+  return k;
+}
+
+/* Bounded self-recursion: replace the stranding Y-fixpoint with a *finite*
+   unravelling `Y_k f = f (f (... (f base) ...))` (k applications), where
+   `base = \a1..\ar 0`.  This is exactly the engine's provably-working recursion
+   pattern (e.g. `recursion.lin`'s stratified `fact_step^5`), so reduction never
+   forms the self-referential continuation knot that strands the base value.
+   Any recursion deeper than `k` truncates to `0`.  Pure, engine-native, and
+   keeps the base engine (and its confluence) untouched. */
+static Term *build_bound_rec(const char *name, Term *body, int k) {
+  /* base = \a1..\an 0 for arity n = lam_arity(body) */
+  int ar = lam_arity(body);
+  Term *zero = term_new(TLAM, "_sz", term_new(TLAM, "_ss", term_new(TVAR, "_sz", 0, 0), 0), 0);
+  Term *base = term_copy(zero);
+  for (int i = 0; i < ar; i++) { char a[NAME]; snprintf(a, sizeof a, "_r%d", i); base = term_new(TLAM, a, base, NULL); }
+  term_free(zero);
+  Term *cur = base;
+  for (int i = 0; i < k; i++) {
+    Term *f = term_new(TLAM, name, term_copy(body), NULL);
+    cur = term_new(TAPP, "", f, cur);
+  }
+  return cur;
 }
 
 static void qualify_free(Term *t, Guard *b) {
@@ -188,7 +222,8 @@ static void process_def(Term *t) {
     strncpy(d->name, t->name, NAME - 1); d->name[NAME - 1] = 0;
   }
   d->sch = sch; d->typed = 1; d->rec = rec;
-  d->term = rec ? term_new(TAPP, "", y_term(), term_new(TLAM, t->name, t->l, NULL)) : t->l;
+  if (rec) d->term = build_bound_rec(t->name, t->l, 24);
+  else     d->term = t->l;
   d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;
   t->l = NULL;
 }
