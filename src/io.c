@@ -272,6 +272,40 @@ static void *resolve_driver(const char *dn) {
   return s;
 }
 
+/* ------------------------------------------------------------------ *
+ *  Native arithmetic hook (goal 3).
+ *
+ *  All pure integer/float arithmetic & comparison dispatch (`lin_add` ...,
+ *  `lin_feq` ...) lives in a driver plugin (`std/drivers/arith.so`), NOT in
+ *  the core.  The plugin registers a scalar evaluator here at dlopen time;
+ *  `run_ffi` delegates any `lin_*` fn the core doesn't own to that hook, so
+ *  base-engine folding, readback, and the composed/head-fold paths all go
+ *  through one arithmetic authority without the core reimplementing math.
+ *  Non-movable C stays in the core: memory/device/OS (exit, driver_*,
+ *  dlopen, puts, getenv), float parsing (`lin_parse_float`, `lin_float`),
+ *  string compare (`lin_streq`), and fold accounting (`lin_folds`/`lin_folded`).
+ *
+ *  Signature: eval(fn, argc, args, out, outkind) -> 1 if fn is a pure-scalar
+ *  op handled here (out=result; outkind: 1 int, 3 bool, 4 float-bits), else 0. */
+static int (*lin_arith_eval)(const char *fn, int argc, const long *args, long *out, int *outkind) = NULL;
+void lin_arith_register(int (*f)(const char *, int, const long *, long *, int *)) {
+  lin_arith_eval = f;
+}
+/* Load the arithmetic driver plugin so its constructor registers the hook.
+   Called once at startup (the base engine needs the hook for every fold). */
+void lin_arith_load(void) {
+  static int done = 0;
+  if (done) return;
+  done = 1;
+  const char *dir = getenv("LIN_STD_DIR");
+  char path[4096];
+  snprintf(path, sizeof path, "%s/drivers/arith.so", dir ? dir : "std");
+  void *s = dlsym(RTLD_DEFAULT, "lin_arith_driver");
+  if (!s) dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+  if (!s) s = dlsym(RTLD_DEFAULT, "lin_arith_driver");
+  if (!s) fprintf(stderr, "warning: arithmetic driver plugin not found at '%s'\n", path);
+}
+
 static Val run_ffi(Net *n, Port p) {
   Val v = {0};
   p = skip_dup(n, p);
@@ -296,41 +330,25 @@ static Val run_ffi(Net *n, Port p) {
     if (s) lin_driver_add((LinDriver *)s);
     v.kind = 1; v.iv = 1; return v;
   }
-  B1("lin_add", c_args[0] + c_args[1]);
-  B1("lin_sub", c_args[0] >= c_args[1] ? c_args[0] - c_args[1] : 0);
-  B1("lin_mul", c_args[0] * c_args[1]);
-  B1("lin_div", c_args[1] ? c_args[0] / c_args[1] : 0);
-  B1("lin_mod", c_args[1] ? c_args[0] % c_args[1] : 0);
-  B1("lin_pow", ({ long b = c_args[0], e = c_args[1], r = 1; while (e > 0) { if (e & 1) r *= b; b *= b; e >>= 1; } r; }));
-  /* float builtins: args are IEEE-754 bits carried as longs; result kind=4 */
-  #define FA(n, e) if (!strcmp(fn, n)) { double a, b; memcpy(&a, &c_args[0], 8); memcpy(&b, &c_args[1], 8); double r = (e); long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
-  #define FU(n, e) if (!strcmp(fn, n)) { double a; memcpy(&a, &c_args[0], 8); double r = (e); long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
-  #define FC(n, e) if (!strcmp(fn, n)) { double a, b; memcpy(&a, &c_args[0], 8); memcpy(&b, &c_args[1], 8); v.kind = 3; v.iv = (e); return v; }
-  FA("lin_fadd", a + b);   FA("lin_fsub", a - b);
-  FA("lin_fmul", a * b);   FA("lin_fdiv", b != 0.0 ? a / b : 0.0);
-  FA("lin_fmin", a < b ? a : b);   FA("lin_fmax", a > b ? a : b);
-  FU("lin_fsqrt", a >= 0.0 ? sqrt(a) : 0.0);
-  FU("lin_fsin", sin(a));  FU("lin_fcos", cos(a));  FU("lin_ftan", tan(a));
-  FU("lin_fabs", fabs(a));
-  FU("lin_fsign", a >= 0.0 ? 1.0 : -1.0);
-  FU("lin_ffract", a - floor(a));
-  FA("lin_fatan2", atan2(a, b));   FA("lin_fpow", pow(a, b));
-  FC("lin_feq", a == b);   FC("lin_flt", a < b);   FC("lin_fleq", a <= b);
-  /* 3-arg lerp (a, b, t) -> a + (b-a)*t, needs a 3rd arg */
-  if (!strcmp(fn, "lin_lerp") && argc >= 3) { double x, y, t; memcpy(&x, &c_args[0], 8); memcpy(&y, &c_args[1], 8); memcpy(&t, &c_args[2], 8); double r = x + (y - x) * t; long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
-  if (!strcmp(fn, "lin_fclamp") && argc >= 3) { double x, lo, hi; memcpy(&x, &c_args[0], 8); memcpy(&lo, &c_args[1], 8); memcpy(&hi, &c_args[2], 8); double r = x < lo ? lo : (x > hi ? hi : x); long rb; memcpy(&rb, &r, 8); v.kind = 4; v.iv = rb; return v; }
-  #undef FA
-  #undef FU
-  #undef FC
-  B1("lin_ffloor", ({ double a; memcpy(&a, &c_args[0], 8); (long)floor(a); }));
+  /* Pure arithmetic / comparison: delegated to the registered driver hook
+     (std/drivers/arith.so).  The hook returns a scalar (int/bool/float-bits)
+     for every `lin_*` op the core does not own; anything it declines falls
+     through to the core's non-movable rows and the dlsym escape hatch below. */
+  if (fn[0] == 'l' && fn[1] == 'i' && fn[2] == 'n' && fn[3] == '_' && lin_arith_eval) {
+    long out; int okind = 0;
+    if (lin_arith_eval(fn, argc, c_args, &out, &okind)) {
+      if (okind == 4) v.kind = 4;
+      else if (okind == 3) v.kind = 3;
+      else v.kind = 1;
+      v.iv = out;
+      return v;
+    }
+  }
   if (!strcmp(fn, "lin_folds")) { v.kind = 1; v.iv = lin_fold_total(); return v; }
   B3("lin_folded", lin_fold_total() > 0);
   if (!strcmp(fn, "lin_parse_float")) { double d = strtod(argc > 0 ? (char*)c_args[0] : "0", NULL); long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
   if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
   B3("lin_streq", argc >= 2 && !strcmp((char *)c_args[0], (char *)c_args[1]));
-  B3("lin_eq", c_args[0] == c_args[1]);  B3("lin_lt", c_args[0] < c_args[1]);
-  B3("lin_leq", c_args[0] <= c_args[1]); B3("lin_gt", c_args[0] > c_args[1]);
-  B3("lin_geq", c_args[0] >= c_args[1]);
   B1("dlopen", (long)(intptr_t)dlopen(argc > 0 ? (char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL));
   B1("puts", puts(argc > 0 ? (char *)c_args[0] : ""));
   if (!strcmp(fn, "getenv")) { char *ev = getenv(argc > 0 ? (char *)c_args[0] : ""); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", ev ? ev : "(null)"); return v; }

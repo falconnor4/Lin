@@ -62,6 +62,12 @@ int wave_snapshot(Net *n, Port **out, int *cap);
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
+/* Native arithmetic hook: a driver plugin (std/drivers/arith.so) registers a
+   pure scalar evaluator for lin_add/lin_eq/lin_fadd/... that the core's run_ffi
+   delegates to; non-movable C ops stay in the core. */
+void lin_arith_register(int (*eval)(const char *, int, const long *, long *, int *));
+/* dlopen the arithmetic driver plugin so its constructor registers the hook */
+void lin_arith_load(void);
 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
