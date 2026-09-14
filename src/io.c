@@ -64,6 +64,16 @@ void ctor_init_builtins(void) {
   ctor_register("c", DT_STR, "c", "n");   /* std list cons/nil string spine */
   ctor_register("_ffi", DT_FFI, "_ffi", "_ret");
   ctor_register("_fsz", DT_FLOAT, "_fsz", "_fss"); /* float box: Scott index into fltbox */
+  /* pure-Lin arithmetic-op tag carriers (DT_OP): each is a *named LAM* (the same
+     mechanism `_ffi` uses — a normal LAM recognized by name, no new node agent),
+     so a saturated arithmetic op is a driver-foldable redex whose LAM body is the
+     pure-Lin fallback. */
+  ctor_register("_add", DT_OP, "_add", NULL); ctor_register("_sub", DT_OP, "_sub", NULL);
+  ctor_register("_mul", DT_OP, "_mul", NULL); ctor_register("_div", DT_OP, "_div", NULL);
+  ctor_register("_mod", DT_OP, "_mod", NULL); ctor_register("_pow", DT_OP, "_pow", NULL);
+  ctor_register("_eq",  DT_OP, "_eq",  NULL); ctor_register("_lt",  DT_OP, "_lt",  NULL);
+  ctor_register("_gt",  DT_OP, "_gt",  NULL); ctor_register("_leq", DT_OP, "_leq", NULL);
+  ctor_register("_geq", DT_OP, "_geq", NULL);
   /* monadic IO/effect continuations: an open set of effect kinds keyed here,
      so new effects are added by registration rather than new branches */
   ctor_register("_iod", DT_EFF, "_iod", NULL);
