@@ -345,6 +345,7 @@ static void export_namespace(const char *name) {
     if (strncmp(dn, pfx, (size_t)pflen)) continue;
     const char *suffix = dn + pflen;
     if (!*suffix || strchr(suffix, '.')) continue;          /* only direct members */
+    if (suffix[0] == '_') continue;                         /* `_`-prefixed = private */
     char qn[NAME * 2 + 2];
     if (curr_ns[0]) snprintf(qn, sizeof qn, "%s.%s", curr_ns, suffix);
     else snprintf(qn, sizeof qn, "%s", suffix);

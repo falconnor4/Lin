@@ -26,12 +26,4 @@
 (define! ifl (bool -> (a -> b) -> (a -> b) -> b) (\c (\t (\f (((c t) f) 0)))))
 
 (namespace _)
-(open bool)
-(define! true  bool bool.true)
-(define! false bool bool.false)
-(define! not (bool -> bool) bool.not)
-(define! and (bool -> bool -> bool) bool.and)
-(define! or  (bool -> bool -> bool) bool.or)
-(define! xor (bool -> bool -> bool) bool.xor)
-(define! if  (bool -> a -> a -> a) bool.if)
-(define! ifl (bool -> (a -> b) -> (a -> b) -> b) bool.ifl)
+(export bool)
