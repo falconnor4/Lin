@@ -505,8 +505,12 @@ int lin_fold_op(Net *n, Port lam, Port app) {
   n->dead[lam.node] = 1; n->dead[app.node] = 1;
   if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
   if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
-  if (ar.node >= 0 && ar.node < n->nn && ar.port == 0 && !n->dead[ar.node]) {
-    /* `ar` is the LAM body's continuation: splice res there, matching beta. */
+  if (ar.node >= 0 && ar.node < n->nn && !n->dead[ar.node]) {
+    /* `ar` is the partner of the APP's port-1 body slot: this is exactly where
+       β threads the redex's result out (net_interact does net_link(lb, ar)), so
+       the consumer on the far end reads the value through `ar`.  Inject `res`
+       AT `ar`.  (Linking into the slot {app,1} instead would REPLACE `ar` and
+       stride the embedded consumer, stranding it reading a dead node.) */
     net_link(n, res, ar, 1);
   } else {
     /* beta threads the redex result through app's port-1 body slot; fall back to
@@ -521,11 +525,38 @@ int lin_fold_op(Net *n, Port lam, Port app) {
    concrete/decodable, so the `_add` head-redex should be DEFERRED (parked on the
    per-net blocked list, re-driven after the wave drains) instead of β-squashed:
    it mirrors lin_ffi_needs_operand, and gives the applied `_cl`-spine time to
-   reduce and its operand sub-nets time to materialise concrete scalars. */
+   reduce and its operand sub-nets time to materialise concrete scalars.
+   In particular a spine operand that is itself an un-folded `_op` redex (a
+   composition like `(omul 6 (oadd 24 96))`) counts as pending: those operands
+   must be folded first, and β-squashing the outer would strand them. */
+static int dec_arg(Net *n, Port p, Val *v);          /* from runtime_decoder.inc */
+static int lin_op_spine_pending(Net *n, Port argp) {
+  Port cur = skip_dup(n, argp);
+  if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) return 0;
+  if (ctor_tag(NNM(n, cur.node)) != DT_STR) return 0; /* not a `_cl`-spine; single flat arg */
+  Port bn = skip_dup(n, wire((Port){cur.node, 2}));
+  if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) return 0;
+  for (int step = 0; step < n->nn; step++) {
+    cur = skip_dup(n, cur);
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
+    Port inner = skip_dup(n, wire((Port){cur.node, 2}));
+    if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
+    Port body = skip_dup(n, wire((Port){inner.node, 2}));
+    if (body.node < 0 || n->tag[body.node] != APP) break;
+    Port ia = skip_dup(n, wire((Port){body.node, 0}));
+    if (ia.node >= 0 && n->tag[ia.node] == APP) {
+      Val v;
+      if (!dec_arg(n, wire((Port){ia.node, 2}), &v)) return 1; /* present-but-pending slot */
+    }
+    cur = wire((Port){body.node, 2});
+  }
+  return 0;
+}
 int lin_op_needs_operand(Net *n, Port lam, Port app) {
   if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
   if (!op_tag_to_fn(n->name[lam.node] ? n->name[lam.node] : "")) return 0;
   Port argp = wire((Port){app.node, 2});
+  if (lin_op_spine_pending(n, argp)) return 1;        /* an operand slot is not concrete yet */
   Val fargs[8] = {{0}};
   int argc = net_spine_args(n, argp, fargs, 8);
   if (argc < 1) return 1;                            /* spine not reduced/readable yet */
