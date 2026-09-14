@@ -22,11 +22,8 @@ Port net_dhop(Net *n, Port p) {
 /* Read the fn name of the `_ffi` closure rooted at port p (port 0). */
 int net_ffi_fn(Net *n, Port p, char *fn, int fnmax) {
   N = n;
-  Port r = wire((Port){p.node, 2});
-  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
-  Port a2 = wire((Port){r.node, 2});
-  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
-  Port a1 = wire((Port){a2.node, 0});
+  Port a1;
+  if (!ffi_header(n, p, &a1, 0)) return 0;
   if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
   return net_read_string(n, wire((Port){a1.node, 2}), fn, (size_t)fnmax) >= 0;
 }
@@ -77,11 +74,9 @@ static int decode_spine(Net *n, Port argp, Val *vals, int max) {
    shape as net_ffi_fn); delegates the spine walk to decode_spine. */
 int net_ffi_args(Net *n, Port lam, Val *vals, int max) {
   N = n;
-  Port r = wire((Port){lam.node, 2});
-  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
-  Port a2 = wire((Port){r.node, 2});
-  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
-  return decode_spine(n, wire((Port){a2.node, 2}), vals, max);
+  Port argp;
+  if (!ffi_header(n, lam, 0, &argp)) return 0;
+  return decode_spine(n, argp, vals, max);
 }
 
 /* Decode a `_cl`-spine argument list rooted at port `argp` (not inside a closure

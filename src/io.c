@@ -184,6 +184,20 @@ static inline Port skip_dup(Net *n, Port p) {
   return p;
 }
 
+/* Dig the `_ffi`-closure header rooted at LAM `lam` (shape \_ffi. \_ret.
+   ((_ffi <fn>) <args>)): fills `*a1` (inner ((_ffi fn) ..) APP, port-2 = fn
+   string) and `*argp` (the `_cl`-spine).  Raw wires (matches lin_ffi_peek).
+   Shared by net_ffi_fn/args and ffi_ops_concrete to avoid re-digging. */
+static int ffi_header(Net *n, Port lam, Port *a1, Port *argp) {
+  Port r = wire((Port){lam.node, 2});
+  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
+  Port a2 = wire((Port){r.node, 2});
+  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
+  if (a1) *a1 = wire((Port){a2.node, 0});
+  if (argp) *argp = wire((Port){a2.node, 2});
+  return 1;
+}
+
 int net_read_string(Net *n, Port p, char *buf, size_t max) {
   N = n;
   size_t len = 0;
@@ -334,11 +348,8 @@ int lin_stuck_ffi_count = 0;  /* _ffi closure β-consumed during a free-var prec
 static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   if (lin_precompile_depth > 0) return 0; /* free-var body: don't fold yet */
   char fn[256];
-  Port r = wire((Port){lam.node, 2});
-  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
-  Port a2 = wire((Port){r.node, 2});
-  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
-  Port a1 = wire((Port){a2.node, 0});
+  Port a1, argp;
+  if (!ffi_header(n, lam, &a1, &argp)) return 0;
   if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
   if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
   if (strncmp(fn, "lin_", 4)) return 0;      /* only pure lin_* builtins fold */
@@ -370,11 +381,9 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
    validated only the FIRST operand, letting later non-concrete operands fold
    as garbage — the `(min 4 5)`-as-if stranding). */
 static int ffi_ops_concrete(Net *n, Port lam) {
-  Port r = wire((Port){lam.node, 2});
-  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
-  Port a2 = wire((Port){r.node, 2});
-  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
-  Port cur = skip_dup(n, wire((Port){a2.node, 2}));
+  Port cur, argp;
+  if (!ffi_header(n, lam, 0, &argp)) return 0;
+  cur = skip_dup(n, argp);
   if (cur.node < 0 || cur.node >= n->nn || n->tag[cur.node] != LAM ||
       ctor_tag(NNM(n, cur.node)) != DT_STR) return 0;   /* arg list is a cons spine */
   if (skip_dup(n, wire((Port){cur.node, 2})).port != 0) return 0;
