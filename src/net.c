@@ -157,6 +157,28 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
 /* the four rules of the scope-gauge calculus (wave-opt-reduction main.hs).
    ERA is inert: era-principal pairs are simply dropped. */
 static int lin_trace = -1; /* cached LIN_TRACE */
+
+/* Fold `aa` if it is a saturated arithmetic closure (a `_ffi` LAM, a pure-Lin `_op`
+   LAM, or an `_op` REDEX app ((_add <body>) <spine>) whose head is a DT_OP LAM),
+   routing to the appropriate *_fold_arg with the value placed at `target`.  Shared
+   by the identity and eager-argument-fold edges in beta. */
+static int fold_arg(Net *n, Port aa, Port target) {
+  if (aa.node < 0 || aa.port != 0 || aa.node >= n->nn || n->dead[aa.node]) return 0;
+  if (n->tag[aa.node] == LAM) {
+    int c = ctor_tag(n->name[aa.node] ? n->name[aa.node] : "");
+    if (c == DT_FFI) return lin_fold_ffi_arg(n, aa, target);
+    if (c == DT_OP)  return lin_fold_op_arg(n, aa, target);
+    return 0;
+  }
+  if (n->tag[aa.node] == APP) {
+    Port h = WIRE(n, ((Port){aa.node, 0}));
+    if (h.node >= 0 && h.node < n->nn && !n->dead[h.node] && n->tag[h.node] == LAM &&
+        ctor_tag(n->name[h.node] ? n->name[h.node] : "") == DT_OP)
+      return lin_fold_op_arg(n, aa, target);
+  }
+  return 0;
+}
+
 int net_interact(Net *n, Port p1, Port p2) {
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
   if (t1 > t2) { Port t = p1; p1 = p2; p2 = t; int u = t1; t1 = t2; t2 = u; }
@@ -194,28 +216,13 @@ int net_interact(Net *n, Port p1, Port p2) {
     n->dead[n1] = 1; n->dead[n2] = 1;
     if (lv.node == n1 && lv.port == 2 && lb.node == n1 && lb.port == 1) {
       /* identity: V = (\x. x) V — but V may be a saturated _ffi/_op closure, so fold the argument */
-      if (aa.node >= 0 && aa.port == 0 && aa.node < n->nn && !n->dead[aa.node] &&
-          n->tag[aa.node] == LAM) {
-        int c = ctor_tag(n->name[aa.node] ? n->name[aa.node] : "");
-        if (c == DT_FFI && lin_fold_ffi_arg(n, aa, ar)) return 1;
-        if (c == DT_OP  && lin_fold_op_arg(n, aa, ar)) return 1;
-      }
+      if (fold_arg(n, aa, ar)) return 1;
       net_link(n, aa, ar, 1); return 1;
     }
     /* eager argument fold: a saturated _ffi/_op closure passed as data (not head) would be
        beta-duplicated without folding (e.g. `succ (mul 2 2)`); fold so the substitution uses a
        concrete value.  A pure-Lin `_op` closure is a REDEX ((\_add <pure-body>) <spine>). */
-    if (aa.node >= 0 && aa.port == 0 && aa.node < n->nn && !n->dead[aa.node]) {
-      int c = (n->tag[aa.node] == LAM) ? ctor_tag(n->name[aa.node] ? n->name[aa.node] : "") : -1;
-      if (c == DT_FFI && lin_fold_ffi_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
-      if (c == DT_OP && lin_fold_op_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
-      if (n->tag[aa.node] == APP) {
-        Port h = WIRE(n, ((Port){aa.node, 0}));
-        if (h.node >= 0 && h.node < n->nn && !n->dead[h.node] && n->tag[h.node] == LAM &&
-            ctor_tag(n->name[h.node] ? n->name[h.node] : "") == DT_OP &&
-            lin_fold_op_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
-      }
-    }
+    if (fold_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
     net_link(n, lv, aa, 1); net_link(n, lb, ar, 1);
     return 1;
   }
