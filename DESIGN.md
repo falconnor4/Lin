@@ -82,19 +82,33 @@ separation:
   `dlopen`, `puts`, `getenv`), float parsing (`lin_parse_float`/`lin_float`),
   string compare (`lin_streq`), and fold accounting (`lin_folds`/`lin_folded`).
 
-## De-laddering: `num.lin` is direct FFI
+## Pure-Lin arithmetic: `num.lin` is driver-foldable `_op` closures
 
-`std/num.lin` is the **direct-FFI (de-ladered) form**: arithmetic &
-comparison are thin `ccall2 "lin_*"` closures, replacing the old 10-deep
-in-net Scott comparison ladders.  It is ~80 lines (the laddered version was
-166).  The engine folds each saturated closure when its operands become
-concrete, so composed uses reduce correctly.
+`std/num.lin`'s integer/comparison ops are **pure-Lin Scott recursion wrapped as
+driver-foldable `_op` closures** (replacing the old direct-`ccall2` de-ladered
+form).  Each op emits a saturated redex whose head is a **DT_OP-named LAM** — the
+same named-LAM pattern `_ffi` uses, no new interaction agent:
+`add 4 3 = ((\_add (padd 4 3)) (cons 4 (cons 3 nil)))`.  The `_add` LAM applied
+to the operand `_cl`-spine is routed by `net_interact` to `lin_fold_op`, which
+derives the op token from the LAM's name, decodes the operands via the shared
+`net_spine_args`, and folds through the one shared `lin_arith_scalar` table
+(arith.so) whenever the operands are concrete.  The embedded pure-Scott body
+(`padd` etc.) is the **always-correct β fallback**: with no scalar provider the
+same redex reduces by the interaction calculus (slow but exact).  Drivers fold
+the same saturated `_op` redexes through the same table, so the base engine,
+SIMD and GPU resolve identical math.
 
 The enabling engine behavior is a **confluence-preserving fold deferral** in
-`src/net.c` / `src/io.c` (see *Fold routing* below) that threads each
-operand's computed value into the closure before folding.  Without it, a
-still-live operand such as `(min 4 5)` (a `if`-application, not a scalar)
-would be β-squashed or mis-folded.
+`src/net.c` / `src/io.c` (see *Fold routing* below) that threads each operand's
+computed value into the closure before folding (for `_op` too, an outer redex
+whose spine operand is an un-folded inner `_op` is deferred until the inner
+folds).  Without it, a still-live operand such as `(min 4 5)` (a
+`if`-application, not a scalar) would be β-squashed or mis-folded.
+
+Two latent engine defects the old FFI overloads hid, now fixed: `egraph_optimize`
+out-of-bounds-read for body-less TDEF/TDEFX/TFLOAT value markers (corrupted
+`lin build`), and `net_load_line` not seeding the active-redex queue (loaded
+`.line` containers didn't reduce).
 
 ## Fold routing (the composed-`if` fix)
 
@@ -197,42 +211,57 @@ is asserted by `LIN_GPU_SELFTEST` (no mismatches on a device).
 
 ## Line budget
 
-Pure core `src/` (`.c` + `lin.h`): **2,476 lines** (< 2,500 target).  The
-arithmetic table, drivers, and `std/runtime/*` live outside `src/` and do not
-count against the core.  (Note the pre-de-laddering baseline was 2,628 — the
-core has been shrunk below target by removing arithmetic dispatch and relocating
-the readback/IO and `.line` runtime into `std/`.)
+Pure core `src/` (`.c` + `lin.h`): **3,085 lines** (above the 2,500 target).
+The pure-Scott de-laddering added the driver-foldable `_op` machinery
+(`lin_fold_op`/`lin_fold_op_arg`/`op_value_from_lam`, `net_spine_args`, and the
+`_op` deferral + eager-argument-fold edges) in `src/io.c`/`src/net.c`, which is
+what lifts the count; the integer arithmetic itself was already retired to
+`std/drivers/arith.so`, so the migration costs fold machinery in the core rather
+than removing rows.  The arithmetic table, drivers, and `std/runtime/*` live
+outside `src/` and do not count against the core.
 
 ## Status (honest)
 
 **All green: 50 suites / 875 assertions.**
 
-- **De-laddering done.**  `std/num.lin` is the direct-FFI (80-line) form; the
-  6 composed failures it previously caused (`math`, `map`, `set`, `nqueens`,
-  `sudoku`, `algorithms`) were closed by the confluence-preserving fold
-  deferral (see *Fold routing*).
-- **Arithmetic generalized.**  One shared `lin_arith_scalar` table
-  (`std/drivers/arith.so`) is the single authority for pure arithmetic; the
-  core hook is a general-purpose `lin_scalar_ops_add/load` registry, and every
-  reduction strategy calls the same table.  Non-movable C (OS/device, float
-  parsing, string compare, fold accounting) stays in the core.
-- **Core < 2500 LOC.**  Arithmetic removed from `run_ffi`; readback/IO effects
-  and `.line` moved to `std/runtime/`; fold/defer routing consolidated.  Core
-  is 2,476 lines.
-- **Recursion converges** via bounded self-unravelling (k=24).
+- **Integer/comparison arithmetic is now PURE LIN.**  `std/num.lin` no longer
+  uses any integer `_ffi`/`ccall2`: `add/sub/mul/div/mod/pow/eq/lt/gt/leq/geq`
+  are pure-Scott recursions wrapped as **driver-foldable `_op` closures** — a
+  saturated op is a DT_OP-named LAM (`_add`, …) applied to the operand
+  `_cl`-spine, whose head `lin_fold_op` folds through the one shared
+  `lin_arith_scalar` table (arith.so) when operands are concrete, and whose
+  pure-Scott body is the always-correct β fallback (verified correct with arith
+  absent).  `(mul 6 (add 24 96))` → 720 and `(if (geq 1 (min 4 5)) 1 8)` → 8
+  fold fast; the dead integer `_ffi` fold paths are trimmed.
+- **Drivers fold `_op` uniformly.**  The base fold's `lin_fold_op` IS the
+  uniform `_op` fold (op token from the DT_OP name, operands via the shared
+  `net_spine_args` decoder, value from the shared scalar table); SIMD keeps its
+  `_ffi` float fold and the GPU delegates to the base, so all strategies resolve
+  the same math.  `native.lin` no longer routes integers through `ccall2`.
+- **Arithmetic generalized.**  One shared `lin_arith_scalar` table is the single
+  authority; the core hook is a general-purpose `lin_scalar_ops_add/load`
+  registry.  Non-movable C (OS/device, float parsing, string compare, fold
+  accounting) stays in the core.
+- **Fold mechanics hardened.**  Two engine defects surfaced by the pure-Lin
+  closures were fixed: `egraph_optimize` no longer out-of-bounds reads for
+  body-less TDEF/TDEFX/TFLOAT value markers (was emitting a stray free `_sz` in
+  `lin build`), and `net_load_line` now seeds the active-redex queue so a loaded
+  `.line` container actually reduces.
+- **Recursion converges** via bounded self-unravelling (k=24), extended by the
+  `_rec` widening for deeper pure-Lin recursion.
 
 **Known limitations (genuinely hard, not patched here).**
-- Recursion depth is capped at the k=24 self-unravelling bound (truncates to
-  the base value beyond it); arbitrarily-deep recursion still needs a value to
-  thread out of a terminating recursive knot in the reducer.
-- XOR-style own-text de-laddering of the *pure* Scott numeric core (expressing
-  e.g. full `add`/`mul` as pure-Lin recursion rather than `ccall2` FFI) is
-  downstream of that unbounded-recursion capability; today arithmetic is
-  direct-FFI, not pure-Scott.
-- `simd.c` still carries its own net-side arg-decoding (`dhop`/`ev_arglist`)
-  paralleling the core's `unpack_args` — an on-net decoder shared by all
-  drivers would further consolidate it (the scalar *semantics* are already
-  shared via `lin_arith_scalar`).
+- Recursion depth is capped by the self-unravelling bound (truncates to the base
+  value beyond it); arbitrarily-deep recursion still needs a value to thread out
+  of a terminating recursive knot in the reducer.
+- The driver fold paths (`simd.c`'s `_ffi` arg-decoding) still parallel the
+  core's shared decoder; the scalar *semantics* are shared via `lin_arith_scalar`
+  and the `_op` operands are decoded by the shared `net_spine_args`, but a fuller
+  consolidation of each driver's net-side walk remains.
+- Core LOC is ~3,085 (above the 2,500 target): the pure-Scott `_op` machinery is
+  the current cost.  Recapturing headroom requires consolidating the fold/defer
+  and decoder paths, not removing dead arithmetic rows (those already live in
+  arith.so).
 
 **Journey / lessons (compressed history).**  Earlier rounds documented in
 detail: Y-combinator recursion strands its base value on a continuation knot;
