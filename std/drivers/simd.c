@@ -27,45 +27,33 @@ static Port WP(Net *n, int node, int port) { return n->wire[node * 3 + port]; }
 
 static const char *nm(Net *n, int id) { return n->name[id] ? n->name[id] : ""; }
 
-static Port dhop(Net *n, Port p) {
-  while (p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP && p.port == 0)
-    p = WIRE(n, p);
-  return p;
-}
-
-static Port ev_arglist(Net *n, Port argp, long out[2], int *nout);
-
-/* Read the fn name of the `_ffi` closure rooted at port p (port 0). */
-static int rd_fn(Net *n, Port p, char *fn, int fnmax) {
-  Port r = dhop(n, WP(n, p.node, 2));
-  if (r.node < 0 || r.port != 0 || n->dead[r.node] || n->tag[r.node] != LAM) return 0;
-  Port a2 = dhop(n, WP(n, r.node, 2));
-  if (a2.node < 0 || a2.port != 1 || n->dead[a2.node] || n->tag[a2.node] != APP) return 0;
-  Port a1 = dhop(n, WP(n, a2.node, 0));
-  if (a1.node < 0 || a1.port != 1 || n->dead[a1.node] || n->tag[a1.node] != APP) return 0;
-  return net_read_string(n, WP(n, a1.node, 2), fn, (size_t)fnmax) >= 0;
+/* Shared on-net FFI decoder (std/runtime/decoder.c), resolved once through the
+   exported core symbols, so this driver does NOT re-implement the DUP-hop /
+   `_cl`-spine arg walk. */
+static int (*g_ffi_fn)(Net *, Port, char *, int);
+static int (*g_ffi_args)(Net *, Port, Val *, int);
+static void resolve_decoder(void) {
+  if (!g_ffi_fn) g_ffi_fn = (int (*)(Net *, Port, char *, int))dlsym(RTLD_DEFAULT, "net_ffi_fn");
+  if (!g_ffi_args) g_ffi_args = (int (*)(Net *, Port, Val *, int))dlsym(RTLD_DEFAULT, "net_ffi_args");
 }
 
 /* Evaluate a single `_ffi` closure whose args are saturated (recursively),
    returning 1 and storing value/type, else 0.  is_bool: result is a Church
    boole; is_float: result is an IEEE-754 double (bits carried in *v as long).
-   Also used to read an argument, so nested arithmetic composes.
-   The actual arithmetic semantics live in the ONE shared scalar-op table
-   (lin_arith_scalar, provided by arith.so) — this driver only decodes args
-   from the net and applies the result kind. */
+   Decoding + fn lookup go through the SHARED decoder; the arithmetic semantics
+   go through the ONE shared scalar-op table (lin_arith_scalar, arith.so). */
 static ScalarOpFn g_scalar;
 static ScalarOpFn scalar_table(void) {
   if (!g_scalar) g_scalar = (ScalarOpFn)dlsym(RTLD_DEFAULT, "lin_arith_scalar");
   return g_scalar;
 }
 static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
+  resolve_decoder();
   char fn[256];
-  if (!rd_fn(n, p, fn, sizeof(fn))) return 0;
-  Port r = dhop(n, WP(n, p.node, 2));
-  Port a2 = WP(n, r.node, 2);
-  if (a2.node < 0) return 0;
-  long a[2]; int na = 0; Port argp = WP(n, a2.node, 2);
-  ev_arglist(n, argp, a, &na);
+  if (!g_ffi_fn || !g_ffi_fn(n, (Port){p.node, 0}, fn, sizeof(fn))) return 0;
+  Val vals[2]; int na = g_ffi_args ? g_ffi_args(n, (Port){p.node, 0}, vals, 2) : 0;
+  long a[2] = {0, 0};
+  for (int i = 0; i < na && i < 2; i++) a[i] = vals[i].iv;
   *is_bool = 0; *is_float = 0;
   if (na < 1) return 0;
   ScalarOpFn tab = scalar_table();
@@ -76,53 +64,6 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   else if (okind == 3) { *v = out; *is_bool = 1; }
   else *v = out;
   return 1;
-}
-
-/* Read a single argument: a Scott numeral, a Church boole, a float box, or a
-   nested saturated `_ffi` closure (evaluated recursively).  A float arg stores
-   its IEEE-754 bits in *v. */
-static Port ev_arglist_arg(Net *n, Port p, long *v, int *is_b) {
-  Port q = dhop(n, p);
-  if (q.node < 0 || q.node >= n->nn || n->dead[q.node] || n->tag[q.node] != LAM)
-    return (Port){-1, 0};
-  if (ctor_tag(nm(n, q.node)) == DT_FFI) {
-    int is_f = 0;
-    if (ev_ffi(n, (Port){q.node, 0}, v, is_b, &is_f)) return p;
-    return (Port){-1, 0};
-  }
-  if (ctor_tag(nm(n, q.node)) == DT_FLOAT) {
-    double d; if (!net_read_float(n, q, &d)) return (Port){-1, 0};
-    memcpy(v, &d, 8); *is_b = 0; return p;
-  }
-  if (ctor_tag(nm(n, q.node)) == DT_BOOL) { int b = net_read_bool(n, q); if (b < 0) return (Port){-1, 0}; *v = b; *is_b = 0; return p; }
-  long x = net_read_int(n, q);
-  if (x < 0) return (Port){-1, 0};
-  *v = x; *is_b = 0; return p;
-}
-
-/* Collect up to 2 args from the `_cl`-spine list; always succeeds (na updated). */
-static Port ev_arglist(Net *n, Port argp, long out[2], int *nout) {
-  *nout = 0; Port cur = dhop(n, argp);
-  if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) return (Port){-1, 0};
-  if (ctor_tag(nm(n, cur.node)) != DT_STR) {
-    int ib = 0; if (ev_arglist_arg(n, argp, &out[0], &ib).node >= 0) *nout = 1;
-    return cur;
-  }
-  for (int step = 0; step < n->nn && *nout < 2; step++) {
-    cur = dhop(n, cur);
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
-    Port inner = dhop(n, WP(n, cur.node, 2));
-    if (inner.node < 0 || inner.port != 0 || n->dead[inner.node] || n->tag[inner.node] != LAM) break;
-    Port body = dhop(n, WP(n, inner.node, 2));
-    if (body.node < 0 || n->dead[body.node] || n->tag[body.node] != APP) break;
-    Port ia = dhop(n, WP(n, body.node, 0));
-    if (ia.node < 0 || n->dead[ia.node] || n->tag[ia.node] != APP) break;
-    int ib = 0;
-    if (ev_arglist_arg(n, WP(n, ia.node, 2), &out[*nout], &ib).node < 0) break;
-    (*nout)++;
-    cur = WP(n, body.node, 2);
-  }
-  return cur;
 }
 
 /* Fold a saturated `_ffi` arithmetic closure `lam` applied to `app`.

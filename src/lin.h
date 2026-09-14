@@ -121,6 +121,12 @@ int lin_fold_ffi(Net *n, Port lam, Port app);
 int lin_ffi_needs_operand(Net *n, Port lam);
 /* Fold a saturated _ffi closure appearing as a beta ARGUMENT (not head); see io.c */
 int lin_fold_ffi_arg(Net *n, Port lam, Port out);
+/* ---- Shared on-net FFI decoder (implemented by std/runtime/decoder.c) ----
+   Driver plugins reuse ONE arg-spine / DUP-hop walker instead of each
+   re-implementing the `_ffi` `_cl`-spine decode. */
+Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
+int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
+int  net_ffi_args(Net *n, Port lam, Val *vals, int max); /* decode arg spine into Vals */
 /* !=0 while def_precompile reduces an open (free-var) body: suppress folding so
    the fold never runs on non-concrete operands and bakes a stale value. */
 extern int lin_precompile_depth;

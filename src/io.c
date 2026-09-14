@@ -207,46 +207,7 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
 
 static Val run_ffi(Net *n, Port p);
 
-static int unpack_arg(Net *n, Port p, long *out_val, char *str_buf, size_t str_max) {
-  p = skip_dup(n, p);
-  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
-  if (ctor_tag(NNM(n, p.node)) == DT_FFI) {
-    Val v = run_ffi(n, p);
-    if (v.kind == 1 || v.kind == 3 || v.kind == 4) { *out_val = v.iv; return 1; }
-    if (v.kind == 2) { snprintf(str_buf, str_max, "%s", v.sv); *out_val = (long)(intptr_t)str_buf; return 1; }
-  }
-  if (ctor_tag(NNM(n, p.node)) == DT_FLOAT) { double d; if (net_read_float(n, p, &d)) { memcpy(out_val, &d, 8); return 1; } }
-  if (ctor_tag(NNM(n, p.node)) == DT_BOOL) { int b = net_read_bool(n, p); if (b >= 0) { *out_val = b; return 1; } }
-  if (ctor_tag(NNM(n, p.node)) == DT_STR) {
-    int len = net_read_string(n, p, str_buf, str_max); if (len >= 0) { *out_val = (long)(intptr_t)str_buf; return 1; }
-  }
-  long v = net_read_int(n, p); return v >= 0 ? (*out_val = v, 1) : 0;
-}
-
-static int unpack_args(Net *n, Port arg_p, long *args, char str_bufs[8][4096], int max_args) {
-  int argc = 0; Port cur = skip_dup(n, arg_p);
-  if (cur.node >= 0 && cur.node < n->nn && n->tag[cur.node] == LAM &&
-      ctor_tag(NNM(n, cur.node)) == DT_STR) {
-    Port bn = skip_dup(n, wire((Port){cur.node, 2}));
-    if (bn.node >= 0 && bn.port == 0 && n->tag[bn.node] == LAM) {
-      for (int step = 0; step < n->nn && argc < max_args; step++) {
-        cur = skip_dup(n, cur);
-        if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
-        Port inner = skip_dup(n, wire((Port){cur.node, 2}));
-        if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
-        Port body = skip_dup(n, wire((Port){inner.node, 2}));
-        if (body.node < 0 || n->tag[body.node] != APP) break;
-        Port ia = skip_dup(n, wire((Port){body.node, 0}));
-        if (ia.node >= 0 && n->tag[ia.node] == APP) {
-          unpack_arg(n, wire((Port){ia.node, 2}), &args[argc], str_bufs[argc], 4096); argc++;
-        }
-        cur = wire((Port){body.node, 2});
-      }
-      if (argc > 0) return argc;
-    }
-  }
-  return unpack_arg(n, arg_p, &args[0], str_bufs[0], 4096) ? 1 : 0;
-}
+/* (arg decoding now lives in the shared net_ffi_args / std/runtime/decoder.c) */
 
 /* Check if root is an FFI invocation: \_ffi. \_ret. ((_ffi fn) args) */
 /* Builtin dispatch: try one named FFI.  Simple int/bool/str builtins are one
@@ -306,8 +267,12 @@ static Val run_ffi(Net *n, Port p) {
 
   char fn[256];
   if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return v;
+  Val fargs[8] = {{0}};
+  int argc = net_ffi_args(n, (Port){p.node, 0}, fargs, 8);
   long c_args[8] = {0}; char sbufs[8][4096];
-  int argc = unpack_args(n, wire((Port){a2.node, 2}), c_args, sbufs, 8);
+  for (int i = 0; i < argc; i++)
+    if (fargs[i].kind == 2) { snprintf(sbufs[i], 4096, "%s", fargs[i].sv); c_args[i] = (long)(intptr_t)sbufs[i]; }
+    else c_args[i] = fargs[i].iv;
 
   if (!strcmp(fn, "exit")) { exit(argc > 0 ? (int)c_args[0] : 0); return v; }
   if (!strcmp(fn, "driver_get")) { LinDriver *d = lin_get_driver(); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", d ? d->name : "cpu"); return v; }
@@ -496,7 +461,9 @@ Port net_alloc_bool(Net *n, int val) {
 
 Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k); }
 
-/* Readback / IO-effect runtime lives in std (not the core); included here so it
-   shares this TU's statics (N, wire, skip_dup, dup_hop, run_ffi). */
+/* Readback / IO-effect runtime + shared on-net FFI decoder live in std (not the
+   core); included here so they share this TU's statics (N, wire, skip_dup,
+   dup_hop, run_ffi). */
 #include "../std/runtime/io.c"
+#include "../std/runtime/decoder.c"
 
