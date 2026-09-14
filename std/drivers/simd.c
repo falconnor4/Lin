@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <dlfcn.h>
 
 #define SIMD_WIDTH 8
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
@@ -48,7 +49,15 @@ static int rd_fn(Net *n, Port p, char *fn, int fnmax) {
 /* Evaluate a single `_ffi` closure whose args are saturated (recursively),
    returning 1 and storing value/type, else 0.  is_bool: result is a Church
    boole; is_float: result is an IEEE-754 double (bits carried in *v as long).
-   Also used to read an argument, so nested arithmetic composes. */
+   Also used to read an argument, so nested arithmetic composes.
+   The actual arithmetic semantics live in the ONE shared scalar-op table
+   (lin_arith_scalar, provided by arith.so) — this driver only decodes args
+   from the net and applies the result kind. */
+static ScalarOpFn g_scalar;
+static ScalarOpFn scalar_table(void) {
+  if (!g_scalar) g_scalar = (ScalarOpFn)dlsym(RTLD_DEFAULT, "lin_arith_scalar");
+  return g_scalar;
+}
 static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   char fn[256];
   if (!rd_fn(n, p, fn, sizeof(fn))) return 0;
@@ -58,40 +67,14 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   long a[2]; int na = 0; Port argp = WP(n, a2.node, 2);
   ev_arglist(n, argp, a, &na);
   *is_bool = 0; *is_float = 0;
-
-  /* float binary ops: args are IEEE bits carried as longs */
-  if      (!strncmp(fn, "lin_fadd", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = x + y; memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_fsub", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = x - y; memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_fmul", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = x * y; memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_fdiv", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = y != 0.0 ? x / y : 0.0; memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_fpow", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = pow(x, y); memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_fatan2", 10)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); double rr = atan2(x, y); memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  /* float unary ops */
-  if      (!strncmp(fn, "lin_fsqrt", 9)) { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = x >= 0.0 ? sqrt(x) : 0.0; memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_fsin", 8))  { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = sin(x); memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_fcos", 8))  { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = cos(x); memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  else if (!strncmp(fn, "lin_ftan", 8))  { if (na < 1) return 0; double x; memcpy(&x, &a[0], 8); double rr = tan(x); memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  /* float comparisons -> bool */
-  if      (!strncmp(fn, "lin_feq", 7))  { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); *v = x == y; *is_bool = 1; return 1; }
-  else if (!strncmp(fn, "lin_flt", 7))  { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); *v = x < y;  *is_bool = 1; return 1; }
-  else if (!strncmp(fn, "lin_fleq", 8)) { if (na < 2) return 0; double x, y; memcpy(&x, &a[0], 8); memcpy(&y, &a[1], 8); *v = x <= y; *is_bool = 1; return 1; }
-  /* int/string <-> float coercion */
-  if (!strncmp(fn, "lin_float", 9)) { double rr = (double)a[0]; memcpy(v, &rr, 8); *is_float = 1; return 1; }
-  if (!strncmp(fn, "lin_ffloor", 10)) { double x; memcpy(&x, &a[0], 8); *v = (long)floor(x); return 1; }
-
-  if (na < 2) return 0; /* every scalar lin_* op needs both saturated args */
-  if      (!strncmp(fn, "lin_add", 7)) *v = a[0] + a[1];
-  else if (!strncmp(fn, "lin_sub", 7)) *v = a[0] >= a[1] ? a[0] - a[1] : 0;
-  else if (!strncmp(fn, "lin_mul", 7)) *v = a[0] * a[1];
-  else if (!strncmp(fn, "lin_div", 7)) *v = a[1] ? a[0] / a[1] : 0;
-  else if (!strncmp(fn, "lin_mod", 7)) *v = a[1] ? a[0] % a[1] : 0;
-  else if (!strncmp(fn, "lin_pow", 7)) { long b0 = a[0], e = a[1], res = 1; while (e > 0) { if (e & 1) res *= b0; b0 *= b0; e >>= 1; } *v = res; }
-  else if (!strncmp(fn, "lin_eq", 6))   { *v = a[0] == a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_lt", 6))   { *v = a[0] <  a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_leq", 7))  { *v = a[0] <= a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_gt", 6))   { *v = a[0] >  a[1]; *is_bool = 1; }
-  else if (!strncmp(fn, "lin_geq", 7))  { *v = a[0] >= a[1]; *is_bool = 1; }
-  else return 0;
+  if (na < 1) return 0;
+  ScalarOpFn tab = scalar_table();
+  if (!tab) return 0;                        /* no shared arithmetic table loaded */
+  long out; int okind = 0;
+  if (!tab(fn, na, a, &out, &okind)) return 0;
+  if (okind == 4) { memcpy(v, &out, 8); *is_float = 1; }
+  else if (okind == 3) { *v = out; *is_bool = 1; }
+  else *v = out;
   return 1;
 }
 

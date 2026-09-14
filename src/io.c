@@ -273,37 +273,27 @@ static void *resolve_driver(const char *dn) {
 }
 
 /* ------------------------------------------------------------------ *
- *  Native arithmetic hook (goal 3).
- *
- *  All pure integer/float arithmetic & comparison dispatch (`lin_add` ...,
- *  `lin_feq` ...) lives in a driver plugin (`std/drivers/arith.so`), NOT in
- *  the core.  The plugin registers a scalar evaluator here at dlopen time;
- *  `run_ffi` delegates any `lin_*` fn the core doesn't own to that hook, so
- *  base-engine folding, readback, and the composed/head-fold paths all go
- *  through one arithmetic authority without the core reimplementing math.
- *  Non-movable C stays in the core: memory/device/OS (exit, driver_*,
- *  dlopen, puts, getenv), float parsing (`lin_parse_float`, `lin_float`),
- *  string compare (`lin_streq`), and fold accounting (`lin_folds`/`lin_folded`).
- *
- *  Signature: eval(fn, argc, args, out, outkind) -> 1 if fn is a pure-scalar
- *  op handled here (out=result; outkind: 1 int, 3 bool, 4 float-bits), else 0. */
-static int (*lin_arith_eval)(const char *fn, int argc, const long *args, long *out, int *outkind) = NULL;
-void lin_arith_register(int (*f)(const char *, int, const long *, long *, int *)) {
-  lin_arith_eval = f;
-}
-/* Load the arithmetic driver plugin so its constructor registers the hook.
-   Called once at startup (the base engine needs the hook for every fold). */
-void lin_arith_load(void) {
-  static int done = 0;
-  if (done) return;
-  done = 1;
+ *  General native scalar-op extension hook: run_ffi is *open* — a driver
+ *  plugin registers ScalarOpFn providers that own classes of scalar ops
+ *  (arith.so is the first; arithmetic stays out of the core).  First provider
+ *  (registration order) that claims `fn` supplies the result; non-movable core
+ *  C (memory/device/OS, float parsing, string compare, fold accounting) never
+ *  routes through this.  outkind: 1 int, 3 bool, 4 float-bits. */
+typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
+static ScalarOpFn scalar_ops[16]; static int n_scalar_ops = 0;
+void lin_scalar_ops_add(ScalarOpFn f) { if (n_scalar_ops < 16) scalar_ops[n_scalar_ops++] = f; }
+
+/* dlopen a std/drivers plugin by its `<sym>_driver` symbol (idempotent); its
+   constructor registers scalar-op providers with the core. */
+void lin_scalar_ops_load(const char *sym) {
+  if (!sym || !sym[0]) return;
+  char sfx[256], path[4096];
+  snprintf(sfx, sizeof sfx, "%s_driver", sym);
+  if (dlsym(RTLD_DEFAULT, sfx)) return;                 /* already loaded */
   const char *dir = getenv("LIN_STD_DIR");
-  char path[4096];
-  snprintf(path, sizeof path, "%s/drivers/arith.so", dir ? dir : "std");
-  void *s = dlsym(RTLD_DEFAULT, "lin_arith_driver");
-  if (!s) dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-  if (!s) s = dlsym(RTLD_DEFAULT, "lin_arith_driver");
-  if (!s) fprintf(stderr, "warning: arithmetic driver plugin not found at '%s'\n", path);
+  snprintf(path, sizeof path, "%s/drivers/%s.so", dir ? dir : "std", sym);
+  if (dlopen(path, RTLD_NOW | RTLD_GLOBAL)) return;
+  fprintf(stderr, "warning: driver plugin '%s' not found (looked for '%s')\n", sym, path);
 }
 
 static Val run_ffi(Net *n, Port p) {
@@ -330,19 +320,19 @@ static Val run_ffi(Net *n, Port p) {
     if (s) lin_driver_add((LinDriver *)s);
     v.kind = 1; v.iv = 1; return v;
   }
-  /* Pure arithmetic / comparison: delegated to the registered driver hook
-     (std/drivers/arith.so).  The hook returns a scalar (int/bool/float-bits)
-     for every `lin_*` op the core does not own; anything it declines falls
-     through to the core's non-movable rows and the dlsym escape hatch below. */
-  if (fn[0] == 'l' && fn[1] == 'i' && fn[2] == 'n' && fn[3] == '_' && lin_arith_eval) {
+  /* Delegate to registered native scalar-op providers (e.g. std/drivers/
+     arith.so).  First provider that owns `fn` supplies the scalar result;
+     anything unclaimed falls to the core's non-movable rows / dlsym. */
+  if (n_scalar_ops > 0) {
     long out; int okind = 0;
-    if (lin_arith_eval(fn, argc, c_args, &out, &okind)) {
-      if (okind == 4) v.kind = 4;
-      else if (okind == 3) v.kind = 3;
-      else v.kind = 1;
-      v.iv = out;
-      return v;
-    }
+    for (int s = 0; s < n_scalar_ops; s++)
+      if (scalar_ops[s](fn, argc, c_args, &out, &okind)) {
+        if (okind == 4) v.kind = 4;
+        else if (okind == 3) v.kind = 3;
+        else v.kind = 1;
+        v.iv = out;
+        return v;
+      }
   }
   if (!strcmp(fn, "lin_folds")) { v.kind = 1; v.iv = lin_fold_total(); return v; }
   B3("lin_folded", lin_fold_total() > 0);
@@ -364,6 +354,7 @@ static Val run_ffi(Net *n, Port p) {
    Returns 1 and fills *vout if `lam` is a saturated pure-arithmetic _ffi
    closure; else 0.  Shared by the head-fold (LAM x APP) and the eager
    argument-fold, so composed arithmetic materialises regardless of position. */
+static int ffi_ops_concrete(Net *n, Port lam); /* fwd */
 int lin_precompile_depth = 0; /* set around def_precompile's net_reduce */
 /* Counted while def_precompile reduces: an _ffi closure was β-consumed as a
    boolean/function but could not fold (open free-var operands).  A nonzero count
@@ -381,50 +372,9 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
   if (strncmp(fn, "lin_", 4)) return 0;      /* only pure lin_* builtins fold */
   if (!strncmp(fn, "lin_streq", 9)) return 0; /* needs C strings, keep readback */
-  /* Saturation guard: only fold a FULLY-saturated closure.  If any argument is
-     not yet a concrete value (a free-var / partially-applied placeholder), the
-     fold would read garbage operands and bake a wrong result.  Walk the arg
-     list and require every element be concrete. */
-  {
-    Port cur = skip_dup(n, wire((Port){a2.node, 2}));
-    if (cur.node < 0 || cur.node >= n->nn || n->tag[cur.node] != LAM ||
-        ctor_tag(NNM(n, cur.node)) != DT_STR) return 0; /* arg list is a cons spine */
-    Port bn = skip_dup(n, wire((Port){cur.node, 2}));
-    if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) return 0;
-    for (int step = 0; step < n->nn; step++) {
-      Port inner = skip_dup(n, wire((Port){cur.node, 2}));
-      if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
-      Port body = skip_dup(n, wire((Port){inner.node, 2}));
-      if (body.node < 0 || n->tag[body.node] != APP) break;
-      Port ia = skip_dup(n, wire((Port){body.node, 0}));
-      if (ia.node < 0 || n->tag[ia.node] != APP) break;
-      Port ap = skip_dup(n, wire((Port){ia.node, 2}));
-      /* require a concrete scalar: scott num, church bool, float, or string.
-         An operand that is ITSELF a pure `lin_*` _ffi closure is also concrete:
-         fold it recursively so a composed `(mul 6 (add 24 96))`-style operand
-         (the inner closure has not yet reduced to a numeral) still saturates the
-         outer closure instead of stranding it. */
-      if (ap.node < 0 || ap.node >= n->nn || n->dead[ap.node] || n->tag[ap.node] != LAM) return 0;
-      if (ctor_tag(NNM(n, ap.node)) == DT_FLOAT) { double d; if (!net_read_float(n, ap, &d)) return 0; }
-      else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 0; }
-      else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 0; }
-      else if (ctor_tag(NNM(n, ap.node)) == DT_FFI) {
-        /* pure-lin *closure* operand: fold it (run_ffi recurses) to a scalar.
-           If the nested closure itself isn't fully concrete (a detached/earlier
-           operand), folding would bake garbage — recurse to detect. */
-        if (lin_precompile_depth > 0) return 0;            /* free-var context: not concrete */
-        if (lin_ffi_needs_operand(n, ap)) return 0;
-        Val nv = run_ffi(n, ap);
-        if (nv.kind != 1 && nv.kind != 3 && nv.kind != 4) return 0;
-      }
-      else if (net_read_int(n, ap) < 0) return 0;
-      /* advance to next cons cell (tail of the current cell's APP), exactly as
-         unpack_args traverses; the previous `cur = body` landed on the APP node
-         so only the FIRST operand was ever validated, letting later non-concrete
-         operands fold as garbage (the `(min 4 5)`-as-if stranding). */
-      cur = skip_dup(n, wire((Port){body.node, 2}));
-    }
-  }
+  /* Saturation guard: only fold a FULLY-saturated closure whose operands are
+     all concrete — otherwise the fold reads garbage and bakes a wrong value. */
+  if (!ffi_ops_concrete(n, (Port){lam.node, 0})) return 0;
   if (argfold) {
     /* Eager argument-fold: only pure scalar INTEGER arithmetic/comparison
        closures are re-entrancy-safe to fold mid-reduction.  String-arg ops
@@ -444,58 +394,55 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   *vout = v; return 1;
 }
 
-/* Non-destructive pre-scan for the reducer: is `lam` a pure-lin `_ffi` closure
-   that is BLOCKED solely because one of its operands is not yet a concrete
-   scalar (e.g. a still-live `(if ...)` result like `(min 4 5)`), rather than
-   because the closure is malformed / partially applied?  If so, the reducer
-   should DEFER this head-redex (re-queue it, don't β-destroy the closure) so
-   the operand's own redexes get a chance to materialise its value first —
-   the confluence-preserving routing that fixes the composed-`if` stranding. */
-int lin_ffi_needs_operand(Net *n, Port lam) {
-  if (lam.node < 0 || lam.node >= n->nn || n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
-  if (n->name[lam.node] && ctor_tag(n->name[lam.node]) != DT_FFI) return 0;
-  char fn[256];
+/* Does the `_ffi` closure at `lam` have ALL operands concretely readable as a
+   scalar (Scott int / Church bool / float / string) or as a recursively-foldable
+   pure-lin_* closure?  Used by the saturation guard (lin_ffi_peek) and the
+   reducer's deferral pre-scan (lin_ffi_needs_operand).  Walks the arg `_cl`-spine
+   exactly like unpack_args (previous code landed on the APP node and validated
+   only the FIRST operand, letting later non-concrete operands fold as garbage —
+   the `(min 4 5)`-as-if stranding). */
+static int ffi_ops_concrete(Net *n, Port lam) {
   Port r = wire((Port){lam.node, 2});
   if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
   Port a2 = wire((Port){r.node, 2});
   if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
-  Port a1 = wire((Port){a2.node, 0});
-  if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
-  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
-  if (strncmp(fn, "lin_", 4)) return 0;
-  if (!strncmp(fn, "lin_streq", 9)) return 0;
   Port cur = skip_dup(n, wire((Port){a2.node, 2}));
   if (cur.node < 0 || cur.node >= n->nn || n->tag[cur.node] != LAM ||
-      ctor_tag(NNM(n, cur.node)) != DT_STR) return 0;
-  Port tail = skip_dup(n, wire((Port){cur.node, 2}));
-  if (tail.node < 0 || tail.port != 0 || n->tag[tail.node] != LAM) return 0;
+      ctor_tag(NNM(n, cur.node)) != DT_STR) return 0;   /* arg list is a cons spine */
+  if (skip_dup(n, wire((Port){cur.node, 2})).port != 0) return 0;
   for (int step = 0; step < n->nn; step++) {
     Port inner = skip_dup(n, wire((Port){cur.node, 2}));
-    if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
+    if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) return 1;
     Port body = skip_dup(n, wire((Port){inner.node, 2}));
-    if (body.node < 0 || n->tag[body.node] != APP) break;
+    if (body.node < 0 || n->tag[body.node] != APP) return 1;
     Port ia = skip_dup(n, wire((Port){body.node, 0}));
-    if (ia.node < 0 || n->tag[ia.node] != APP) break;
+    if (ia.node < 0 || n->tag[ia.node] != APP) return 1;
     Port ap = skip_dup(n, wire((Port){ia.node, 2}));
-    if (ap.node < 0 || ap.node >= n->nn || n->dead[ap.node] || n->tag[ap.node] != LAM) return 1;
-    if (ctor_tag(NNM(n, ap.node)) == DT_FLOAT) { double d; if (!net_read_float(n, ap, &d)) return 1; }
-    else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 1; }
-    else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 1; }
+    if (ap.node < 0 || ap.node >= n->nn || n->dead[ap.node] || n->tag[ap.node] != LAM) return 0;
+    if (ctor_tag(NNM(n, ap.node)) == DT_FLOAT) { double d; if (!net_read_float(n, ap, &d)) return 0; }
+    else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 0; }
+    else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 0; }
     else if (ctor_tag(NNM(n, ap.node)) == DT_FFI) {
-      if (lin_precompile_depth > 0) return 1;
-      /* A nested `_ffi` operand is only concrete if ITS OWN operands are all
-         concrete too.  Just folding it here (run_ffi) would silently bake garbage
-         when a nested add/eq closure has a detached/not-yet-resolved operand
-         (reads as 0), corrupting the outer closure with a wrong scalar.  Recurse
-         so a not-fully-concrete nested closure flags the OUTER as needing-defer. */
-      if (lin_ffi_needs_operand(n, ap)) return 1;
+      if (lin_precompile_depth > 0) return 0;           /* free-var context: not concrete */
+      if (lin_ffi_needs_operand(n, ap)) return 0;       /* nested closure not fully concrete */
       Val nv = run_ffi(n, ap);
-      if (nv.kind != 1 && nv.kind != 3 && nv.kind != 4) return 1;
+      if (nv.kind != 1 && nv.kind != 3 && nv.kind != 4) return 0;
     }
-    else if (net_read_int(n, ap) < 0) return 1;
+    else if (net_read_int(n, ap) < 0) return 0;
     cur = skip_dup(n, wire((Port){body.node, 2}));
   }
-  return 0;
+  return 1;
+}
+
+/* Non-destructive pre-scan for the reducer: 1 if a pure-lin `_ffi` closure is
+   blocked solely because an operand is not yet concrete (e.g. a still-live
+   `(min 4 5)` result) rather than malformed — so the reducer DEFERS the
+   head-redex instead of β-destroying the closure (the confluence-preserving
+   routing behind the composed-`if` fix). */
+int lin_ffi_needs_operand(Net *n, Port lam) {
+  if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
+  if (n->name[lam.node] && ctor_tag(n->name[lam.node]) != DT_FFI) return 0;
+  return !ffi_ops_concrete(n, lam);
 }
 
 /* Fold a saturated _ffi closure into a concrete net value during reduction, so
@@ -503,6 +450,11 @@ int lin_ffi_needs_operand(Net *n, Port lam) {
    Scott consumers instead of only materialising at readback.  Only PURE `lin_*`
    arithmetic/comparison closures are folded; side-effecting FFI (puts, exit,
    dlopen, driver_set, getenv) stays readback-only. */
+static Port val_to_port(Net *n, Val v) {           /* alloc concrete value node */
+  if (v.kind == 1) return net_alloc_scott(n, v.iv);
+  if (v.kind == 3) return net_alloc_bool(n, (int)v.iv);
+  double d; memcpy(&d, &v.iv, 8); return net_alloc_float(n, d);
+}
 int lin_fold_ffi(Net *n, Port lam, Port app) {
   Val v; N = n;
   if (!lin_ffi_peek(n, lam, &v, 0)) {
@@ -512,10 +464,7 @@ int lin_fold_ffi(Net *n, Port lam, Port app) {
     if (lin_precompile_depth > 0) lin_stuck_ffi_count++;
     return 0;
   }
-  Port res;
-  if (v.kind == 1) res = net_alloc_scott(n, v.iv);
-  else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);
-  else { double d; memcpy(&d, &v.iv, 8); res = net_alloc_float(n, d); }
+  Port res = val_to_port(n, v);
   n->dead[lam.node] = 1;
   n->declines = 0; /* a fold is real progress: reset the deferral budget */
   net_link(n, res, (Port){app.node, 0}, 1);
@@ -538,10 +487,7 @@ int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
      encoded and re-linking mid-beta is unsafe), which also covers the
      composed-float cases (`(fadd (float "2.5") (float "3.5"))`). */
   if (v.kind != 1 && v.kind != 3) return 0;
-  Port res;
-  if (v.kind == 1) res = net_alloc_scott(n, v.iv);
-  else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);
-  else { double d; memcpy(&d, &v.iv, 8); res = net_alloc_float(n, d); }
+  Port res = val_to_port(n, v);
   n->dead[lam.node] = 1;
   net_link(n, res, out, 1);
   return 1;

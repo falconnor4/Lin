@@ -5,27 +5,28 @@
 #include <math.h>
 
 /* ---------------------------------------------------------------------- *
- *  Native scalar arithmetic & comparison driver (goal 3).
+ *  Native scalar arithmetic & comparison semantics (generalized).
  *
- *  Holds ALL pure integer/float arithmetic + comparison builtins that used to
- *  live in the core's `run_ffi` (`lin_add`, `lin_sub`, `lin_mul`, `lin_div`,
- *  `lin_mod`, `lin_pow`, `lin_eq`..`lin_geq`, `lin_ffloor`, every `lin_f*`
- *  float op, `lin_lerp`, `lin_fclamp`).  The core delegates to us through the
- *  `lin_arith_register` hook (see src/io.c), so base-engine folding, readback,
- *  and the composed/head-fold paths all resolve arithmetic through one
- *  plugin authority without the core reimplementing math.
+ *  The SINGLE authority for pure integer/float arithmetic + comparison
+ *  builtins (`lin_add`, `lin_sub`, `lin_mul`, `lin_div`, `lin_mod`,
+ *  `lin_pow`, `lin_eq`..`lin_geq`, `lin_ffloor`, every `lin_f*` float op,
+ *  `lin_lerp`, `lin_fclamp`).  Exposes one canonical entry point:
  *
- *  Non-movable C stays in the core (memory/device/OS, float parsing, string
- *  compare, fold accounting).  We are also a claimable wavefront driver of
- *  the native-num class, so `(driver_add "arith")` / `(set_driver "arith")`
- *  lets arithmetic fold directly in the reducer pipeline too.  Whatever row we
- *  own is authoritative in both paths.
+ *      int lin_arith_scalar(fn, argc, vals, out, outkind)
+ *
+ *  so EVERY reduction strategy (base cpu fold in src/io.c, SIMD, GPU, or a
+ *  future driver) resolves scalar arithmetic through this ONE table instead of
+ *  re-implementing the ops per-driver.  The strategy keeps its own concern —
+ *  how it extracts/decodes args from the net and when it folds — and calls
+ *  this for the math itself.  New ops are new table rows, not new switch
+ *  arms in each driver.
+ *
+ *  `vals` carries decoded scalars as C longs (int / bool / IEEE-754 double
+ *  bits, symmetric with `Val`).  `outkind`: 1=int, 3=bool (out=0/1), 4=float
+ *  (out = IEEE-754 bits).  Returns 1 if `fn` is one of our rows, else 0
+ *  (declined, so the caller can fall back to core / dlsym).
  * ---------------------------------------------------------------------- */
-
-/* eval(fn, argc, args, out, outkind): pure scalar int/bool/float evaluator.
- * outkind: 1=int, 3=bool (out=0/1), 4=float (out = IEEE-754 bits).  Returns 1
- * if `fn` is one of our arithmetic/comparison rows, else 0 (declined). */
-static int arith_eval(const char *fn, int argc, const long *a, long *out, int *outkind) {
+int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *outkind) {
   *outkind = 0;
   if (!fn) return 0;
 
@@ -36,7 +37,6 @@ static int arith_eval(const char *fn, int argc, const long *a, long *out, int *o
   else if (!strncmp(fn, "lin_fdiv", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=y!=0.0?x/y:0.0; memcpy(out,&r,8); *outkind=4; return 1; }
   else if (!strncmp(fn, "lin_fpow", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=pow(x,y); memcpy(out,&r,8); *outkind=4; return 1; }
   else if (!strncmp(fn, "lin_fatan2", 10)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=atan2(x,y); memcpy(out,&r,8); *outkind=4; return 1; }
-  /* float binary min/max */
   else if (!strncmp(fn, "lin_fmin", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x<y?x:y; memcpy(out,&r,8); *outkind=4; return 1; }
   else if (!strncmp(fn, "lin_fmax", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x>y?x:y; memcpy(out,&r,8); *outkind=4; return 1; }
   /* float unary ops -> float */
@@ -75,23 +75,23 @@ static int arith_eval(const char *fn, int argc, const long *a, long *out, int *o
   return 1;
 }
 
-/* ---- optional wavefront driver ----
-   The run_ffi hook above is the primary (and only required) mechanism: the
-   base engine's lin_fold_ffi/readback calls run_ffi, which delegates here.
-   We also export a LinDriver so `(driver_add "arith")` is accepted, but claim
-   is a no-op (we deliberately do NOT steal redexes from the base engine's
-   fold/deferral, which already routes arithmetic here through the hook). */
+/* ---- registration ----
+   The scalar-op table is the semantics; a strategy (cpu base engine, simd,
+   gpu) DECIDES how to reduce a net.  arith.so is NOT itself a reduction
+   strategy (claim is deliberately a no-op) — it is the semantic provider that
+   strategies call.  We still export a LinDriver so `(driver_add "arith")` is
+   accepted and the plugin loads through the standard driver mechanism. */
 static int arith_claim(const Net *n, Port p1, Port p2) { (void)n; (void)p1; (void)p2; return 0; }
 static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) { (void)redexes;(void)limit;(void)changed; return 0; (void)nred; }
 
-/* ---- registration ---- */
+/* Register the scalar-op table with the core's general scalar-op hook. */
 static void __attribute__((constructor)) arith_load(void) {
-  lin_arith_register(arith_eval);
+  lin_scalar_ops_add(lin_arith_scalar);
 }
 
 LinDriver lin_arith_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI,
-  .name = "arith", .description = "native scalar integer/float arithmetic (run_ffi hook + claimable driver)",
+  .name = "arith", .description = "native scalar integer/float arithmetic table (shared semantic provider)",
   .caps = LIN_CAP_NATIVE_NUM, .priority = 20,
   .claim = arith_claim, .reduce = arith_reduce,
 };

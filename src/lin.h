@@ -62,12 +62,18 @@ int wave_snapshot(Net *n, Port **out, int *cap);
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
-/* Native arithmetic hook: a driver plugin (std/drivers/arith.so) registers a
-   pure scalar evaluator for lin_add/lin_eq/lin_fadd/... that the core's run_ffi
-   delegates to; non-movable C ops stay in the core. */
-void lin_arith_register(int (*eval)(const char *, int, const long *, long *, int *));
-/* dlopen the arithmetic driver plugin so its constructor registers the hook */
-void lin_arith_load(void);
+/* ---- General native scalar-op extension hook ----
+   Any driver plugin may register a ScalarOpFn provider implementing a class of
+   native scalar ops (fn -> result kind 1 int / 3 bool / 4 float-bits).  run_ffi
+   tries providers in registration order; arithmetic (std/drivers/arith.so) is
+   the first consumer, this is generic machinery for any future provider. */
+typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
+void lin_scalar_ops_add(ScalarOpFn f);
+/* dlopen std/drivers/<sym>.so (idempotent) so its constructor registers ops */
+void lin_scalar_ops_load(const char *sym);
+/* Canonical shared scalar-op table (implemented by std/drivers/arith.so):
+   the single arithmetic authority that any reduction strategy may call. */
+int lin_arith_scalar(const char *fn, int argc, const long *args, long *out, int *outkind);
 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
