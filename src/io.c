@@ -347,14 +347,13 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
      all concrete — otherwise the fold reads garbage and bakes a wrong value. */
   if (!ffi_ops_concrete(n, (Port){lam.node, 0})) return 0;
   if (argfold) {
-    /* Eager argument-fold: only pure scalar INTEGER arithmetic/comparison
-       closures are re-entrancy-safe to fold mid-reduction.  String-arg ops
-       (lin_parse_float) and float-box results are excluded — they keep using
-       head-fold + readback, which avoids the strtod-on-garbage regression. */
-    static const char *safe[] = {
-      "lin_add","lin_sub","lin_mul","lin_div","lin_mod","lin_pow",
-      "lin_eq","lin_lt","lin_leq","lin_gt","lin_geq","lin_ffloor"
-    };
+    /* Eager argument-fold: only pure scalar results are re-entrancy-safe to fold
+       mid-reduction.  Since num.lin is pure-Lin (integer/comparison ops are now
+       driver-foldable `_op` closures, not `_ffi`), the integer `_ffi` rows are
+       retired here; `lin_ffloor` is the one remaining int-result `_ffi` op.
+       String-arg ops (lin_parse_float) and float-box results are excluded — they
+       keep using head-fold + readback, avoiding the strtod-on-garbage regression. */
+    static const char *safe[] = { "lin_ffloor" };
     int ok = 0;
     for (int s = 0; s < (int)(sizeof safe / sizeof safe[0]); s++) if (!strcmp(fn, safe[s])) { ok = 1; break; }
     if (!ok) return 0;
