@@ -7,7 +7,7 @@ build:
 	nix build
 
 # Core engine only: the language/runtime is src/*.c + src/lin.h (compact,
-# <= 2500 lines).  -rdynamic exports the core's symbols so dlopen'd driver
+# <= 3000 lines).  -rdynamic exports the core's symbols so dlopen'd driver
 # plugins (simd.so) can resolve net_alloc_scott / net_read_int / net_link &c.
 lin: $(SRCS) src/lin.h
 	$(CC) $(CFLAGS) -rdynamic -o $@ $(SRCS) -ldl -lm

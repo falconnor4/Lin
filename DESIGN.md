@@ -11,8 +11,8 @@ fan-out), implemented compactly.
 The **base engine** (`src/`) is pure interaction-net reduction: the four
 scope-gauge rules (beta, annihilate, commute, erase) plus readback/effects,
 with no hardware-specific or opportunistic fast paths baked in.  That purity
-is what keeps the core small (the pure `src/` core is **2,476 lines** incl.
-`lin.h`, under the 2,500 target) and auditable.
+is what keeps the core small (the pure `src/` core is **2,923 lines** incl.
+`lin.h`, under the 3,000 target) and auditable.
 
 **All optimization/acceleration lives outside the core**, in `std/` and
 `std/drivers/*.so`:
@@ -211,14 +211,18 @@ is asserted by `LIN_GPU_SELFTEST` (no mismatches on a device).
 
 ## Line budget
 
-Pure core `src/` (`.c` + `lin.h`): **3,085 lines** (above the 2,500 target).
-The pure-Scott de-laddering added the driver-foldable `_op` machinery
+Pure core `src/` (`.c` + `lin.h`): **2,923 lines** (< **3,000 target**).  The
+pure-Scott de-laddering added the driver-foldable `_op` machinery
 (`lin_fold_op`/`lin_fold_op_arg`/`op_value_from_lam`, `net_spine_args`, and the
 `_op` deferral + eager-argument-fold edges) in `src/io.c`/`src/net.c`, which is
 what lifts the count; the integer arithmetic itself was already retired to
 `std/drivers/arith.so`, so the migration costs fold machinery in the core rather
-than removing rows.  The arithmetic table, drivers, and `std/runtime/*` live
-outside `src/` and do not count against the core.
+than removing rows.  The fold machinery was then consolidated and generalised —
+one shared `_cl`-spine walk (`decode_spine`), one shared `_ffi`-header dig
+(`ffi_header`), a Scott-spine `scott_peel`, a fold-result `fold_link`, and a
+shared beta `fold_arg` edge — and expository comments/blank lines were compressed
+(3,085 → 2,923).  The arithmetic table, drivers, and `std/runtime/*` live outside
+`src/` and do not count against the core.
 
 ## Status (honest)
 
@@ -258,10 +262,12 @@ outside `src/` and do not count against the core.
   core's shared decoder; the scalar *semantics* are shared via `lin_arith_scalar`
   and the `_op` operands are decoded by the shared `net_spine_args`, but a fuller
   consolidation of each driver's net-side walk remains.
-- Core LOC is ~3,085 (above the 2,500 target): the pure-Scott `_op` machinery is
-  the current cost.  Recapturing headroom requires consolidating the fold/defer
-  and decoder paths, not removing dead arithmetic rows (those already live in
-  arith.so).
+- Core LOC is ~2,923, under the **3,000 target**: the pure-Scott `_op` machinery
+  is a deliberate cost, now consolidated (shared `decode_spine`/`ffi_header`/
+  `scott_peel`/`fold_link`/`fold_arg` and compressed comments).  The driver
+  fold paths (`simd.c`'s `_ffi` arg-decoding) still parallel the core's shared
+  decoder; a fuller consolidation of each driver's net-side walk would reclaim a
+  little more headroom.
 
 **Journey / lessons (compressed history).**  Earlier rounds documented in
 detail: Y-combinator recursion strands its base value on a continuation knot;
