@@ -166,13 +166,32 @@ static int eg_find(EGraph *g, int c) {
   return c;
 }
 
+/* Opaque / leaf node kinds -- precompiled def value markers (TDEF with no body),
+   TDEFX, and floats -- carry no egraph-structural children.  The old
+   eg_add_term recursed into t->l for these, yielding the sentinel -1 as a child
+   eclass; eg_cost()/eg_extract() then ran eg_find(-1) on that index, an
+   out-of-bounds read that silently skewed the reconstruction (def refs such as
+   num.succ / num.is_zero / _cl_cons were emitted back as a stray free `_sz`,
+   so `lin build` on pure-Lin arithmetic failed with `unbound variable '_sz'`).
+   They are handled atomically instead. */
+static int eg_opaque(int type) {
+  switch (type) {
+  case TDEF:
+  case TDEFX:
+  case TFLOAT:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 static void eg_union(EGraph *g, int c1, int c2) {
   c1 = eg_find(g, c1); c2 = eg_find(g, c2); if (c1 == c2) return;
   if (g->classes[c1].cost <= g->classes[c2].cost) g->classes[c2].parent = c1; else g->classes[c1].parent = c2;
 }
 
 static int eg_cost(EGraph *g, ENode *n) {
-  if (n->type == TVAR) return 1;
+  if (n->type == TVAR || eg_opaque(n->type)) return 1;
   if (n->type == TLAM) return 2 + g->classes[eg_find(g, n->l)].cost;
   return 3 + g->classes[eg_find(g, n->l)].cost + g->classes[eg_find(g, n->r)].cost;
 }
@@ -202,6 +221,7 @@ static int eg_add_term(EGraph *g, Term *t) {
   if (t->type == TVAR) return eg_add(g, TVAR, t->name, -1, -1);
   if (t->type == TLAM) return eg_add(g, TLAM, t->name, eg_add_term(g, t->l), -1);
   if (t->type == TAPP) return eg_add(g, TAPP, "", eg_add_term(g, t->l), eg_add_term(g, t->r));
+  if (eg_opaque(t->type)) return eg_add(g, t->type, t->name, -1, -1);
   return eg_add_term(g, t->l);
 }
 
@@ -263,6 +283,7 @@ static Term *eg_extract(EGraph *g, int c, int d) {
   if (d > 2048) return NULL;
   c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
   if (n.type == TVAR) return term_new(TVAR, n.name, NULL, NULL);
+  if (eg_opaque(n.type)) return term_new(n.type, n.name, NULL, NULL);
   if (n.type == TLAM) { Term *l = eg_extract(g, n.l, d + 1); return l ? term_new(TLAM, n.name, l, NULL) : NULL; }
   if (n.type == TAPP) {
     Term *l = eg_extract(g, n.l, d + 1), *r = eg_extract(g, n.r, d + 1);

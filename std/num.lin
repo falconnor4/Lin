@@ -1,14 +1,17 @@
 ; ==============================================================================
 ; Lin Standard Library: Numerals & Arithmetic
 ; ==============================================================================
-; Combines Scott numerals (for O(1) predecessor & pattern matching) and
-; Church numerals (for pure unbounded self-iterating arithmetic folds).
+; Scott numerals (O(1) predecessor & pattern matching) + Church numerals (pure
+; unbounded self-iterating folds).
 ;
-; Arithmetic & comparison are DE-LADERED: instead of 10-deep in-net Scott
-; windowing ladders, `eq`/`add`/... are thin `ccall2 "lin_*"` FFI closures.
-; The engine's confluence-preserving head-fold deferral (net.c) threads each
-; operand's computed value into the closure before folding, so composed
-; expressions like `(if (geq 1 (min 4 5)) 1 8)` still reduce exactly.
+; Arithmetic & comparison are PURE LIN Scott recursion, wrapped as driver-foldable
+; `_op` closures: a saturated op like (add 4 3) reduces to
+;     ((\_add <pure-body>) (cons 4 (cons 3 nil)))
+; whose head `_add` is a DT_OP-named LAM the reducer's lin_fold_op folds, via the
+; shared scalar table (arith.so), into the concrete value whenever the operands
+; are concrete — composed uses like (mul 6 (add 24 96)) fold fast.  The embedded
+; pure-Scott body is the always-correct β-fallback: with no scalar provider the
+; same redex reduces by the interaction calculus (slow but exact).
 ; ==============================================================================
 
 (load "bool.lin")
@@ -29,22 +32,42 @@
 (define c_pow  (\b (\e (e b))))
 (define c_to_scott (\cn (cn num.succ 0)))
 
-(load "ffi.lin")
+; --- Pure-Lin Scott recursion bodies (the always-correct β fallback) ---
+; sub/div/mod clamp like the native table (a<b => 0; /0 or %0 => 0); pow is the
+; positive-exponent loop (b=0 => 1), matching arith.so's integer rows.
+; The `_cl`-spine operands use the Church-list encodings (`\c \n`) the shared
+; on-net decoder recognises, since num.lin loads before list.lin.
+(define! _cl_nil  (list a) (\c (\n n)))
+(define! _cl_cons (a -> list a -> list a) (\h (\t (\c (\n ((c h) t))))))
+(define! padd (num -> num -> num) (\a (\b (ifl (is_zero a) (\_ b) (\_ (succ (padd (pred a) b)))))))
+(define! psub (num -> num -> num) (\a (\b (ifl (is_zero b) (\_ a) (\_ (ifl (is_zero a) (\_ 0) (\_ (psub (pred a) (pred b)))))))))
+(define! pmul (num -> num -> num) (\a (\b (ifl (is_zero a) (\_ 0) (\_ (padd b (pmul (pred a) b)))))))
+(define! pdiv (num -> num -> num)
+  (\a (\b (ifl (is_zero a) (\_ 0) (\_ (ifl (is_zero b) (\_ 0) (\_ (ifl (lt a b) (\_ 0) (\_ (succ (pdiv (psub a b) b)))))))))))
+(define! pmod (num -> num -> num)
+  (\a (\b (ifl (is_zero a) (\_ 0) (\_ (ifl (is_zero b) (\_ 0) (\_ (ifl (lt a b) (\_ a) (\_ (pmod (psub a b) b))))))))))
+(define! ppow (num -> num -> num)
+  (\a (\b (ifl (is_zero b) (\_ 1) (\_ (pmul a (ppow a (pred b))))))))
+(define! peq (num -> num -> bool) (\a (\b (ifl (is_zero a) (\_ (is_zero b)) (\_ (ifl (is_zero b) (\_ false) (\_ (peq (pred a) (pred b)))))))))
+(define! plt (num -> num -> bool) (\a (\b (ifl (is_zero a) (\_ (not (is_zero b))) (\_ (ifl (is_zero b) (\_ false) (\_ (plt (pred a) (pred b)))))))))
+(define pgt (\a (\b (plt b a))))
+(define pleq (\a (\b (not (plt b a)))))
+(define pgeq (\a (\b (not (plt a b)))))
 
-; --- Arithmetic & Comparison (de-ladered: direct FFI) ---
-(define! eq (num -> num -> bool) (\a (\b (ccall2 "lin_eq" a b))))
-(define! add (num -> num -> num) (\a (\b (ccall2 "lin_add" a b))))
-(define! sub (num -> num -> num) (\a (\b (ccall2 "lin_sub" a b))))
-(define! mul (num -> num -> num) (\a (\b (ccall2 "lin_mul" a b))))
-(define! div (num -> num -> num) (\a (\b (ccall2 "lin_div" a b))))
-(define! mod (num -> num -> num) (\a (\b (ccall2 "lin_mod" a b))))
-(define! pow (num -> num -> num) (\a (\b (ccall2 "lin_pow" a b))))
-
-; --- Hybrid Comparisons (de-ladered: direct FFI) ---
-(define! lt (num -> num -> bool) (\a (\b (ccall2 "lin_lt" a b))))
-(define! gt (num -> num -> bool) (\a (\b (ccall2 "lin_gt" a b))))
-(define! leq (num -> num -> bool) (\a (\b (ccall2 "lin_leq" a b))))
-(define! geq (num -> num -> bool) (\a (\b (ccall2 "lin_geq" a b))))
+; --- Arithmetic & Comparison (pure-Lin, driver-foldable) ---
+; Each op emits a saturated `_op` closure whose head is a DT_OP-named LAM applied
+; to the operand `_cl`-spine, with the pure-Scott body inside (fold / β fallback).
+(define! eq (num -> num -> bool) (\a (\b ((\_eq (peq a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! add (num -> num -> num) (\a (\b ((\_add (padd a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! sub (num -> num -> num) (\a (\b ((\_sub (psub a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! mul (num -> num -> num) (\a (\b ((\_mul (pmul a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! div (num -> num -> num) (\a (\b ((\_div (pdiv a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! mod (num -> num -> num) (\a (\b ((\_mod (pmod a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! pow (num -> num -> num) (\a (\b ((\_pow (ppow a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! lt (num -> num -> bool) (\a (\b ((\_lt (plt a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! gt (num -> num -> bool) (\a (\b ((\_gt (pgt a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! leq (num -> num -> bool) (\a (\b ((\_leq (pleq a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
+(define! geq (num -> num -> bool) (\a (\b ((\_geq (pgeq a b)) (_cl_cons a (_cl_cons b _cl_nil))))))
 ; Scott aliases
 (define zero_s num.zero)
 (define succ_s num.succ)

@@ -54,5 +54,13 @@ int net_load_line(Net *n, const char *path) {
     n->name[id][len] = 0;
   }
   if (scn > 0 && fread(n->sca, sizeof(uint64_t), (size_t)scn, f) != (size_t)scn) { fclose(f); net_free(n); return 0; }
-  fclose(f); return 1;
+  fclose(f);
+  /* Seed the self-collecting activation queue: the wire buffer is serialized but
+     the active-redex list is not, so a freshly loaded net starts with an empty
+     queue and net_reduce would do nothing.  Reconstruct all live principal
+     principal-pairs (including ROOT) so the loaded program actually reduces. */
+  for (int i = 0; i < n->nn; i++)
+    if (n->wire[i * 3].port == 0 && n->wire[i * 3].node > i)
+      lin_enqueue(n, (Port){i, 0}, n->wire[i * 3]);
+  return 1;
 }
