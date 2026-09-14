@@ -207,6 +207,14 @@ static Term *parse_term(void) {
       skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
       return term_new(isOpen ? TOPEN : TNS, name, NULL, NULL);
     }
+    if (!strcmp(kw, "export")) {
+      /* (export <ns>): re-export every public member of `ns` into the current
+         namespace.  Collapses the per-module `(open ns)` + `(define! x ns.x)`
+         alias boilerplate. */
+      skipws(); char name[NAME]; if (!sym(name, NAME)) pfail("expected name");
+      skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
+      return term_new(TEXPORT, name, NULL, NULL);
+    }
     if (!strcmp(kw, "match")) {
       /* match => scrut applied to one lambda per case; pat is `_`, a lone name, or (Name v1...vk). Positional Scott dispatch: no type/registry dep. */
       Term *scrut = parse_term();

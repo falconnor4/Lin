@@ -317,17 +317,46 @@ static int run_line_file(const char *path) {
   run_and_report(&net); net_free(&net); return 1;
 }
 
+static void export_namespace(const char *name);   /* (export <ns>) re-export */
 static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
   if (perr) { printf("error: %s\n", perr); return; }
   if (t->type == TLOAD) { if (!load_file(t->name)) printf("error: cannot load '%s'\n", t->name); }
   else if (t->type == TNS) set_namespace(t->name);
   else if (t->type == TOPEN) open_namespace(t->name);
+  else if (t->type == TEXPORT) export_namespace(t->name);
   else if (t->type == TDEF || t->type == TDEFX) process_def(t);
   else if (t->type == TDATATYPE) process_datatype(t);
   else if (building) { if (build_term) term_free(build_term); build_term = term_copy(t); }
   else eval_form(t);
   term_free(t);
+}
+
+/* (export <ns>): re-export every public member of the namespace `ns` into the
+   current namespace, mirroring the hand-written `(define! y ns.y)` aliases each
+   module appended by hand — but preserving each scheme and recursion metadata so
+   exported names reduce exactly as their qualified originals. */
+static void export_namespace(const char *name) {
+  if (!name || !*name) return;
+  char pfx[NAME + 2]; snprintf(pfx, sizeof pfx, "%s.", name);
+  int pflen = (int)strlen(pfx);
+  for (int i = 0; i < ndefs; i++) {
+    const char *dn = defs[i].name;
+    if (strncmp(dn, pfx, (size_t)pflen)) continue;
+    const char *suffix = dn + pflen;
+    if (!*suffix || strchr(suffix, '.')) continue;          /* only direct members */
+    char qn[NAME * 2 + 2];
+    if (curr_ns[0]) snprintf(qn, sizeof qn, "%s.%s", curr_ns, suffix);
+    else snprintf(qn, sizeof qn, "%s", suffix);
+    if (lookup_raw(qn)) continue;                            /* already present */
+    if (ndefs >= defcap) defs = realloc(defs, (size_t)(defcap = defcap ? defcap * 2 : 128) * sizeof(Def));
+    Def *e = &defs[ndefs++], *src = &defs[i];
+    snprintf(e->name, NAME, "%s", qn);
+    e->sch = src->sch; e->typed = 1; e->rec = src->rec;
+    e->rec_k = src->rec_k; e->rec_body = src->rec_body;
+    e->term = term_copy(src->term);
+    e->expanded = NULL; e->compiled = NULL; e->comp_tried = 0;
+  }
 }
 
 static int load_file(const char *path) {

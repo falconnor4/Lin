@@ -7,7 +7,7 @@
 #define NAME 256
 
 /* ---------------- core terms (pure untyped lambda) ---------------- */
-enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT };
+enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT, TEXPORT };
 typedef struct Type { int kind, id; struct Type *a, *b; } Type;
 typedef struct Term {
   int type;
