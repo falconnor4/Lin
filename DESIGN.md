@@ -366,17 +366,29 @@ the fold/scheduling fix above.
   de-ladered `num.lin` is committed as `std/num.lin` and the full suite is green.
   Nested `_ffi` closures are rebuilt as `simd.so` against the updated `lin.h`
   (the prebuilt `.so` was stale).
-- **Arithmetic moved out of the core into a driver plugin (goal 3).**  All pure
-  integer/float arithmetic & comparison dispatch (`lin_add`.., `lin_eq`..,
-  `lin_ffloor`, every `lin_f*` op, `lin_lerp`, `lin_fclamp`) now lives in
-  `std/drivers/arith.so`, not in `src/io.c run_ffi`.  The plugin registers a
-  scalar evaluator via a new `lin_arith_register` hook (constructor at dlopen;
-  `main()` calls `lin_arith_load()` at startup so the base engine folds
-  correctly); `run_ffi` delegates any `lin_*` fn the core doesn't own to that
-  hook, so folding/readback/composed paths share one plugin authority and the
-  core no longer reimplements math.  Non-movable C stays in the core
-  (memory/device/OS, float parsing `lin_parse_float`/`lin_float`, `lin_streq`,
-  `lin_folds`/`lin_folded`).  Suite stays green: 50 suites / 875 assertions.
+- **Arithmetic generalized: ONE shared scalar-op table, any reduction strategy.**
+  All pure integer/float arithmetic & comparison dispatch (`lin_add`..,
+  `lin_eq`.., `lin_ffloor`, every `lin_f*` op, `lin_lerp`, `lin_fclamp`) now
+  lives in `std/drivers/arith.so` as the **single canonical `lin_arith_scalar`
+  table**.  `simd.c`'s `ev_ffi` delegates to it (dlsym, cached) instead of its
+  own switch, and the GPU strategy already relegates `_ffi` folding to the base
+  fold — so cpu base fold, SIMD, and GPU all resolve the SAME math, and new ops
+  are one table row, not per-driver switch arms.  `arith.so` is a semantic
+  provider, deliberately NOT a reduction strategy (its claim is a no-op).  The
+  core hook is generalized: `lin_scalar_ops_add()`/`lin_scalar_ops_load(sym)`
+  register any number of `ScalarOpFn` providers (arith is the first consumer),
+  so future drivers extend ops without touching the core.  Non-movable C stays
+  in the core (memory/device/OS, float parsing `lin_parse_float`/`lin_float`,
+  `lin_streq`, `lin_folds`/`lin_folded`).
+- **Core shrunk under 2500 LOC by relocating non-calculus runtime to std.**
+  The readback/IO-effect runtime (value rendering, net printer, the monadic
+  `_iod/_iop/_ior/_iow` runner) moved out of `src/io.c` and the `.line` binary
+  container out of `src/compile.c` into `std/runtime/{io,line}.c`, which the
+  core `#include`s (unity build, no build/recipe change).  Together with the
+  arithmetic generalization and fold/defer consolidation, the pure-`src` core
+  is now **2476 LOC** (< 2500 target; note baseline ecb7156 was already 2628),
+  focused on the interaction calculus.  Suite stays green after every step:
+  50 suites / 875 assertions.
 - **True self-recursion converges (round-28).**  Recursive defs are now compiled
   by *bounded self-unravelling* (`build_bound_rec`: `Y_k f = f(f(...(f base)...))`,
   k=24, `base = \args 0`) instead of the Y-fixpoint, which the reducer stranded
