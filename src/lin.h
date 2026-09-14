@@ -144,6 +144,7 @@ long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
 typedef struct { char name[NAME]; Term *term, *expanded; Scheme sch; int typed, rec;
+                 int rec_k; Term *rec_body;   /* widening self-recursion bound + original body */
                  Net *compiled; int comp_tried; } Def;
 extern Def *defs;
 extern int ndefs, lin_threads;

@@ -123,13 +123,55 @@ static void run_and_report(Net *net) {
   }
 }
 
+/* (recursion builders defined below eval_form; forward decls) */
+static const char REC_SENTINEL[];
+static int lam_arity(Term *t);
+static Term *build_bound_rec(const char *name, Term *body, int k);
+
+/* Is a node named `nm` alive and reachable from ROOT?  Detects the `_rec`
+   recursion sentinel surviving a truncated run (depth exceeded the bound). */
+static int net_has_reachable(Net *net, const char *nm) {
+  if (!nm) return 0;
+  unsigned char *reach = malloc((size_t)(net->nn + 1));
+  memset(reach, 0, (size_t)(net->nn + 1));
+  int *q = malloc((size_t)(net->nn + 1) * sizeof(int)); int qh = 0, qt = 1; q[0] = 0; reach[0] = 1;
+  int found = 0;
+  while (qh < qt) { int u = q[qh++];
+    if (net->name[u] && !strcmp(net->name[u], nm)) { found = 1; break; }
+    for (int p = 0; p < 3; p++) { Port w = net->wire[u*3+p];
+      if (w.node >= 0 && w.node < net->nn && !net->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; } } }
+  free(reach); free(q); return found;
+}
+
+/* Double every recursive def's unravelling bound, clear its expansion, so the
+   next attempt compiles a deeper chain (O(log depth) re-evaluations). */
+static int widen_recursion(void) {
+  int wid = 0;
+  for (int i = 0; i < ndefs; i++) if (defs[i].rec && defs[i].rec_body) {
+    defs[i].rec_k = defs[i].rec_k < (1 << 22) ? defs[i].rec_k * 2 : defs[i].rec_k;
+    term_free(defs[i].term);
+    defs[i].term = build_bound_rec(defs[i].name, defs[i].rec_body, defs[i].rec_k);
+    defs[i].expanded = NULL;
+    wid = 1;
+  }
+  return wid;
+}
+
 void eval_form(Term *t) {
   char err[512]; Scheme sch;
   if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
   if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); return; }
-  Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
-  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
-  run_and_report(&net); net_free(&net); term_free(ex);
+  for (int round = 0; round < 16; round++) {
+    Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
+    if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
+    net_reduce(&net, STEP_LIMIT);
+    if (net_has_reachable(&net, REC_SENTINEL)) {   /* self-recursion exceeded k */
+      net_free(&net); term_free(ex);
+      if (!widen_recursion()) { printf("error: recursion depth exceeded unravelling bound\n"); return; }
+      continue;
+    }
+    run_and_report(&net); net_free(&net); term_free(ex); return;
+  }
 }
 
 /* Count the arity (leading \x binders) of a function body, so the bounded
@@ -140,20 +182,19 @@ static int lam_arity(Term *t) {
   return k;
 }
 
-/* Bounded self-recursion: replace the stranding Y-fixpoint with a *finite*
-   unravelling `Y_k f = f (f (... (f base) ...))` (k applications), where
-   `base = \a1..\ar 0`.  This is exactly the engine's provably-working recursion
-   pattern (e.g. `recursion.lin`'s stratified `fact_step^5`), so reduction never
-   forms the self-referential continuation knot that strands the base value.
-   Any recursion deeper than `k` truncates to `0`.  Pure, engine-native, and
-   keeps the base engine (and its confluence) untouched. */
+static const char REC_SENTINEL[] = "_rec";
+/* Dynamic (widening) self-recursion: replace the stranding Y-fixpoint with a
+   *finite* unravelling `Y_k f = f (f (... (f base) ...))` (k applications) whose
+   innermost `base = \a1..\ar (_rec ...)` is the __rec SENTINEL (not 0).  The
+   base engine is never changed: reduction is confluent and correct for depth
+   <= k, and if depth exceeds k the sentinel survives to a ROOT-reachable
+   position (eval_form re-drives with a doubled k; see widen_recursion).  A user
+   term never yields `_rec` (reserved), so truncation is unambiguous. */
 static Term *build_bound_rec(const char *name, Term *body, int k) {
-  /* base = \a1..\an 0 for arity n = lam_arity(body) */
   int ar = lam_arity(body);
-  Term *zero = term_new(TLAM, "_sz", term_new(TLAM, "_ss", term_new(TVAR, "_sz", 0, 0), 0), 0);
-  Term *base = term_copy(zero);
+  Term *zero = term_new(TLAM, REC_SENTINEL, term_new(TLAM, REC_SENTINEL, term_new(TVAR, REC_SENTINEL, 0, 0), 0), 0);
+  Term *base = zero;
   for (int i = 0; i < ar; i++) { char a[NAME]; snprintf(a, sizeof a, "_r%d", i); base = term_new(TLAM, a, base, NULL); }
-  term_free(zero);
   Term *cur = base;
   for (int i = 0; i < k; i++) {
     Term *f = term_new(TLAM, name, term_copy(body), NULL);
@@ -222,8 +263,12 @@ static void process_def(Term *t) {
     strncpy(d->name, t->name, NAME - 1); d->name[NAME - 1] = 0;
   }
   d->sch = sch; d->typed = 1; d->rec = rec;
-  if (rec) d->term = build_bound_rec(t->name, t->l, 24);
-  else     d->term = t->l;
+  if (rec) {
+    d->rec_k = 24; d->rec_body = t->l;                  /* keep body for widening */
+    d->term = build_bound_rec(t->name, t->l, d->rec_k);
+  } else {
+    d->rec_k = 0; d->rec_body = NULL; d->term = t->l;
+  }
   d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;
   t->l = NULL;
 }
