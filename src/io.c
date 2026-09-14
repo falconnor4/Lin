@@ -477,40 +477,20 @@ int lin_fold_op(Net *n, Port lam, Port app) {
   return 1;
 }
 
-/* 1 if `lam` (a DT_OP head-LAM) is applied to operands that are not yet ALL decodable, so the `_add`
-   head-redex should be DEFERRED (parked on the per-net blocked list, re-driven after the wave drains)
-   instead of β-squashed.  Mirrors lin_ffi_needs_operand.  A spine operand that is itself an un-folded
-   `_op` redex (e.g. `(omul 6 (oadd 24 96))`) counts as pending: those must fold first, or β would strand them. */
-static int dec_arg(Net *n, Port p, Val *v);          /* from runtime_decoder.inc */
-static int lin_op_spine_pending(Net *n, Port argp) {
-  Port cur = skip_dup(n, argp);
-  if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) return 0;
-  if (ctor_tag(NNM(n, cur.node)) != DT_STR) return 0; /* not a `_cl`-spine; single flat arg */
-  Port bn = skip_dup(n, wire((Port){cur.node, 2}));
-  if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) return 0;
-  for (int step = 0; step < n->nn; step++) {
-    cur = skip_dup(n, cur);
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
-    Port inner = skip_dup(n, wire((Port){cur.node, 2}));
-    if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
-    Port body = skip_dup(n, wire((Port){inner.node, 2}));
-    if (body.node < 0 || n->tag[body.node] != APP) break;
-    Port ia = skip_dup(n, wire((Port){body.node, 0}));
-    if (ia.node >= 0 && n->tag[ia.node] == APP) {
-      Val v;
-      if (!dec_arg(n, wire((Port){ia.node, 2}), &v)) return 1; /* present-but-pending slot */
-    }
-    cur = wire((Port){body.node, 2});
-  }
-  return 0;
-}
+/* 1 if `lam` (a DT_OP head-LAM) is applied to operands that are not yet ALL
+   decodable, so the `_add` head-redex should be DEFERRED (parked on the per-net
+   blocked list, re-driven after the wave drains) instead of β-squashed.  Mirrors
+   lin_ffi_needs_operand.  A spine operand that is itself an un-folded `_op`
+   redex (e.g. `(omul 6 (oadd 24 96))`) counts as pending via decode_spine's
+   skipped-slot detection: those must fold first, or β would strand them. */
+static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped); /* decoder */
 int lin_op_needs_operand(Net *n, Port lam, Port app) {
   if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
   if (!op_tag_to_fn(n->name[lam.node] ? n->name[lam.node] : "")) return 0;
   Port argp = wire((Port){app.node, 2});
-  if (lin_op_spine_pending(n, argp)) return 1;        /* an operand slot is not concrete yet */
-  Val fargs[8] = {{0}};
-  int argc = net_spine_args(n, argp, fargs, 8);
+  Val fargs[8] = {{0}}; int skipped = 0;
+  int argc = decode_spine(n, argp, fargs, 8, &skipped);
+  if (skipped) return 1;                             /* a present operand slot is not concrete yet */
   if (argc < 1) return 1;                            /* spine not reduced/readable yet */
   for (int i = 0; i < argc; i++)
     if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return 1;

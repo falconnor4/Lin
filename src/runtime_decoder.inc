@@ -35,9 +35,12 @@ static int dec_arg(Net *n, Port p, Val *v) {
 
 /* Decode a `_cl`-spine argument list rooted at port `argp` into up to `max`
    Vals.  The single spine walk shared by the `_ffi` closure (net_ffi_args) and
-   the `_op` redex fold (net_spine_args).  Returns the arg count; 0 if none
-   (a single non-spine arg is decoded too). */
-static int decode_spine(Net *n, Port argp, Val *vals, int max) {
+   the `_op` redex fold (net_spine_args).  If `*skipped` is non-NULL it is set
+   to 1 when a PRESENT slot was not decodable (a nested `_op`/closure that has
+   yet to fold), which net_reduce uses to defer the outer fold.  Returns decoded
+   count; 0 if none (a single non-spine arg is decoded too). */
+static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped) {
+  if (skipped) *skipped = 0;
   int argc = 0; Port cur = skip_dup(n, argp);
   if (cur.node >= 0 && cur.node < n->nn && n->tag[cur.node] == LAM &&
       ctor_tag(NNM(n, cur.node)) == DT_STR) {
@@ -53,12 +56,13 @@ static int decode_spine(Net *n, Port argp, Val *vals, int max) {
         Port ia = skip_dup(n, wire((Port){body.node, 0}));
         if (ia.node >= 0 && n->tag[ia.node] == APP) {
           if (dec_arg(n, wire((Port){ia.node, 2}), &vals[argc])) argc++;
+          else if (skipped) *skipped = 1;             /* present slot, not yet concrete */
         }
         cur = wire((Port){body.node, 2});
       }
     }
   }
-  if (argc == 0 && dec_arg(n, argp, &vals[0])) argc = 1;
+  if (skipped && !*skipped && argc == 0 && dec_arg(n, argp, &vals[0])) argc = 1;
   return argc;
 }
 
@@ -68,7 +72,7 @@ int net_ffi_args(Net *n, Port lam, Val *vals, int max) {
   N = n;
   Port argp;
   if (!ffi_header(n, lam, 0, &argp)) return 0;
-  return decode_spine(n, argp, vals, max);
+  return decode_spine(n, argp, vals, max, 0);
 }
 
 /* Decode a `_cl`-spine argument list rooted at port `argp` (not inside a closure
@@ -76,5 +80,5 @@ int net_ffi_args(Net *n, Port lam, Val *vals, int max) {
    way.  Exported so driver plugins reuse the shared decoder. */
 int net_spine_args(Net *n, Port argp, Val *vals, int max) {
   N = n;
-  return decode_spine(n, argp, vals, max);
+  return decode_spine(n, argp, vals, max, 0);
 }
