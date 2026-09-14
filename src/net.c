@@ -175,10 +175,11 @@ int net_interact(Net *n, Port p1, Port p2) {
        Church booleans usable by `if` — independent of any accelerator driver. */
     const char *lnm = n->name[n1] ? n->name[n1] : "";
     if (ctor_tag(lnm) == DT_FFI && lin_fold_ffi(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
-    if (ctor_tag(lnm) == DT_OP && lin_fold_op(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
-    /* a saturated pure-Lin arithmetic-op closure (DT_OP named LAM, no new agent)
-       folds the same way: if a scalar provider (arith.so/SIMD/GPU) claims the raw
-       op, use its concrete value; otherwise fall through to the pure-Lin β-body. */
+    /* a saturated pure-Lin arithmetic-op closure (DT_OP named LAM, no new agent):
+       the fold reads the op token from the LAM name + raw operands from the
+       applied `_cl`-spine and folds via the shared scalar table; if a scalar
+       provider claims the op it folds fast, otherwise we fall through to the
+       pure-Lin β-body below (the embedded Scott recursion, slow but correct). */
     if (ctor_tag(lnm) == DT_OP && lin_fold_op(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
     /* A pure-lin `_ffi` closure whose operands are not yet concrete (e.g. a
        still-live `(min 4 5)` result feeding `geq`) must not be β-squashed here:
@@ -189,8 +190,9 @@ int net_interact(Net *n, Port p1, Port p2) {
        During an open free-var precompile (lin_precompile_depth > 0) the operands
        are legitimately free vars that will never become concrete now: deferring
        would spin the whole precompile, so only defer for real reductions. */
-    if (lin_precompile_depth == 0 && ctor_tag(lnm) == DT_FFI && n->declines < (long)(1 << 15) &&
-        lin_ffi_needs_operand(n, (Port){n1, 0})) {
+    if (lin_precompile_depth == 0 && n->declines < (long)(1 << 15) &&
+        ((ctor_tag(lnm) == DT_FFI && lin_ffi_needs_operand(n, (Port){n1, 0})) ||
+         (ctor_tag(lnm) == DT_OP  && lin_op_needs_operand(n, (Port){n1, 0}, (Port){n2, 0})))) {
       n->declines++;
       /* Hold the pair on a separate BLOCKED list (NOT re-queued into `act`):
          re-queuing into the active list would keep the inner reduce loop from
@@ -207,20 +209,31 @@ int net_interact(Net *n, Port p1, Port p2) {
     Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;
     if (lv.node == n1 && lv.port == 2 && lb.node == n1 && lb.port == 1) {
-      /* identity: V = (\x. x) V — but V may itself be a saturated _ffi closure
-         (e.g. `arity` polymorphics), so fold the argument where possible. */
+      /* identity: V = (\x. x) V — but V may itself be a saturated _ffi/_op
+         closure (e.g. `arity` polymorphics), so fold the argument where possible. */
       if (aa.node >= 0 && aa.port == 0 && aa.node < n->nn && !n->dead[aa.node] &&
-          n->tag[aa.node] == LAM && ctor_tag(n->name[aa.node] ? n->name[aa.node] : "") == DT_FFI) {
-        if (lin_fold_ffi_arg(n, aa, ar)) return 1;
+          n->tag[aa.node] == LAM) {
+        int c = ctor_tag(n->name[aa.node] ? n->name[aa.node] : "");
+        if (c == DT_FFI && lin_fold_ffi_arg(n, aa, ar)) return 1;
+        if (c == DT_OP  && lin_fold_op_arg(n, aa, ar)) return 1;
       }
       net_link(n, aa, ar, 1); return 1;
     }
-    /* eager argument fold: a saturated _ffi closure passed as data (not head)
+    /* eager argument fold: a saturated _ffi/_op closure passed as data (not head)
        would otherwise be beta-duplicated without ever folding (e.g.
-       `succ (mul 2 2)`).  Fold it so the substitution binds a concrete value. */
-    if (aa.node >= 0 && aa.port == 0 && aa.node < n->nn && !n->dead[aa.node] &&
-        n->tag[aa.node] == LAM && ctor_tag(n->name[aa.node] ? n->name[aa.node] : "") == DT_FFI) {
-      if (lin_fold_ffi_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
+       `succ (mul 2 2)`).  Fold it so the substitution binds a concrete value.
+       A pure-Lin `_op` closure is a REDEX ((\_add <pure-body>) <spine>), i.e. an
+       APP whose head is a DT_OP LAM (`lin_fold_op_arg` accepts that form too). */
+    if (aa.node >= 0 && aa.port == 0 && aa.node < n->nn && !n->dead[aa.node]) {
+      int c = (n->tag[aa.node] == LAM) ? ctor_tag(n->name[aa.node] ? n->name[aa.node] : "") : -1;
+      if (c == DT_FFI && lin_fold_ffi_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
+      if (c == DT_OP && lin_fold_op_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
+      if (n->tag[aa.node] == APP) {
+        Port h = WIRE(n, ((Port){aa.node, 0}));
+        if (h.node >= 0 && h.node < n->nn && !n->dead[h.node] && n->tag[h.node] == LAM &&
+            ctor_tag(n->name[h.node] ? n->name[h.node] : "") == DT_OP &&
+            lin_fold_op_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
+      }
     }
     net_link(n, lv, aa, 1); net_link(n, lb, ar, 1);
     return 1;

@@ -120,6 +120,12 @@ int lin_fold_ffi(Net *n, Port lam, Port app);
    as _ffi): reads the op tag + raw operands, folds via the shared scalar table;
    pure-Lin β-body is the driver-free fallback. */
 int lin_fold_op(Net *n, Port lam, Port app);
+/* Fold a saturated pure-Lin `_op` closure appearing as a beta ARGUMENT (not head) */
+int lin_fold_op_arg(Net *n, Port lam, Port out);
+/* 1 if an `_op` head-redex's applied operands are not yet concrete/decodable and
+   should be deferred (waiting for the operand sub-nets to materialise) rather
+   than β-squashed; mirrors lin_ffi_needs_operand for the pure-Lin op fold. */
+int lin_op_needs_operand(Net *n, Port lam, Port app);
 /* non-destructive pre-scan: 1 if a pure-lin _ffi closure is blocked solely by a
    non-concrete operand and should be deferred (re-queued) rather than β-squashed */
 int lin_ffi_needs_operand(Net *n, Port lam);
@@ -131,6 +137,7 @@ int lin_fold_ffi_arg(Net *n, Port lam, Port out);
 Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_args(Net *n, Port lam, Val *vals, int max); /* decode arg spine into Vals */
+int  net_spine_args(Net *n, Port argp, Val *vals, int max); /* decode a `_cl`-spine at a port */
 /* !=0 while def_precompile reduces an open (free-var) body: suppress folding so
    the fold never runs on non-concrete operands and bakes a stale value. */
 extern int lin_precompile_depth;

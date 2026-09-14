@@ -77,3 +77,34 @@ int net_ffi_args(Net *n, Port lam, Val *vals, int max) {
   if (argc == 0 && dec_arg(n, argp, &vals[0])) argc = 1;
   return argc;
 }
+
+/* Decode a `_cl`-spine argument list rooted at port `argp` (not inside a
+   closure body) into up to `max` Vals.  The `_op` redex fold (lin_fold_op)
+   reads a saturated arith op's raw operands this way: the operands live in the
+   `_cl`-spine that the DT_OP LAM is directly applied to.  Mirrors the spine
+   walk of net_ffi_args; exported so driver plugins can reuse one decoder. */
+int net_spine_args(Net *n, Port argp, Val *vals, int max) {
+  N = n;
+  int argc = 0; Port cur = skip_dup(n, argp);
+  if (cur.node >= 0 && cur.node < n->nn && n->tag[cur.node] == LAM &&
+      ctor_tag(NNM(n, cur.node)) == DT_STR) {
+    Port bn = skip_dup(n, wire((Port){cur.node, 2}));
+    if (bn.node >= 0 && bn.port == 0 && n->tag[bn.node] == LAM) {
+      for (int step = 0; step < n->nn && argc < max; step++) {
+        cur = skip_dup(n, cur);
+        if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
+        Port inner = skip_dup(n, wire((Port){cur.node, 2}));
+        if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
+        Port body = skip_dup(n, wire((Port){inner.node, 2}));
+        if (body.node < 0 || n->tag[body.node] != APP) break;
+        Port ia = skip_dup(n, wire((Port){body.node, 0}));
+        if (ia.node >= 0 && n->tag[ia.node] == APP) {
+          if (dec_arg(n, wire((Port){ia.node, 2}), &vals[argc])) argc++;
+        }
+        cur = wire((Port){body.node, 2});
+      }
+    }
+  }
+  if (argc == 0 && dec_arg(n, argp, &vals[0])) argc = 1;
+  return argc;
+}

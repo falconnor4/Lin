@@ -468,24 +468,122 @@ int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
    new agent — but the *value* comes from the shared scalar table (arith.so),
    and the β-body is pure-Lin, so with no driver loaded a saturated `_op` still
    reduces (slowly) to the exact result via the interaction calculus. */
+/* Derive the shared-table scalar op name from a DT_OP carrier tag (e.g. `_add`
+   -> "lin_add").  Returns the name or NULL for non-op carries. */
+static const char *op_tag_to_fn(const char *tag) {
+  if (!tag || tag[0] != '_') return NULL;
+  static char fn[256];
+  snprintf(fn, sizeof fn, "lin_%s", tag + 1);   /* "_add" -> "lin_add" */
+  return fn;
+}
+
+/* forward decl (defined after use in this TU) */
+static int op_value_from_lam(Net *n, Port lam, Port app, Val *v);
+
 int lin_fold_op(Net *n, Port lam, Port app) {
   N = n;
-  /* closure shape: \_op (\_ret ((_op TAG) (PUREARGS?))).  Read TAG + operands just
-     like a `_ffi` closure.  TAG -> scalar-op name; operands must be concrete. */
-  const char *tag = n->name[lam.node] ? n->name[lam.node] : "";
-  (void)tag;
-  Port r = wire((Port){lam.node, 2});
-  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
-  Port a2 = wire((Port){r.node, 2});
-  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
-  Port a1 = wire((Port){a2.node, 0});
-  if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
-  char fn[256];
-  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
-  if (strncmp(fn, "lin_", 4)) return 0;              /* shared table keys on lin_* names */
-  /* saturation: every operand must be a concrete scalar */
+  /* A saturated pure-Lin arithmetic-op redex is shaped
+         ((\_add <pure-Lin-β-body>) <_cl-spine of raw operands>)
+     i.e. the `_add` (DT_OP) LAM *applied directly to the operand spine*: the
+     fold reads the op token from the LAM's own name (`_add`), decodes the raw
+     operands from the applied `_cl`-spine via the SHARED decoder, and folds via
+     the shared scalar table (arith.so).  No driver/table present (or a non-
+     concrete operand) => return 0 so the pure-Lin β-body (<pure-Lin-β-body>, a
+     plain Scott recursion applied to the same operands) computes slowly but
+     correctly. */
+  Val v;
+  if (!op_value_from_lam(n, lam, app, &v)) return 0;
+  Port res = val_to_port(n, v);
+  /* Substitute the concrete result for the saturated redex, exactly as β would
+     thread the body out: the redex's value continues through the APP's port-1
+     body slot (matching net_interact's beta wiring), so `res` replaces it.  The
+     LAM, its pure-Lin body, and the operand spine are killed/GC'd so no residual
+     computation competes with the folded value. */
+  Port ar = wire((Port){app.node, 1});
+  Port aa = wire((Port){app.node, 2});
+  Port body = wire((Port){lam.node, 2});             /* the pure-Lin β-body residual */
+  n->dead[lam.node] = 1; n->dead[app.node] = 1;
+  if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
+  if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
+  if (ar.node >= 0 && ar.node < n->nn && ar.port == 0 && !n->dead[ar.node]) {
+    /* `ar` is the LAM body's continuation: splice res there, matching beta. */
+    net_link(n, res, ar, 1);
+  } else {
+    /* beta threads the redex result through app's port-1 body slot; fall back to
+       that slot directly if `ar` was already consumed. */
+    net_link(n, res, (Port){app.node, 1}, 1);
+  }
+  lin_fold_bump();
+  return 1;
+}
+
+/* 1 if `lam` (a DT_OP head-LAM) is applied to operands that are not yet ALL
+   concrete/decodable, so the `_add` head-redex should be DEFERRED (parked on the
+   per-net blocked list, re-driven after the wave drains) instead of β-squashed:
+   it mirrors lin_ffi_needs_operand, and gives the applied `_cl`-spine time to
+   reduce and its operand sub-nets time to materialise concrete scalars. */
+int lin_op_needs_operand(Net *n, Port lam, Port app) {
+  if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
+  if (!op_tag_to_fn(n->name[lam.node] ? n->name[lam.node] : "")) return 0;
+  Port argp = wire((Port){app.node, 2});
   Val fargs[8] = {{0}};
-  int argc = net_ffi_args(n, (Port){lam.node, 0}, fargs, 8);
+  int argc = net_spine_args(n, argp, fargs, 8);
+  if (argc < 1) return 1;                            /* spine not reduced/readable yet */
+  for (int i = 0; i < argc; i++)
+    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return 1;
+  return 0;                                          /* ready to fold */
+}
+
+/* Fold a saturated pure-Lin `_op` closure that appears as a beta ARGUMENT (not a
+   head), e.g. the `n` of `\_sz \_ss (_ss n)` in `succ (add 2 2)`, so the
+   substitution binds a concrete scalar.  `p` may be the `_op` LAM itself OR the
+   redex APP ((_add <pure-body>) <spine>) whose head is a DT_OP LAM.  Mirrors
+   lin_fold_ffi_arg; writes the folded concrete value to `out`.  Returns 1. */
+int lin_fold_op_arg(Net *n, Port p, Port out) {
+  N = n;
+  Port lam, redex;
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node]) return 0;
+  if (n->tag[p.node] == LAM && op_tag_to_fn(n->name[p.node] ? n->name[p.node] : "")) {
+    lam = p;
+    redex = wire((Port){p.node, 0});                 /* the APP this LAM is applied to */
+    if (redex.node < 0 || redex.node >= n->nn || n->dead[redex.node] || n->tag[redex.node] != APP) return 0;
+  } else if (n->tag[p.node] == APP) {
+    Port h = wire((Port){p.node, 0});                /* an APP-headed _op redex */
+    if (h.node < 0 || h.node >= n->nn || n->dead[h.node] || n->tag[h.node] != LAM ||
+        !op_tag_to_fn(n->name[h.node] ? n->name[h.node] : "")) return 0;
+    lam = h; redex = p;
+  } else return 0;
+  Val v;
+  if (!op_value_from_lam(n, lam, redex, &v)) return 0;
+  if (v.kind != 1 && v.kind != 3) return 0;          /* int/bool values re-link safely mid-beta */
+  Port res = val_to_port(n, v);
+  Port body = wire((Port){lam.node, 2});             /* the pure-Lin β-body residual */
+  Port aa = wire((Port){redex.node, 2});             /* the operand spine */
+  n->dead[lam.node] = 1; n->dead[redex.node] = 1;
+  if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
+  if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
+  net_link(n, res, out, 1);
+  lin_fold_bump();
+  return 1;
+}
+
+/* Compute the concrete value of a saturated `_op` redex headed by LAM `lam`
+   (a DT_OP carrier) applied to `app` (its redex APP, carrying the operand spine).
+   On success fills `*v` and returns 1.  Shared by the head-fold (lin_fold_op) and
+   the eager argument-fold (lin_fold_op_arg). */
+static int op_value_from_lam(Net *n, Port lam, Port app, Val *v) {
+  const char *tag = n->name[lam.node] ? n->name[lam.node] : "";
+  const char *fn = op_tag_to_fn(tag);
+  if (!fn) return 0;
+  /* During an open free-var precompile, the operands are legitimately free vars
+     that will never be concrete now, so we cannot fold; and normal β would
+     β-squash the `_op` closure (destroying the fold point for composed use).
+     Signal the stuck closure so def_precompile declines this def's cache and the
+     definition stays textual (its `_add` closure survives to fold at use site). */
+  if (lin_precompile_depth > 0) { lin_stuck_ffi_count++; return 0; }
+  Port argp = wire((Port){app.node, 2});             /* the applied `_cl`-spine */
+  Val fargs[8] = {{0}};
+  int argc = net_spine_args(n, argp, fargs, 8);
   if (argc < 1) return 0;
   long c_args[8] = {0};
   for (int i = 0; i < argc; i++) if (fargs[i].kind == 1 || fargs[i].kind == 3 || fargs[i].kind == 4) c_args[i] = fargs[i].iv;
@@ -494,13 +592,8 @@ int lin_fold_op(Net *n, Port lam, Port app) {
   int claimed = 0;
   for (int s = 0; s < n_scalar_ops; s++) if (scalar_ops[s](fn, argc, c_args, &out, &okind)) { claimed = 1; break; }
   if (!claimed) return 0;                            /* no scalar provider: fall through to pure-Lin β */
-  Val v = {0};
-  if (okind == 4) v.kind = 4; else if (okind == 3) v.kind = 3; else v.kind = 1;
-  v.iv = out;
-  Port res = val_to_port(n, v);
-  n->dead[lam.node] = 1;
-  net_link(n, res, (Port){app.node, 0}, 1);
-  lin_fold_bump();
+  if (okind == 4) v->kind = 4; else if (okind == 3) v->kind = 3; else v->kind = 1;
+  v->iv = out;
   return 1;
 }
 
