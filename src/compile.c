@@ -280,4 +280,4 @@ Term *egraph_optimize(Term *t) {
 }
 
 /* ---------------- .line Binary Container (lives in std; see std/runtime/line.c) ---------------- */
-#include "../std/runtime/line.c"
+#include "runtime_line.inc"

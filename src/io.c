@@ -464,6 +464,6 @@ Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k); }
 /* Readback / IO-effect runtime + shared on-net FFI decoder live in std (not the
    core); included here so they share this TU's statics (N, wire, skip_dup,
    dup_hop, run_ffi). */
-#include "../std/runtime/io.c"
-#include "../std/runtime/decoder.c"
+#include "runtime_io.inc"
+#include "runtime_decoder.inc"
 
