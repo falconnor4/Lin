@@ -351,15 +351,11 @@ static Val run_ffi(Net *n, Port p) {
 }
 
 /* Compute a saturated _ffi closure's concrete value (pure lin_* only).
-   Returns 1 and fills *vout if `lam` is a saturated pure-arithmetic _ffi
-   closure; else 0.  Shared by the head-fold (LAM x APP) and the eager
-   argument-fold, so composed arithmetic materialises regardless of position. */
+   Shared by the head-fold and the eager argument-fold so composed arithmetic
+   materialises regardless of position. */
 static int ffi_ops_concrete(Net *n, Port lam); /* fwd */
 int lin_precompile_depth = 0; /* set around def_precompile's net_reduce */
-/* Counted while def_precompile reduces: an _ffi closure was β-consumed as a
-   boolean/function but could not fold (open free-var operands).  A nonzero count
-   means the baked def would be broken, so def_precompile declines the cache. */
-int lin_stuck_ffi_count = 0;
+int lin_stuck_ffi_count = 0;  /* _ffi closure β-consumed during a free-var precompile */
 static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   if (lin_precompile_depth > 0) return 0; /* free-var body: don't fold yet */
   char fn[256];
@@ -394,13 +390,11 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   *vout = v; return 1;
 }
 
-/* Does the `_ffi` closure at `lam` have ALL operands concretely readable as a
-   scalar (Scott int / Church bool / float / string) or as a recursively-foldable
-   pure-lin_* closure?  Used by the saturation guard (lin_ffi_peek) and the
-   reducer's deferral pre-scan (lin_ffi_needs_operand).  Walks the arg `_cl`-spine
-   exactly like unpack_args (previous code landed on the APP node and validated
-   only the FIRST operand, letting later non-concrete operands fold as garbage —
-   the `(min 4 5)`-as-if stranding). */
+/* Are all of `lam`'s operands concretely readable (Scott int / Church bool /
+   float / string) or a recursively-foldable pure-lin_* closure?  Walks the
+   arg `_cl`-spine like unpack_args (previously it landed on the APP node and
+   validated only the FIRST operand, letting later non-concrete operands fold
+   as garbage — the `(min 4 5)`-as-if stranding). */
 static int ffi_ops_concrete(Net *n, Port lam) {
   Port r = wire((Port){lam.node, 2});
   if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
