@@ -1,22 +1,14 @@
 ; ==============================================================================
 ; Lin Standard Library: Native small-integer arithmetic mode
 ; ==============================================================================
-; Routes the scalar arithmetic / comparison primitives through the FFI closure
-; representation so that a capable reducer (e.g. the SIMD driver) can fold them
-; to native small-integer results *during* reduction, instead of expanding them
-; step-by-step through Scott numerals.  Optional and driver-opt-in: without a
-; folding reducer the pure-Scott numeric module remains the default and every
-; driver stays correct (though slower for small integers).
+; With arithmetic now PURE LIN (std/num.lin), the scalar ops are driver-foldable
+; `_op` closures: a saturated op like (add 4 3) is a DT_OP-named LAM applied to
+; the operand `_cl`-spine, which the core's lin_fold_op — or an accelerator
+; driver (SIMD/GPU) claiming the same saturated redex — folds via the shared
+; scalar table (arith.so) to a native small-integer result *during* reduction.
+; No integer `_ffi`/ccall2 routing remains; this module just ensures pure-Lin
+; num/math are loaded so a folding reducer stays the convention.
 ; ==============================================================================
 
 (load "num.lin")
 (load "math.lin")
-(load "../ffi.lin")
-
-; --- Native arithmetic: produce an FFI closure the reducer can fold ---
-(define! add (num -> num -> num) (\a (\b (ccall2 "lin_add" a b))))
-(define! sub (num -> num -> num) (\a (\b (ccall2 "lin_sub" a b))))
-(define! mul (num -> num -> num) (\a (\b (ccall2 "lin_mul" a b))))
-(define! div (num -> num -> num) (\a (\b (ccall2 "lin_div" a b))))
-(define! mod (num -> num -> num) (\a (\b (ccall2 "lin_mod" a b))))
-(define! pow (num -> num -> num) (\a (\b (ccall2 "lin_pow" a b))))
