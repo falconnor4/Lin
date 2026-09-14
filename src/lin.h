@@ -100,7 +100,7 @@ void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
    names; builtins are pre-registered so the readback layer decodes and renders
    them, and user code can register more (see `datatype`).  Decoders consult
    this table (ctor_tag) instead of comparing specific name strings. */
-enum { DT_NUM, DT_BOOL, DT_STR, DT_FFI, DT_EFF, DT_FLOAT, DT_MAX };
+enum { DT_NUM, DT_BOOL, DT_STR, DT_FFI, DT_EFF, DT_FLOAT, DT_OP, DT_MAX };
 typedef struct {
   int tag;                 /* builtin DT_* or -1 for user types */
   const char *carrier;     /* primary lambda carrier name, e.g. "_sz" */
