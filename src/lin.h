@@ -116,6 +116,10 @@ int net_print(Net *n);
    (Scott int / Church bool / float box), so FFI results materialize during
    reduction instead of only at readback.  Returns 1 on success. */
 int lin_fold_ffi(Net *n, Port lam, Port app);
+/* Fold a saturated pure-Lin arithmetic-op closure (DT_OP named LAM, same pattern
+   as _ffi): reads the op tag + raw operands, folds via the shared scalar table;
+   pure-Lin β-body is the driver-free fallback. */
+int lin_fold_op(Net *n, Port lam, Port app);
 /* non-destructive pre-scan: 1 if a pure-lin _ffi closure is blocked solely by a
    non-concrete operand and should be deferred (re-queued) rather than β-squashed */
 int lin_ffi_needs_operand(Net *n, Port lam);

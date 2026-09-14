@@ -462,6 +462,48 @@ int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
   return 1;
 }
 
+/* Fold a saturated pure-Lin arithmetic-op closure: a `_op`-named LAM (tag
+   carrier registered DT_OP) applied to its RAW operands, whose body holds the
+   pure-Lin Scott fallback.  Mirror of lin_fold_ffi — same named-LAM pattern, no
+   new agent — but the *value* comes from the shared scalar table (arith.so),
+   and the β-body is pure-Lin, so with no driver loaded a saturated `_op` still
+   reduces (slowly) to the exact result via the interaction calculus. */
+int lin_fold_op(Net *n, Port lam, Port app) {
+  N = n;
+  /* closure shape: \_op (\_ret ((_op TAG) (PUREARGS?))).  Read TAG + operands just
+     like a `_ffi` closure.  TAG -> scalar-op name; operands must be concrete. */
+  const char *tag = n->name[lam.node] ? n->name[lam.node] : "";
+  (void)tag;
+  Port r = wire((Port){lam.node, 2});
+  if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
+  Port a2 = wire((Port){r.node, 2});
+  if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
+  Port a1 = wire((Port){a2.node, 0});
+  if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
+  char fn[256];
+  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
+  if (strncmp(fn, "lin_", 4)) return 0;              /* shared table keys on lin_* names */
+  /* saturation: every operand must be a concrete scalar */
+  Val fargs[8] = {{0}};
+  int argc = net_ffi_args(n, (Port){lam.node, 0}, fargs, 8);
+  if (argc < 1) return 0;
+  long c_args[8] = {0};
+  for (int i = 0; i < argc; i++) if (fargs[i].kind == 1 || fargs[i].kind == 3 || fargs[i].kind == 4) c_args[i] = fargs[i].iv;
+  else return 0;                                     /* non-concrete operand: don't fold */
+  long out; int okind = 0;
+  int claimed = 0;
+  for (int s = 0; s < n_scalar_ops; s++) if (scalar_ops[s](fn, argc, c_args, &out, &okind)) { claimed = 1; break; }
+  if (!claimed) return 0;                            /* no scalar provider: fall through to pure-Lin β */
+  Val v = {0};
+  if (okind == 4) v.kind = 4; else if (okind == 3) v.kind = 3; else v.kind = 1;
+  v.iv = out;
+  Port res = val_to_port(n, v);
+  n->dead[lam.node] = 1;
+  net_link(n, res, (Port){app.node, 0}, 1);
+  lin_fold_bump();
+  return 1;
+}
+
 Port net_alloc_bool(Net *n, int val) {
   Scope sc = scope_nil(); Port bt = net_alloc(n, LAM, sc, "_bt"), bf = net_alloc(n, LAM, sc, "_bf");
   net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0);

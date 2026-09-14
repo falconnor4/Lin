@@ -175,6 +175,11 @@ int net_interact(Net *n, Port p1, Port p2) {
        Church booleans usable by `if` — independent of any accelerator driver. */
     const char *lnm = n->name[n1] ? n->name[n1] : "";
     if (ctor_tag(lnm) == DT_FFI && lin_fold_ffi(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
+    if (ctor_tag(lnm) == DT_OP && lin_fold_op(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
+    /* a saturated pure-Lin arithmetic-op closure (DT_OP named LAM, no new agent)
+       folds the same way: if a scalar provider (arith.so/SIMD/GPU) claims the raw
+       op, use its concrete value; otherwise fall through to the pure-Lin β-body. */
+    if (ctor_tag(lnm) == DT_OP && lin_fold_op(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
     /* A pure-lin `_ffi` closure whose operands are not yet concrete (e.g. a
        still-live `(min 4 5)` result feeding `geq`) must not be β-squashed here:
        the β-duplication strangles the operand sub-net before it materialises its
