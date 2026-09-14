@@ -1,12 +1,8 @@
-/* ============================================================================
+/* ================================================================
  * Lin readback / IO-effect runtime (std — not part of the src/ core).
- *
- * #included into src/io.c (unity build): value rendering to stdout, net net
- * printer, and the monadic IO/effect continuation runner (_iod/_iop/_ior/_iow).
- * Keeping this runtime out of src/ keeps the core small and focused on the
- * pure interaction calculus; it shares io.c's statics (N, wire, skip_dup,
- * dup_hop, run_ffi) via the same translation unit.
- * ========================================================================== */
+ * #included into src/io.c: value rendering, net printer, and the monadic
+ * IO/effect continuation runner (_iod/_iop/_ior/_iow), sharing io.c's statics.
+ * ================================================================ */
 
 /* Render one decoded value to a stream (1=int, 2=str, 3=bool, 4=float); returns
    1 if a value rendered, 0 if none. */

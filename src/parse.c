@@ -87,8 +87,7 @@ static Term *scott(long k) {
 
 static Term *parse_term(void);
 
-/* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'
-   builtins: num = fresh type variable, bool = p->q->p (fresh vars per use) */
+/* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'; builtins: num=fresh var, bool=p->q->p */
 static Type *parse_type(void);
 static char (*tvn)[NAME];
 static Type **tvt;
@@ -209,9 +208,7 @@ static Term *parse_term(void) {
       return term_new(isOpen ? TOPEN : TNS, name, NULL, NULL);
     }
     if (!strcmp(kw, "match")) {
-      /* (match scrut (pat body) ...)  => scrut applied to one lambda per case.
-         pat is `_` (wildcard), a lone name (nullary), or (Name v1...vk).
-         Purely positional Scott dispatch: no type/registry dependency. */
+      /* match => scrut applied to one lambda per case; pat is `_`, a lone name, or (Name v1...vk). Positional Scott dispatch: no type/registry dep. */
       Term *scrut = parse_term();
       Term *app = scrut;
       skipws();

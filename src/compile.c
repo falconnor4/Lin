@@ -55,8 +55,7 @@ static Port dup_tree(Port *ts, int nts, Scope sc) {
   return cur;
 }
 
-/* Rebuild a source-net scope in the target gauge table. sso scopes are
-   self-contained; heap-backed ones re-register bit-by-bit into N->sca. */
+/* Rebuild a source-net scope in the target gauge table; heap-backed ones re-register bit-by-bit into N->sca. */
 static Scope sc_rebuild(Net *d, int i) {
   Scope s = d->scope[i];
   if (!s.sso.is_heap) return s;
@@ -65,9 +64,7 @@ static Scope sc_rebuild(Net *d, int i) {
   return r;
 }
 
-/* Clone a pre-reduced define value (closed normal-form net) into N and return
-   its value port.  The source ROOT<->value clamp is cut so the clone ties only
-   to the caller. */
+/* Clone a pre-reduced define value (closed normal-form net) into N; cut the source ROOT<->value clamp so the clone ties only to the caller. */
 static Port ct_splice(Def *d, Scope sc) {
   (void)sc; Net *s = d->compiled;
   int n = s->nn, *map = malloc(sizeof(int) * (size_t)(n ? n : 1));
@@ -166,14 +163,10 @@ static int eg_find(EGraph *g, int c) {
   return c;
 }
 
-/* Opaque / leaf node kinds -- precompiled def value markers (TDEF with no body),
-   TDEFX, and floats -- carry no egraph-structural children.  The old
-   eg_add_term recursed into t->l for these, yielding the sentinel -1 as a child
-   eclass; eg_cost()/eg_extract() then ran eg_find(-1) on that index, an
-   out-of-bounds read that silently skewed the reconstruction (def refs such as
-   num.succ / num.is_zero / _cl_cons were emitted back as a stray free `_sz`,
-   so `lin build` on pure-Lin arithmetic failed with `unbound variable '_sz'`).
-   They are handled atomically instead. */
+/* Opaque/leaf kinds (TDEF no-body, TDEFX, floats) have no egraph-structural children:
+   recursing into t->l (old behavior) yielded sentinel -1 as a child, and eg_cost/extract
+   ran eg_find(-1), an OOB read that skewed reconstruction (def refs like num.succ/_cl_cons
+   came back as a stray `_sz`, breaking `lin build` with "unbound variable '_sz'"). */
 static int eg_opaque(int type) {
   switch (type) {
   case TDEF:

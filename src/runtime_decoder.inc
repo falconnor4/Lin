@@ -1,17 +1,9 @@
-/* ============================================================================
+/* ================================================================
  * Shared on-net decoder (std — not part of the pure src/ core).
- *
- * #included into src/io.c (unity build) so it shares that TU's statics
- * (N, wire, skip_dup, net_read_*); the functions are also EXPORTED so driver
- * plugins (simd.c, gpu.c, future) can reuse THE SAME decoder instead of each
- * carrying its own arg-spine / DUP-hop walker.
- *
- * A saturated `_ffi` closure is the shape
- *     \_ffi. \_ret. ((_ffi "lin_*") args)         args = `_cl`-spine of scalars
- * These helpers locate the fn name, walk the arg spine, and decode each arg to
- * a Val (int / bool / float-bits / string), recursing into nested `_ffi`
- * closures so composed arithmetic composes.
- * ========================================================================== */
+ * #included into src/io.c shares its statics; also EXPORTED so driver plugins
+ * reuse the same arg-spine / DUP-hop walker.  A saturated `_ffi` closure is
+ * `\_ffi. \_ret. ((_ffi "lin_*") args)` with args a `_cl`-spine of scalars.
+ * ================================================================ */
 
 /* Deref a DUP (port 0) chain to the underlying wire; pure, no allocation. */
 Port net_dhop(Net *n, Port p) {

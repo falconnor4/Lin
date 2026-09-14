@@ -61,9 +61,7 @@ static int guard_has(Guard *g, const char *name) {
   return 0;
 }
 
-/* Non-recursive define: evaluate once, cache the reduced net so each reference
-   clones that value instead of re-expanding/re-reducing. Recursive or too-big
-   bodies keep the textual path. */
+/* Non-recursive define: evaluate once and cache the reduced net so each reference clones it; recursive/too-big bodies keep the textual path. */
 static void def_precompile(Def *d) {
   if (d->comp_tried) return;
   d->comp_tried = 1;
@@ -71,17 +69,13 @@ static void def_precompile(Def *d) {
   char err[512]; Term *ex = expand_defs(d->term);
   Net src; net_init(&src, 1 << 14);
   if (!compile(ex, &src, err, sizeof err)) { net_free(&src); term_free(ex); return; }
-  /* Free-var body: suppress FFI folding so no closure bakes a stale value from
-     the open bound vars (lin_ffi_peek's saturation + nested-closure paths test
-     lin_precompile_depth > 0 and bail). */
+  /* Free-var body: suppress FFI folding so no closure bakes a stale value from the open bound vars (lin_ffi_peek saturation + nested-closure paths bail while lin_precompile_depth > 0). */
   lin_precompile_depth++;
   lin_stuck_ffi_count = 0;
   long full = net_reduce(&src, STEP_LIMIT);
   lin_precompile_depth--;
   if (full >= STEP_LIMIT) { net_free(&src); term_free(ex); return; }
-  /* If this free-var body β-consumed an _ffi closure as a boolean/function (the
-     fold was suppressed by lin_precompile_depth, so the closure was destroyed),
-     the baked net is broken for composed use — decline the cache. */
+  /* If this free-var body β-consumed an _ffi closure (fold suppressed by lin_precompile_depth destroyed it), the baked net is broken for composed use — decline the cache. */
   if (lin_stuck_ffi_count > 0) { net_free(&src); term_free(ex); return; }
   d->compiled = net_copy(&src); net_free(&src); term_free(ex);
 }
@@ -128,8 +122,7 @@ static const char REC_SENTINEL[];
 static int lam_arity(Term *t);
 static Term *build_bound_rec(const char *name, Term *body, int k);
 
-/* Is a node named `nm` alive and reachable from ROOT?  Detects the `_rec`
-   recursion sentinel surviving a truncated run (depth exceeded the bound). */
+/* Is a node named `nm` alive and reachable from ROOT?  Detects the `_rec` recursion sentinel surviving a truncated run (depth exceeded the bound). */
 static int net_has_reachable(Net *net, const char *nm) {
   if (!nm) return 0;
   unsigned char *reach = malloc((size_t)(net->nn + 1));
@@ -143,8 +136,7 @@ static int net_has_reachable(Net *net, const char *nm) {
   free(reach); free(q); return found;
 }
 
-/* Double every recursive def's unravelling bound, clear its expansion, so the
-   next attempt compiles a deeper chain (O(log depth) re-evaluations). */
+/* Double every recursive def's unravelling bound and clear its expansion so the next attempt compiles a deeper chain (O(log depth) re-evaluations). */
 static int widen_recursion(void) {
   int wid = 0;
   for (int i = 0; i < ndefs; i++) if (defs[i].rec && defs[i].rec_body) {
@@ -174,8 +166,7 @@ void eval_form(Term *t) {
   }
 }
 
-/* Count the arity (leading \x binders) of a function body, so the bounded
-   self-unravelling base term can be built with the right number of slots. */
+/* Count the arity (leading \x binders) of a function body so the bounded self-unravelling base term gets the right number of slots. */
 static int lam_arity(Term *t) {
   int k = 0;
   while (t && t->type == TLAM) { k++; t = t->l; }
@@ -183,13 +174,11 @@ static int lam_arity(Term *t) {
 }
 
 static const char REC_SENTINEL[] = "_rec";
-/* Dynamic (widening) self-recursion: replace the stranding Y-fixpoint with a
-   *finite* unravelling `Y_k f = f (f (... (f base) ...))` (k applications) whose
-   innermost `base = \a1..\ar (_rec ...)` is the __rec SENTINEL (not 0).  The
-   base engine is never changed: reduction is confluent and correct for depth
-   <= k, and if depth exceeds k the sentinel survives to a ROOT-reachable
-   position (eval_form re-drives with a doubled k; see widen_recursion).  A user
-   term never yields `_rec` (reserved), so truncation is unambiguous. */
+/* Dynamic (widening) self-recursion: replace the stranding Y-fixpoint with a *finite*
+   unravelling `Y_k f = f (... (f base) ...)` (k apps) whose innermost `base = \a1..\ar (_rec ...)`
+   is the sentinel (not 0). Base engine is unchanged: confluent/correct for depth<=k; if depth
+   exceeds k the sentinel survives ROOT-reachable (eval_form re-drives with doubled k). `_rec`
+   is reserved, so truncation is unambiguous. */
 static Term *build_bound_rec(const char *name, Term *body, int k) {
   int ar = lam_arity(body);
   Term *zero = term_new(TLAM, REC_SENTINEL, term_new(TLAM, REC_SENTINEL, term_new(TVAR, REC_SENTINEL, 0, 0), 0), 0);
@@ -215,11 +204,9 @@ static void qualify_free(Term *t, Guard *b) {
   if (bound) b->count--;
 }
 
-/* (datatype Name (Ctor f...) ...): generate Scott-encoded constructors.
-   For m constructors C0..C_{m-1} with C_i of arity k_i:
-     C_i = \f1..\fk_i \d0..\d_{m-1} (((d_i f1) f2) ..)
-   Each constructor becomes an ordinary (inferred) definition so it type-checks
-   and is usable exactly like a hand-written Scott encoding. */
+/* (datatype Name (Ctor f...) ...): generate Scott-encoded constructors. For m constructors
+   C0..C_{m-1} (C_i arity k_i): C_i = \f1..\fk \d0..\d_{m-1} (((d_i f1) f2) ..). Each becomes
+   an ordinary inferred def so it type-checks like a hand-written Scott encoding. */
 static void process_def(Term *t);
 static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
   (void)dn;

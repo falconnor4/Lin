@@ -1,12 +1,8 @@
-/* ============================================================================
- * Lin `.line` binary container runtime (std — not part of the src/ core).
- *
- * #included into src/compile.c (unity build): serializes/deserializes a
- * reduced Net to a self-running .line executable (shebang re-invokes the exact
- * engine that produced it, instead of a PATH-ambiguous `#!/usr/bin/env lin`).
- * Shared statics/structs (Net, Port, Scope, net_init, net_free) come from the
- * including translation unit.
- * ========================================================================== */
+/* ================================================================
+ * Lin `.line` binary container runtime (std — not part of src/).
+ * #included into src/compile.c: serializes/deserializes a reduced Net to a
+ * self-running .line executable (shebang re-invokes the producing engine).
+ * ================================================================ */
 static char self_path[4096] = "lin";
 
 void lin_set_self_path(const char *p) {
@@ -55,10 +51,9 @@ int net_load_line(Net *n, const char *path) {
   }
   if (scn > 0 && fread(n->sca, sizeof(uint64_t), (size_t)scn, f) != (size_t)scn) { fclose(f); net_free(n); return 0; }
   fclose(f);
-  /* Seed the self-collecting activation queue: the wire buffer is serialized but
-     the active-redex list is not, so a freshly loaded net starts with an empty
-     queue and net_reduce would do nothing.  Reconstruct all live principal
-     principal-pairs (including ROOT) so the loaded program actually reduces. */
+  /* Seed the self-collecting activation queue: the active-redex list is not
+     serialized, so a freshly loaded net has an empty queue; reconstruct all
+     live principal pairs (including ROOT) so it actually reduces. */
   for (int i = 0; i < n->nn; i++)
     if (n->wire[i * 3].port == 0 && n->wire[i * 3].node > i)
       lin_enqueue(n, (Port){i, 0}, n->wire[i * 3]);

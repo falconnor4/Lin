@@ -36,11 +36,8 @@ long net_reduce(Net *n, long limit);
 Net *net_copy(const Net *n); Scope scope_nil(void);
 Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
 
-/* ---------------- driver ABI ----------------
-   A driver reduces a *class* of redexes.  The core waves fan out to every
-   registered driver in priority order: each driver *claims* the redexes it
-   handles and leaves the rest for lower-priority drivers and the base engine,
-   so SIMD + GPU + future accelerators compose in unison on one wave. */
+/* ---------------- driver ABI ---------------- */
+/* Drivers reduce a redex *class*; core waves fan out to each in priority order, each claiming the redexes it handles. */
 #define LIN_DRIVER_MAGIC 0x4C494E44u            /* 'LIND' */
 #define LIN_DRIVER_ABI   1u
 #define LIN_CAP_NATIVE_NUM 0x01u                 /* satur `_ffi` arithmetic */
@@ -63,10 +60,8 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
 /* ---- General native scalar-op extension hook ----
-   Any driver plugin may register a ScalarOpFn provider implementing a class of
-   native scalar ops (fn -> result kind 1 int / 3 bool / 4 float-bits).  run_ffi
-   tries providers in registration order; arithmetic (std/drivers/arith.so) is
-   the first consumer, this is generic machinery for any future provider. */
+   Plugins register a ScalarOpFn provider implementing a class of native scalar
+   ops (arith.so is the first consumer); run_ffi tries providers in order. */
 typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
 void lin_scalar_ops_add(ScalarOpFn f);
 /* dlopen std/drivers/<sym>.so (idempotent) so its constructor registers ops */
@@ -96,10 +91,7 @@ int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const cha
 void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
 
 /* ---------------- datatype registry ----------------
-   A value domain (num, bool, string, ffi/effect) is keyed by its carrier node
-   names; builtins are pre-registered so the readback layer decodes and renders
-   them, and user code can register more (see `datatype`).  Decoders consult
-   this table (ctor_tag) instead of comparing specific name strings. */
+   A value domain (num, bool, string, ffi/effect) is keyed by carrier node names; decoders consult this table (ctor_tag). */
 enum { DT_NUM, DT_BOOL, DT_STR, DT_FFI, DT_EFF, DT_FLOAT, DT_OP, DT_MAX };
 typedef struct {
   int tag;                 /* builtin DT_* or -1 for user types */
@@ -112,34 +104,25 @@ long net_read_int(Net *n, Port p); int net_read_bool(Net *n, Port p);
 int net_read_float(Net *n, Port p, double *out);
 int net_read_string(Net *n, Port p, char *buf, size_t max); int net_run_io(Net *n, long step_limit);
 int net_print(Net *n);
-/* Fold a saturated _ffi closure (LAM x APP) natively into a concrete net value
-   (Scott int / Church bool / float box), so FFI results materialize during
-   reduction instead of only at readback.  Returns 1 on success. */
+/* Fold a saturated _ffi closure (LAM x APP) natively into a concrete net value during reduction; returns 1 on success. */
 int lin_fold_ffi(Net *n, Port lam, Port app);
-/* Fold a saturated pure-Lin arithmetic-op closure (DT_OP named LAM, same pattern
-   as _ffi): reads the op tag + raw operands, folds via the shared scalar table;
-   pure-Lin β-body is the driver-free fallback. */
+/* Fold a saturated pure-Lin arithmetic-op closure (DT_OP named LAM); reads tag + operands via shared scalar table. */
 int lin_fold_op(Net *n, Port lam, Port app);
 /* Fold a saturated pure-Lin `_op` closure appearing as a beta ARGUMENT (not head) */
 int lin_fold_op_arg(Net *n, Port lam, Port out);
-/* 1 if an `_op` head-redex's applied operands are not yet concrete/decodable and
-   should be deferred (waiting for the operand sub-nets to materialise) rather
-   than β-squashed; mirrors lin_ffi_needs_operand for the pure-Lin op fold. */
+/* 1 if an `_op` head-redex's applied operands are not yet decodable and should be deferred rather than β-squashed */
 int lin_op_needs_operand(Net *n, Port lam, Port app);
-/* non-destructive pre-scan: 1 if a pure-lin _ffi closure is blocked solely by a
-   non-concrete operand and should be deferred (re-queued) rather than β-squashed */
+/* non-destructive pre-scan: 1 if a pure-lin _ffi closure is blocked solely by a non-concrete operand and should be deferred */
 int lin_ffi_needs_operand(Net *n, Port lam);
 /* Fold a saturated _ffi closure appearing as a beta ARGUMENT (not head); see io.c */
 int lin_fold_ffi_arg(Net *n, Port lam, Port out);
 /* ---- Shared on-net FFI decoder (implemented by std/runtime/decoder.c) ----
-   Driver plugins reuse ONE arg-spine / DUP-hop walker instead of each
-   re-implementing the `_ffi` `_cl`-spine decode. */
+   Driver plugins reuse ONE arg-spine / DUP-hop walker for the `_ffi` `_cl`-spine decode. */
 Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_args(Net *n, Port lam, Val *vals, int max); /* decode arg spine into Vals */
 int  net_spine_args(Net *n, Port argp, Val *vals, int max); /* decode a `_cl`-spine at a port */
-/* !=0 while def_precompile reduces an open (free-var) body: suppress folding so
-   the fold never runs on non-concrete operands and bakes a stale value. */
+/* !=0 while def_precompile reduces an open body: suppress folding so it never runs on non-concrete operands */
 extern int lin_precompile_depth;
 /* bumped when a foldable head-closure is consumed unfolded during precompile */
 extern int lin_stuck_ffi_count;
