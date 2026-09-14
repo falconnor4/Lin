@@ -106,52 +106,56 @@ static inline Port dup_hop(Net *n, Port p) {
 static Val run_ffi(Net *n, Port p); /* fwd */
 static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold); /* fwd */
 
-long net_read_int(Net *n, Port p) {
-  N = n; long count = 0; Port cur = p;
+/* Walk a Scott-spine value: `\__carrier \_ss (recur | zero-terminal)`, counting
+   succ layers.  An optional `peek` may rewrite `*p` at each layer (e.g. fold an
+   embedded `_ffi` closure to its int value).  Returns 1 when the zero-terminal is
+   reached (with `*count` set) or 0 on a malformed spine.  Shared by net_read_int
+   and net_read_float (numeral vs float-box). */
+static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), long *count) {
   for (int step = 0; step < n->nn; step++) {
-    cur = dup_hop(n, cur);
-    /* An embedded saturated `_ffi` arithmetic closure (e.g. the `n` of `\_sz \_ss (_ss (mul 2 2))`)
-       never folded during reduction; fold it on read so the numeral decodes.  Pure int/bool only. */
-    if (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == LAM) {
-      const char *cn = n->name[cur.node];
-      if (cn && ctor_tag(cn) == DT_FFI) {
-        long v = -1;
-        Val vv; if (lin_ffi_peek(n, (Port){cur.node, 0}, &vv, 1) && vv.kind == 1) v = vv.iv;
-        if (v >= 0) cur = net_alloc_scott(n, v);
-      }
-    }
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != DT_NUM) return -1;
-    int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
-    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != DT_NUM) return -1;
+    p = dup_hop(n, p);
+    if (peek && !peek(n, &p)) return 0;
+    if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM ||
+        ctor_tag(NNM(n, p.node)) != carrier) return 0;
+    int sz = p.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
+    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM ||
+        ctor_tag(NNM(n, ss_p.node)) != carrier) return 0;
     int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
-    if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return -1;
-    if (body.node == sz && body.port == 1) return count;
+    if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return 0;
+    if (body.node == sz && body.port == 1) return 1;              /* zero terminal */
     if (n->tag[body.node] == APP) {
       Port fn = dup_hop(n, wire((Port){body.node, 0}));
-      if (fn.node == ss && fn.port == 1) { count++; cur = wire((Port){body.node, 2}); continue; }
+      if (fn.node == ss && fn.port == 1) { (*count)++; p = wire((Port){body.node, 2}); continue; }
     }
-    return -1;
+    return 0;
   }
-  return -1;
+  return 0;
+}
+
+/* Fold an embedded saturated `_ffi` closure (e.g. the `n` of `\_sz \_ss (_ss (mul 2 2))`) that
+   never folded during reduction, on read, so the numeral decodes.  Pure int/bool only. */
+static int read_int_peek(Net *n, Port *cur) {
+  if ((*cur).node >= 0 && (*cur).node < n->nn && !n->dead[(*cur).node] && n->tag[(*cur).node] == LAM) {
+    const char *cn = n->name[(*cur).node];
+    if (cn && ctor_tag(cn) == DT_FFI) {
+      long v = -1; Val vv;
+      if (lin_ffi_peek(n, (Port){(*cur).node, 0}, &vv, 1) && vv.kind == 1) v = vv.iv;
+      if (v >= 0) *cur = net_alloc_scott(n, v);
+    }
+  }
+  return 1;
+}
+
+long net_read_int(Net *n, Port p) {
+  N = n; long count = 0;
+  return scott_peel(n, p, DT_NUM, read_int_peek, &count) ? count : -1;
 }
 
 /* Extract a float box (`_fsz` spine whose value is a fltbox index). */
 int net_read_float(Net *n, Port p, double *out) {
-  N = n; long count = 0; Port cur = p;
-  for (int step = 0; step < n->nn; step++) {
-    cur = dup_hop(n, cur);
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM || ctor_tag(NNM(n, cur.node)) != DT_FLOAT) return 0;
-    int sz = cur.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
-    if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM || ctor_tag(NNM(n, ss_p.node)) != DT_FLOAT) return 0;
-    int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
-    if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return 0;
-    if (body.node == sz && body.port == 1) { if (count < nfltbox) { *out = fltbox[count]; return 1; } return 0; }
-    if (n->tag[body.node] == APP) {
-      Port fn = dup_hop(n, wire((Port){body.node, 0}));
-      if (fn.node == ss && fn.port == 1) { count++; cur = wire((Port){body.node, 2}); continue; }
-    }
-    return 0;
-  }
+  N = n; long count = 0;
+  if (!scott_peel(n, p, DT_FLOAT, 0, &count)) return 0;
+  if (count < nfltbox) { *out = fltbox[count]; return 1; }
   return 0;
 }
 
@@ -399,6 +403,16 @@ static Port val_to_port(Net *n, Val v) {           /* alloc concrete value node 
   if (v.kind == 3) return net_alloc_bool(n, (int)v.iv);
   double d; memcpy(&d, &v.iv, 8); return net_alloc_float(n, d);
 }
+/* Link a folded scalar `v` as the concrete value replacing closure `lam`: its
+   output rewires to `target`.  Kills `lam`; resets the deferral budget (a fold is
+   real progress).  Shared by every *_fold / *_fold_arg. */
+static int fold_link(Net *n, Port lam, Port target, Val v) {
+  Port res = val_to_port(n, v);
+  n->dead[lam.node] = 1;
+  n->declines = 0;
+  net_link(n, res, target, 1);
+  return 1;
+}
 int lin_fold_ffi(Net *n, Port lam, Port app) {
   Val v; N = n;
   if (!lin_ffi_peek(n, lam, &v, 0)) {
@@ -407,11 +421,7 @@ int lin_fold_ffi(Net *n, Port lam, Port app) {
     if (lin_precompile_depth > 0) lin_stuck_ffi_count++;
     return 0;
   }
-  Port res = val_to_port(n, v);
-  n->dead[lam.node] = 1;
-  n->declines = 0; /* a fold is real progress: reset the deferral budget */
-  net_link(n, res, (Port){app.node, 0}, 1);
-  return 1;
+  return fold_link(n, lam, (Port){app.node, 0}, v);
 }
 
 /* Fold saturated `_ffi` closures wherever they are embedded (not just beta head/arg), so closures captured
@@ -425,10 +435,7 @@ int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
   /* Only fold concrete INTEGER/BOOL scalar results as beta arguments; floats stay on the head-fold +
      readback path (box-index encoded, re-linking mid-beta is unsafe), covering composed-float cases. */
   if (v.kind != 1 && v.kind != 3) return 0;
-  Port res = val_to_port(n, v);
-  n->dead[lam.node] = 1;
-  net_link(n, res, out, 1);
-  return 1;
+  return fold_link(n, lam, out, v);
 }
 
 /* Fold a saturated pure-Lin arithmetic-op closure: a `_op`-named LAM (DT_OP) applied to RAW operands, whose
