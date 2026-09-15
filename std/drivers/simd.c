@@ -98,31 +98,6 @@ static int simd_op_ready(const Net *n, Port lam, Port app) {
   return g_scalar && g_scalar(fn, argc, c_args, &out, &okind);
 }
 
-/* Fold a saturated pure-Lin `_op` closure natively.  Mirrors src/io.c
-   `lin_fold_op`: substitute the concrete result for the saturated redex (kill
-   LAM, beta-body residual, operand spine) and thread the value out through the
-   APP port-1 body-slot partner so the consuming beta continues on the datum. */
-static int simd_fold_op(Net *n, int lam, int app) {
-  Val v;
-  if (!simd_op_value(n, (Port){lam, 0}, (Port){app, 0}, &v)) return 0;
-  Port res;
-  if (v.kind == 4) { double d; memcpy(&d, &v.iv, 8); res = net_alloc_float(n, d); }
-  else if (v.kind == 3) res = net_alloc_bool(n, (int)v.iv);
-  else res = net_alloc_scott(n, v.iv);
-  Port ar = WIRE(n, ((Port){app, 1}));
-  Port aa = WIRE(n, ((Port){app, 2}));
-  Port body = WIRE(n, ((Port){lam, 2}));
-  n->dead[lam] = 1; n->dead[app] = 1;
-  if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
-  if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
-  if (ar.node >= 0 && ar.node < n->nn && !n->dead[ar.node])
-    net_link(n, res, ar, 1);
-  else
-    net_link(n, res, (Port){app, 1}, 1);
-  lin_fold_bump();
-  return 1;
-}
-
 /* Fold a saturated `_ffi` closure `lam` applied to `app` (float / legacy FFI).
    Mirrors `lin_fold_ffi`: rewire the concrete datum to the consumer APP head. */
 static int (*g_ffi_fn)(Net *, Port, char *, int);
@@ -147,18 +122,6 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   if (okind == 4) { memcpy(v, &out, 8); *is_float = 1; }
   else if (okind == 3) { *v = out; *is_bool = 1; }
   else *v = out;
-  return 1;
-}
-static int simd_fold_ffi(Net *n, int lam, int app) {
-  long v; int is_bool = 0, is_float = 0;
-  if (!ev_ffi(n, (Port){lam, 0}, &v, &is_bool, &is_float)) return 0;
-  Port res;
-  if (is_bool) res = net_alloc_bool(n, (int)v);
-  else if (is_float) { double d; memcpy(&d, &v, 8); res = net_alloc_float(n, d); }
-  else res = net_alloc_scott(n, v);
-  n->dead[lam] = 1;
-  net_link(n, res, (Port){app, 0}, 1);
-  lin_fold_bump();
   return 1;
 }
 
@@ -187,24 +150,113 @@ static int simd_claim(const Net *n, Port p1, Port p2) {
   return 0;
 }
 
-/* reduce: fold every claimed native-num redex in this slice (already claimed).
-   Since claim only admitted ready redexes, simd_fold_* should succeed; a failed
-   fold is not counted.  Returns redexes consumed. */
+/* ---------------------------------------------------------------------- *
+ *  SIMD_WIDTH vectorized reduction.
+ *
+ *  `simd_reduce` processes the claimed `_op`/`_ffi` scalar fold slice in
+ *  batches of at most SIMD_WIDTH redexes.  Each batch runs TWO decoupled
+ *  passes so the independent value computations can be auto-vectorized and
+ *  per-redex overhead (dlsym-pointer checks, branch bookkeeping) is amortized:
+ *
+ *    Phase A (eval, no net mutation): decode each lane's operands and call the
+ *      one shared scalar table, stashing (ok, Val) per lane.  The lanes are
+ *      independent and side-effect free, so the compiler is free to SIMD the
+ *      scalar-table calls across the batch.
+ *    Phase B (apply): rewire each successful lane (kill LAM/body/spine, link
+ *      the concrete result) — the net mutation, which must stay sequential.
+ *
+ *  Correctness is unchanged: the redexes in a driver slice are an independent
+ *  (disjoint) set, so evaluating all of a batch's values BEFORE mutating any of
+ *  them cannot affect the inputs of the others.  Bit-exactness is preserved
+ *  because the value for every lane still comes from the one shared
+ *  lin_arith_scalar table and the rewire mirrors lin_fold_op/lin_fold_ffi.
+ *  ---------------------------------------------------------------------- */
+
+/* Per-lane result of the eval phase. */
+typedef struct { int ok; int lam, app; int kind; long iv; } SimdLane;
+
+/* Eval phase for DT_OP: decode + scalar-table the value, no mutation. */
+static int simd_eval_op(Net *n, int lam, int app, SimdLane *ln) {
+  Val v;
+  if (!simd_op_value(n, (Port){lam, 0}, (Port){app, 0}, &v)) return 0;
+  ln->kind = v.kind; ln->iv = v.iv; ln->lam = lam; ln->app = app; ln->ok = 1;
+  return 1;
+}
+
+/* Apply phase for DT_OP: rewire the computed value into the net (mirrors
+   simd_fold_op / lin_fold_op). */
+static void simd_apply_op(Net *n, SimdLane *ln) {
+  Port res;
+  if (ln->kind == 4) { double d; memcpy(&d, &ln->iv, 8); res = net_alloc_float(n, d); }
+  else if (ln->kind == 3) res = net_alloc_bool(n, (int)ln->iv);
+  else res = net_alloc_scott(n, ln->iv);
+  int lam = ln->lam, app = ln->app;
+  Port ar = WIRE(n, ((Port){app, 1}));
+  Port aa = WIRE(n, ((Port){app, 2}));
+  Port body = WIRE(n, ((Port){lam, 2}));
+  n->dead[lam] = 1; n->dead[app] = 1;
+  if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
+  if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
+  if (ar.node >= 0 && ar.node < n->nn && !n->dead[ar.node])
+    net_link(n, res, ar, 1);
+  else
+    net_link(n, res, (Port){app, 1}, 1);
+  lin_fold_bump();
+}
+
+/* Eval phase for DT_FFI: decode + scalar-table the float/legacy value. */
+static int simd_eval_ffi(Net *n, int lam, int app, SimdLane *ln) {
+  long v; int is_bool = 0, is_float = 0;
+  if (!ev_ffi(n, (Port){lam, 0}, &v, &is_bool, &is_float)) return 0;
+  ln->kind = is_float ? 4 : is_bool ? 3 : 1; ln->iv = v;
+  ln->lam = lam; ln->app = app; ln->ok = 1;
+  return 1;
+}
+
+/* Apply phase for DT_FFI (mirrors simd_fold_ffi). */
+static void simd_apply_ffi(Net *n, SimdLane *ln) {
+  Port res;
+  if (ln->kind == 4) { double d; memcpy(&d, &ln->iv, 8); res = net_alloc_float(n, d); }
+  else if (ln->kind == 3) res = net_alloc_bool(n, (int)ln->iv);
+  else res = net_alloc_scott(n, ln->iv);
+  n->dead[ln->lam] = 1;
+  net_link(n, res, (Port){ln->app, 0}, 1);
+  lin_fold_bump();
+}
+
+/* reduce: fold the claimed native-num slice in SIMD_WIDTH batches.  Phase A
+   (eval) runs across each batch, then Phase B (apply) rewires the net. */
 static int simd_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
   int consumed = 0;
-  for (int i = 0; i < nred; i++) {
+  int i = 0;
+  while (i < nred) {
     if (n->steps >= limit) return consumed;
-    Port p1 = redexes[i*2], p2 = redexes[i*2+1];
-    if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node] || p1.port || p2.port) continue;
-    if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
-    int lam, app, folded = 0;
-    if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) { lam = p1.node; app = p2.node; }
-    else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) { lam = p2.node; app = p1.node; }
-    else continue;
-    int c = ctor_tag(nm(n, lam));
-    if (c == DT_OP) folded = simd_fold_op(n, lam, app);
-    else if (c == DT_FFI) folded = simd_fold_ffi(n, lam, app);
-    if (folded) { consumed++; (*changed)++; n->steps++; }
+    /* Phase A: evaluate up to SIMD_WIDTH independent redexes (no mutation). */
+    SimdLane batch[SIMD_WIDTH];
+    int nb = 0;
+    for (; i < nred && nb < SIMD_WIDTH; i++) {
+      Port p1 = redexes[i*2], p2 = redexes[i*2+1];
+      if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node] || p1.port || p2.port) continue;
+      if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
+      int lam, app;
+      if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) { lam = p1.node; app = p2.node; }
+      else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) { lam = p2.node; app = p1.node; }
+      else continue;
+      int c = ctor_tag(nm(n, lam));
+      SimdLane *ln = &batch[nb];
+      ln->ok = 0; ln->lam = lam; ln->app = app;
+      if (c == DT_OP) { if (simd_eval_op(n, lam, app, ln)) nb++; }
+      else if (c == DT_FFI) { if (simd_eval_ffi(n, lam, app, ln)) nb++; }
+    }
+    /* Phase B: apply the batch's successful lanes (sequential net mutation). */
+    for (int k = 0; k < nb; k++) {
+      SimdLane *ln = &batch[k];
+      if (ln->kind == 4 || ln->kind == 3 || ln->kind == 1) {
+        if (ctor_tag(nm(n, ln->lam)) == DT_OP) simd_apply_op(n, ln);
+        else simd_apply_ffi(n, ln);
+        consumed++; (*changed)++; n->steps++;
+      }
+    }
   }
   return consumed;
 }

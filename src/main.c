@@ -312,13 +312,25 @@ static char *read_file(const char *path) {
 static int resolve_path(const char *rel, char *out, size_t out_sz) {
   (void)out_sz;
   char cand[PATH_MAX];
+  const char *std_dir = getenv("LIN_STD_DIR") ?: "std";
+  const char *sub = !strncmp(rel, "std/", 4) ? rel + 4 : rel;
+  /* A `std/`-prefixed load names a standard-library module.  When LIN_STD_DIR is
+     explicitly configured (e.g. a packaged /nix/store std), that configured dir
+     MUST win over a coincidental ./std sitting in the process CWD — otherwise a
+     checkout run overrides the configured std with a local one, mixing two stds
+     and stranding private defs (e.g. num._padd unbound when a second num.lin is
+     loaded on top of the configured one).  So resolve `std/...` against
+     LIN_STD_DIR first; a plain (non-`std/`) relative load still falls through to
+     the CWD / loading-file-relative lookup below. */
+  if (rel[0] != '/' && !strncmp(rel, "std/", 4)) {
+    snprintf(cand, sizeof cand, "%s/%s", std_dir, sub);
+    if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
+  }
   if (rel[0] != '/' && dir_sp > 0) {
     snprintf(cand, sizeof cand, "%s/%s", dir_stack[dir_sp - 1], rel);
     if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
   }
   if (access(rel, R_OK) == 0 && realpath(rel, out)) return 1;
-  const char *std_dir = getenv("LIN_STD_DIR") ?: "std";
-  const char *sub = !strncmp(rel, "std/", 4) ? rel + 4 : rel;
   snprintf(cand, sizeof cand, "%s/%s", std_dir, sub);
   if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
   return 0;

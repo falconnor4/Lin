@@ -120,11 +120,15 @@ engine:
   *Fold-accounting note:* SIMD's native-fold count matches, not exceeds, the
   base engine's on the same programs (e.g. 71 vs 71 on `fact 6`), because the
   base's `lin_fold_op` already folds every saturated `_op` closure in O(1) via
-  the one shared scalar table.  SIMD is a *correct* offload point — the fold
-  fires and is bit-exact — but a larger raw speedup requires actually
-  vectorizing a batch of independent `_op` redexes across `SIMD_WIDTH` lanes
-  (more throughput, same fold count) rather than the scalar fold the base
-  already performs.
+  the one shared scalar table.  `simd_reduce` implements the **SIMD_WIDTH
+  factorization**: it processes the claimed slice in batches of up to
+  `SIMD_WIDTH` redexes, running a side-effect-free *eval* pass (decode operands
+  + shared-table value) for the whole batch, then a sequential *apply* pass
+  (net rewire) — so the independent value computations decouple from mutation
+  and can be auto-vectorized.  It stays bit-exact (canonical selftest green),
+  but rigorously no wall-clock win over the base on `_op` scalar folding: the
+  base's O(1) fold already dominates and the surrounding interaction-net
+  reduction, which neither SIMD nor batching accelerates, is the real cost.
 - **GPU beta must not claim foldable closures.**  The GPU kernel's beta only
   rewires wires; it does not fold.  So `gpu_claim` rejects any LAM x APP whose
   head **or** applied argument is a saturated `_op`/`_ffi` closure — the base
@@ -155,17 +159,24 @@ engine:
   `lin_parse_float`) now guard on the argument kind, so a malformed closure
   yields a clean no-value instead of a crash.  This is a core robustness fix
   that all drivers benefit from and does not regress the host suite.
-- **GPU verified bit-exact on a real device.**  With a correct std (`LIN_STD_DIR`
-  set to a working std tree), the full canonical corpus reduces under GPU with
-  **all 23 value probes matching the CPU golden and every dispatched wave
-  `[GPU selftest] OK` (1602/1602)**, no crash (exit 0).  `test/driver_selftest.sh`
-  reports `PASS gpu (23 probes equal; N native folds)` on the device.  The one
-  earlier "long-run divergence" was **not a GPU bug but the flake's installed std
-  failing to load** (`num._padd` unbound — a pre-existing std/load-path defect
-  that also affects a pure-CPU run of `./result/bin/lin` with its store std);
-  pointing `LIN_STD_DIR` at a working std eliminates it.  That flake-std load
-  defect is tracked separately; with it fixed, the GPU passes the canonical
-  selftest end-to-end.
+- **GPU verified bit-exact on a real device.**  With a correct std, the full
+  canonical corpus reduces under GPU with **all 23 value probes matching the CPU
+  golden and every dispatched wave `[GPU selftest] OK` (1602/1602)**, no crash
+  (exit 0).  `test/driver_selftest.sh` reports `PASS gpu (23 probes equal; N
+  native folds)` on the device.  The one earlier "long-run divergence" was **not
+  a GPU bug but a std-load-path defect**: `resolve_path` (src/main.c) resolved a
+  `(load "std/...")` to a coincidental `./std` in the process CWD before trying
+  the configured `LIN_STD_DIR`, so a checkout run mixed a local std onto the
+  configured one and stranded private defs (`num._padd` unbound).  Fixed: a
+  `std/`-prefixed load now honors `LIN_STD_DIR` first.  The flake's packaged
+  std loads cleanly and the GPU dispatches to hardware through the normal
+  `nix run #.lin` / `result/bin/lin` path (all corpus values correct, real
+  device dispatch).
+- **Flake std loads cleanly.**  From a non-checkout CWD the flake binary
+  (`./result/bin/lin`, store std) was already correct; the `resolve_path` fix
+  (prefer `LIN_STD_DIR` for `std/...`) closes the checkout-CWD mixing case so
+  `add 8 5 -> 13` holds even when `./std` exists beside an overridden
+  `LIN_STD_DIR`.
 
 ## Arithmetic: one shared table, any reduction strategy
 
