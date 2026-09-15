@@ -24,18 +24,7 @@
 (define folded   (ffi.ccall0 "lin_folded")) ; true once any driver folded
 
 (namespace _)
-(open ffi)
-(define ffi ffi.ffi)
-(define ccall0 ffi.ccall0)
-(define ccall1 ffi.ccall1)
-(define ccall2 ffi.ccall2)
-(define ccall3 ffi.ccall3)
-(define exit ffi.exit)
-(define getenv ffi.getenv)
-(define system ffi.system)
-(define load_lib ffi.load_lib)
-(define folds ffi.folds)
-(define folded ffi.folded)
+(export ffi)
 
 ; Load I/O module (printing, character streams, file operations)
 (load "io.lin")

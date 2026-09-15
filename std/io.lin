@@ -3,6 +3,16 @@
 ; ==============================================================================
 ; Asynchronous event-driven I/O, destination-directed stream writing, and
 ; POSIX file operations integrated with interaction net readback.
+;
+; Every public member below carries the globally-safe `io_*` name (never bare
+; `wait`/`read`/`file`/`write_to`/`print`/`done`/`prompt`/`call`), so
+; `(export io)` re-exports exactly those safe names bare without colliding with
+; the bare short names other std modules export.  The low-level POSIX C
+; bindings keep their stable bare names (`puts`/`putchar`/`fopen`/`fclose`/
+; `fgetc`/`fputc`), matching the consumer-facing API.  The qualified short-name
+; references consumers still use (`io.wait`/`io.read`/`io.file`/`io.print`/...)
+; are bound at root as plain aliases AFTER `(export io)`, so they are reachable
+; qualified but never leaked bare.
 ; ==============================================================================
 
 (load "list.lin")
@@ -17,19 +27,19 @@
 ;   - "!cmd" or "cmd:...": process output
 ;   - "file:...": disk file contents
 ;   - "sleep:ms": timer delay
-(define wait (\src (\cb (\_iow ((_iow src) cb)))))
-(define read (\cb (io.wait 0 cb)))
-(define file (\path (\cb (io.wait path cb))))
+(define io_wait (\src (\cb (\_iow ((_iow src) cb)))))
+(define io_read (\cb (io.io_wait 0 cb)))
+(define io_file (\path (\cb (io.io_wait path cb))))
 
 ; --- Destination-Directed Output ---
 ;   - 1 or omitted: standard output
 ;   - 2: standard error
-(define write_to (\dst (\msg (\next (\_iop (((_iop dst) msg) next))))))
-(define print    (\msg (\next (\_iop ((_iop msg) next)))))
-(define done     (\_iod _iod))
+(define io_write_to (\dst (\msg (\next (\_iop (((_iop dst) msg) next))))))
+(define io_print    (\msg (\next (\_iop ((_iop msg) next)))))
+(define io_done     (\_iod _iod))
 
 ; --- Interactive Utilities ---
-(define prompt   (\p (\cb (io.print p (io.read cb)))))
+(define io_prompt   (\p (\cb (io.io_print p (io.io_read cb)))))
 
 ; --- Native C Standard I/O Bindings ---
 (define puts     (\s (ffi.ccall1 "puts" s)))
@@ -40,25 +50,22 @@
 (define fputc    (\c (\fp (ffi.ccall2 "fputc" c fp))))
 
 ; --- Monadic Wrappers ---
-(define call       (\fn (\args (\cb (io.wait (ffi.ffi fn args) cb)))))
-(define io_puts    (\s (\next (io.wait (io.puts s) (\_ next)))))
-(define io_putchar (\c (\next (io.wait (io.putchar c) (\_ next)))))
+(define io_call       (\fn (\args (\cb (io.io_wait (ffi.ffi fn args) cb)))))
+(define io_puts       (\s (\next (io.io_wait (io.puts s) (\_ next)))))
+(define io_putchar    (\c (\next (io.io_wait (io.putchar c) (\_ next)))))
 
+; --- Re-export the safe io_* / puts names into root scope ---
 (namespace _)
-(open io)
-(define io_wait io.wait)
-(define io_read io.read)
-(define io_file io.file)
-(define io_write_to io.write_to)
-(define io_print io.print)
-(define io_done io.done)
-(define io_prompt io.prompt)
-(define puts io.puts)
-(define putchar io.putchar)
-(define fopen io.fopen)
-(define fclose io.fclose)
-(define fgetc io.fgetc)
-(define fputc io.fputc)
-(define io_call io.call)
-(define io_puts io.io_puts)
-(define io_putchar io.io_putchar)
+(export io)
+
+; --- Consumer-required qualified aliases (bound qualified only, not exported,
+;     so no bare `wait`/`read`/`file`/`write_to`/`print`/`done`/`prompt`/`call`
+;     leaks into root) ---
+(define io.wait     io_wait)
+(define io.read     io_read)
+(define io.file     io_file)
+(define io.write_to io_write_to)
+(define io.print    io_print)
+(define io.done     io_done)
+(define io.prompt   io_prompt)
+(define io.call     io_call)
