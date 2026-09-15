@@ -1,0 +1,100 @@
+; ==============================================================================
+; Lin Standard Library: Canonical Driver Selftest Corpus
+; ==============================================================================
+; The single, cross-driver correctness contract every Lin reduction driver must
+; satisfy (cpu base engine, SIMD, GPU, and any future driver).
+;
+; Loading + running this module as a PROGRAM reduces a fixed set of pure probes
+; and emits one readback line per probe plus a trailing fold count:
+;
+;       => <probe-1 value>
+;       => <probe-2 value>
+;       ...
+;       => <folds>            ; native-fold accounting (informational)
+;
+; The corpus itself is driver-agnostic: it activates NO driver.  The driver
+; under test is selected by the *runner* (test/driver_selftest.sh), which wraps
+; this file so a driver's std module loads first.  The SAME corpus therefore
+; runs unchanged against the base CPU engine (the golden oracle) and against
+; every driver; the runner diffs the probe lines.  Because the base engine is
+; always the correctness oracle (DESIGN.md), a driver passes the value contract
+; iff it reproduces the golden readback values exactly, value-for-value.
+;
+; The probe values come from core confluence (beta / annihilate / commute /
+; erase) plus the one shared scalar-op table (std/drivers/arith.so), so the
+; corpus is meaningful under cpu, SIMD and GPU alike and under any future
+; driver.  Probes are grouped (see the dividers below) by the redex / capability
+; class they stress, so they map onto a driver's claimed LinDriver.caps bits
+; (src/lin.h):
+;
+;   - native small-integer arithmetic  (LIN_CAP_NATIVE_NUM; SIMD claims this)
+;     > saturated _op folds: (add 20 22), (div 42 6), ...
+;   - comparison / branch folding      (LIN_CAP_NATIVE_NUM)
+;     > saturated comparisons fold to Church bools: (leq 3 5), ...
+;   - float arithmetic                 (LIN_CAP_NATIVE_NUM)
+;     > ffloor (fsqrt 144.0), feq, composed fmul/fadd ...
+;   - fixed allocations                (LIN_CAP_FIXED; GPU claims this)
+;     > beta-heavy nesting: ((add 20) 22), erasure: ((\x x) 42)
+;     > annihilate/erase identity: (fst (pair 7 8)), (second (list3 10 20 30))
+;
+; Fold accounting: the trailing (folds) line reports how many native folds a
+; run performed (base engine cpu folds saturated _op via arith.so too).  This
+; is informational and NOT part of the equality contract: folding is each
+; driver's own optimization decision, not a requirement (folded need not be
+; true).  The runner reports it so a driver that silently stops folding is
+; visible, while still failing the run if and only if a value mismatches.
+; ==============================================================================
+
+(load "std.lin")
+
+; ---------------------------------------------------------------------------
+; Group 1 — saturated pure-Lin integer _op folds (LIN_CAP_NATIVE_NUM)
+; ---------------------------------------------------------------------------
+(add 20 22)
+(mul 6 7)
+(sub 42 42)
+(div 42 6)
+(mod 17 5)
+(pow 2 8)
+
+; ---------------------------------------------------------------------------
+; Group 2 — saturated comparisons fold to Church bools (LIN_CAP_NATIVE_NUM)
+; ---------------------------------------------------------------------------
+(eq 4 4)
+(leq 3 5)
+(lt 5 3)
+(gt 7 3)
+(geq 7 7)
+
+; ---------------------------------------------------------------------------
+; Group 3 — composed / deferred operands (fold routing must stay exact)
+; ---------------------------------------------------------------------------
+(mul 6 (add 24 96))
+(if (geq 1 (min 4 5)) 1 8)
+
+; ---------------------------------------------------------------------------
+; Group 4 — structure: annihilate / erase identity (LIN_CAP_FIXED)
+; ---------------------------------------------------------------------------
+(fst (pair 7 8))
+(snd (pair 7 8))
+(second (list3 10 20 30))
+((\x x) 42)
+
+; ---------------------------------------------------------------------------
+; Group 5 — float arithmetic folds (LIN_CAP_NATIVE_NUM); _ffi closures
+; ---------------------------------------------------------------------------
+(ffloor (fsqrt 144.0))
+(feq (fadd 2.5 3.5) 6.0)
+(ffloor (fmul (fsqrt 16.0) (fadd 1.0 1.0)))
+
+; ---------------------------------------------------------------------------
+; Group 6 — beta-heavy nested currying + arithmetic composition
+; ---------------------------------------------------------------------------
+((add 20) 22)
+((mul 6) 7)
+(mul (add 20 22) 2)
+
+; ---------------------------------------------------------------------------
+; Trailing fold accounting (informational; NOT part of the equality contract)
+; ---------------------------------------------------------------------------
+(folds)

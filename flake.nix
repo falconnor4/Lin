@@ -27,6 +27,9 @@
                   -I${pkgs.vulkan-headers}/include \
                   -o "''${d%.c}.so" "$d" -ldl -lm -L${pkgs.vulkan-loader}/lib
               done
+              # Build the Vulkan compute shader (reduce.spv is a build artifact
+              # and gitignored, so it must be regenerated here rather than staged).
+              ${pkgs.glslang}/bin/glslangValidator -V std/drivers/reduce.comp -o std/drivers/reduce.spv
               runHook postBuild
             '';
 
@@ -78,7 +81,7 @@
             run_test() {
               f="$1"
               t0=$(date +%s%3N 2>/dev/null || date +%s)
-              got=$($LIN_BIN "$f" 2>&1 | grep -v '^warning' || true)
+              got=$($LIN_BIN "$f" 2>/dev/null || true)
               want=$(grep '^; expect ' "$f" | sed 's/^; expect //')
               gn=$(printf '%s\n' "$got" | grep -c . || true)
               wn=$(printf '%s\n' "$want" | grep -c . || true)
@@ -129,6 +132,17 @@
             for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin; do
               run_test "$f"
             done
+
+            printf "\n''${C_TIER}[Tier 2.5: Canonical Cross-Driver Selftest]''${C_RESET}\n"
+            if bash test/driver_selftest.sh "$LIN_BIN" "$LIN_STD_DIR" >/dev/null 2>&1; then
+              pass=$((pass + 1))
+              total_checks=$((total_checks + 46))
+              printf "  ''${C_PASS}PASS''${C_RESET} %-32s\n" "test/driver_selftest.sh (2 drivers x 23 probes)"
+            else
+              fail=$((fail + 1))
+              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/driver_selftest.sh"
+              bash test/driver_selftest.sh "$LIN_BIN" "$LIN_STD_DIR" || true
+            fi
 
             printf "\n''${C_TIER}[Tier 3: Constraint Satisfaction & Term Rewriting]''${C_RESET}\n"
             for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do

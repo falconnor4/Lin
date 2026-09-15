@@ -59,6 +59,43 @@ while still admitting hardware acceleration as an opt-in concern.
    host-authoritative (the base engine is ground truth and a driver only
    commits when its output is proven bit-exact).
 
+## Canonical driver selftest (the driver correctness contract)
+
+Every reduction driver — current (`cpu` fold, SIMD, GPU) or future — must
+reproduce the base engine's reduction exactly.  That invariant is enforced by
+one canonical, driver-agnostic selftest, not by per-driver test files:
+
+- **Corpus: `std/selftest.lin`.**  A single module that loads `std.lin` and
+  reduces a fixed set of pure probes covering each redex/capability class a
+  driver claims (`_op` integer folds, saturated comparisons, float folds,
+  composed/deferred operands, annihilate/erase identities, beta-heavy nesting).
+  It activates **no** driver and carries **no** expected values: it just emits
+  the readback tokens.  It is meaningful under cpu, SIMD, GPU and any future
+  driver because every value follows from core confluence plus the one shared
+  scalar-op table (`arith.so`).
+- **Runner: `test/driver_selftest.sh`.**  Runs the corpus under the base CPU
+  engine (golden), then under each driver in a `DRIVERS` registry array, and
+  requires the driver's probe lines to equal the golden **value-for-value**.
+  It also reports each driver's native fold count (`(folds)`), which is
+  informational — folding is a driver's own optimization decision, so `folded`
+  need **not** be true for a driver to pass.
+- **The contract for a new driver is two lines of work, not a new test file:**
+  1. ship its `std/drivers/<name>.lin` plugin, and
+  2. add `<name>` to the `DRIVERS` array in `test/driver_selftest.sh`.
+  The runner then validates it against the base engine exactly as it does SIMD
+  and GPU.  No bespoke expected values, no driver-specific assertions to
+  maintain, no drift.
+- **Device reducers get a stronger, per-wave oracle.**  `std/drivers/selftest.h`
+  is the shared, std-wide extraction of what was `gpu_selftest`: a device
+  driver calls `lin_selftest_replay(...)` after committing a wave, and the
+  harness clones the host net, replays the *same* redexes through the canonical
+  `lin_reduce_wave_parallel`, and diffs `wire[]`/`dead[]` **bit-exactly**
+  (env-gated, e.g. `LIN_GPU_SELFTEST=1`).  Host-native reducers (SIMD) have no
+  separable device state to compare, so their oracle is the value-level corpus.
+  The two layers compose: `std/selftest.lin` proves cross-driver value
+  equality everywhere; `selftest.h` proves per-wave device-redux bit-exactness
+  where a device actually ran.
+
 ## Arithmetic: one shared table, any reduction strategy
 
 There is **exactly one** place that knows what `lin_add`, `lin_eq`,
@@ -203,11 +240,14 @@ with `vulkan-headers`/`vulkan-loader`, and wraps the binary with the bundled
 
 ## Test status
 
-The full suite is green: **50 suites / 875 assertions** (Tiers 1-6: core
+The full suite is green: **52 suites / 940 assertions** (Tiers 1-6: core
 primitives, FFI/system drivers, SAT & term rewriting, non-trivial workloads,
 `.line` containers, and CLI invariants).  A driver's native folds are asserted
-by `(folded)`/`lin_folds` in the driver suites; the GPU driver's bit-exactness
-is asserted by `LIN_GPU_SELFTEST` (no mismatches on a device).
+by `(folded)`/`lin_folds` in the driver suites; cross-driver correctness is
+asserted by the canonical selftest (`test/driver_selftest.sh` validates every
+driver against the base-CPU golden via `std/selftest.lin`); the GPU driver's
+per-wave bit-exactness is asserted by `LIN_GPU_SELFTEST` through the shared
+`std/drivers/selftest.h` harness (no mismatches on a device).
 
 ## Line budget
 
@@ -226,7 +266,7 @@ shared beta `fold_arg` edge — and expository comments/blank lines were compres
 
 ## Status (honest)
 
-**All green: 50 suites / 875 assertions.**
+**All green: 52 suites / 940 assertions.**
 
 - **Integer/comparison arithmetic is now PURE LIN.**  `std/num.lin` no longer
   uses any integer `_ffi`/`ccall2`: `add/sub/mul/div/mod/pow/eq/lt/gt/leq/geq`
@@ -301,4 +341,4 @@ The whole std was migrated to this template, with two idioms applied per module:
 
 A proper distinct `float` annotation type remains a compiler/type-checker task
 (annotations only have builtin atoms `num`/`bool`/`a`/`(list a)`); `float.lin` is
-reworked to the export template but its ops stay `num`-typed.  Suite: 50/875.
+reworked to the export template but its ops stay `num`-typed.  Suite: 52/940.

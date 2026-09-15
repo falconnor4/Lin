@@ -12,6 +12,7 @@
  * on any failure gpu_ready=0 so the base CPU engine takes over transparently.
  * ========================================================================== */
 #include "../../src/lin.h"
+#include "selftest.h"          /* canonical per-wave bit-exact differential (std-wide) */
 #include <vulkan/vulkan.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,23 @@ static int gpu_ready = 0, pipe_ready = 0;
 static VkInstance vk_instance; static VkPhysicalDevice vk_phys;
 static VkDevice vk_dev; static VkQueue vk_queue; static uint32_t vk_qfam;
 static void *vk_lib;
+
+/* Emit a one-time, NON-SILENT fallback notice: the GPU driver loaded but cannot
+   produce a usable on-device reducer, so reduction transparently falls back to
+   the base CPU engine.  Keeping the user informed is the point of this guard —
+   without it a missing shader, loader or device is a silent no-op (and, until
+   now, the missing-shader case could even segfault in gpu_reduce).  The
+   `warning:` prefix is the repo convention that test/run_tests.sh strips via
+   `grep -v '^warning'`, so a functional fallback still passes the suite. */
+static int gpu_warned = 0;
+static void gpu_warn(const char *why) {
+  if (gpu_warned) return;
+  gpu_warned = 1;
+  /* Informational diagnostic to stderr (never stdout): the value-output stream
+     a test harness reads (test/run_tests.sh captures stdout only) must stay
+     clean even though gpu.so is dlopen'd mid-expression by set_driver. */
+  fprintf(stderr, "warning: GPU driver is unavailable (%s) - reducing on the base CPU engine\n", why);
+}
 
 static struct Buf { VkBuffer b; VkDeviceMemory m; VkDeviceSize sz; void *map; }
   g_tags, g_wires, g_deads, g_scopes, g_redex;
@@ -185,21 +203,27 @@ __attribute__((constructor))
 static void vk_init(void) {
   vk_lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_GLOBAL);
   if (!vk_lib) vk_lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-  if (!vk_lib) return;
+  if (!vk_lib) { gpu_warn("Vulkan loader (libvulkan.so) not found"); return; }
   LOAD(vkCreateInstance); LOAD(vkEnumeratePhysicalDevices);
   LOAD(vkGetPhysicalDeviceProperties); LOAD(vkGetPhysicalDeviceQueueFamilyProperties);
   LOAD(vkCreateDevice); LOAD(vkGetDeviceQueue);
   p_vkPMemProps = dlsym(vk_lib, "vkGetPhysicalDeviceMemoryProperties");
-  if (!p_vkCreateInstance || !p_vkEnumeratePhysicalDevices || !p_vkCreateDevice || !p_vkGetDeviceQueue || !p_vkPMemProps) return;
+  if (!p_vkCreateInstance || !p_vkEnumeratePhysicalDevices || !p_vkCreateDevice || !p_vkGetDeviceQueue || !p_vkPMemProps) {
+    gpu_warn("Vulkan loader missing required entry points"); return;
+  }
 
   VkInstanceCreateInfo ii = {0}; ii.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-  if (p_vkCreateInstance(&ii, NULL, &vk_instance) != VK_SUCCESS || !vk_instance) return;
+  if (p_vkCreateInstance(&ii, NULL, &vk_instance) != VK_SUCCESS || !vk_instance) {
+    gpu_warn("Vulkan instance creation failed (no ICD / driver?)"); return;
+  }
 
   uint32_t ndef = 0;
-  if (p_vkEnumeratePhysicalDevices(vk_instance, &ndef, NULL) != VK_SUCCESS || !ndef) return;
+  if (p_vkEnumeratePhysicalDevices(vk_instance, &ndef, NULL) != VK_SUCCESS || !ndef) {
+    gpu_warn("no Vulkan physical devices enumerated"); return;
+  }
   VkPhysicalDevice *devs = malloc(sizeof(VkPhysicalDevice) * ndef);
   if (!devs) return;
-  if (p_vkEnumeratePhysicalDevices(vk_instance, &ndef, devs) != VK_SUCCESS) { free(devs); return; }
+  if (p_vkEnumeratePhysicalDevices(vk_instance, &ndef, devs) != VK_SUCCESS) { free(devs); gpu_warn("Vulkan device enumeration failed"); return; }
 
   for (uint32_t i = 0; i < ndef; i++) {
     uint32_t nq = 0;
@@ -224,6 +248,7 @@ static void vk_init(void) {
     free(q);
   }
   free(devs);
+  gpu_warn("no Vulkan device with a compute queue found");
   return;
 device_ok:
   LOAD(vkCreateShaderModule); LOAD(vkCreateDescriptorSetLayout); LOAD(vkCreatePipelineLayout);
@@ -237,6 +262,10 @@ device_ok:
 
   /* build the compute pipeline now that all device entry points are loaded */
   build_pipeline();
+  /* A device was found, but if the compute pipeline (descriptors/shader) could
+     not be built we must NOT dispatch on-device: fall back to the CPU engine
+     loudly rather than dereference a half-built pipeline (was a segfault). */
+  if (!pipe_ready) gpu_warn("Vulkan compute pipeline/shader failed to build");
 }
 
 /* Allocate/refresh device buffers sized to the current net. */
@@ -256,69 +285,62 @@ static int gpu_sector_cap;
 
 /* Bit-exact differential check (LIN_GPU_SELFTEST=1): reduce the SAME fixed
    redexes on a host clone of the net and compare wire[]/dead[] against what
-   the GPU just wrote into its mapped buffers.  Reports a running tally. */
-static long selftest_mismatches = 0, selftest_runs = 0;
+   the GPU just wrote into its mapped buffers.  Delegates to the canonical,
+   std-wide harness in selftest.h so every device driver shares one oracle. */
+static unsigned char *self_deads; static Port *self_wires; static int self_alloc = 0;
 
 static void gpu_selftest(Net *n, int nred) {
   if (!getenv("LIN_GPU_SELFTEST")) return;
-  selftest_runs++;
 
-  /* clone n, replay only the fixed redexes through the host reducer using the
-   SAME concurrent wavefront reducer (lin_reduce_wave_parallel) that production
-   uses, so the oracle matches the actual host reduction semantics (sequential
-   net_interact would differ because concurrent reduction reorders). */
-  Net *h = net_copy(n);
-  int shadow = 0;
-  /* reconstruct the fixed redex pair list as Port[] for the wave reducer */
+  /* decode the packed GPU-committed buffers into the plain wire[]/dead[] layout
+     the shared harness expects (same decode the authoritative commit below uses) */
+  if (self_alloc < n->nn) {
+    self_alloc = n->nn + 64;
+    free(self_deads); free(self_wires);
+    self_deads = malloc((size_t)self_alloc);
+    self_wires = malloc(sizeof(Port) * (size_t)self_alloc * 3);
+    if (!self_deads || !self_wires) { free(self_deads); free(self_wires); self_deads=NULL; self_wires=NULL; self_alloc=0; return; }
+  }
+  uint32_t *gw = (uint32_t *)g_wires.map, *gd = (uint32_t *)g_deads.map;
+  for (int i = 0; i < n->nn; i++) {
+    self_deads[i] = (unsigned char)gd[i];
+    for (int p = 0; p < 3; p++) {
+      uint32_t w32 = gw[i*3+p];
+      self_wires[i*3+p] = (w32 == 0x3fffffffu) ? (Port){-1,0}
+                        : (Port){ (int)(w32 & 0x3fffffff), (int)(w32 >> 30) };
+    }
+  }
+
+  /* reconstruct the redex Pair list (same encoding the GPU consumed) */
   Port *fp = malloc(sizeof(Port) * (size_t)nred * 2);
+  if (!fp) return;
   for (int i = 0; i < nred; i++) {
     uint32_t a = ((uint32_t*)g_redex.map)[i*2], b = ((uint32_t*)g_redex.map)[i*2+1];
     fp[i*2]   = (Port){ (int)(a & 0x3fffffff), (int)(a >> 30) };
     fp[i*2+1] = (Port){ (int)(b & 0x3fffffff), (int)(b >> 30) };
   }
-  lin_reduce_wave_parallel(h, fp, nred * 2, &shadow);
+  int bad = lin_selftest_replay(n, fp, nred, self_wires, self_deads, "GPU", "LIN_GPU_SELFTEST");
   free(fp);
 
-  /* compare host clone vs GPU-committed buffers (wire + dead) */
-  long bad = 0;
-  uint32_t *gw = (uint32_t *)g_wires.map;
-  uint32_t *gd = (uint32_t *)g_deads.map;
-  int difftag = -1, diffport = -1; uint32_t gv = 0, hv = 0; unsigned char gd8 = 0, hd8 = 0;
-  for (int i = 0; i < n->nn && !bad; i++) {
-    if ((unsigned char)gd[i] != h->dead[i]) { bad = 1; difftag = i; gd8 = (unsigned char)gd[i]; hd8 = h->dead[i]; break; }
-    for (int p = 0; p < 3; p++) {
-      Port hw = h->wire[i*3+p];
-      uint32_t hw32 = hw.node < 0 ? 0x3fffffffu : ((uint32_t)(hw.node & 0x3fffffff) | (hw.port << 30));
-      if (gw[i*3+p] != hw32) { bad = 1; difftag = i; diffport = p; gv = gw[i*3+p]; hv = hw32; break; }
+  if (bad && getenv("LIN_GPU_SELFTEST_DUMP")) {
+    for (int i = 0; i < nred; i++) {
+      uint32_t a = ((uint32_t*)g_redex.map)[i*2], b = ((uint32_t*)g_redex.map)[i*2+1];
+      fprintf(stderr, "  redex %d: n%d.%d(tag%d) x n%d.%d(tag%d)\n", i,
+              (int)(a & 0x3fffffff), (int)(a >> 30), n->tag[a & 0x3fffffff],
+              (int)(b & 0x3fffffff), (int)(b >> 30), n->tag[b & 0x3fffffff]);
     }
   }
-  if (bad && getenv("LIN_GPU_SELFTEST")) {
-    if (diffport >= 0)
-      fprintf(stderr, "[gpu self] first diff node %d port %d: gpu=0x%08x host=0x%08x (replaying %d redexes)\n",
-              difftag, diffport, gv, hv, nred);
-    else
-      fprintf(stderr, "[gpu self] first diff node %d dead: gpu=%u host=%u\n", difftag, gd8, hd8);
-    if (getenv("LIN_GPU_SELFTEST_DUMP")) {
-      for (int i = 0; i < nred; i++) {
-        uint32_t a = ((uint32_t*)g_redex.map)[i*2], b = ((uint32_t*)g_redex.map)[i*2+1];
-        fprintf(stderr, "  redex %d: n%d.%d(tag%d) x n%d.%d(tag%d)\n", i,
-                (int)(a & 0x3fffffff), (int)(a >> 30), n->tag[a & 0x3fffffff],
-                (int)(b & 0x3fffffff), (int)(b >> 30), n->tag[b & 0x3fffffff]);
-      }
-    }
-  }
-  if (bad) selftest_mismatches++;
-  fprintf(stderr, "[gpu selftest] %s (run %ld, %ld/%ld waves mismatched)\n",
-          bad ? "MISMATCH" : "OK", selftest_runs, selftest_mismatches, selftest_runs);
-  net_free(h);
-  (void)shadow;
 }
 
 /* claim: a fixed-allocation redex (beta, inline-scope annihilate).  Commute /
    heap-scope annihilate / `_ffi` closures are NOT claimed (SIMD claims `_ffi`
    at higher priority; commute is the base engine's). */
 static int gpu_claim(const Net *n, Port p1, Port p2) {
-  if (!gpu_ready) return 0;   /* no usable device => pure no-op, never claim */
+  /* A usable device AND a built compute pipeline are both required to handle a
+     redex; with either absent we are a pure no-op and the base engine owns the
+     wave.  Checking pipe_ready here (not just gpu_ready) prevents claiming a
+     redex the driver then cannot dispatch because the shader/pipeline failed. */
+  if (!gpu_ready || !pipe_ready) return 0;
   if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) return 0;
   /* principal-port validity (mirrors lin_reduce_wave_parallel) */
   if (p1.port || p2.port) return 0;
@@ -345,7 +367,12 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
    and fall back to net_interact for the sector-non-disjoint subset.  The core
    has already routed commute redexes to the base engine. */
 static int gpu_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
-  if (!gpu_ready || nred <= 0 || n->steps >= limit) return 0;
+  /* Require a built pipeline: if gpu_ready but pipe_ready is 0 (device found but
+     the compute shader/pipeline failed to build, e.g. no reduce.spv), dispatching
+     would dereference NULL device objects and segfault.  Fall back to the CPU
+     engine instead — gpu_claim already returned 0 in this state, so the base
+     engine owns this wave. */
+  if (!gpu_ready || !pipe_ready || nred <= 0 || n->steps >= limit) return 0;
 
   /* reset the per-sector usage bitmap for this wave */
   int nsec = (n->nn + 63) >> 6;

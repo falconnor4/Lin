@@ -37,7 +37,11 @@ t_start=$(date +%s%3N 2>/dev/null || date +%s)
 run_test() {
   f="$1"
   t0=$(date +%s%3N 2>/dev/null || date +%s)
-  got=$("$LIN_BIN" "$f" 2>&1 | grep -v '^warning' || true)
+  # Capture stdout only: diagnostics (e.g. driver fallback warnings) go to
+  # stderr and must not be merged into the readback stream — `2>&1` interleaves
+  # them onto stdout data lines at the pipe level, breaking line-for-line
+  # equality when a warning fires mid-expression (see gpu_warn / unison.lin).
+  got=$("$LIN_BIN" "$f" 2>/dev/null || true)
   want=$(grep '^; expect ' "$f" | sed 's/^; expect //')
   gn=$(printf '%s\n' "$got"  | grep -c . || true)
   wn=$(printf '%s\n' "$want" | grep -c . || true)
@@ -74,6 +78,20 @@ printf "[Tier 2: Foreign Function Interface & System Drivers]\n"
 for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin test/gpu_dispatch.lin test/unison.lin test/simd_fold.lin; do
   run_test "$f"
 done
+
+# ----------------------------------------------------------------------------
+# Tier 2.5: Canonical cross-driver selftest
+#   Runs std/selftest.lin under the base CPU engine (golden) and under every
+#   registered driver, requiring value-for-value equality (test/driver_selftest.sh).
+#   This is the CONTRACT any current or future driver must satisfy.
+# ----------------------------------------------------------------------------
+DS_LOG=$(mktemp)
+if bash test/driver_selftest.sh "$LIN_BIN" "$STD_DIR" >"$DS_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 46)); echo "PASS test/driver_selftest.sh (2 drivers x 23 probes)"
+  rm -f "$DS_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/driver_selftest.sh"; cat "$DS_LOG"; rm -f "$DS_LOG"
+fi
 
 printf "[Tier 3: Constraint Satisfaction & Term Rewriting]\n"
 for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do
