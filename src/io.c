@@ -59,6 +59,7 @@ void ctor_init_builtins(void) {
   nominal_register("bool", 0);
   nominal_register("num", 0);
   nominal_register("float", 0);
+  nominal_register("list", 1);
   ctor_register("_sz", DT_NUM, "_sz", "_ss");
   ctor_register("_bt", DT_BOOL, "_bt", "_bf");
   ctor_register("_cl", DT_STR, "_cl", "_nl");

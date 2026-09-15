@@ -102,7 +102,6 @@ static Type *parse_type_atom(void) {
   }
   char nm[NAME];
   if (!sym(nm, NAME)) pfail("type: expected name");
-  if (!strcmp(nm, "list")) return type_list(parse_type_atom());
   if (nominal_lookup(nm)) {
     /* generic nominal: consume `arity` type-argument atoms, chained as TARGs. */
     Type *t = type_nominal(nm); Type **cur = &t->a;

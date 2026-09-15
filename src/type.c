@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { TVR, TARROW, TLINK, TLIST, TNOM, TARG };
+enum { TVR, TARROW, TLINK, TNOM, TARG };
 
 static jmp_buf TJ;
 static char TMSG[256];
@@ -37,7 +37,6 @@ int nominal_register(const char *name, int arity) {
 
 static Type *tvar(void) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, .id = next_id++}; return t; }
 static Type *tarrow(Type *a, Type *b) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARROW, .id = -1, .a = a, .b = b}; return t; }
-static Type *tlist(Type *e) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TLIST, .id = -1, .a = e}; return t; }
 /* type-argument chain node: {a = the arg type, b = next TARG or NULL} */
 static Type *targ(Type *arg, Type *next) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARG, .id = -1, .a = arg, .b = next}; return t; }
 /* nominal type: `name` copied; `*argp` is a TARG chain of arity type args (or NULL). */
@@ -59,7 +58,6 @@ static int occurs(Type *v, Type *t) {
   t = find(t);
   if (t == v) return 1;
   if (t->kind == TARROW) return occurs(v, t->a) || occurs(v, t->b);
-  if (t->kind == TLIST) return occurs(v, t->a);
   if (t->kind == TNOM) return t->a && occurs(v, t->a);     /* arg chain */
   if (t->kind == TARG) return occurs(v, t->a) || (t->b && occurs(v, t->b));
   return 0;
@@ -70,7 +68,6 @@ static void unify(Type *x, Type *y) {
   y = find(y);
   if (x == y) return;
   if (x->kind == TARROW && y->kind == TARROW) { unify(x->a, y->a); unify(x->b, y->b); return; }
-  if (x->kind == TLIST && y->kind == TLIST) { unify(x->a, y->a); return; }
   /* nominal: equal only when both are the SAME declared type; then unify type
      arguments pairwise.  A nominal value may also be APPLIED as its
      Scott-encoded dispatch (match desugars scrut to application). */
@@ -82,7 +79,14 @@ static void unify(Type *x, Type *y) {
   if (x->kind == TNOM || y->kind == TNOM) {
     if (x->kind == TVR) { x->kind = TLINK; x->a = y; return; }
     if (y->kind == TVR) { y->kind = TLINK; y->a = x; return; }
-    if (x->kind == TARROW || y->kind == TARROW) return;   /* Scott dispatch compat */
+    /* A nominal unifies with an arrow for Scott dispatch (match scrut) and
+       for polymorphic values -- EXCEPT structured containers `list`/`string`,
+       which must reject a raw numeral/arrow ((head 5), (cons 1 2) stay errors). */
+    if (x->kind == TARROW || y->kind == TARROW) {
+      Type *nom = (x->kind == TNOM) ? x : y;
+      if (nom->name && (!strcmp(nom->name, "list") || !strcmp(nom->name, "string"))) tfail("type mismatch");
+      return;
+    }
     tfail("type mismatch");
   }
   if (x->kind == TVR) { if (occurs(x, y)) tfail("infinite type"); x->kind = TLINK; x->a = y; return; }
@@ -119,7 +123,6 @@ static void fv(Type *t, int *set, int *n) {
     fv(t->a, set, n);
     fv(t->b, set, n);
   }
-  if (t->kind == TLIST) fv(t->a, set, n);
   if (t->kind == TNOM) { if (t->a) fv(t->a, set, n); }
   if (t->kind == TARG) { fv(t->a, set, n); if (t->b) fv(t->b, set, n); }
 }
@@ -136,7 +139,6 @@ static Type *inst_rec(Type *t) {
     return t;
   }
   if (t->kind == TARROW) return tarrow(inst_rec(t->a), inst_rec(t->b));
-  if (t->kind == TLIST) return tlist(inst_rec(t->a));
   if (t->kind == TARG) return targ(inst_rec(t->a), t->b ? inst_rec(t->b) : NULL);
   if (t->kind == TNOM) { Type *n = tnom0(t->name); Type **cur = &n->a; for (Type *k = t->a; k; k = k->b) { *cur = targ(inst_rec(k->a), NULL); cur = &(*cur)->b; } return n; }
   return t;
@@ -214,7 +216,6 @@ static void print_rec(Type *t, int par) {
     if (par) putchar(')');
     return;
   }
-  if (t->kind == TLIST) { printf("list "); print_rec(t->a, 1); return; }
   if (t->kind == TNOM) { fputs(t->name ? t->name : "?", stdout); for (Type *k = t->a; k; k = k->b) { putchar(' '); print_rec(k->a, 2); } return; }
   if (t->kind == TARG) { print_rec(t->a, 2); return; }
   putchar('?');
@@ -223,7 +224,6 @@ static void print_rec(Type *t, int par) {
 void scheme_print(Scheme *s) { print_rec(s->t, 0); }
 Type *type_var(void) { return tvar(); }
 Type *type_arrow(Type *a, Type *b) { return tarrow(a, b); }
-Type *type_list(Type *e) { return tlist(e); }
 Type *type_nominal(const char *name) { return tnom0(name); }
 Type *type_arg(Type *arg) { return targ(arg, NULL); }
 
