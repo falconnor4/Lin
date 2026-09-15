@@ -60,3 +60,13 @@
 (define! idp (Point -> Point) (\p p))
 (idp (seg (point 1 2) (point 3 4)))
 ; expect error: type mismatch
+; --- generic (parameterised) nominal ADTs ---
+(datatype (Box a) (box v))
+(define! unbox_num (Box num -> num) (\b (match b ((box v) v))))
+; a Box num is accepted; a Box bool is rejected (type safety on the type arg)
+(define! myn (Box num) (box 5))
+(unbox_num myn)
+; expect => 5
+(define! myb (Box bool) (box true))
+(unbox_num myb)
+; expect error: type mismatch
