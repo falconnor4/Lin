@@ -340,23 +340,29 @@ static void export_namespace(const char *name) {
   if (!name || !*name) return;
   char pfx[NAME + 2]; snprintf(pfx, sizeof pfx, "%s.", name);
   int pflen = (int)strlen(pfx);
+  /* Re-export by routing each public member through process_def as a plain
+     alias `(define suffix qualified-name)` — the exact shape the hand-written
+     modules used (`(define x ns.x)`), so each exported def gets identical
+     type-checking, free-var qualification and precompile behaviour to its
+     qualified original (avoiding closure-bake differences).  Collect names first
+     so appending can't invalidate iteration. */
+  static char (*out)[NAME]; static int outcap = 0;
+  int nout = 0;
   for (int i = 0; i < ndefs; i++) {
     const char *dn = defs[i].name;
     if (strncmp(dn, pfx, (size_t)pflen)) continue;
     const char *suffix = dn + pflen;
     if (!*suffix || strchr(suffix, '.')) continue;          /* only direct members */
     if (suffix[0] == '_') continue;                         /* `_`-prefixed = private */
+    if (nout >= outcap) out = realloc(out, (size_t)(outcap = outcap ? outcap * 2 : 64) * sizeof *out);
+    snprintf(out[nout++], NAME, "%s", suffix);
+  }
+  for (int k = 0; k < nout; k++) {
     char qn[NAME * 2 + 2];
-    if (curr_ns[0]) snprintf(qn, sizeof qn, "%s.%s", curr_ns, suffix);
-    else snprintf(qn, sizeof qn, "%s", suffix);
-    if (lookup_raw(qn)) continue;                            /* already present */
-    if (ndefs >= defcap) defs = realloc(defs, (size_t)(defcap = defcap ? defcap * 2 : 128) * sizeof(Def));
-    Def *e = &defs[ndefs++], *src = &defs[i];
-    snprintf(e->name, NAME, "%s", qn);
-    e->sch = src->sch; e->typed = 1; e->rec = src->rec;
-    e->rec_k = src->rec_k; e->rec_body = src->rec_body;
-    e->term = term_copy(src->term);
-    e->expanded = NULL; e->compiled = NULL; e->comp_tried = 0;
+    if (curr_ns[0]) snprintf(qn, sizeof qn, "%s.%s", curr_ns, out[k]);
+    else snprintf(qn, sizeof qn, "%s", out[k]);
+    char fullname[NAME * 2 + 2]; snprintf(fullname, sizeof fullname, "%s.%s", name, out[k]);
+    process_def(term_new(TDEF, out[k], term_new(TVAR, fullname, NULL, NULL), NULL));
   }
 }
 
