@@ -9,7 +9,9 @@
 (load "list.lin")
 
 (namespace queue)
-(define rev
+
+; --- Internal: reverse a list (skipped by export) ---
+(define _rev
   (\l
     (if (list.is_empty l)
       nil
@@ -23,30 +25,23 @@
               (cons (fourth l) (cons (third l) (cons (second l) (cons (first l) nil))))
               (cons (fifth l) (cons (fourth l) (cons (third l) (cons (second l) (cons (first l) nil))))))))))))
 
-(define empty (pair nil nil))
-(define singleton (\x (pair nil (cons x nil))))
-(define is_empty (\q (and (list.is_empty (fst q)) (list.is_empty (snd q)))))
+(define empty_queue (pair nil nil))
+(define queue_singleton (\x (pair nil (cons x nil))))
+(define is_empty_queue (\q (and (list.is_empty (fst q)) (list.is_empty (snd q)))))
 
-(define push
+(define queue_push
   (\x (\q
     (if (list.is_empty (snd q))
       (pair (fst q) (cons x nil))
       (pair (cons x (fst q)) (snd q))))))
 
-(define peek (\q (head (snd q))))
+(define queue_peek (\q (head (snd q))))
 
-(define pop
+(define queue_pop
   (\q
     (if (list.is_empty (tail (snd q)))
-      (pair nil (queue.rev (fst q)))
+      (pair nil (queue._rev (fst q)))
       (pair (fst q) (tail (snd q))))))
 
 (namespace _)
-(open queue)
-(define queue_rev queue.rev)
-(define empty_queue queue.empty)
-(define queue_singleton queue.singleton)
-(define is_empty_queue queue.is_empty)
-(define queue_push queue.push)
-(define queue_peek queue.peek)
-(define queue_pop queue.pop)
+(export queue)

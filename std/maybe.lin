@@ -18,17 +18,9 @@
 
 ; --- Eliminators & Combinators ---
 (define from_maybe (\d (\m ((m d) (\x x)))))
-(define map  (\f (\m ((m maybe.nothing) (\x (maybe.just (f x)))))))
-(define bind (\m (\f ((m maybe.nothing) (\x (f x))))))
-(define or   (\m1 (\m2 ((m1 m2) (\x (maybe.just x))))))
+(define maybe_map  (\f (\m ((m maybe.nothing) (\x (maybe.just (f x)))))))
+(define maybe_bind (\m (\f ((m maybe.nothing) (\x (f x))))))
+(define maybe_or   (\m1 (\m2 ((m1 m2) (\x (maybe.just x))))))
 
 (namespace _)
-(open maybe)
-(define nothing maybe.nothing)
-(define just maybe.just)
-(define is_nothing maybe.is_nothing)
-(define is_just maybe.is_just)
-(define from_maybe maybe.from_maybe)
-(define maybe_map maybe.map)
-(define maybe_bind maybe.bind)
-(define maybe_or maybe.or)
+(export maybe)

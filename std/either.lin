@@ -17,18 +17,10 @@
 (define is_right (\e ((e (\_ bool.false)) (\_ bool.true))))
 
 ; --- Eliminators & Combinators ---
-(define either (\fl (\fr (\e ((e fl) fr)))))
-(define map    (\f (\e ((e either.left) (\y (either.right (f y)))))))
-(define bind   (\e (\f ((e either.left) (\y (f y))))))
-(define from_right (\d (\e ((e (\_ d)) (\y y)))))
+(define either      (\fl (\fr (\e ((e fl) fr)))))
+(define either_map  (\f (\e ((e either.left) (\y (either.right (f y)))))))
+(define either_bind (\e (\f ((e either.left) (\y (f y))))))
+(define from_right  (\d (\e ((e (\_ d)) (\y y)))))
 
 (namespace _)
-(open either)
-(define left either.left)
-(define right either.right)
-(define is_left either.is_left)
-(define is_right either.is_right)
-(define either either.either)
-(define either_map either.map)
-(define either_bind either.bind)
-(define from_right either.from_right)
+(export either)

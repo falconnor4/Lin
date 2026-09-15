@@ -1,32 +1,72 @@
 ; ==============================================================================
 ; Lin Standard Library: Lists & Linear Sequences
 ; ==============================================================================
-; Combines Scott-encoded lists (for O(1) head, tail, and pattern matching)
-; with Church-encoded lists (for pure unbounded self-iterating folds).
+; Scott-encoded lists (O(1) head/tail/pattern-matching) plus Church-encoded
+; self-iterating lists & folds.  The positional projections (first..eighth) are
+; thin wrappers over the single generic recursive `nth`, so the projection
+; family shares one encoding instead of hand-unrolled head/tail chains.
 ; ==============================================================================
 
 (load "bool.lin")
 (load "num.lin")
 
 (namespace list)
+
+; --- Scott list core ---
 (define! nil (list a) (\c (\n bool.true)))
 (define! cons (a -> list a -> list a) (\h (\t (\c (\n ((c h) t))))))
 (define! head (list a -> a) (\l ((l (\h (\t h))) list.nil)))
 (define! tail (list a -> list a) (\l ((l (\h (\t t))) list.nil)))
 (define! is_empty (list a -> bool) (\l ((l (\h (\t bool.false))) bool.true)))
 
-; Higher-order list equality
-(define eq
+; --- Higher-order list equality (public list_eq over internal _eq) ---
+(define _eq
   (\elem_eq
     (\l1 (\l2
-      (bool.ifl (list.is_empty l1)
-        (\_ (list.is_empty l2))
-        (\_ (bool.ifl (list.is_empty l2)
+      (bool.ifl (is_empty l1)
+        (\_ (is_empty l2))
+        (\_ (bool.ifl (is_empty l2)
               (\_ bool.false)
-              (\_ (bool.and ((elem_eq (list.head l1)) (list.head l2))
-                            (((eq elem_eq) (list.tail l1)) (list.tail l2)))))))))))
+              (\_ (bool.and ((elem_eq (head l1)) (head l2))
+                            (((_eq elem_eq) (tail l1)) (tail l2)))))))))))
+(define list_eq _eq)
 
-; Church self-iterating lists & folds
+; --- Generic positional projection (terminating recursion) ---
+; O(i): hoist head repeatedly; the index drives the recursion to 0, bounding the
+; depth by the requested position and keeping nth generic over the element type
+; (an `is_empty` guard that yields `nil` would pin nth to lists-of-lists under HM
+; inference, so termination is index-driven; valid positions never hit the end).
+(define nth
+  (\i (\l
+    (bool.ifl (is_zero i)
+      (\_ (head l))
+      (\_ (nth (pred i) (tail l)))))))
+
+; --- Positional projections (thin nth wrappers) ---
+(define first  (\l (nth 0 l)))
+(define second (\l (nth 1 l)))
+(define third  (\l (nth 2 l)))
+(define fourth (\l (nth 3 l)))
+(define fifth  (\l (nth 4 l)))
+(define sixth  (\l (nth 5 l)))
+(define seventh (\l (nth 6 l)))
+(define eighth  (\l (nth 7 l)))
+
+; --- 1-based projection aliases ---
+(define nth1 list.first)
+(define nth2 list.second)
+(define nth3 list.third)
+(define nth4 list.fourth)
+(define nth5 list.fifth)
+
+; --- Positional constructors ---
+(define list1 (\a (cons a nil)))
+(define list2 (\a (\b (cons a (cons b nil)))))
+(define list3 (\a (\b (\c (cons a (cons b (cons c nil)))))))
+(define list4 (\a (\b (\c (\d (cons a (cons b (cons c (cons d nil)))))))))
+(define list5 (\a (\b (\c (\d (\e (cons a (cons b (cons c (cons d (cons e nil)))))))))))
+
+; --- Church self-iterating lists & folds ---
 (define c_nil (\c (\n n)))
 (define c_cons (\h (\t (\c (\n (c h (t c n)))))))
 (define c_foldr (\f (\z (\l (l f z)))))
@@ -38,63 +78,6 @@
 (define c_to_scott (\cl (cl list.cons list.nil)))
 (define c_reverse (\cl (list.c_foldl (\acc (\x (list.c_cons x acc))) list.c_nil cl)))
 
-; Positional constructors
-(define list1 (\a (list.cons a list.nil)))
-(define list2 (\a (\b (list.cons a (list.cons b list.nil)))))
-(define list3 (\a (\b (\c (list.cons a (list.cons b (list.cons c list.nil)))))))
-(define list4 (\a (\b (\c (\d (list.cons a (list.cons b (list.cons c (list.cons d list.nil)))))))))
-(define list5 (\a (\b (\c (\d (\e (list.cons a (list.cons b (list.cons c (list.cons d (list.cons e list.nil)))))))))))
-
-; Direct O(1) positional projections
-(define first list.head)
-(define second (\l (list.head (list.tail l))))
-(define third  (\l (list.head (list.tail (list.tail l)))))
-(define fourth (\l (list.head (list.tail (list.tail (list.tail l))))))
-(define fifth  (\l (list.head (list.tail (list.tail (list.tail (list.tail l)))))))
-(define sixth  (\l (list.head (list.tail (list.tail (list.tail (list.tail (list.tail l))))))))
-(define seventh (\l (list.head (list.tail (list.tail (list.tail (list.tail (list.tail (list.tail l)))))))))
-(define eighth  (\l (list.head (list.tail (list.tail (list.tail (list.tail (list.tail (list.tail (list.tail l))))))))))
-
-; Aliases
-(define nth1 list.first)
-(define nth2 list.second)
-(define nth3 list.third)
-(define nth4 list.fourth)
-(define nth5 list.fifth)
-
+; --- Re-export public members into root scope ---
 (namespace _)
-(open list)
-(define nil list.nil)
-(define cons list.cons)
-(define head list.head)
-(define tail list.tail)
-(define is_empty list.is_empty)
-(define list1 list.list1)
-(define list2 list.list2)
-(define list3 list.list3)
-(define list4 list.list4)
-(define list5 list.list5)
-(define first list.first)
-(define second list.second)
-(define third list.third)
-(define fourth list.fourth)
-(define fifth list.fifth)
-(define sixth list.sixth)
-(define seventh list.seventh)
-(define eighth list.eighth)
-(define nth1 list.nth1)
-(define nth2 list.nth2)
-(define nth3 list.nth3)
-(define nth4 list.nth4)
-(define nth5 list.nth5)
-(define c_nil list.c_nil)
-(define c_cons list.c_cons)
-(define c_foldr list.c_foldr)
-(define c_foldl list.c_foldl)
-(define c_length list.c_length)
-(define c_map list.c_map)
-(define c_filter list.c_filter)
-(define c_concat list.c_concat)
-(define c_to_scott list.c_to_scott)
-(define c_reverse list.c_reverse)
-(define list_eq list.eq)
+(export list)
