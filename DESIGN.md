@@ -276,3 +276,29 @@ composed direct-FFI comparisons strand until the fold-routing/deferral fix
 landed; readback folds and `lin_precompile_depth` suppression were incremental
 steps toward it.  These were resolved by the bounded self-unravelling and the
 deferral fix above; the per-round investigation is preserved in git history.
+
+## Standard library rework: `(export <ns>)`
+
+The std modules carried a per-module boilerplate tail — `(namespace _) (open X)`
+plus a hand-written `(define! y X.y …)` alias for every public name (~230 lines
+total).  A new compiler form `(export <ns>)` re-exports a namespace's public
+members into the current (root) scope in one form: `(namespace _) (export X)`.
+Each export is routed through `process_def` (matching the old `(define y X.y)`
+aliases exactly), `_`-prefixed members are treated as private and skipped, and
+last-loaded-wins resolve bare-name collisions the way the old alias modules did.
+
+The whole std was migrated to this template, with two idioms applied per module:
+- **Global-safe public names**: members are named so `(export X)` exposes the
+  exact bare names consumers use and nothing that collides across modules (e.g.
+  `str_eq`/`streq`/`maybe_map`/`empty_queue`/`io_read`; never a naked `eq`,
+  `length`, `head`, `empty`, …).  Qualified-only short names consumers still
+  reach (e.g. `str.eq`, `stream.nth_c`, `io.print`) are bound as dotted aliases
+  after the export so they resolve without re-exporting bare.
+- **De-laddering**: hand-unrolled positional families (list `first..eighth`,
+  string `length`/`concat`, map/set insert-ladders) were collapsed onto a single
+  terminating recursion or shared internal `_`-helpers without changing public
+  semantics.
+
+A proper distinct `float` annotation type remains a compiler/type-checker task
+(annotations only have builtin atoms `num`/`bool`/`a`/`(list a)`); `float.lin` is
+reworked to the export template but its ops stay `num`-typed.  Suite: 50/875.
