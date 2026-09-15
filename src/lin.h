@@ -8,7 +8,7 @@
 
 /* ---------------- core terms (pure untyped lambda) ---------------- */
 enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT, TEXPORT };
-typedef struct Type { int kind, id; struct Type *a, *b; } Type;
+typedef struct Type { int kind, id; struct Type *a, *b; const char *name; } Type;
 typedef struct Term {
   int type;
   char name[NAME];
@@ -82,7 +82,9 @@ int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
 Type *type_var(void); Type *type_arrow(Type *a, Type *b);
-Type *type_list(Type *e); Scheme scheme_all(Type *t);
+Type *type_list(Type *e); Type *type_nominal(const char *name);
+int nominal_lookup(const char *name); int nominal_register(const char *name);
+Scheme scheme_all(Type *t);
 
 /* ---------------- compile & aot & .line ---------------- */
 int compile(Term *t, Net *n, char *err, int errsz);

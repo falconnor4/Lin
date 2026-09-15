@@ -105,6 +105,7 @@ static Type *parse_type_atom(void) {
   if (!strcmp(nm, "num")) return type_var();
   if (!strcmp(nm, "bool")) { Type *p = type_var(), *q = type_var(); return type_arrow(p, type_arrow(q, p)); }
   if (!strcmp(nm, "list")) return type_list(parse_type_atom());
+  if (nominal_lookup(nm)) return type_nominal(nm);   /* user-declared nominal type */
   for (int i = 0; i < tvnn; i++) if (!strcmp(tvn[i], nm)) return tvt[i];
   if (tvnn >= tvcap) {
     tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);

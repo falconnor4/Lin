@@ -225,11 +225,18 @@ static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
 }
 
 static void process_datatype(Term *t) {
+  nominal_register(t->name);                          /* declare `Name` as a nominal type */
   int m = 0; for (Term *c = t->l; c; c = c->r) m++;
   int idx = 0;
   for (Term *c = t->l; c; c = c->r, idx++) {
     Term *lam = scott_ctor(t->name, idx, c->l, m);
-    process_def(term_new(TDEF, c->name, lam, NULL)); /* takes ownership of lam */
+    /* constructor type: f1 -> ... -> fk -> Name  (field types are fresh vars,
+       generalised over, so the ADT is polymorphic in its fields) */
+    int k = 0; for (Term *f = c->l; f; f = f->r) k++;
+    Type *ct = type_nominal(t->name);
+    for (int i = 0; i < k; i++) ct = type_arrow(type_var(), ct);
+    Term *def = term_new(TDEFX, c->name, lam, NULL); def->annot = ct;
+    process_def(def);                                   /* takes ownership of lam */
   }
 }
 
