@@ -87,7 +87,7 @@ static Term *scott(long k) {
 
 static Term *parse_term(void);
 
-/* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'; builtins: num=fresh var, bool=p->q->p */
+/* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'; scalars bool/num/float + datatypes are nominals */
 static Type *parse_type(void);
 static char (*tvn)[NAME];
 static Type **tvt;
@@ -102,10 +102,8 @@ static Type *parse_type_atom(void) {
   }
   char nm[NAME];
   if (!sym(nm, NAME)) pfail("type: expected name");
-  if (!strcmp(nm, "num")) return type_var();
-  if (!strcmp(nm, "bool")) { Type *p = type_var(), *q = type_var(); return type_arrow(p, type_arrow(q, p)); }
   if (!strcmp(nm, "list")) return type_list(parse_type_atom());
-  if (nominal_lookup(nm)) return type_nominal(nm);   /* user-declared nominal type */
+  if (nominal_lookup(nm)) return type_nominal(nm);   /* builtin scalars (bool/num/float) and user datatypes */
   for (int i = 0; i < tvnn; i++) if (!strcmp(tvn[i], nm)) return tvt[i];
   if (tvnn >= tvcap) {
     tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);

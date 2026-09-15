@@ -10,9 +10,7 @@ static Net *N;
 #define NNM(n, i) ((i) >= 0 && (i) < (n)->nn && (n)->name[i] ? (n)->name[i] : "")
 static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 
-/* ---------------- float box (side table) ----------------
-   A float in the net is a `_fsz`-spine Scott numeral indexing a global double table
-   (avoids storing IEEE bits in the numeral, so no giant/negative Scott counts arise). */
+/* float box: a `_fsz`-spine Scott numeral indexes a global double table (no IEEE bits in the numeral). */
 static double *fltbox; static int nfltbox, cfltbox;
 
 static Port alloc_scott_named(Net *n, long k, const char *szn, const char *ssn) {
@@ -56,14 +54,18 @@ int ctor_register(const char *name, int tag, const char *c1, const char *c2) {
 }
 void ctor_init_builtins(void) {
   if (nctors) return;
+  /* Fold builtin scalars into the nominal-type registry so parse_type_atom resolves
+     bool/num/float to distinct TNOM heads via nominal_lookup. */
+  nominal_register("bool");
+  nominal_register("num");
+  nominal_register("float");
   ctor_register("_sz", DT_NUM, "_sz", "_ss");
   ctor_register("_bt", DT_BOOL, "_bt", "_bf");
   ctor_register("_cl", DT_STR, "_cl", "_nl");
   ctor_register("c", DT_STR, "c", "n");   /* std list cons/nil string spine */
   ctor_register("_ffi", DT_FFI, "_ffi", "_ret");
   ctor_register("_fsz", DT_FLOAT, "_fsz", "_fss"); /* float box: Scott index into fltbox */
-  /* pure-Lin arithmetic-op tag carriers (DT_OP): each is a *named LAM* (like `_ffi`),
-     so a saturated arith op is a driver-foldable redex whose LAM body is the pure-Lin fallback. */
+  /* DT_OP tag carriers are *named LAM*s: a saturated arith op is a driver-foldable redex with a pure-Lin β-body fallback. */
   ctor_register("_add", DT_OP, "_add", NULL); ctor_register("_sub", DT_OP, "_sub", NULL);
   ctor_register("_mul", DT_OP, "_mul", NULL); ctor_register("_div", DT_OP, "_div", NULL);
   ctor_register("_mod", DT_OP, "_mod", NULL); ctor_register("_pow", DT_OP, "_pow", NULL);
@@ -106,11 +108,7 @@ static inline Port dup_hop(Net *n, Port p) {
 static Val run_ffi(Net *n, Port p); /* fwd */
 static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold); /* fwd */
 
-/* Walk a Scott-spine value: `\__carrier \_ss (recur | zero-terminal)`, counting
-   succ layers.  An optional `peek` may rewrite `*p` at each layer (e.g. fold an
-   embedded `_ffi` closure to its int value).  Returns 1 when the zero-terminal is
-   reached (with `*count` set) or 0 on a malformed spine.  Shared by net_read_int
-   and net_read_float (numeral vs float-box). */
+/* Scott-spine walk: count succ layers (optional `peek` folds embedded `_ffi` closures per layer); 1 at zero-terminal (count set) or 0 malformed. */
 static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), long *count) {
   for (int step = 0; step < n->nn; step++) {
     p = dup_hop(n, p);
@@ -132,8 +130,7 @@ static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), l
   return 0;
 }
 
-/* Fold an embedded saturated `_ffi` closure (e.g. the `n` of `\_sz \_ss (_ss (mul 2 2))`) that
-   never folded during reduction, on read, so the numeral decodes.  Pure int/bool only. */
+/* fold an embedded saturated `_ffi` closure (e.g. the `n` of `\_sz \_ss (_ss (mul 2 2))`) that never folded during reduction, on read, so the numeral decodes; pure int/bool only */
 static int read_int_peek(Net *n, Port *cur) {
   if ((*cur).node >= 0 && (*cur).node < n->nn && !n->dead[(*cur).node] && n->tag[(*cur).node] == LAM) {
     const char *cn = n->name[(*cur).node];
@@ -181,8 +178,7 @@ static inline Port skip_dup(Net *n, Port p) {
   return p;
 }
 
-/* Dig the `_ffi`-closure header rooted at LAM `lam` (shape \_ffi. \_ret. ((_ffi <fn>) <args>)):
-   fills `*a1` (fn APP) and `*argp` (the `_cl`-spine); raw wires.  Shared by net_ffi_fn/args and ffi_ops_concrete. */
+/* dig the `_ffi`-closure header at LAM `lam` (shape \_ffi. \_ret. ((_ffi <fn>) <args>)) into `*a1` (fn APP) and `*argp` (`_cl`-spine) */
 static int ffi_header(Net *n, Port lam, Port *a1, Port *argp) {
   Port r = wire((Port){lam.node, 2});
   if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
@@ -228,12 +224,10 @@ static Val run_ffi(Net *n, Port p);
 
 /* arg decoding now lives in the shared net_ffi_args / std/runtime/decoder.c */
 
-/* Builtin dispatch: simple int/bool/str builtins are one table row each; anything else resolves via dlsym (int result).
-   Side-effectors (exit) that must run and not return a value are handled specially before the table. */
+/* Builtin dispatch: table rows for simple int/bool/str; side-effectors (exit) handled before the table, else dlsym. */
 #define B1(n, e) if (!strcmp(fn, n)) { v.kind = 1, v.iv = (long)(e); return v; }
 #define B3(n, e) if (!strcmp(fn, n)) { v.kind = 3, v.iv = (long)(e); return v; }
-/* Resolve a wavefront driver by name: "cpu" -> base engine, else a LinDriver sym by exact name,
-   lin_<name>_driver, or loading <LIN_STD_DIR>/drivers/<name>.so as a plugin. */
+/* resolve a driver: "cpu" -> base engine, else LinDriver sym / lin_<name>_driver / std/drivers plugin */
 static void *resolve_driver(const char *dn) {
   if (!strcmp(dn, "cpu")) return NULL;
   char sym[NAME + 16]; snprintf(sym, sizeof sym, "lin_%s_driver", dn);
@@ -248,9 +242,7 @@ static void *resolve_driver(const char *dn) {
   return s;
 }
 
-/* General native scalar-op extension hook: run_ffi is *open* — a driver plugin registers
-   ScalarOpFn providers owning classes of scalar ops (arith.so is first); the first provider
-   claiming `fn` supplies the result.  outkind: 1 int, 3 bool, 4 float-bits. */
+/* run_ffi is *open*: drivers register ScalarOpFn providers (arith.so first); first claiming `fn` supplies the result. outkind 1=int,3=bool,4=float-bits */
 typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
 static ScalarOpFn scalar_ops[16]; static int n_scalar_ops = 0;
 void lin_scalar_ops_add(ScalarOpFn f) { if (n_scalar_ops < 16) scalar_ops[n_scalar_ops++] = f; }
@@ -339,9 +331,7 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   /* Saturation guard: only fold a FULLY-saturated closure whose operands are all concrete, else read garbage. */
   if (!ffi_ops_concrete(n, (Port){lam.node, 0})) return 0;
   if (argfold) {
-    /* Eager argument-fold is only re-entrancy-safe for pure scalar results; since num.lin is pure-Lin,
-       `lin_ffloor` is the one remaining int-result `_ffi` op.  String-arg ops (lin_parse_float) and
-       float-box results stay on head-fold + readback, avoiding the strtod-on-garbage regression. */
+    /* eager arg-fold is re-entrancy-safe only for pure scalar results; `lin_ffloor` is the sole int-result `_ffi` op; others stay head-fold/readback */
     static const char *safe[] = { "lin_ffloor" };
     int ok = 0;
     for (int s = 0; s < (int)(sizeof safe / sizeof safe[0]); s++) if (!strcmp(fn, safe[s])) { ok = 1; break; }
@@ -353,9 +343,7 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
   *vout = v; return 1;
 }
 
-/* Are all of `lam`'s operands concretely readable (Scott int / Church bool / float / string) or a
-   recursively-foldable pure-lin_* closure?  Walks the arg `_cl`-spine (previously validated only the FIRST
-   operand, letting later non-concrete ones fold as garbage — the `(min 4 5)`-as-if stranding). */
+/* are ALL of `lam`'s operands concretely readable or a foldable pure-lin_* closure?  Walks the whole arg `_cl`-spine (previously checked only the FIRST operand, letting later non-concrete ones fold as garbage — the `(min 4 5)`-as-if stranding) */
 static int ffi_ops_concrete(Net *n, Port lam) {
   Port cur, argp;
   if (!ffi_header(n, lam, 0, &argp)) return 0;
@@ -387,25 +375,20 @@ static int ffi_ops_concrete(Net *n, Port lam) {
   return 1;
 }
 
-/* Non-destructive pre-scan: 1 if a pure-lin `_ffi` closure is blocked solely by a non-concrete operand
-   (e.g. a still-live `(min 4 5)` result) rather than malformed — the reducer DEFERS rather than β-destroying. */
+/* Non-destructive pre-scan: 1 if a pure-lin `_ffi` closure is blocked only by a non-concrete operand (e.g. live `(min 4 5)`) — the reducer DEFERS rather than β-destroying */
 int lin_ffi_needs_operand(Net *n, Port lam) {
   if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
   if (n->name[lam.node] && ctor_tag(n->name[lam.node]) != DT_FFI) return 0;
   return !ffi_ops_concrete(n, lam);
 }
 
-/* Fold a saturated _ffi closure into a concrete net value during reduction, so FFI results (float comparisons
-   -> Church booleans) become usable by Scott consumers.  Only PURE `lin_*` closures fold; side-effecting FFI
-   (puts, exit, dlopen, driver_set, getenv) stays readback-only. */
+/* fold a saturated _ffi closure into a concrete value during reduction (so float comparisons materialise as Church bools); only PURE `lin_*` closures fold, side-effecting FFI stays readback-only */
 static Port val_to_port(Net *n, Val v) {           /* alloc concrete value node */
   if (v.kind == 1) return net_alloc_scott(n, v.iv);
   if (v.kind == 3) return net_alloc_bool(n, (int)v.iv);
   double d; memcpy(&d, &v.iv, 8); return net_alloc_float(n, d);
 }
-/* Link a folded scalar `v` as the concrete value replacing closure `lam`: its
-   output rewires to `target`.  Kills `lam`; resets the deferral budget (a fold is
-   real progress).  Shared by every *_fold / *_fold_arg. */
+/* link a folded scalar `v` as the concrete value replacing closure `lam`: rewires output to `target`, kills `lam`, resets deferral budget (a fold is progress) */
 static int fold_link(Net *n, Port lam, Port target, Val v) {
   Port res = val_to_port(n, v);
   n->dead[lam.node] = 1;
@@ -416,33 +399,26 @@ static int fold_link(Net *n, Port lam, Port target, Val v) {
 int lin_fold_ffi(Net *n, Port lam, Port app) {
   Val v; N = n;
   if (!lin_ffi_peek(n, lam, &v, 0)) {
-    /* During an open free-var precompile a _ffi closure used as boolean/function cannot fold (operands
-       not concrete) and would be β-destroyed; flag the containing def as uncacheable. */
+    /* during an open free-var precompile a non-foldable `_ffi` closure used as bool/function would be β-destroyed; flag the def as uncacheable */
     if (lin_precompile_depth > 0) lin_stuck_ffi_count++;
     return 0;
   }
   return fold_link(n, lam, (Port){app.node, 0}, v);
 }
 
-/* Fold saturated `_ffi` closures wherever they are embedded (not just beta head/arg), so closures captured
-   inside a caller's body (e.g. the `n` of `\_sz \_ss (_ss n)` in `succ (mul 2 2)`) materialise at a fixed
-   point, by linking the concrete value to the closure's output wire. */
+/* fold saturated `_ffi` closures wherever embedded (not just beta head/arg) at a fixed point by linking the concrete value to the closure's output wire */
 int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
   Val v; N = n;
   if (lam.port != 0 || lam.node < 0 || lam.node >= n->nn || n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
   if (ctor_tag(n->name[lam.node] ? n->name[lam.node] : "") != DT_FFI) return 0;
   if (!lin_ffi_peek(n, lam, &v, 1)) return 0;
-  /* Only fold concrete INTEGER/BOOL scalar results as beta arguments; floats stay on the head-fold +
-     readback path (box-index encoded, re-linking mid-beta is unsafe), covering composed-float cases. */
+  /* only fold concrete INTEGER/BOOL scalar results as beta args here; floats stay on head-fold/readback (box-index encoded, re-linking mid-beta is unsafe) */
   if (v.kind != 1 && v.kind != 3) return 0;
   return fold_link(n, lam, out, v);
 }
 
-/* Fold a saturated pure-Lin arithmetic-op closure: a `_op`-named LAM (DT_OP) applied to RAW operands, whose
-   body holds the pure-Lin Scott fallback.  Mirror of lin_fold_ffi (same named-LAM pattern, no new agent); the
-   value comes from the shared scalar table (arith.so), and with no driver a saturated `_op` still reduces
-   (slowly) to the exact result via the interaction calculus. */
-/* Derive the shared-table scalar op name from a DT_OP carrier tag (e.g. `_add` -> "lin_add"). */
+/* fold a saturated pure-Lin `_op` closure (a DT_OP LAM applied to RAW operands; β-body is the pure-Lin fallback).  Mirror of lin_fold_ffi; value from the shared scalar table (arith.so), and with no driver it still reduces exactly via the interaction calculus */
+/* derive the shared-table scalar op name from a DT_OP carrier tag (e.g. `_add` -> "lin_add") */
 static const char *op_tag_to_fn(const char *tag) {
   if (!tag || tag[0] != '_') return NULL;
   static char fn[256];
@@ -455,16 +431,11 @@ static int op_value_from_lam(Net *n, Port lam, Port app, Val *v);
 
 int lin_fold_op(Net *n, Port lam, Port app) {
   N = n;
-  /* A saturated _op redex is ((\_add <pure-Lin-β-body>) <_cl-spine>): the `_add` LAM applied directly to the
-     operand spine; fold reads the op token from the LAM name and raw operands via the SHARED decoder, folding
-     via arith.so.  No provider (or a non-concrete operand) => return 0 so the pure-Lin β-body computes slowly
-     but correctly. */
+  /* a saturated _op redex is ((\_add <pure-Lin-β-body>) <_cl-spine>); fold reads the op token from the LAM name and RAW operands via the SHARED decoder (arith.so); no provider/non-concrete operand => 0, so the pure-Lin β-body computes slowly but correctly */
   Val v;
   if (!op_value_from_lam(n, lam, app, &v)) return 0;
   Port res = val_to_port(n, v);
-  /* Substitute the concrete result for the saturated redex (exactly as β threads the body out through the
-     APP's port-1 body slot); the LAM, its pure-Lin body, and the operand spine are killed/GC'd so no residual
-     computation competes with the folded value. */
+  /* substitute the concrete result for the saturated redex (exactly as β threads the body out through APP port-1); kill LAM, β-body, and operand spine so nothing competes */
   Port ar = wire((Port){app.node, 1});
   Port aa = wire((Port){app.node, 2});
   Port body = wire((Port){lam.node, 2});             /* the pure-Lin β-body residual */
@@ -472,9 +443,7 @@ int lin_fold_op(Net *n, Port lam, Port app) {
   if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
   if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
   if (ar.node >= 0 && ar.node < n->nn && !n->dead[ar.node]) {
-    /* `ar` is the APP's port-1 body-slot partner — where β threads the redex result out — so the consumer
-       reads the value through `ar`; inject `res` AT `ar` (linking into {app,1} would REPLACE `ar`, stranding
-       the embedded consumer reading a dead node). */
+    /* `ar` is the APP's port-1 body-slot partner — where β threads the result out — so inject `res` AT `ar` (linking into {app,1} would REPLACE `ar`, stranding the consumer) */
     net_link(n, res, ar, 1);
   } else {
     /* beta threads the result through app's port-1 body slot; fall back to it if `ar` was already consumed. */
@@ -484,12 +453,7 @@ int lin_fold_op(Net *n, Port lam, Port app) {
   return 1;
 }
 
-/* 1 if `lam` (a DT_OP head-LAM) is applied to operands that are not yet ALL
-   decodable, so the `_add` head-redex should be DEFERRED (parked on the per-net
-   blocked list, re-driven after the wave drains) instead of β-squashed.  Mirrors
-   lin_ffi_needs_operand.  A spine operand that is itself an un-folded `_op`
-   redex (e.g. `(omul 6 (oadd 24 96))`) counts as pending via decode_spine's
-   skipped-slot detection: those must fold first, or β would strand them. */
+/* 1 if `lam` (a DT_OP head-LAM) is applied to operands not yet ALL decodable, so the `_add` head-redex should be DEFERRED (parked on the per-net blocked list) rather than β-squashed.  Mirrors lin_ffi_needs_operand; an un-folded `_op` operand (e.g. `(omul 6 (oadd 24 96))`) counts pending via decode_spine's skipped-slot detection */
 static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped); /* decoder */
 int lin_op_needs_operand(Net *n, Port lam, Port app) {
   if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
@@ -504,9 +468,7 @@ int lin_op_needs_operand(Net *n, Port lam, Port app) {
   return 0;                                          /* ready to fold */
 }
 
-/* Fold a saturated pure-Lin `_op` closure appearing as a beta ARGUMENT (not head), e.g. the `n` of
-   `\_sz \_ss (_ss n)` in `succ (add 2 2)`, so the substitution binds a concrete scalar.  `p` may be the `_op`
-   LAM itself OR the redex APP ((_add <pure-body>) <spine>).  Mirrors lin_fold_ffi_arg; writes to `out`. */
+/* fold a saturated pure-Lin `_op` closure appearing as a beta ARGUMENT (e.g. the `n` of `\_sz \_ss (_ss n)` in `succ (add 2 2)`) so the substitution binds a concrete scalar; `p` is the `_op` LAM or the redex APP.  Mirrors lin_fold_ffi_arg */
 int lin_fold_op_arg(Net *n, Port p, Port out) {
   N = n;
   Port lam, redex;
@@ -535,16 +497,12 @@ int lin_fold_op_arg(Net *n, Port p, Port out) {
   return 1;
 }
 
-/* Compute the concrete value of a saturated `_op` redex headed by LAM `lam` (DT_OP) applied to `app` (its
-   redex APP, carrying the operand spine).  On success fills `*v` and returns 1.  Shared by head-fold and
-   eager argument-fold. */
+/* compute the concrete value of a saturated `_op` redex headed by LAM `lam` (DT_OP) applied to `app` (its redex APP carrying the operand spine); on success fills `*v` and returns 1.  Shared by head-fold and eager argument-fold */
 static int op_value_from_lam(Net *n, Port lam, Port app, Val *v) {
   const char *tag = n->name[lam.node] ? n->name[lam.node] : "";
   const char *fn = op_tag_to_fn(tag);
   if (!fn) return 0;
-  /* During an open free-var precompile the operands are legitimately free vars that never become concrete,
-     so we cannot fold; signal the stuck closure so def_precompile declines this def's cache and the
-     definition stays textual (its `_add` closure survives to fold at use site). */
+  /* during an open free-var precompile `_op` operands are legitimately free vars that never become concrete, so signal the stuck closure so def_precompile declines this def's cache and it stays textual */
   if (lin_precompile_depth > 0) { lin_stuck_ffi_count++; return 0; }
   Port argp = wire((Port){app.node, 2});             /* the applied `_cl`-spine */
   Val fargs[8] = {{0}};
@@ -571,8 +529,7 @@ Port net_alloc_bool(Net *n, int val) {
 
 Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k); }
 
-/* Readback / IO-effect runtime + shared on-net FFI decoder live in std (not the core); included here so
-   they share this TU's statics (N, wire, skip_dup, dup_hop, run_ffi). */
+/* readback / IO-effect runtime + shared on-net FFI decoder live in std (not the core); included so they share this TU's statics */
 #include "runtime_io.inc"
 #include "runtime_decoder.inc"
 

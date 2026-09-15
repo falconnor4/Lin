@@ -1,9 +1,4 @@
-/* ================================================================
- * Shared on-net decoder (std — not part of the pure src/ core).
- * #included into src/io.c shares its statics; also EXPORTED so driver plugins
- * reuse the same arg-spine / DUP-hop walker.  A saturated `_ffi` closure is
- * `\_ffi. \_ret. ((_ffi "lin_*") args)` with args a `_cl`-spine of scalars.
- * ================================================================ */
+/* Shared on-net decoder (std — not core): #included into src/io.c shares its statics; EXPORTED so driver plugins reuse the same arg-spine / DUP-hop walker.  A saturated `_ffi` closure is `\_ffi. \_ret. ((_ffi "lin_*") args)` with args a `_cl`-spine of scalars. */
 
 /* Deref a DUP (port 0) chain to the underlying wire; pure, no allocation. */
 Port net_dhop(Net *n, Port p) {
@@ -20,8 +15,7 @@ int net_ffi_fn(Net *n, Port p, char *fn, int fnmax) {
   return net_read_string(n, wire((Port){a1.node, 2}), fn, (size_t)fnmax) >= 0;
 }
 
-/* Decode a single argument port into a Val.  int/bool/float/string directly; a
-   nested `_ffi` closure is folded (run_ffi) first.  Returns 1 on success. */
+/* decode a single argument port into a Val (int/bool/float/string directly; a nested `_ffi` closure folds first); 1 on success */
 static int dec_arg(Net *n, Port p, Val *v) {
   N = n;
   p = skip_dup(n, p);
@@ -33,12 +27,7 @@ static int dec_arg(Net *n, Port p, Val *v) {
   long x = net_read_int(n, p); if (x < 0) return 0; v->iv = x; v->kind = 1; return 1;
 }
 
-/* Decode a `_cl`-spine argument list rooted at port `argp` into up to `max`
-   Vals.  The single spine walk shared by the `_ffi` closure (net_ffi_args) and
-   the `_op` redex fold (net_spine_args).  If `*skipped` is non-NULL it is set
-   to 1 when a PRESENT slot was not decodable (a nested `_op`/closure that has
-   yet to fold), which net_reduce uses to defer the outer fold.  Returns decoded
-   count; 0 if none (a single non-spine arg is decoded too). */
+/* decode a `_cl`-spine arg list at port `argp` into up to `max` Vals — the single spine walk shared by `_ffi` (net_ffi_args) and `_op` fold (net_spine_args); sets `*skipped` when a PRESENT slot isn't decodable (nested `_op`/closure yet to fold), which net_reduce uses to defer the outer fold; a single non-spine arg is decoded too */
 static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped) {
   if (skipped) *skipped = 0;
   int argc = 0; Port cur = skip_dup(n, argp);
@@ -66,8 +55,7 @@ static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped) {
   return argc;
 }
 
-/* Walk the `_cl`-spine arg list of the `_ffi` closure rooted at `lam` (same
-   shape as net_ffi_fn); delegates the spine walk to decode_spine. */
+/* walk the `_cl`-spine arg list of the `_ffi` closure rooted at `lam` (same shape as net_ffi_fn); delegates to decode_spine */
 int net_ffi_args(Net *n, Port lam, Val *vals, int max) {
   N = n;
   Port argp;
@@ -75,9 +63,7 @@ int net_ffi_args(Net *n, Port lam, Val *vals, int max) {
   return decode_spine(n, argp, vals, max, 0);
 }
 
-/* Decode a `_cl`-spine argument list rooted at port `argp` (not inside a closure
-   body): the `_op` redex fold reads a saturated arith op's raw operands this
-   way.  Exported so driver plugins reuse the shared decoder. */
+/* decode a `_cl`-spine arg list at port `argp` (not inside a closure body): the `_op` redex fold reads a saturated arith op's raw operands this way; exported so driver plugins reuse the shared decoder */
 int net_spine_args(Net *n, Port argp, Val *vals, int max) {
   N = n;
   return decode_spine(n, argp, vals, max, 0);

@@ -75,8 +75,7 @@ static void unify(Type *x, Type *y) {
     if (x->kind == TVR) { x->kind = TLINK; x->a = y; return; }
     if (y->kind == TVR) { y->kind = TLINK; y->a = x; return; }
     if (x->kind == TARROW || y->kind == TARROW) return;   /* Scott dispatch compat */
-    if (x->kind == TLIST || y->kind == TLIST) return;
-    tfail("type mismatch");
+    tfail("type mismatch");   /* TLIST is a dedicated builtin list, never a Scott dispatch head */
   }
   if (x->kind == TVR) { if (occurs(x, y)) tfail("infinite type"); x->kind = TLINK; x->a = y; return; }
   if (y->kind == TVR) { if (occurs(y, x)) tfail("infinite type"); y->kind = TLINK; y->a = x; return; }

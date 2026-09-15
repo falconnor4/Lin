@@ -174,11 +174,7 @@ static int lam_arity(Term *t) {
 }
 
 static const char REC_SENTINEL[] = "_rec";
-/* Dynamic (widening) self-recursion: replace the stranding Y-fixpoint with a *finite*
-   unravelling `Y_k f = f (... (f base) ...)` (k apps) whose innermost `base = \a1..\ar (_rec ...)`
-   is the sentinel (not 0). Base engine is unchanged: confluent/correct for depth<=k; if depth
-   exceeds k the sentinel survives ROOT-reachable (eval_form re-drives with doubled k). `_rec`
-   is reserved, so truncation is unambiguous. */
+/* Dynamic (widening) self-recursion: replace the stranding Y-fixpoint with a *finite* unravelling `Y_k f = f (... base ...)` (k apps) whose innermost `base` carries the reserved `_rec` sentinel; confluent for depth<=k, and if depth exceeds k the sentinel survives ROOT-reachable so eval_form re-drives with doubled k */
 static Term *build_bound_rec(const char *name, Term *body, int k) {
   int ar = lam_arity(body);
   Term *zero = term_new(TLAM, REC_SENTINEL, term_new(TLAM, REC_SENTINEL, term_new(TVAR, REC_SENTINEL, 0, 0), 0), 0);
@@ -204,9 +200,7 @@ static void qualify_free(Term *t, Guard *b) {
   if (bound) b->count--;
 }
 
-/* (datatype Name (Ctor f...) ...): generate Scott-encoded constructors. For m constructors
-   C0..C_{m-1} (C_i arity k_i): C_i = \f1..\fk \d0..\d_{m-1} (((d_i f1) f2) ..). Each becomes
-   an ordinary inferred def so it type-checks like a hand-written Scott encoding. */
+/* (datatype Name (Ctor f...) ...): Scott-encode each constructor C_i (\f1..\fk \d0..\d_{m-1}).  Each becomes an ordinary inferred def, so it type-checks like hand-written Scott encoding */
 static void process_def(Term *t);
 static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
   (void)dn;
@@ -230,8 +224,7 @@ static void process_datatype(Term *t) {
   int idx = 0;
   for (Term *c = t->l; c; c = c->r, idx++) {
     Term *lam = scott_ctor(t->name, idx, c->l, m);
-    /* constructor type: f1 -> ... -> fk -> Name  (field types are fresh vars,
-       generalised over, so the ADT is polymorphic in its fields) */
+    /* constructor type: \f1..\fk -> Name (field types are fresh vars generalised over, so the ADT is polymorphic in its fields) */
     int k = 0; for (Term *f = c->l; f; f = f->r) k++;
     Type *ct = type_nominal(t->name);
     for (int i = 0; i < k; i++) ct = type_arrow(type_var(), ct);
@@ -339,20 +332,12 @@ static void form_cb(Term *t, const char *perr, void *ud) {
   term_free(t);
 }
 
-/* (export <ns>): re-export every public member of the namespace `ns` into the
-   current namespace, mirroring the hand-written `(define! y ns.y)` aliases each
-   module appended by hand — but preserving each scheme and recursion metadata so
-   exported names reduce exactly as their qualified originals. */
+/* (export <ns>): re-export every public member of `ns` into the current namespace, mirroring hand-written `(define! y ns.y)` aliases but preserving each scheme + recursion metadata so exported names reduce exactly as their qualified originals */
 static void export_namespace(const char *name) {
   if (!name || !*name) return;
   char pfx[NAME + 2]; snprintf(pfx, sizeof pfx, "%s.", name);
   int pflen = (int)strlen(pfx);
-  /* Re-export by routing each public member through process_def as a plain
-     alias `(define suffix qualified-name)` — the exact shape the hand-written
-     modules used (`(define x ns.x)`), so each exported def gets identical
-     type-checking, free-var qualification and precompile behaviour to its
-     qualified original (avoiding closure-bake differences).  Collect names first
-     so appending can't invalidate iteration. */
+  /* Re-export by routing each public member through process_def as the exact `(define x ns.x)` alias shape the hand-written modules used, so each gets identical type-checking/qualification/precompile (avoiding closure-bake differences).  Collect names first so appending can't invalidate iteration */
   static char (*out)[NAME]; static int outcap = 0;
   int nout = 0;
   for (int i = 0; i < ndefs; i++) {

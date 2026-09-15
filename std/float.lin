@@ -16,34 +16,34 @@
 
 ; --- Construction ---
 ; Parse a decimal string into a float, e.g. (float "2.5").
-(define! float (a -> num) (\s (ccall1 "lin_parse_float" s)))
+(define! float (a -> float) (\s (ccall1 "lin_parse_float" s)))
 ; Promote an integer to a float.
-(define! i2f (num -> num) (\i (ccall1 "lin_float" i)))
+(define! i2f (num -> float) (\i (ccall1 "lin_float" i)))
 
 ; --- Arithmetic (binary) ---
-(define! fadd (num -> num -> num) (\a (\b (ccall2 "lin_fadd" a b))))
-(define! fsub (num -> num -> num) (\a (\b (ccall2 "lin_fsub" a b))))
-(define! fmul (num -> num -> num) (\a (\b (ccall2 "lin_fmul" a b))))
-(define! fdiv (num -> num -> num) (\a (\b (ccall2 "lin_fdiv" a b))))
-(define! fpow (num -> num -> num) (\a (\b (ccall2 "lin_fpow" a b))))
-(define! fatan2 (num -> num -> num) (\a (\b (ccall2 "lin_fatan2" a b))))
+(define! fadd (float -> float -> float) (\a (\b (ccall2 "lin_fadd" a b))))
+(define! fsub (float -> float -> float) (\a (\b (ccall2 "lin_fsub" a b))))
+(define! fmul (float -> float -> float) (\a (\b (ccall2 "lin_fmul" a b))))
+(define! fdiv (float -> float -> float) (\a (\b (ccall2 "lin_fdiv" a b))))
+(define! fpow (float -> float -> float) (\a (\b (ccall2 "lin_fpow" a b))))
+(define! fatan2 (float -> float -> float) (\a (\b (ccall2 "lin_fatan2" a b))))
 
 ; --- Unary ---
-(define! fsqrt (num -> num) (\x (ccall1 "lin_fsqrt" x)))
-(define! fsin  (num -> num) (\x (ccall1 "lin_fsin" x)))
-(define! fcos  (num -> num) (\x (ccall1 "lin_fcos" x)))
-(define! ftan  (num -> num) (\x (ccall1 "lin_ftan" x)))
+(define! fsqrt (float -> float) (\x (ccall1 "lin_fsqrt" x)))
+(define! fsin  (float -> float) (\x (ccall1 "lin_fsin" x)))
+(define! fcos  (float -> float) (\x (ccall1 "lin_fcos" x)))
+(define! ftan  (float -> float) (\x (ccall1 "lin_ftan" x)))
 
 ; --- Comparison (bool) ---
-(define! feq  (num -> num -> bool) (\a (\b (ccall2 "lin_feq" a b))))
-(define! flt  (num -> num -> bool) (\a (\b (ccall2 "lin_flt" a b))))
-(define! fleq (num -> num -> bool) (\a (\b (ccall2 "lin_fleq" a b))))
-(define! fgt (num -> num -> bool) (\a (\b (not (fleq a b)))))
-(define! fgeq (num -> num -> bool) (\a (\b (not (flt a b)))))
+(define! feq  (float -> float -> bool) (\a (\b (ccall2 "lin_feq" a b))))
+(define! flt  (float -> float -> bool) (\a (\b (ccall2 "lin_flt" a b))))
+(define! fleq (float -> float -> bool) (\a (\b (ccall2 "lin_fleq" a b))))
+(define! fgt (float -> float -> bool) (\a (\b (not (fleq a b)))))
+(define! fgeq (float -> float -> bool) (\a (\b (not (flt a b)))))
 
 ; --- Coercion / constants ---
-; Truncate toward zero (floor) to an integer.
-(define! ffloor (num -> num) (\x (ccall1 "lin_ffloor" x)))
+; Truncate toward zero (floor) to an integer-valued float.
+(define! ffloor (float -> float) (\x (ccall1 "lin_ffloor" x)))
 (define pi (float "3.14159265358979323846"))
 (define e  (float "2.71828182845904523536"))
 

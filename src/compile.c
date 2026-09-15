@@ -163,10 +163,7 @@ static int eg_find(EGraph *g, int c) {
   return c;
 }
 
-/* Opaque/leaf kinds (TDEF no-body, TDEFX, floats) have no egraph-structural children:
-   recursing into t->l (old behavior) yielded sentinel -1 as a child, and eg_cost/extract
-   ran eg_find(-1), an OOB read that skewed reconstruction (def refs like num.succ/_cl_cons
-   came back as a stray `_sz`, breaking `lin build` with "unbound variable '_sz'"). */
+/* Opaque/leaf kinds (TDEF no-body, TDEFX, floats) have no egraph structural children: recursing into t->l yielded sentinel -1 as a child and eg_find(-1) OOB — skewed reconstruction (stray `_sz`) broke `lin build` */
 static int eg_opaque(int type) {
   switch (type) {
   case TDEF:

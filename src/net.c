@@ -154,14 +154,10 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
   }
 }
 
-/* the four rules of the scope-gauge calculus (wave-opt-reduction main.hs).
-   ERA is inert: era-principal pairs are simply dropped. */
+/* four rules of the scope-gauge calculus (wave-opt-reduction main.hs); ERA is inert (era pairs dropped) */
 static int lin_trace = -1; /* cached LIN_TRACE */
 
-/* Fold `aa` if it is a saturated arithmetic closure (a `_ffi` LAM, a pure-Lin `_op`
-   LAM, or an `_op` REDEX app ((_add <body>) <spine>) whose head is a DT_OP LAM),
-   routing to the appropriate *_fold_arg with the value placed at `target`.  Shared
-   by the identity and eager-argument-fold edges in beta. */
+/* fold `aa` if a saturated arithmetic closure (a `_ffi` LAM, a pure-Lin `_op` LAM, or an `_op` redex APP whose head is a DT_OP LAM), routing to the appropriate *_fold_arg with the value at `target`; shared by the identity and eager-argument-fold edges in beta */
 static int fold_arg(Net *n, Port aa, Port target) {
   if (aa.node < 0 || aa.port != 0 || aa.node >= n->nn || n->dead[aa.node]) return 0;
   if (n->tag[aa.node] == LAM) {
@@ -188,23 +184,17 @@ int net_interact(Net *n, Port p1, Port p2) {
     fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
 
   if (t1 == LAM && t2 == APP) {
-    /* a saturated _ffi closure folds to a concrete value (int/bool/float) here
-       rather than beta-reducing, so e.g. float comparisons materialise as
-       Church booleans usable by `if` — independent of any accelerator driver. */
+    /* a saturated _ffi closure folds to a concrete value (int/bool/float) rather than beta-reducing, so e.g. float comparisons materialise as Church bools — independent of any driver */
     const char *lnm = n->name[n1] ? n->name[n1] : "";
     if (ctor_tag(lnm) == DT_FFI && lin_fold_ffi(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
     /* pure-Lin DT_OP closure (no new agent): fold via shared scalar table if a provider claims it, else fall to β-body */
     if (ctor_tag(lnm) == DT_OP && lin_fold_op(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
-    /* A pure-lin `_ffi`/`_op` closure with a non-concrete operand must not be β-squashed here
-       (β-duplication strangles the operand sub-net); defer (re-queue) so its redexes run first.
-       Bounded so a genuinely-stranded operand falls through to the legacy β path.  During open
-       free-var precompile the operands never become concrete, so only defer for real reductions. */
+    /* A pure-lin `_ffi`/`_op` closure with a non-concrete operand must not be β-squashed here (β-duplication strangles the operand sub-net); defer (re-queue) so its redexes run first, bounded so a genuinely-stranded operand falls through; only defer for real reductions (not open free-var precompile) */
     if (lin_precompile_depth == 0 && n->declines < (long)(1 << 15) &&
         ((ctor_tag(lnm) == DT_FFI && lin_ffi_needs_operand(n, (Port){n1, 0})) ||
          (ctor_tag(lnm) == DT_OP  && lin_op_needs_operand(n, (Port){n1, 0}, (Port){n2, 0})))) {
       n->declines++;
-      /* Hold the pair on a separate BLOCKED list (NOT re-queued into `act`): re-queuing would
-         keep the inner reduce loop from ever draining.  Re-added only after the wave drains. */
+      /* hold the pair on a separate BLOCKED list (NOT re-queued into `act`, else the inner loop never drains); re-added only after the wave drains */
       Port a = (Port){n1, 0}, b = (Port){n2, 0};
       if (n->nblocked + 2 > n->blockedcap)
         n->blocked = realloc(n->blocked, (size_t)(n->blockedcap = n->blockedcap ? n->blockedcap * 2 : 64) * sizeof(Port));
@@ -219,9 +209,7 @@ int net_interact(Net *n, Port p1, Port p2) {
       if (fold_arg(n, aa, ar)) return 1;
       net_link(n, aa, ar, 1); return 1;
     }
-    /* eager argument fold: a saturated _ffi/_op closure passed as data (not head) would be
-       beta-duplicated without folding (e.g. `succ (mul 2 2)`); fold so the substitution uses a
-       concrete value.  A pure-Lin `_op` closure is a REDEX ((\_add <pure-body>) <spine>). */
+    /* eager argument fold: a saturated _ffi/_op closure passed as data (not head) would be β-duplicated without folding (e.g. `succ (mul 2 2)`); fold so the substitution binds a concrete value.  A pure-Lin `_op` closure is a REDEX ((\_add <pure-body>) <spine>) */
     if (fold_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
     net_link(n, lv, aa, 1); net_link(n, lb, ar, 1);
     return 1;
@@ -282,8 +270,7 @@ static void net_compact(Net *n, const unsigned char *reach) {
 }
 
 typedef struct { Port p1, p2; } Pair;
-/* Driver pipeline: drivers sorted by priority (ascending); the core waves fan out to
-   each in priority order, each *claiming* the redexes it handles, so drivers compose. */
+/* Driver pipeline: drivers sorted by priority (ascending); the core waves fan out to each in priority order, each *claiming* the redexes it handles, so drivers compose */
 static LinDriver *drv[16]; static int ndrv;
 void lin_driver_add(LinDriver *d) {
   if (!d || ndrv >= 16) return;
@@ -300,9 +287,7 @@ void lin_driver_add(LinDriver *d) {
 void lin_driver_clear(void) { ndrv = 0; }
 LinDriver *lin_get_driver(void) { return ndrv ? drv[ndrv-1] : NULL; }
 
-/* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs, an even count):
-   spatial-disjoint pairs run concurrently via OpenMP, the rest serially.  Exposed so driver
-   reducers can fan out a real wave in parallel; the base correctness rules all live here. */
+/* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs, an even count): spatial-disjoint pairs run concurrently via OpenMP, the rest serially; exposed so driver reducers fan out a real wave in parallel — the base correctness rules all live here */
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
 #ifdef _OPENMP
   ensure_tact();
@@ -377,8 +362,7 @@ int wave_snapshot(Net *n, Port **out, int *cap) {
 }
 
 long net_reduce(Net *n, long limit) {
-  /* Self-collecting nets reduce by the active list; BFS+compact reclaims memory after it doubles.
-   Waves fan out to every driver in priority order; the base engine takes the remainder. */
+  /* Self-collecting nets reduce by the active list; BFS+compact reclaims memory after it doubles; waves fan out to every driver in priority order, base engine takes the remainder */
   Port *curr = NULL; int curr_cap = 0;
   unsigned char *reach = NULL; int *q = NULL; long qcap = 0, gcmark = 1L << 20;
   /* per-driver slice buckets (rebuilt each wave) */
@@ -417,8 +401,7 @@ long net_reduce(Net *n, long limit) {
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
     }
-    /* The active wave has fully drained.  FFI/op head-redexes we DEFERRED (operands weren't
-       concrete yet) get another chance now that their operand computations have run. */
+    /* active wave fully drained: DEFERRED FFI/op head-redexes (operands weren't concrete yet) get another chance now their operand computations have run */
     if (n->nblocked > 0) {
       for (int i = 0; i + 1 < n->nblocked; i += 2) {
         Port a = n->blocked[i], b = n->blocked[i + 1];

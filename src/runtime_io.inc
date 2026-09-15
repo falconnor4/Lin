@@ -1,11 +1,6 @@
-/* ================================================================
- * Lin readback / IO-effect runtime (std — not part of the src/ core).
- * #included into src/io.c: value rendering, net printer, and the monadic
- * IO/effect continuation runner (_iod/_iop/_ior/_iow), sharing io.c's statics.
- * ================================================================ */
+/* Lin readback / IO-effect runtime (std — not core). #included into src/io.c: value rendering, net printer, and the monadic IO/effect runner (_iod/_iop/_ior/_iow), sharing io.c's statics. */
 
-/* Render one decoded value to a stream (1=int, 2=str, 3=bool, 4=float); returns
-   1 if a value rendered, 0 if none. */
+/* render one decoded value to a stream (1=int, 2=str, 3=bool, 4=float); returns 1 if rendered, else 0 */
 static int render_val(FILE *f, Val v) {
   if (v.kind == 1) fprintf(f, "%ld", v.iv);
   else if (v.kind == 2) fputs(v.sv, f);
@@ -105,8 +100,7 @@ static void read_stdin(char *buf, size_t sz) { if (!fgets(buf, (int)sz, stdin)) 
 
 static inline int is_io_tag(const char *s) { return ctor_tag(s) == DT_EFF; }
 
-/* Apply effect continuation `fn` to value `arg`, relink ROOT, and re-reduce:
-   the single monadic step shared by every effect (print/read/wait/ffi). */
+/* apply effect continuation `fn` to value `arg`, relink ROOT, and re-reduce: the single monadic step shared by every effect (print/read/wait/ffi) */
 static void eff_apply(Net *n, Port fn, Port arg) {
   Port app = net_alloc(n, APP, scope_nil(), "");
   net_link(n, (Port){app.node, 0}, fn, 1); net_link(n, (Port){app.node, 2}, arg, 1);

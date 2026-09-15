@@ -59,15 +59,12 @@ int wave_snapshot(Net *n, Port **out, int *cap);
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
-/* ---- General native scalar-op extension hook ----
-   Plugins register a ScalarOpFn provider implementing a class of native scalar
-   ops (arith.so is the first consumer); run_ffi tries providers in order. */
+/* ---- General native scalar-op extension hook: plugins register a ScalarOpFn provider for a class of ops (arith.so first); run_ffi tries providers in order ---- */
 typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
 void lin_scalar_ops_add(ScalarOpFn f);
 /* dlopen std/drivers/<sym>.so (idempotent) so its constructor registers ops */
 void lin_scalar_ops_load(const char *sym);
-/* Canonical shared scalar-op table (implemented by std/drivers/arith.so):
-   the single arithmetic authority that any reduction strategy may call. */
+/* Canonical shared scalar-op table (std/drivers/arith.so): the single arithmetic authority any reduction strategy may call */
 int lin_arith_scalar(const char *fn, int argc, const long *args, long *out, int *outkind);
 
 /* ---------------- parser ---------------- */
@@ -92,8 +89,7 @@ Term *egraph_optimize(Term *t);
 int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const char *path);
 void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
 
-/* ---------------- datatype registry ----------------
-   A value domain (num, bool, string, ffi/effect) is keyed by carrier node names; decoders consult this table (ctor_tag). */
+/* ---------------- datatype registry: a value domain is keyed by its carrier node names; decoders consult ctor_tag ---------------- */
 enum { DT_NUM, DT_BOOL, DT_STR, DT_FFI, DT_EFF, DT_FLOAT, DT_OP, DT_MAX };
 typedef struct {
   int tag;                 /* builtin DT_* or -1 for user types */
@@ -118,8 +114,7 @@ int lin_op_needs_operand(Net *n, Port lam, Port app);
 int lin_ffi_needs_operand(Net *n, Port lam);
 /* Fold a saturated _ffi closure appearing as a beta ARGUMENT (not head); see io.c */
 int lin_fold_ffi_arg(Net *n, Port lam, Port out);
-/* ---- Shared on-net FFI decoder (implemented by std/runtime/decoder.c) ----
-   Driver plugins reuse ONE arg-spine / DUP-hop walker for the `_ffi` `_cl`-spine decode. */
+/* ---- Shared on-net FFI decoder (std/runtime/decoder.c): driver plugins reuse the one arg-spine / DUP-hop walker for the `_ffi` `_cl`-spine decode ---- */
 Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_args(Net *n, Port lam, Val *vals, int max); /* decode arg spine into Vals */

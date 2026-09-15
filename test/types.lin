@@ -33,10 +33,12 @@
 ; expect error: type mismatch
 
 (succ true)
-; expect => (\_sz (\_ss (_ss true)))
+; expect error: type mismatch
+
+; (pred true) is also a mismatch: bool and num are now distinct nominal types.
 
 (pred true)
-; expect => 0
+; expect error: type mismatch
 
 (fst 3)
 ; expect => (\_ss (_ss 2))
