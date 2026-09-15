@@ -4,8 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { TVR, TARROW, TLINK, TNOM, TARG };
-
 static jmp_buf TJ;
 static char TMSG[256];
 static int next_id;
@@ -45,6 +43,10 @@ static Type *tnom(const char *name, Type *args) {
   *t = (Type){.kind = TNOM, .id = -1, .name = p, .a = args}; return t;
 }
 static Type *tnom0(const char *name) { return tnom(name, NULL); }
+/* transient reference to a datatype's k-th type parameter (only used while
+   building constructor field types; resolved to the head's param var in
+   process_datatype).  `id` = parameter index. */
+static Type *tparam(int idx) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TPARAM, .id = idx}; return t; }
 
 static Type *find(Type *t) {
   while (t->kind == TLINK) {
@@ -226,6 +228,7 @@ Type *type_var(void) { return tvar(); }
 Type *type_arrow(Type *a, Type *b) { return tarrow(a, b); }
 Type *type_nominal(const char *name) { return tnom0(name); }
 Type *type_arg(Type *arg) { return targ(arg, NULL); }
+Type *type_param(int idx) { return tparam(idx); }
 
 Scheme scheme_all(Type *t) {
   int f[64], fn = 0; fv(t, f, &fn);

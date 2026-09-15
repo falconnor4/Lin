@@ -9,6 +9,8 @@
 /* ---------------- core terms (pure untyped lambda) ---------------- */
 enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT, TEXPORT };
 typedef struct Type { int kind, id; struct Type *a, *b; const char *name; } Type;
+/* type-kinds (shared: type.c and the datatype processor in main.c use these) */
+enum { TVR, TARROW, TLINK, TNOM, TARG, TPARAM };
 typedef struct Term {
   int type;
   char name[NAME];
@@ -78,7 +80,7 @@ typedef struct { int nq, q[256]; Type *t; } Scheme;
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
-Type *type_var(void); Type *type_arrow(Type *a, Type *b); Type *type_nominal(const char *name); Type *type_arg(Type *arg);
+Type *type_var(void); Type *type_arrow(Type *a, Type *b); Type *type_nominal(const char *name); Type *type_arg(Type *arg); Type *type_param(int idx);
 int nominal_lookup(const char *name); int nominal_register(const char *name, int arity);
 int nominal_arity(const char *name);
 Scheme scheme_all(Type *t);

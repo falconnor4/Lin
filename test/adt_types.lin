@@ -70,3 +70,21 @@
 (define! myb (Box bool) (box true))
 (unbox_num myb)
 ; expect error: type mismatch
+
+; --- typed fields: constructors type-check their declared payloads ---
+; (datatype Name ctor (field Type..)...): a field's type references the type
+; param, so (box 5) : Box num and a Box num function rejects a Box bool.
+(datatype (Box b) (box (v b)))
+(define! bval (Box num -> num) (\b (match b ((box v) v))))
+(define! bnum (Box num) (box 5))
+(bval bnum)
+; expect => 5
+(define! bbad (Box bool) (box true))
+(bval bbad)
+; expect error: type mismatch
+; a generic param'd list-like with a typed head + typed tail recurses
+(datatype (L t) (lnil) (lcons (hd t) (tl L t)))
+(define! llen (L num -> num)
+  (\l (match l (lnil 0) ((lcons hd tl) (succ (llen tl))))))
+(llen (lcons 1 (lcons 2 (lnil))))
+; expect => 2

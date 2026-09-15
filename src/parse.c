@@ -92,6 +92,11 @@ static Type *parse_type(void);
 static char (*tvn)[NAME];
 static Type **tvt;
 static int tvnn, tvcap;
+/* datatype field-type parsing context: when non-zero, `params` lists the declared
+   type-parameter names of the datatype, and a bare type atom matching one becomes
+   a TPARAM reference (index into params) instead of a fresh type variable. */
+static char (*dt_params)[NAME]; static int dt_np;
+static int dt_in = 0;
 
 static Type *parse_type_atom(void) {
   skipws();
@@ -108,6 +113,9 @@ static Type *parse_type_atom(void) {
     int arity = nominal_arity(nm);
     for (int i = 0; i < arity; i++) { *cur = type_arg(parse_type_atom()); cur = &(*cur)->b; }
     return t;
+  }
+  if (dt_in) {                        /* a datatype type-param reference (e.g. `a`) */
+    for (int i = 0; i < dt_np; i++) if (!strcmp(dt_params[i], nm)) return type_param(i);
   }
   for (int i = 0; i < tvnn; i++) if (!strcmp(tvn[i], nm)) return tvt[i];
   if (tvnn >= tvcap) {
@@ -255,13 +263,18 @@ static Term *parse_term(void) {
       skipws(); char dn[NAME];
       /* generic form: (datatype (Name p1 p2 ..) (Ctor f..) ..) declares `Name`
          with |pi| type parameters (arity); otherwise a simple name (arity 0). */
-      int arity = 0;
+      int arity = 0; int np_ctx = 0;
+      if (!dt_params) { dt_params = malloc(64 * sizeof *dt_params); }
       if (S[P] == '(') {
         P++; skipws(); if (!sym(dn, NAME)) pfail("datatype: expected name");
-        skipws(); while (S[P] != ')') { char pn[NAME]; if (!sym(pn, NAME)) pfail("datatype: bad type param"); arity++; skipws(); }
+        skipws(); while (S[P] != ')') { char pn[NAME]; if (!sym(pn, NAME)) pfail("datatype: bad type param"); snprintf(dt_params[arity], NAME, "%s", pn); arity++; skipws(); }
         P++;
       } else if (!sym(dn, NAME)) pfail("datatype: expected name");
-      /* constructors: (Name f1 f2 ...) */
+      nominal_register(dn, arity);   /* register early so self-referential field types ((left Tree a)) parse */
+      np_ctx = arity;                       /* field types may reference these params */
+      /* constructors: (Name f1 f2 ...) where a field is `name` or `(name Type..)`. */
+      int prev_in = dt_in, prev_np = dt_np;
+      dt_in = (np_ctx > 0); dt_np = np_ctx;
       Term *ctrs = NULL, *tail = NULL;
       skipws();
       while (S[P] == '(') {
@@ -271,8 +284,18 @@ static Term *parse_term(void) {
         Term *fields = NULL, *ftail = NULL;
         skipws();
         while (S[P] != ')') {
-          char fn[NAME]; if (!sym(fn, NAME)) pfail("datatype: expected field");
-          Term *fv = term_new(TVAR, fn, NULL, NULL);
+          char fn[NAME]; Term *fv;
+          if (S[P] == '(') {                 /* typed field (name Type..) */
+            P++; skipws(); if (!sym(fn, NAME)) pfail("datatype: bad field");
+            skipws();
+            Type *ty = parse_type();         /* param context active */
+            skipws(); if (S[P] != ')') pfail("datatype: bad field type");
+            P++;
+            fv = term_new(TVAR, fn, NULL, NULL); fv->annot = ty;
+          } else {	                         /* bare name: untyped polymorphism */
+            if (!sym(fn, NAME)) pfail("datatype: expected field");
+            fv = term_new(TVAR, fn, NULL, NULL);
+          }
           if (!fields) fields = ftail = fv; else { ftail->r = fv; ftail = fv; }
           skipws();
         }
@@ -281,6 +304,7 @@ static Term *parse_term(void) {
         if (!ctrs) ctrs = tail = c; else { tail->r = c; tail = c; }
         skipws();
       }
+      dt_in = prev_in; dt_np = prev_np;
       skipws(); if (S[P] == ')') P++; /* consume datatype close */
       Term *dt = term_new(TDATATYPE, dn, ctrs, NULL);
       dt->annot = (Type *)(intptr_t)arity;   /* stash arity (annot is not freed by term_free) */

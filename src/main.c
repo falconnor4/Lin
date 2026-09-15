@@ -218,6 +218,20 @@ static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
   return lam;
 }
 
+/* Substitute a datatype's declared type-param references (TPARAM, `id` = param
+   index) in a constructor field type with the head's concrete param variables. */
+static Type *resolve_dt_type(Type *ty, Type **params) {
+  if (!ty) return type_var();                       /* bare (untyped) field */
+  if (ty->kind == TPARAM) return params[ty->id];    /* datatype type param -> head var */
+  if (ty->kind == TARROW) return type_arrow(resolve_dt_type(ty->a, params), resolve_dt_type(ty->b, params));
+  if (ty->kind == TARG) return type_arg(resolve_dt_type(ty->a, params));
+  if (ty->kind == TNOM) {
+    Type *n = type_nominal(ty->name); Type **cur = &n->a;
+    for (Type *k = ty->a; k; k = k->b) { *cur = type_arg(resolve_dt_type(k->a, params)); cur = &(*cur)->b; }
+    return n;
+  }
+  return ty;                                        /* TVR / TLINK */
+}
 static void process_datatype(Term *t) {
   int arity = (t->annot) ? (int)(intptr_t)t->annot : 0;    /* (datatype (Name p..) ..) arity; default 0 */
   nominal_register(t->name, arity);                         /* declare `Name` nominal with arity */
@@ -225,14 +239,16 @@ static void process_datatype(Term *t) {
   int idx = 0;
   for (Term *c = t->l; c; c = c->r, idx++) {
     Term *lam = scott_ctor(t->name, idx, c->l, m);
-    /* constructor type: fresh-params -> Name p1..pk, field types fresh vars
-       (polymorphic fields).  A (Tree a) head carries k type args so
-       (Tree num) vs (Tree bool) unify only when the arg matches. */
+    /* constructor type: fresh-params -> Name p1..pk.  A field with a declared
+       type (annot) contributes that type (param refs resolved); an untyped field
+       (no annot) contributes a fresh polymorphic var. */
     Type *head = type_nominal(t->name); Type **hp = &head->a;
-    for (int ip = 0; ip < arity; ip++) { *hp = type_arg(type_var()); hp = &(*hp)->b; }
-    int k = 0; for (Term *f = c->l; f; f = f->r) k++;
+    Type *params[16];
+    for (int ip = 0; ip < arity && ip < 16; ip++) { params[ip] = type_var(); *hp = type_arg(params[ip]); hp = &(*hp)->b; }
     Type *ct = head;
-    for (int i = 0; i < k; i++) ct = type_arrow(type_var(), ct);
+    Type *args[16]; int nf = 0;
+    for (Term *f = c->l; f; f = f->r) if (nf < 16) args[nf++] = resolve_dt_type(f->annot, params);
+    for (int i = nf - 1; i >= 0; i--) ct = type_arrow(args[i], ct);  /* fields left-to-right */
     Term *def = term_new(TDEFX, c->name, lam, NULL); def->annot = ct;
     process_def(def);                                   /* takes ownership of lam */
   }
