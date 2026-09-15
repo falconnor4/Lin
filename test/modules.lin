@@ -103,7 +103,7 @@ test_b.x
 
 ; 10. String literal escape sequences (issue 5)
 (str.length "\e[31mLin\e[0m")
-; expect => 8
+; expect => 12
 
 (str.length "\033[32m")
 ; expect => 5

@@ -1,7 +1,16 @@
 ; ==============================================================================
 ; Lin Standard Library: String Manipulation & Character Combinators
 ; ==============================================================================
-; Scott/Church character sequences, string concatenation, and metrics.
+; Scott/Church character sequences, terminating-recursion string concatenation
+; and length, and character-by-character equality via the lin_streq FFI.
+;
+; Every public member below carries the globally-safe `str_*` / `streq` names
+; (never bare `empty`/`is_empty`/`head`/`tail`/`first`/`length`/`concat`/`eq`),
+; so `(export str)` re-exports exactly those safe names without colliding with
+; the bare short names other std modules export.  The few qualified short-name
+; references consumers still use (`str.empty`/`str.is_empty`/`str.length`/
+; `str.eq`) are bound at root as plain aliases AFTER `(export str)`, so they are
+; reachable qualified but never leaked bare.
 ; ==============================================================================
 
 (load "bool.lin")
@@ -9,63 +18,48 @@
 (load "list.lin")
 
 (namespace str)
-(define empty list.nil)
-(define is_empty list.is_empty)
-(define head list.head)
-(define tail list.tail)
 
-(define char1 list.list1)
-(define char2 list.list2)
-(define char3 list.list3)
-(define char4 list.list4)
+; --- String primitives (reuse the list Scott encodings) ---
+(define str_empty   list.nil)
+(define str_is_empty list.is_empty)
+(define str_head    list.head)
+(define str_tail    list.tail)
 
-(define first list.first)
-(define second list.second)
-(define third list.third)
-(define fourth list.fourth)
+(define str_char1 list.list1)
+(define str_char2 list.list2)
+(define str_char3 list.list3)
+(define str_char4 list.list4)
 
-(define length
+(define str_first  list.first)
+(define str_second list.second)
+(define str_third  list.third)
+(define str_fourth list.fourth)
+
+; String length by terminating recursion over the string's tail.
+(define str_length
   (\s
-    (if (is_empty s) 0
-    (if (is_empty (tail s)) 1
-    (if (is_empty (tail (tail s))) 2
-    (if (is_empty (tail (tail (tail s)))) 3
-    (if (is_empty (tail (tail (tail (tail s))))) 4
-    (if (is_empty (tail (tail (tail (tail (tail s)))))) 5
-    (if (is_empty (tail (tail (tail (tail (tail (tail s))))))) 6
-    (if (is_empty (tail (tail (tail (tail (tail (tail (tail s)))))))) 7
-    8))))))))))
+    (if (str_is_empty s)
+      0
+      (num.succ (str_length (str_tail s))))))
 
-(define concat
+; String concatenation by terminating recursion over s1's head/tail.
+(define str_concat
   (\s1 (\s2
-    (if (is_empty s1)
+    (if (str_is_empty s1)
       s2
-      (if (is_empty (tail s1))
-        (cons (first s1) s2)
-        (if (is_empty (tail (tail s1)))
-          (cons (first s1) (cons (second s1) s2))
-          (if (is_empty (tail (tail (tail s1))))
-            (cons (first s1) (cons (second s1) (cons (third s1) s2)))
-            (cons (first s1) (cons (second s1) (cons (third s1) (cons (fourth s1) s2)))))))))))
+      (list.cons (list.head s1) (str_concat (list.tail s1) s2))))))
 
-; Character-by-character string equality
-(define eq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
+; Character-by-character string equality (FFI).
+(define streq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
+(define str_eq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
 
+; --- Re-export the safe str_* / streq names into root scope ---
 (namespace _)
-(open str)
-(define str_empty str.empty)
-(define str_is_empty str.is_empty)
-(define str_head str.head)
-(define str_tail str.tail)
-(define str_char1 str.char1)
-(define str_char2 str.char2)
-(define str_char3 str.char3)
-(define str_char4 str.char4)
-(define str_first str.first)
-(define str_second str.second)
-(define str_third str.third)
-(define str_fourth str.fourth)
-(define str_length str.length)
-(define str_concat str.concat)
-(define str_eq str.eq)
-(define streq str.eq)
+(export str)
+
+; --- Consumer-required qualified aliases (bound qualified only, not exported,
+;     so no bare `empty`/`is_empty`/`length`/`eq` leaks into root) ---
+(define str.empty   str_empty)
+(define str.is_empty str_is_empty)
+(define str.length  str_length)
+(define str.eq      str_eq)
