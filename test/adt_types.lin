@@ -1,0 +1,62 @@
+; ==============================================================================
+; User-defined nominal (data-structure) types
+; ==============================================================================
+; `datatype` now registers a nominal type: constructors are typed `fields -> Name`
+; and `(Name -> ...)` annotations are real.  Two values of the same declared type
+; unify; a value of a different declared type is rejected with `type mismatch`.
+; `match` does Scott dispatch over the nominals and type-checks.
+; ==============================================================================
+
+(load "std/std.lin")
+
+; --- struct-like nominal type (C-struct analog) ---
+(datatype Point (point x y))
+; construction + match
+(match (point 3 4) ((point x y) (add x y)))
+; expect => 7
+(match (point 10 20) ((point x y) (add x y)))
+; expect => 30
+; match computes with the bound fields
+(match (point 5 6) ((point x y) (sub y x)))
+; expect => 1
+
+; --- a function whose signature names the nominal type ---
+(define! sumcoords (Point -> num) (\p (match p ((point x y) (add x y)))))
+(sumcoords (point 3 4))
+; expect => 7
+(sumcoords (point 10 20))
+; expect => 30
+(define! const_point (num -> Point) (\n (point n n)))
+(match (const_point 9) ((point x y) (mul x y)))
+; expect => 81
+
+; --- multi-constructor ADT (Option) ---
+(datatype Option (none) (some v))
+(match (some 5) (none 0) ((some v) (mul v 2)))
+; expect => 10
+(match none (none 7) ((some v) 0))
+; expect => 7
+(define! inc (Option -> num) (\o (match o (none 0) ((some v) (succ v)))))
+(inc (some 41))
+; expect => 42
+(inc none)
+; expect => 0
+
+; --- a second nominal with the same shape is still a DIFFERENT type ---
+(datatype Pair (mkpair a b))
+(match (mkpair 2 3) ((mkpair a b) (mul a b)))
+; expect => 6
+
+; --- nested nominal: a Point field in another nominal ---
+(datatype Segment (seg start end))
+(define length_sqr (\s (match s ((seg start end) (add (sumcoords start) (sumcoords end))))))
+(length_sqr (seg (point 1 2) (point 3 4)))
+; expect => 10
+
+; --- type safety: a different nominal passed to a Point-typed function is rejected ---
+(define! sump (Point -> num) (\p (match p ((point x y) (add x y)))))
+(sump (mkpair 1 2))
+; expect error: type mismatch
+(define! idp (Point -> Point) (\p p))
+(idp (seg (point 1 2) (point 3 4)))
+; expect error: type mismatch
