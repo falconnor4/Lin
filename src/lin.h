@@ -79,8 +79,9 @@ int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
 Type *type_var(void); Type *type_arrow(Type *a, Type *b);
-Type *type_list(Type *e); Type *type_nominal(const char *name);
-int nominal_lookup(const char *name); int nominal_register(const char *name);
+Type *type_list(Type *e); Type *type_nominal(const char *name); Type *type_arg(Type *arg);
+int nominal_lookup(const char *name); int nominal_register(const char *name, int arity);
+int nominal_arity(const char *name);
 Scheme scheme_all(Type *t);
 
 /* ---------------- compile & aot & .line ---------------- */

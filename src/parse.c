@@ -103,7 +103,13 @@ static Type *parse_type_atom(void) {
   char nm[NAME];
   if (!sym(nm, NAME)) pfail("type: expected name");
   if (!strcmp(nm, "list")) return type_list(parse_type_atom());
-  if (nominal_lookup(nm)) return type_nominal(nm);   /* builtin scalars (bool/num/float) and user datatypes */
+  if (nominal_lookup(nm)) {
+    /* generic nominal: consume `arity` type-argument atoms, chained as TARGs. */
+    Type *t = type_nominal(nm); Type **cur = &t->a;
+    int arity = nominal_arity(nm);
+    for (int i = 0; i < arity; i++) { *cur = type_arg(parse_type_atom()); cur = &(*cur)->b; }
+    return t;
+  }
   for (int i = 0; i < tvnn; i++) if (!strcmp(tvn[i], nm)) return tvt[i];
   if (tvnn >= tvcap) {
     tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);
@@ -247,7 +253,15 @@ static Term *parse_term(void) {
       return app;
     }
     if (!strcmp(kw, "datatype") || !strcmp(kw, "data")) {
-      skipws(); char dn[NAME]; if (!sym(dn, NAME)) pfail("datatype: expected name");
+      skipws(); char dn[NAME];
+      /* generic form: (datatype (Name p1 p2 ..) (Ctor f..) ..) declares `Name`
+         with |pi| type parameters (arity); otherwise a simple name (arity 0). */
+      int arity = 0;
+      if (S[P] == '(') {
+        P++; skipws(); if (!sym(dn, NAME)) pfail("datatype: expected name");
+        skipws(); while (S[P] != ')') { char pn[NAME]; if (!sym(pn, NAME)) pfail("datatype: bad type param"); arity++; skipws(); }
+        P++;
+      } else if (!sym(dn, NAME)) pfail("datatype: expected name");
       /* constructors: (Name f1 f2 ...) */
       Term *ctrs = NULL, *tail = NULL;
       skipws();
@@ -270,6 +284,7 @@ static Term *parse_term(void) {
       }
       skipws(); if (S[P] == ')') P++; /* consume datatype close */
       Term *dt = term_new(TDATATYPE, dn, ctrs, NULL);
+      dt->annot = (Type *)(intptr_t)arity;   /* stash arity (annot is not freed by term_free) */
       return dt;
     }
     if (!strcmp(kw, "let")) {

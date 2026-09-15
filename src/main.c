@@ -219,14 +219,19 @@ static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
 }
 
 static void process_datatype(Term *t) {
-  nominal_register(t->name);                          /* declare `Name` as a nominal type */
+  int arity = (t->annot) ? (int)(intptr_t)t->annot : 0;    /* (datatype (Name p..) ..) arity; default 0 */
+  nominal_register(t->name, arity);                         /* declare `Name` nominal with arity */
   int m = 0; for (Term *c = t->l; c; c = c->r) m++;
   int idx = 0;
   for (Term *c = t->l; c; c = c->r, idx++) {
     Term *lam = scott_ctor(t->name, idx, c->l, m);
-    /* constructor type: \f1..\fk -> Name (field types are fresh vars generalised over, so the ADT is polymorphic in its fields) */
+    /* constructor type: fresh-params -> Name p1..pk, field types fresh vars
+       (polymorphic fields).  A (Tree a) head carries k type args so
+       (Tree num) vs (Tree bool) unify only when the arg matches. */
+    Type *head = type_nominal(t->name); Type **hp = &head->a;
+    for (int ip = 0; ip < arity; ip++) { *hp = type_arg(type_var()); hp = &(*hp)->b; }
     int k = 0; for (Term *f = c->l; f; f = f->r) k++;
-    Type *ct = type_nominal(t->name);
+    Type *ct = head;
     for (int i = 0; i < k; i++) ct = type_arrow(type_var(), ct);
     Term *def = term_new(TDEFX, c->name, lam, NULL); def->annot = ct;
     process_def(def);                                   /* takes ownership of lam */

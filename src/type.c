@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { TVR, TARROW, TLINK, TLIST, TNOM };
+enum { TVR, TARROW, TLINK, TLIST, TNOM, TARG };
 
 static jmp_buf TJ;
 static char TMSG[256];
@@ -18,31 +18,34 @@ static void tfail(const char *fmt, ...) {
   longjmp(TJ, 1);
 }
 
-/* nominal-type registry: a declared user data type (C-struct-like or ADT).
-   parse_type_atom resolves a registered name to a TNOM head, so two values of the
-   same declared type unify and different types do not.  Nullary for now. */
-static const char *nom_names[512]; static int n_nom = 0;
-int nominal_lookup(const char *name) {
-  for (int i = 0; i < n_nom; i++) if (!strcmp(nom_names[i], name)) return 1;
-  return 0;
+/* nominal-type registry: a declared user data type (ADT/struct), optionally with
+   a fixed number of type parameters (its arity).  parse_type_atom resolves a
+   registered name to a TNOM head with arity arg chains, so two values of the
+   same declared type unify (parameter-wise) and different types do not. */
+typedef struct { const char *name; int arity; } NomDecl;
+static NomDecl noms[512]; static int n_nom = 0;
+int nominal_arity(const char *name) {
+  for (int i = 0; i < n_nom; i++) if (!strcmp(noms[i].name, name)) return noms[i].arity;
+  return -1;
 }
-/* register a nominal type name (called when a (struct)/(datatype) is declared).
-   returns 1 if newly registered, 0 if already present. */
-int nominal_register(const char *name) {
+int nominal_lookup(const char *name) { return nominal_arity(name) >= 0; }
+int nominal_register(const char *name, int arity) {
   if (nominal_lookup(name)) return 0;
-  if (n_nom < 512) { char *p = malloc(strlen(name) + 1); strcpy(p, name); nom_names[n_nom++] = p; return 1; }
+  if (n_nom < 512) { char *p = malloc(strlen(name) + 1); strcpy(p, name); noms[n_nom++] = (NomDecl){.name = p, .arity = arity}; return 1; }
   return 0;
 }
 
 static Type *tvar(void) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, .id = next_id++}; return t; }
 static Type *tarrow(Type *a, Type *b) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARROW, .id = -1, .a = a, .b = b}; return t; }
 static Type *tlist(Type *e) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TLIST, .id = -1, .a = e}; return t; }
-/* nullary nominal type: a registered type name.  `name` is copied (the caller's
-   buffer is transient). */
-static Type *tnom(const char *name) {
+/* type-argument chain node: {a = the arg type, b = next TARG or NULL} */
+static Type *targ(Type *arg, Type *next) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARG, .id = -1, .a = arg, .b = next}; return t; }
+/* nominal type: `name` copied; `*argp` is a TARG chain of arity type args (or NULL). */
+static Type *tnom(const char *name, Type *args) {
   Type *t = malloc(sizeof *t); char *p = malloc(strlen(name) + 1); strcpy(p, name);
-  *t = (Type){.kind = TNOM, .id = -1, .name = p}; return t;
+  *t = (Type){.kind = TNOM, .id = -1, .name = p, .a = args}; return t;
 }
+static Type *tnom0(const char *name) { return tnom(name, NULL); }
 
 static Type *find(Type *t) {
   while (t->kind == TLINK) {
@@ -57,6 +60,8 @@ static int occurs(Type *v, Type *t) {
   if (t == v) return 1;
   if (t->kind == TARROW) return occurs(v, t->a) || occurs(v, t->b);
   if (t->kind == TLIST) return occurs(v, t->a);
+  if (t->kind == TNOM) return t->a && occurs(v, t->a);     /* arg chain */
+  if (t->kind == TARG) return occurs(v, t->a) || (t->b && occurs(v, t->b));
   return 0;
 }
 
@@ -66,16 +71,19 @@ static void unify(Type *x, Type *y) {
   if (x == y) return;
   if (x->kind == TARROW && y->kind == TARROW) { unify(x->a, y->a); unify(x->b, y->b); return; }
   if (x->kind == TLIST && y->kind == TLIST) { unify(x->a, y->a); return; }
-  /* nominal: equal only when both are the SAME declared type.  A nominal value
-     may also be APPLIED as its Scott-encoded dispatch (match desugars scrut to a
-     function application), so a nominal may unify with a function type; equality
-     safety is enforced when two concrete nominals meet. */
-  if (x->kind == TNOM && y->kind == TNOM) { if (strcmp(x->name, y->name)) tfail("type mismatch"); return; }
+  /* nominal: equal only when both are the SAME declared type; then unify type
+     arguments pairwise.  A nominal value may also be APPLIED as its
+     Scott-encoded dispatch (match desugars scrut to application). */
+  if (x->kind == TNOM && y->kind == TNOM) {
+    if (strcmp(x->name, y->name)) tfail("type mismatch");
+    for (Type *xa = x->a, *ya = y->a; xa && ya; xa = xa->b, ya = ya->b) unify(xa->a, ya->a);
+    return;
+  }
   if (x->kind == TNOM || y->kind == TNOM) {
     if (x->kind == TVR) { x->kind = TLINK; x->a = y; return; }
     if (y->kind == TVR) { y->kind = TLINK; y->a = x; return; }
     if (x->kind == TARROW || y->kind == TARROW) return;   /* Scott dispatch compat */
-    tfail("type mismatch");   /* TLIST is a dedicated builtin list, never a Scott dispatch head */
+    tfail("type mismatch");
   }
   if (x->kind == TVR) { if (occurs(x, y)) tfail("infinite type"); x->kind = TLINK; x->a = y; return; }
   if (y->kind == TVR) { if (occurs(y, x)) tfail("infinite type"); y->kind = TLINK; y->a = x; return; }
@@ -112,6 +120,8 @@ static void fv(Type *t, int *set, int *n) {
     fv(t->b, set, n);
   }
   if (t->kind == TLIST) fv(t->a, set, n);
+  if (t->kind == TNOM) { if (t->a) fv(t->a, set, n); }
+  if (t->kind == TARG) { fv(t->a, set, n); if (t->b) fv(t->b, set, n); }
 }
 
 static int mid[256];
@@ -127,6 +137,8 @@ static Type *inst_rec(Type *t) {
   }
   if (t->kind == TARROW) return tarrow(inst_rec(t->a), inst_rec(t->b));
   if (t->kind == TLIST) return tlist(inst_rec(t->a));
+  if (t->kind == TARG) return targ(inst_rec(t->a), t->b ? inst_rec(t->b) : NULL);
+  if (t->kind == TNOM) { Type *n = tnom0(t->name); Type **cur = &n->a; for (Type *k = t->a; k; k = k->b) { *cur = targ(inst_rec(k->a), NULL); cur = &(*cur)->b; } return n; }
   return t;
 }
 
@@ -203,7 +215,8 @@ static void print_rec(Type *t, int par) {
     return;
   }
   if (t->kind == TLIST) { printf("list "); print_rec(t->a, 1); return; }
-  if (t->kind == TNOM) { fputs(t->name ? t->name : "?", stdout); return; }
+  if (t->kind == TNOM) { fputs(t->name ? t->name : "?", stdout); for (Type *k = t->a; k; k = k->b) { putchar(' '); print_rec(k->a, 2); } return; }
+  if (t->kind == TARG) { print_rec(t->a, 2); return; }
   putchar('?');
 }
 
@@ -211,7 +224,8 @@ void scheme_print(Scheme *s) { print_rec(s->t, 0); }
 Type *type_var(void) { return tvar(); }
 Type *type_arrow(Type *a, Type *b) { return tarrow(a, b); }
 Type *type_list(Type *e) { return tlist(e); }
-Type *type_nominal(const char *name) { return tnom(name); }
+Type *type_nominal(const char *name) { return tnom0(name); }
+Type *type_arg(Type *arg) { return targ(arg, NULL); }
 
 Scheme scheme_all(Type *t) {
   int f[64], fn = 0; fv(t, f, &fn);
