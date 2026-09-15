@@ -1,0 +1,36 @@
+; ==============================================================================
+; sat_solve.lin  —  Constructive SAT: witness extraction & certificate check
+; ------------------------------------------------------------------------------
+; Property:  std/sat.lin resolves satisfiability self-reducibly in interaction
+; net reduction.  probeN{} extract a model by recursive existential projection
+; (no backtracking stack), and verifyN provide O(1) stackless certificate checks:
+; a witness is only trusted once it is re-evaluated against the formula.
+; Here we solve phi(x,y) = (x OR y) AND (NOT x OR y), which is satisfiable
+; exactly where y = true.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/logic-sat/sat_solve.lin
+; ==============================================================================
+(load "std/std.lin")
+(load "std/sat.lin")
+
+; --- The formula: (x OR y) AND (NOT x OR y) --------------------------------
+(define phi (\x (\y (sat.and2 (sat.clause2 x y) (sat.clause2 (bool.not x) y)))))
+
+; Two independent certificate checks before we trust any witness:
+(sat.verify2 phi (pair.pair bool.true bool.true))     ; (T,T) satisfies f
+; expect => true
+(sat.verify2 phi (pair.pair bool.true bool.false))    ; (T,F) does not
+; expect => false
+
+; sat.probe2 self-reduces the formula and returns a pair (sat?, witness):
+(define sol (sat.probe2 phi))
+(pair.fst sol)              ; satisfiable?
+; expect => true
+(pair.fst (pair.snd sol))   ; witness.x
+; expect => true
+(pair.snd (pair.snd sol))   ; witness.y
+; expect => true
+
+; The extracted witness is itself a valid model, confirmed by verify2:
+(sat.verify2 phi (pair.snd sol))
+; expect => true

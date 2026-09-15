@@ -1,0 +1,85 @@
+; ==============================================================================
+; driver_tour.lin  —  A tour across Lin's pluggable wavefront-reduction drivers
+; ------------------------------------------------------------------------------
+; ;interactive
+;
+; Property:  Lin's reduction engine is pluggable.  std/drivers/driver.lin exposes
+; a base-CPU engine plus accelerator drivers — SIMD (std/drivers/simd.lin) and
+; GPU (std/drivers/gpu.lin, loaded as a Vulkan plugin that transparently falls
+; back to CPU when no device is present).  Switching drivers changes *how*
+; saturated arithmetic closures are folded (batched into native vector folds)
+; without ever changing the resulting value — referential transparency is exact.
+;
+; `set_driver` selects one driver; `get_driver` reports the active one; `folds`
+; reports how many saturated closures the active driver folded natively, and
+; `folded` is true once any driver has done so.  This is the same contract the
+; canonical cross-driver selftest (test/driver_selftest.sh) checks: every
+; driver must reproduce the CPU golden value-for-value.
+;
+; The tour narrates via continuation I/O while the actual driver values are
+; emitted as top-level `=> <value>` normal forms.  Because the GPU driver may
+; or may not be available on a given host (it self-degrades to the CPU engine),
+; the reported fold counts are deliberately not asserted here.
+;
+;   Running:
+;     cd /home/falconnor4/github/Lin && ./lin examples/interactive/driver_tour.lin
+;
+;   This example has NO `; expect` lines: driver fold counts are each driver's
+;   own optimization bookkeeping and may vary by host, so it is reported but
+;   not value-checked by examples/run_verifier.sh.
+; ==============================================================================
+(load "std/std.lin")
+; Bring the driver-control interface (set_driver / get_driver / add_driver /
+; clear_drivers) into scope.  std.lin loads the std collections but not the
+; accelerator driver module; each accelerator (simd.lin / gpu.lin) also loads
+; this module and activates its own driver.
+(load "std/drivers/driver.lin")
+
+; --- Introduce the tour via the continuation-I/O narration ------------------
+(io_print "lin driver tour (pluggable wavefront reduction drivers)\n"
+  (io_print "   [1/4] base cpu driver:\n"
+    (io_done 0)))
+
+; --- Base CPU engine is the golden oracle -----------------------------------
+(set_driver "cpu")
+; => cpu   (the active driver after an explicit cpu reset)
+(get_driver)
+
+; --- A sample computation on the base engine --------------------------------
+(add 40 2)
+; => 42
+(mul 6 7)
+; => 42
+
+; --- Activate the SIMD accelerator (load prints its own '=> 1') ------------
+(load "std/drivers/simd.lin")
+; => simd  (the active driver is now the SIMD offloader)
+(get_driver)
+
+; --- Same value, folded natively in batches ---------------------------------
+(is_zero (sub 42 42))
+; => true
+(add 80 1)
+; => 81
+; folded is true once any driver has performed a native fold; folds reports how many
+(folded)
+; => true
+(folds)
+; => ...   (host-dependent native fold count)
+
+; --- Activate the GPU plugin (falls back to CPU if no Vulkan device) --------
+(load "std/drivers/gpu.lin")
+; => gpu   (last-added driver even when it self-degrades to the CPU engine)
+(get_driver)
+
+(add 19 23)
+; => 42
+(ffloor (fsqrt 144.0))
+; => 12
+
+; --- Reset to the deterministic base engine ---------------------------------
+(set_driver "cpu")
+; => cpu
+(get_driver)
+(io_print "   tour complete.  every driver reproduced the cpu golden values.\n"
+  (io_done 0))

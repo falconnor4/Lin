@@ -58,17 +58,17 @@ make lin
 # Interactive REPL
 ./result/bin/lin
 
-# Run a source file
-./result/bin/lin examples/adts.lin
+# Run a source file (value-checked by examples/run_verifier.sh)
+./result/bin/lin examples/pure-functional/scott_lists.lin
 
 # Evaluate an expression directly
 ./result/bin/lin -e '(load "std/num.lin") (mul 6 7)'
 
 # Multi-threaded parallel reduction (e.g. 8 threads)
-./result/bin/lin -t 8 examples/parallel_tree.lin
+./result/bin/lin -t 8 examples/logic-sat/tseitin.lin
 
 # Benchmark mode (execution time, rewrite steps, GoI determinant)
-./result/bin/lin -b examples/sat_verify.lin
+./result/bin/lin -b examples/optimization/redundant_compute.lin
 ```
 
 ## Language Overview
@@ -187,17 +187,27 @@ Lin executes lambda calculus terms directly as interaction nets using non-abelia
 
 ## Examples
 
-The `examples/` directory contains self-contained programs demonstrating the language:
+The `examples/` directory is a curated, self-verifying set demonstrating
+Lin's interesting properties.  Each example is a self-contained program whose
+top-level expressions print `=> <value>` lines, and those carrying `; expect`
+annotations are machine-checked by `examples/run_verifier.sh` (14 PASS,
+5 interactive):
 
-- `examples/tictactoe.lin`: Interactive 3x3 Tic-Tac-Toe game engine and AI opponent; evaluates moves in real time (`(play board move)`), detects winning threats, blocks opponent lines, and referees matches.
-- `examples/sat_solver.lin`: Working propositional SAT solver with model extraction, certificate verification, and Tseitin graph expander refutations.
-- `examples/logic_proofs.lin`: Constructive Curry-Howard proof terms, Modus Ponens, De Morgan's laws, and double negation.
-- `examples/circuit_alu.lin`: Gate-level hardware simulation (Full Adder, 4-bit Ripple-Carry Adder, Multiplexer, ALU).
-- `examples/cellular_automaton.lin`: Discrete dynamical systems (Rule 90 Sierpinski fractal & Rule 110 Turing-complete automaton).
-- `examples/adts.lin`: Functional data structures (Maybe, Either, Binary Search Tree, Pairs) with monadic chaining.
-- `examples/parallel_tree.lin`: Wavefront parallel reduction across OpenMP threads on balanced trees.
-- `examples/tsp.lin`: Traveling Salesperson Problem (TSP) tour extraction and verification.
-- `examples/ffi_sys.lin`: Interoperability with standard C library functions (`puts`, `getenv`, `putchar`).
+- `optimization/` — optimization by construction: every program reduces to its
+  optimal interaction-net form (Lévy/opportunistic sharing), with the native
+  fold made observable (`sharing_folds.lin`), Church-encoded arithmetic sharing,
+  and AOT `.line` parity.
+- `pure-functional/` — the purely functional, sharing data model: Scott lists
+  and ADTs, immutable collections (queue/stream/set/map).
+- `logic-sat/` — constructive SAT + certificate check and Curry–Howard proofs.
+- `numeric-float/` — floating-point and recursive numeric kernels.
+- `systems-ffi/` — the C FFI / systems boundary and the pluggable reduction
+  driver (`set_driver cpu/simd`).
+- `interactive/` — runnable demos: a driver tour (`cpu->simd->gpu`), a pure
+  calculator REPL, and a small turn-based game.
+
+See `examples/README.md` for the full index, how to run each file, and how to
+value-check the whole suite (`bash examples/run_verifier.sh ./lin`).
 
 ## Command-Line Options
 

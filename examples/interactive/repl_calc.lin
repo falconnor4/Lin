@@ -1,0 +1,55 @@
+; ==============================================================================
+; repl_calc.lin  —  A calculator-driven REPL demo via pure, continuation I/O
+; ------------------------------------------------------------------------------
+; ;interactive
+;
+; Property:  Lin's core is a pure interaction net, so side effects like reading
+; a terminal line or writing a message are modelled with continuation-passing
+; I/O (std/io.lin) rather than imperative statements.  `io_prompt` prints a
+; prompt then hands the typed line to its callback; `io_print` writes a message
+; then continues to a `next` value; `io_done` terminates the chain.  Chaining
+; these continuations composes a REPL "loop" without any mutable state or
+; loop counter — each step reduces to the next suspended action.
+;
+; This is a simplistic calculator: the user is asked for two input lines and a
+; sample arithmetic pipeline is echoed back with the computed fixture result.
+; Because parsing an arbitrary number string back to a Scott numeral is not part
+; of the std API, the demo fixes the numeric operands (8 + 4, 8 * 4) and shows
+; how the pure `add`/`mul` normal forms feed the output stream — the input
+; lines are read, echoed verbatim, and then the arithmetic is demonstrated on
+; fixture operands.
+;
+; Note: `io_print` treats numeral messages fine too (they read back as ASCII),
+; so both strings and computed numbers can travel down the same continuation.
+;
+;   Running interactively (type two lines, then ctrl-d):
+;     cd /home/falconnor4/github/Lin && ./lin examples/interactive/repl_calc.lin
+;
+;   Or non-interactively with a pipe:
+;     printf 'piece one\npiece two\n' | ./lin examples/interactive/repl_calc.lin
+;
+;   This example has NO `; expect` lines: its output depends on what the user
+;   types, so it is reported but not value-checked by examples/run_verifier.sh.
+; ==============================================================================
+(load "std/std.lin")
+
+; Banner for the interactive calculator session.
+(io_print "lin calculator REPL (continuation I/O demo)\n"
+  ; --- First read: prompt, then echo the line back -------------------------
+  (io_prompt "operand a> "
+    (\a
+      (io_print (str_concat "   read: '" a)
+        (io_print "   ... and now also read b.  Enter a second line.\n"
+          ; --- Second read: prompt, then echo the line back ----------------
+          (io_prompt "operand b> "
+            (\b
+              (io_print (str_concat "   read: '" b)
+                ; Demonstrate the pure arithmetic pipeline on fixtures (raw
+                ; text cannot be parsed back to a Scott numeral in std).
+                (io_print "   fixture a + b = 8 + 4 -> "
+                  (io_print (add 8 4)
+                    (io_print "   fixture a * b = 8 * 4 -> "
+                      (io_print (mul 8 4)
+                        (io_print "   fixture a ^ 2 = 8 ^ 2 -> "
+                          (io_print (pow 8 2)
+                            (io_print "session done.\n" (io_done 0))))))))))))))))

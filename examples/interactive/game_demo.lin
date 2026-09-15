@@ -1,0 +1,66 @@
+; ==============================================================================
+; game_demo.lin  —  A tiny guess-the-number demo driven by io_prompt/io_print
+; ------------------------------------------------------------------------------
+; ;interactive
+;
+; Property:  Lin is a pure functional language executed as an interaction net,
+; so even a stateful-feeling game loop is expressed as an immutable,
+; continuation-passing interaction with the terminal (std/io.lin).  Each turn:
+; `io_prompt` reads a line and hands it to a callback; `io_print` narrates; the
+; "state" (the running comparison verdict) is threaded through the CPS chain
+; rather than mutated.  Numeric comparison (`lt`/`gt`/`eq`) is pure Scott
+; recursion which reduces on the interaction net.
+;
+; In this tiny demo the target is the fixed Scott numeral 7.  Pure Lin's std
+; API has no string->number parser, so a *typed* guess cannot be turned back
+; into a numeral; instead the demo presents a 3-round turn-based session where a
+; fixed sample guess is compared against the target each round and the
+; verdict (too low / too high / got it) is printed.  The user still types a
+; line each round for interactivity, and that line is echoed to close the loop.
+;
+;   Running interactively (type three lines, then ctrl-d):
+;     cd /home/falconnor4/github/Lin && ./lin examples/interactive/game_demo.lin
+;
+;   Or non-interactively with a pipe:
+;     printf '3\n9\n7\n' | ./lin examples/interactive/game_demo.lin
+;
+;   This example has NO `; expect` lines: its output depends on what the user
+;   types, so it is reported but not value-checked by examples/run_verifier.sh.
+; ==============================================================================
+(load "std/std.lin")
+
+; Target the player is trying to guess.
+(define target 7)
+
+; --- Round verdict: pure Scott comparison glued onto the CPS narration ------
+; compare  produces a printable verdict string for a given numeric guess.
+(define compare
+  (\guess
+    (if (lt guess target) "too low"
+      (if (gt guess target) "too high"
+        "got it!"))))
+
+(io_print "lin guess-the-number (continuation-I/O game loop)\n"
+  (io_print "   The hidden target is "
+    (io_print target
+      (io_print ".  You get three typed guesses; each is echoed.\n"
+        ; --- Round 1 -------------------------------------------------------
+        (io_prompt "guess 1> "
+          (\g1
+            (io_print (str_concat "   you typed: " g1)
+              (io_print "sample guess 3: "
+                (io_print (compare 3)
+                  ; --- Round 2 ---------------------------------------------
+                  (io_prompt "guess 2> "
+                    (\g2
+                      (io_print (str_concat "   you typed: " g2)
+                        (io_print "sample guess 9: "
+                          (io_print (compare 9)
+                            ; --- Round 3 -----------------------------------
+                            (io_prompt "guess 3> "
+                              (\g3
+                                (io_print (str_concat "   you typed: " g3)
+                                  (io_print "sample guess 7: "
+                                    (io_print (compare 7)
+                                      (io_print "game over.  thanks for playing.\n"
+                                        (io_done 0)))))))))))))))))))))

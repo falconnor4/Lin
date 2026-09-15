@@ -1,0 +1,46 @@
+; ==============================================================================
+; aot_vs_interpret.lin
+; ------------------------------------------------------------------------------
+; Property:  AOT-compiled (.line binary container) runs the SAME net as the
+;            interpreted source, with no optimizer between them.
+;
+;            A single source is already optimal-by-construction, so the AOT
+;            build is a serialization + binary front-load step, NOT a
+;            transformation: the .line container embeds the same compiled nets
+;            that the interpreter would build (for a multi-form suite it keeps
+;            the final net), and produces the same value as running that
+;            expression directly.  There is no interpreter overhead to remove
+;            and no optimizer to run.
+;
+;            This example is INTERACTIVE (no `; expect` lines => it is reported
+;            but not value-checked).  It shows three equivalent ways to run the
+;            program and lets you compare their `-b` (bench) step counts.
+;
+; How to run (all from the repo root):
+;   # 1) Interpret the source directly:
+;   ./lin examples/optimization/aot_vs_interpret.lin
+;
+;   # 2) AOT-compile to a .line binary container, then run it (the container
+;   #     keeps the suite's final net, so its one printed value is the same as
+;   #     that expression run on its own):
+;   ./lin build examples/optimization/aot_vs_interpret.lin -o /tmp/aot.line
+;   ./lin /tmp/aot.line
+;   ./lin build /tmp/single.lin -o /tmp/single.line   # (single-form: identical)
+;
+;   # 3) Run either one under `-b` (bench: normalize the net, count reduction
+;   #     steps).  `-b` is a measurement flag, NOT an optimizer:
+;   ./lin -b examples/optimization/aot_vs_interpret.lin
+;   ./lin -b /tmp/aot.line
+;
+;   The graph being normalized is the same optimal interaction net either way.
+;   Extra passes are simply not part of the pipeline: source -> parser/normalizer
+;   -> net is already optimal, and build .line just freezes the same nets into a
+;   container.
+; ==============================================================================
+(load "std/std.lin")
+
+; The same expression, several times, so both the interpreted and AOT runs have
+; a comparable slice of work to report.
+(mul (add 34 8) (sub 9 2))
+(add 1 (add 2 (add 3 (add 4 5))))
+(pow (add 2 1) 3)

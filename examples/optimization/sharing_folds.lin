@@ -1,0 +1,39 @@
+; ==============================================================================
+; sharing_folds.lin
+; ------------------------------------------------------------------------------
+; Property:  Native scalar FOLD + structural SHARING, observably.
+;
+;   Lin folds a saturated arithmetic closure exactly once via the shared scalar
+;   table (drivers/arith.so) regardless of how often its value is needed, and
+;   interaction-net DUP-sharing means a repeated subterm is one net node, not
+;   two copies.  The (folded)/(folds) probe makes the fold observable: after a
+;   shared redex, the native-fold flag is true and the counter has advanced.
+;
+;   Compare against `-b` (./lin -b this file): the single net plus fold is
+;   cheaper than the same value re-computed twice, because the fold happens
+;   once by construction.
+; ==============================================================================
+(load "std/drivers/simd.lin")      ; native `_op` fold path (works on cpu too)
+; expect => 1
+
+; One shared saturated redex: both copies of (mul 6 7) name the SAME 42-net node.
+(add (mul 6 7) (mul 6 7))
+; expect => 84
+
+; The native fold actually fired for that redex - observable, not just claimed.
+(folded)
+; expect => true
+
+; The fold counter advanced (>=1) thanks to the shared redex above.
+(folds)
+; expect => 3
+
+; A deeper right-nested add folds in one wave: same value, one normal form.
+(add 1 (add 2 (add 3 (add 4 5))))
+; expect => 15
+
+; Returning to the base CPU engine keeps values identical (fold path is shared).
+(set_driver "cpu")
+; expect => 1
+(get_driver)
+; expect => cpu

@@ -1,0 +1,35 @@
+; ==============================================================================
+; interactive_repl.lin  —  A small continuation-passing REPL over stdin
+; ------------------------------------------------------------------------------
+; ;interactive
+;
+; Property:  Lin's core is pure (no effects), so I/O is modelled with
+; continuation-passing callbacks rather than side-effecting statements
+; (`std/io.lin`).  Each primitive hands control to a lambda that receives the
+; result: `io_prompt` prints a prompt then hands the line of input to its
+; callback; `io_print` writes a message then continues to a `next` value;
+; `io_done` terminates the chain.  The program below is a tiny REPL that uses
+; this machinery to read two lines from stdin and echo each back, proving the
+; interaction net can suspend on external input and resume on the callback.
+;
+;   Running interactively (type two lines):
+;     cd /home/falconnor4/github/Lin && ./lin examples/systems-ffi/interactive_repl.lin
+;
+;   Or as non-interactive pipes / one-shot:
+;     printf 'alpha\nbeta\n' | ./lin examples/systems-ffi/interactive_repl.lin
+;     ./lin -e '(load "io.lin") (io_prompt "> " (\x (io_print x (io_done 0))))' < <(echo hi)
+;
+;   This example has NO `; expect` lines: its output depends on what the user
+;   types, so it is reported but not value-checked by examples/run_verifier.sh.
+; ==============================================================================
+(load "std/std.lin")
+
+; Banner, then the first prompt.  io_prompt prints "> " and hands the user's
+; line to (\x ...).  Each "echo: <line>" is produced by io_print, which then
+; queues the next step (here the second prompt) as its continuation.
+(io_print "lin interactive repl: type two lines, then ctrl-d\n"
+  (io_prompt "> "
+    (\a (io_print (str_concat "echo: " a)
+      (io_prompt "> "
+        (\b (io_print (str_concat "echo: " b)
+          (io_print "done.\n" (io_done 0)))))))))

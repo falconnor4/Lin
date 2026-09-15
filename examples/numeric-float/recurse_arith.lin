@@ -1,0 +1,43 @@
+; ==============================================================================
+; recurse_arith.lin  —  recursive integer arithmetic over Scott numerals
+; ------------------------------------------------------------------------------
+; Property:  Lin numbers are *Scott numerals*: a numeral is its own decoder, so
+; recursion over natural numbers is just self-application (O(1) pred / is_zero).
+; The arithmetic etas (add/mul/sub/eq) are pure-Lin Scott recursion that a
+; driver folds to constants whenever operands are concrete — and they stay exact
+; even with no scalar provider.  User-defined recursive functions build on the
+; same primitives with lazy `ifl` guards to keep recursion well-founded.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/numeric-float/recurse_arith.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- Direct arithmetic combinators --------------------------------------------
+(add 40 2)                       ; 40 + 2
+; expect => 42
+(mul 6 7)                        ; 6 * 7
+; expect => 42
+(sub 100 58)                     ; 100 - 58
+; expect => 42
+(sub 10 4)                       ; 10 - 4
+; expect => 6
+
+; --- Equality over numerals ----------------------------------------------------
+(eq 42 42)                       ; reflexive
+; expect => true
+(eq 42 43)                       ; distinct
+; expect => false
+
+; --- A user-defined recursive factorial (mul + pred + is_zero) ----------------
+; fac n = 1 if n = 0 else n * fac(n-1).  5! = 120.
+(define fac (\n (ifl (is_zero n) (\_ 1) (\_ (mul n (fac (pred n)))))))
+(fac 5)
+; expect => 120
+(fac 0)
+; expect => 1
+
+; --- A user-defined recursive sum 1..n built on add ---------------------------
+; sum n = 0 if n = 0 else n + sum(n - 1), so sum 10 = 55.
+(define sum (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sum (pred n)))))))
+(sum 10)                         ; 1 + 2 + ... + 10 = 55
+; expect => 55

@@ -1,0 +1,70 @@
+; ==============================================================================
+; scott_lists.lin  —  The Scott list data model
+; ------------------------------------------------------------------------------
+; Property:  Lin represents inductive data structures as *Scott encodings* —
+; a value chooses among its constructors, so case analysis is just function
+; application (O(1) dispatch).  Lists are `nil` / `cons`, and positional
+; projections (first..fifth) are thin wrappers over the single recursive `nth`.
+;
+; Every top-level expression below reduces to one normal form and prints one
+; `=> <value>` line.  Lin is optimal by construction (interaction nets with
+; Levy-optimal sharing), so sharing through the shared `cons`/`nth` spines is
+; handled by the graph, not by copying.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/pure-functional/scott_lists.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- Positional constructors list1..list5, projected back out ---------------
+(first (list1 42))
+; expect => 42
+(second (list2 10 20))
+; expect => 20
+(third (list3 1 2 3))
+; expect => 3
+(fourth (list4 1 2 3 4))
+; expect => 4
+(fifth (list5 1 2 3 4 5))
+; expect => 5
+
+; --- The generic positional projection `nth` (0-based) and 1-based aliases ---
+(nth 0 (list2 99 88))
+; expect => 99
+(nth 1 (list2 99 88))
+; expect => 88
+(nth1 (list1 7))
+; expect => 7
+(nth2 (list2 7 8))
+; expect => 8
+(nth3 (list3 7 8 9))
+; expect => 9
+
+; --- Structural equality (needs an element-equality function) ----------------
+; `list_eq elem_eq l1 l2` compares lists element-wise.  Applied to two
+; equal/unequal singleton lists (a form the reducer verifies cleanly).
+(list_eq eq (list1 1) (list1 1))
+; expect => true
+(list_eq eq (list1 1) (list1 2))
+; expect => false
+
+; --- Church self-iterating folds, collapsed back to Scott with c_to_scott ---
+; A Church list is a fold `\c \n (c e1 (c e2 n))`; `c_to_scott` materializes it
+; into a Scott `cons/nil` list so we can project elements out again.
+(define c3l (c_cons 10 (c_cons 20 (c_cons 30 c_nil))))
+(c_length c3l)
+; expect => 3
+(first (c_to_scott c3l))
+; expect => 10
+(second (c_to_scott c3l))
+; expect => 20
+
+; `c_map` maps a function and returns a (shared) Church list — project the head.
+(first (c_to_scott (c_map (\x (mul x 10)) c3l)))
+; expect => 100
+
+; `c_reverse` reverses (returns a Church list) — project the first element,
+; which is the last element of the original list.
+(first (c_to_scott (c_reverse (c_cons 65 (c_cons 66 (c_cons 67 c_nil))))))
+; expect => 67
+(second (c_to_scott (c_reverse (c_cons 65 (c_cons 66 (c_cons 67 c_nil))))))
+; expect => 66

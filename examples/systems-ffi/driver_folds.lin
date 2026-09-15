@@ -1,0 +1,47 @@
+; ==============================================================================
+; driver_folds.lin  —  Multiple wavefront reduction drivers on one net
+; ------------------------------------------------------------------------------
+; Property:  Lin's reduction engine is pluggable.  `std/drivers/driver.lin`
+; exposes a base-CPU engine plus native accelerator drivers (here SIMD via
+; `std/drivers/simd.lin`).  Switching drivers changes *how* arithmetic is
+; performed (batching saturated `_ffi` closures into native vector folds)
+; without ever changing the value, keeping the language's referential
+; transparency exact.
+;
+; `(folds)` reports how many saturated closures the active driver folded
+; natively; `(folded)` is true once any driver has done so.  Both are the
+; driver's own optimization bookkeeping — not output values — so they are
+; matched here with `; expect ...` prefixes.
+;
+; Each top-level expression reduces to one normal form and prints one
+; `=> <value>` line (the `set_driver` at simd.lin load prints its own `=> 1`).
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/systems-ffi/driver_folds.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- Activate the wavefront SIMD accelerator driver (returns "=> 1") ---------
+(load "std/drivers/simd.lin")
+; expect => 1
+
+; --- The active (last-added) driver is now the SIMD offloader ---------------
+(get_driver)
+; expect => simd
+
+; --- Reduce a comparison under SIMD: the subtraction folds natively ---------
+(is_zero (sub 42 42))
+; expect => true
+(add 80 1)
+; expect => 81
+
+; --- A driver fold has actually fired, and the fold count is reported -------
+(folded)
+; expect => true
+(folds)
+; expect => ...
+
+; --- Return to the deterministic base CPU engine ----------------------------
+(set_driver "cpu")
+; expect => 1
+(get_driver)
+; expect => cpu

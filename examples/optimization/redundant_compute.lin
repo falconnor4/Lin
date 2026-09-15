@@ -1,0 +1,43 @@
+; ==============================================================================
+; redundant_compute.lin
+; ------------------------------------------------------------------------------
+; Property:  Optimization BY CONSTRUCTION on a pure reusable expression.
+;
+;   Every expression below writes the SAME clever/repeated subterm (e.g. the
+;   `(add 7 5)` in `(mul (add 7 5) (add 7 5))`) more than once.  Because Lin
+;   evaluates terms as interaction nets, the repeated subterm becomes one shared
+;   net node (DUP sharing) and the arithmetic is folded by the shared scalar
+;   table exactly once, so the value is computed once and shared - no separate
+;   optimizer pass is possible or needed.
+;
+;   The fold/sharing is made OBSERVABLE in sharing_folds.lin (native-fold flag
+;   and counter).  Here we focus on the exact values such a net must reduce to.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/optimization/redundant_compute.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; The subterm (add 7 5) is written twice; both sites fold to the SAME shared
+; 12-net and mul sees one 12, not two separate computations.
+(mul (add 7 5) (add 7 5))
+; expect => 144
+
+; Two copies of (mul 6 7) = 42 are shared; add folds them to 84.
+(add (mul 6 7) (mul 6 7))
+; expect => 84
+
+; The nested (add 2 1) is a single shared 3 fed once into pow: 3^3 = 27.
+(pow (add 2 1) 3)
+; expect => 27
+
+; (mul 29 2) is shared inside a (sub ... ) redex: 100 - 58 = 42.
+(sub (add 100 0) (mul 29 2))
+; expect => 42
+
+; A purely additive CPS-shaped spine: right-nested adds all fold in one wave.
+(add 1 (add 2 (add 3 (add 4 5))))
+; expect => 15
+
+; Two-level sharing: (mul 2 3)=6 feeds (mul 6 (sub 10 3)) = 6 * 7 = 42.
+(mul (mul 2 3) (sub 10 3))
+; expect => 42

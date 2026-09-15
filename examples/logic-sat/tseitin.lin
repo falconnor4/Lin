@@ -1,0 +1,48 @@
+; ==============================================================================
+; tseitin.lin  =  Small Tseitin CNF / equisatisfiable encoding
+; ------------------------------------------------------------------------------
+; Property:  Tseitin's transformation converts a circuit into an equisatisfiable
+; 3-CNF by introducing one auxiliary gate variable per wire.  For the gate
+; out = (x AND y) with the output forced true we get four clauses over
+; (t, x, y), t = out:
+;     (t)                       output must hold
+;     (NOT t OR x)              t -> x
+;     (NOT t OR y)              t -> y
+;     (NOT x OR NOT y OR t)     (x AND y) -> t
+; The formula's unique satisfying assignment is (t,x,y) = (T,T,T), shown below
+; by the O(1) certificate checker verify3 and by a full truth table.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/logic-sat/tseitin.lin
+; ==============================================================================
+(load "std/std.lin")
+(load "std/sat.lin")
+
+; --- Tseitin CNF for out = (x AND y), forced out ----------------------------
+(define cnf (\t (\x (\y (sat.and3
+                           t
+                           (sat.and2 (sat.clause2 (bool.not t) x)
+                                     (sat.clause2 (bool.not t) y))
+                           (sat.clause3 (bool.not x) (bool.not y) t))))))
+
+; verify3 evaluates the 3-variable clause set at a candidate (t,x,y):
+(sat.verify3 cnf (pair.pair bool.true (pair.pair bool.true bool.true)))
+; expect => true
+(sat.verify3 cnf (pair.pair bool.true (pair.pair bool.false bool.false)))
+; expect => false
+; Full truth table.  Only (T,T,T) satisfies the CNF:
+(cnf bool.false bool.false bool.false)
+; expect => false
+(cnf bool.false bool.false bool.true)
+; expect => false
+(cnf bool.false bool.true bool.false)
+; expect => false
+(cnf bool.false bool.true bool.true)
+; expect => false
+(cnf bool.true bool.false bool.false)
+; expect => false
+(cnf bool.true bool.false bool.true)
+; expect => false
+(cnf bool.true bool.true bool.false)
+; expect => false
+(cnf bool.true bool.true bool.true)
+; expect => true

@@ -1,0 +1,47 @@
+; ==============================================================================
+; float_math.lin  —  IEEE-754 floating-point primitives & combinators
+; ------------------------------------------------------------------------------
+; Property:  Lin's float layer stores each double as the Scott-spine of its
+; IEEE-754 bit pattern and pushes the real arithmetic through FFI closures
+; (lin_fadd, lin_lerp, ...) to the C math library.  Higher combinators — lerp,
+; clamp/fclamp, deg2rad/rad2deg — are pure Lin defined on top of those FFI
+; primitives, so the math stays exact by delegation and the code stays
+; functional by construction.  Readback renders floats with the C `%g` format.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/numeric-float/float_math.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- Square root, floor, and basic fadd/fmul --------------------------------
+(fsqrt (float "144.0"))          ; sqrt(144) = 12
+; expect => 12
+(ffloor (float "3.7"))           ; floor truncates toward zero -> 3.0
+; expect => 3
+(fadd (float "1.5") (float "2.25"))   ; 1.5 + 2.25
+; expect => 3.75
+(fmul (float "1.5") (float "2.0"))    ; 1.5 * 2.0
+; expect => 3
+
+; --- lerp: linear interpolation a -> b at parameter t ------------------------
+; lerp a b t = a + t*(b - a)  ->  0 + 0.5*(10 - 0) = 5
+(lerp (float "0.0") (float "10.0") (float "0.5"))
+; expect => 5
+(lerp (float "0.0") (float "10.0") (float "1.0"))
+; expect => 10
+
+; --- clamp (integer) and fclamp (floating-point) -----------------------------
+; math.clamp is integer-based: (clamp lo hi x).
+(clamp 0 10 99)                  ; clamp an integer into [0,10]
+; expect => 10
+(clamp 0 10 (sub 0 5))          ; clamp -5 (written (sub 0 5)) into [0,10]
+; expect => 0
+; fclamp is the float-domain clamp: (fclamp lo hi x).
+(fclamp (float "0.0") (float "1.0") (float "5.0"))
+; expect => 1
+
+; --- deg2rad / rad2deg --------------------------------------------------------
+; 180 degrees is exactly pi (3.14159...).
+(deg2rad (float "180.0"))
+; expect => 3.14159...
+(rad2deg pi)                     ; pi radians is exactly 180 degrees.
+; expect => 180

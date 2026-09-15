@@ -1,0 +1,46 @@
+; ==============================================================================
+; curry_howard.lin  —  Constructive proof terms (Curry–Howard correspondence)
+; ------------------------------------------------------------------------------
+; Property:  every lambda term is a proof of its type, and reduction of a proof
+; term is proof normalization.  Modus Ponens is plain function application
+; (\f (\a (f a))): a proof of A->B together with a proof of A yields a proof of
+; B.  De Morgan's law  NOT(A OR B)  ==  (NOT A) AND (NOT B)  holds
+; constructively and is witnessed by a boolean term that simplifies to true on
+; every row, so its existence is the proof.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/logic-sat/curry_howard.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- Modus Ponens:  (A -> B)  A  |-  B -------------------------------
+; The proof term is just function application; the "premises" are the two args.
+(define modus_ponens (\f (\a (f a))))
+; From (n -> n*2) and 4, infer 8:
+(modus_ponens (\n (mul n 2)) 4)
+; expect => 8
+; From false, and false -> true, infer true:
+(modus_ponens (\b bool.true) bool.false)
+; expect => true
+
+; --- De Morgan (constructive direction), as a boolean proof term -------
+; Show NOT(A OR B) == (NOT A) AND (NOT B) reduces to true on all four rows.
+(define lhs (\A (\B (bool.not (bool.or A B)))))
+(define rhs (\A (\B (bool.and (bool.not A) (bool.not B)))))
+; Equality as a conjunction of two material implications (iff):
+(define dm_eq (\A (\B (bool.and
+                         (bool.or (bool.not (lhs A B)) (rhs A B))
+                         (bool.or (bool.not (rhs A B)) (lhs A B))))))
+(dm_eq bool.true bool.true)      ; A=T B=T
+; expect => true
+(dm_eq bool.true bool.false)     ; A=T B=F
+; expect => true
+(dm_eq bool.false bool.true)     ; A=F B=T
+; expect => true
+(dm_eq bool.false bool.false)    ; A=F B=F
+; expect => true
+
+; A concrete instance: NOT(F OR T) evaluates to the same as (NOT F) AND (NOT T):
+(bool.not (bool.or bool.false bool.true))
+; expect => false
+(bool.and (bool.not bool.false) (bool.not bool.true))
+; expect => false

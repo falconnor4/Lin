@@ -1,0 +1,53 @@
+; ==============================================================================
+; ffi_basics.lin  —  Calling native C from pure lambda calculus
+; ------------------------------------------------------------------------------
+; Property:  Lin is a purely functional language (lambda terms reduced as
+; interaction nets), yet ships a Foreign Function Interface (`std/ffi.lin`)
+; that reaches directly into libc and dlopen'd shared libraries.  A value is
+; still a single normal form — calling out does not change the model, it just
+; lets a top-level expression *be* the result of a C call.
+;
+; Bindings used:
+;   (puts s)            -> write string + newline to stdout, return chars written
+;   (getenv name)       -> return the environment variable's value (or "")
+;   (ccall1 fn arg)     -> call a unary C function
+;   (ccall0 fn)         -> call a nullary C function
+;   (load_lib lib)      -> dlopen a shared library, return its handle pointer
+;   (system cmd)        -> run a shell command, print its stdout, return exit code
+;
+; Values returned by the runtime (env var contents, a PID, a dlopen handle) are
+; not fixed constants, so those pass with `; expect ...` prefix matches.  Pure
+; deterministic calls (`atoi`, `puts` byte counts, `system` exit code) are
+; matched exactly.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/systems-ffi/ffi_basics.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- puts: one string, two output lines (the text and its byte count) --------
+(puts "hello from lin ffi")
+; expect => hello from lin ffi
+; expect 19
+
+; --- getenv: environment variable lookup (value varies per machine) ----------
+(getenv "PATH")
+; expect => /...
+
+; --- ccall1: unary C function, here libc atoi (deterministic) ----------------
+(ccall1 "atoi" "42")
+; expect => 42
+(ccall1 "atoi" "-7")
+; expect => -7
+
+; --- ccall0: nullary C function, libc getpid (varies per process) ------------
+(ccall0 "getpid")
+; expect ...
+
+; --- load_lib: dlopen a shared library, returns an opaque handle -------------
+(load_lib "libm.so.6")
+; expect ...
+
+; --- system: run a command, echo its stdout, then exit code ------------------
+(system "echo lin-shell-ok")
+; expect => lin-shell-ok
+; expect 0

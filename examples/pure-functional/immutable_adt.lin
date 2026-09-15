@@ -1,0 +1,68 @@
+; ==============================================================================
+; immutable_adt.lin  —  User ADTs & the Scott tree datatype, all immutable
+; ------------------------------------------------------------------------------
+; Property:  Lin encodes algebraic data types as Scott sums — constructors are
+; lambdas that dispatch into the `match` on the chosen variant, so `match` is
+; pure function application with O(1) case dispatch.  Values are immutable:
+; "updating" a structure builds a new one and shares the untouched subtrees
+; through the interaction net's DUP rewrite (no mutation, no copying).
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/pure-functional/immutable_adt.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- A small user datatype via `datatype` + `match` --------------------------
+(datatype Color (red) (green) (blue))
+(match red (red 1) (green 2) (blue 3))
+; expect => 1
+(match green (red 1) (green 2) (blue 3))
+; expect => 2
+(match blue (red 1) (green 2) (blue 3))
+; expect => 3
+
+; A derived, *pure* computation over the ADT: `area` only reads; the value is
+; unchanged before and after.
+(datatype Shape (pt) (circle r) (rect w h))
+(define! area (Shape -> num) (\s (match s (pt 0) ((circle r) (mul r r)) ((rect w h) (mul w h)))))
+(area (circle 5))
+; expect => 25
+(area (rect 3 4))
+; expect => 12
+(area pt)
+; expect => 0
+
+; The same value is preserved across uses — Shape is immutable.
+(define s0 (circle 6))
+(add (area s0) (area s0))
+; expect => 72
+
+; --- The std tree module: Scott leaf/node with O(1) destructors --------------
+; Binary tree 5(3)(8(·)(13)); navigators give left/right children directly.
+(define root (node 5 (node 3 leaf leaf) (node 8 leaf (node 13 leaf leaf))))
+(tree_val root)
+; expect => 5
+(tree_val (tree_left root))
+; expect => 3
+(tree_val (tree_right root))
+; expect => 8
+(tree_val (tree_right (tree_right root)))
+; expect => 13
+(is_leaf (tree_left (tree_left root)))
+; expect => true
+(tree_has_right (tree_right root))
+; expect => true
+
+; A fold computed from the destructors — still no mutation; the source tree is
+; untouched and re-usable.
+(define subtree_sum
+  (\t (add (tree_val t)
+           (add (if (tree_has_left t) (tree_val (tree_left t)) 0)
+                (if (tree_has_right t) (tree_val (tree_right t)) 0)))))
+(subtree_sum root)
+; expect => 16
+(subtree_sum (tree_right root))
+; expect => 21
+(add (tree_val root) (tree_val (tree_left root)))
+; expect => 8
+(add (tree_val root) (tree_val (tree_right (tree_right root))))
+; expect => 18

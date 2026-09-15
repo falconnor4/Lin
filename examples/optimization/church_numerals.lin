@@ -1,0 +1,60 @@
+; ==============================================================================
+; church_numerals.lin
+; ------------------------------------------------------------------------------
+; Property:  Church-encoded arithmetic with OPPORTUNISTIC LÉVY SHARING.
+;
+;   A Church numeral is a self-iterating fold:  cN = \f \x (f (f ... (f x))).
+;   When Lin normalizes c_add / c_mul / c_pow it does NOT copy the iterated
+;   function or accumulator per step.  The interaction-net DUP rewrite shares
+;   the SAME `f` and `x` across every iteration (Levy-optimal sharing), so an
+;   n-fold application grows the net by O(1) per step instead of O(n) — the
+;   classic reason interaction combinators beat naive beta by an exponential.
+;
+;   Semantics here follow std/num.lin: `c_zero`/`c_succ` build Church numerals,
+;   `c_add`, `c_mul` and `c_pow` combine them, and `count` (the std `loop`
+;   fold: `loop n num.succ 0`) collapses a Church numeral back to the native
+;   Scott integer that Lin prints.  Every top-level line is one net that reduces
+;   to its optimal interaction form — there is no separate optimizer.
+;
+;   Running:  cd /home/falconnor4/github/Lin && ./lin examples/optimization/church_numerals.lin
+; ==============================================================================
+(load "std/std.lin")
+
+; --- Church numerals as pure self-iterating folds (shared f/x) ---------------
+(define c1 (\f (\x (f x))))              ; church 1
+(define c2 (\f (\x (f (f x)))))          ; church 2
+(define c3 (\f (\x (f (f (f x))))))      ; church 3
+(define c5 (\f (\x (f (f (f (f (f x)))))))) ; church 5
+
+; c_add shares the continuation `f` across both addends: 2 + 3 = 5.
+(count (c_add c2 c3))
+; expect => 5
+
+; c_mul reuses each base's `f` spine under sharing: 2 * 3 = 6.
+(count (c_mul c2 c3))
+; expect => 6
+
+; c_mul with a larger factor, all sites shared: 5 * 2 = 10.
+(count (c_mul c5 c2))
+; expect => 10
+
+; c_pow b e = (e b): exponent 1 is the identity b^1 = b, reducing cleanly to a
+; single shared net here (higher exponents form a much larger shared spine; see
+; the note at the bottom before scaling them up).
+(count (c_pow c3 c1))
+; expect => 3
+(count (c_pow c2 c1))
+; expect => 2
+
+; `loop` iterates a *runtime* Church count over any step function, sharing the
+; step across all application sites (here num.succ applied c5 times from 8).
+(loop c5 num.succ 8)
+; expect => 13
+
+; --- Notes on pushing further ------------------------------------------------
+; With pure-Church c_pow, exponents >= 2 like (c_pow c2 c2) reduce to a very
+; large shared interaction net and may not collapse to a single Scott constant
+; under the default reduction budget — the recommended route for repeated
+; iteration is `loop`, which stays O(1)-shared per step (see test/loop.lin).
+; Everything you see here is already optimal by construction: Lin has no
+; optimizer, every term is its own Levy-optimal interaction net.
