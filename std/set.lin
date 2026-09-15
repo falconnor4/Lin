@@ -9,41 +9,51 @@
 (load "tree.lin")
 
 (namespace set)
-(define empty leaf)
-(define is_empty is_leaf)
-(define singleton (\x (((node x) leaf) leaf)))
 
-(define insert_left
+(define empty_set leaf)
+(define is_empty_set is_leaf)
+(define set_singleton (\x (((node x) leaf) leaf)))
+
+; --- Internal helpers: rebuild a node around one new child (skipped by export) ---
+(define _left_rebuild
+  (\s (\nl
+    (((node (tree_val s)) nl) (tree_right s)))))
+
+(define _right_rebuild
+  (\s (\nr
+    (((node (tree_val s)) (tree_left s)) nr))))
+
+(define set_insert_left
   (\x (\s
     (if (is_leaf (tree_left s))
-      (((node (tree_val s)) (singleton x)) (tree_right s))
+      (_left_rebuild s (set_singleton x))
       (if (eq x (tree_val_left s))
         s
         (if (lt x (tree_val_left s))
-          (((node (tree_val s)) (((node (tree_val_left s)) (singleton x)) (tree_right (tree_left s)))) (tree_right s))
-          (((node (tree_val s)) (((node (tree_val_left s)) (tree_left (tree_left s))) (singleton x))) (tree_right s))))))))
+          (_left_rebuild s (((node (tree_val_left s)) (set_singleton x)) (tree_right (tree_left s))))
+          (_left_rebuild s (((node (tree_val_left s)) (tree_left (tree_left s))) (set_singleton x)))))))))
 
-(define insert_right
+(define set_insert_right
   (\x (\s
     (if (is_leaf (tree_right s))
-      (((node (tree_val s)) (tree_left s)) (singleton x))
+      (_right_rebuild s (set_singleton x))
       (if (eq x (tree_val_right s))
         s
         (if (lt x (tree_val_right s))
-          (((node (tree_val s)) (tree_left s)) (((node (tree_val_right s)) (singleton x)) (tree_right (tree_right s))))
-          (((node (tree_val s)) (tree_left s)) (((node (tree_val_right s)) (tree_left (tree_right s))) (singleton x)))))))))
+          (_right_rebuild s (((node (tree_val_right s)) (set_singleton x)) (tree_right (tree_right s))))
+          (_right_rebuild s (((node (tree_val_right s)) (tree_left (tree_right s))) (set_singleton x)))))))))
 
-(define insert
+(define set_insert
   (\x (\s
     (if (is_leaf s)
-      (singleton x)
+      (set_singleton x)
       (if (eq x (tree_val s))
         s
         (if (lt x (tree_val s))
-          (insert_left x s)
-          (insert_right x s)))))))
+          (set_insert_left x s)
+          (set_insert_right x s)))))))
 
-(define lookup_sub
+(define set_lookup_sub
   (\x (\s
     (if (is_leaf s)
       false
@@ -57,23 +67,15 @@
             (eq x (tree_val_right s))
             false)))))))
 
-(define member
+(define set_member
   (\x (\s
     (if (is_leaf s)
       false
       (if (eq x (tree_val s))
         true
         (if (lt x (tree_val s))
-          (lookup_sub x (tree_left s))
-          (lookup_sub x (tree_right s))))))))
+          (set_lookup_sub x (tree_left s))
+          (set_lookup_sub x (tree_right s))))))))
 
 (namespace _)
-(open set)
-(define empty_set set.empty)
-(define is_empty_set set.is_empty)
-(define set_singleton set.singleton)
-(define set_insert set.insert)
-(define set_insert_left set.insert_left)
-(define set_insert_right set.insert_right)
-(define set_lookup_sub set.lookup_sub)
-(define set_member set.member)
+(export set)

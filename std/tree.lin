@@ -3,22 +3,38 @@
 ; ==============================================================================
 ; Combines Scott-encoded binary trees (for O(1) left/right destructors)
 ; and Church trees (for pure self-iterating structural folds).
+;
+; Every public member carries a globally-safe name so `(export tree)` re-exports
+; exactly the consumer API (leaf/node/is_leaf/is_node, the tree_val/tree_left/
+; tree_has_*/tree_val_* navigators, and the c_* Church folds) without leaking the
+; generic internal accessor names val/left/right into root scope, where they
+; would collide with other std modules (e.g. either's left/right).  Those
+; accessors are `_`-prefixed and skipped by the export.
 ; ==============================================================================
 
 (load "bool.lin")
 
 (namespace tree)
+
+; --- Scott tree core ---
 (define! leaf a (\l (\n l)))
 (define! node (a -> b -> c -> d) (\v (\left (\right (\l (\n (((n v) left) right)))))))
 (define! is_leaf (a -> bool) (\t ((t bool.true) (\_ (\_ (\_ bool.false))))))
 (define! is_node (a -> bool) (\t ((t bool.false) (\_ (\_ (\_ bool.true))))))
-(define! val (a -> b) (\t ((t 0) (\v (\_ (\_ v))))))
-(define! left (a -> b) (\t ((t tree.leaf) (\_ (\left (\_ left))))))
-(define! right (a -> b) (\t ((t tree.leaf) (\_ (\_ (\right right))))))
-(define has_left (\t (tree.is_node (tree.left t))))
-(define has_right (\t (tree.is_node (tree.right t))))
-(define val_left (\t (tree.val (tree.left t))))
-(define val_right (\t (tree.val (tree.right t))))
+
+; --- Internal accessors (private, `_`-prefixed; skipped by export) ---
+(define! _val (a -> b) (\t ((t 0) (\v (\_ (\_ v))))))
+(define! _left (a -> b) (\t ((t tree.leaf) (\_ (\l (\_ l))))))
+(define! _right (a -> b) (\t ((t tree.leaf) (\_ (\_ (\r r))))))
+
+; --- Public navigators (globally-safe tree_* names) ---
+(define tree_val tree._val)
+(define tree_left tree._left)
+(define tree_right tree._right)
+(define tree_has_left (\t (tree.is_node (tree._left t))))
+(define tree_has_right (\t (tree.is_node (tree._right t))))
+(define tree_val_left (\t (tree._val (tree._left t))))
+(define tree_val_right (\t (tree._val (tree._right t))))
 
 ; --- Church Self-Iterating Trees & Folds ---
 (define c_leaf (\l (\n l)))
@@ -26,18 +42,4 @@
 (define c_fold (\fl (\fn (\t ((t fl) fn)))))
 
 (namespace _)
-(open tree)
-(define leaf tree.leaf)
-(define node tree.node)
-(define is_leaf tree.is_leaf)
-(define is_node tree.is_node)
-(define tree_val tree.val)
-(define tree_left tree.left)
-(define tree_right tree.right)
-(define tree_has_left tree.has_left)
-(define tree_has_right tree.has_right)
-(define tree_val_left tree.val_left)
-(define tree_val_right tree.val_right)
-(define c_leaf tree.c_leaf)
-(define c_node tree.c_node)
-(define c_fold tree.c_fold)
+(export tree)

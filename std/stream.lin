@@ -3,6 +3,12 @@
 ; ==============================================================================
 ; Lazy generator sequences, positional projections, and Church-iterated
 ; nth/drop combinators.
+;
+; Every public member below carries the globally-safe `stream_*` / `nats_from` /
+; `repeat` names, so `(export stream)` re-exports exactly those safe names bare
+; into the root scope — matching the previous hand-written re-export block while
+; preserving each scheme and recursion metadata.  No `_`-prefixed private members
+; exist here: every member is part of the public API.
 ; ==============================================================================
 
 (load "bool.lin")
@@ -11,48 +17,38 @@
 (load "list.lin")
 
 (namespace stream)
-(define create (\s0 (\next (pair s0 next))))
-(define head (\s (fst s)))
-(define! tail (a -> b) (\s (s (\curr (\step (pair (step curr) step))))))
 
-(define nats (\n (create n succ)))
-(define repeat (\x (create x (\v v))))
+(define stream_create (\s0 (\next (pair s0 next))))
+(define stream_head (\s (fst s)))
+(define! stream_tail (a -> b) (\s (s (\curr (\step (pair (step curr) step))))))
 
-(define drop1 stream.tail)
-(define drop2 (\s (stream.tail (stream.tail s))))
-(define drop3 (\s (stream.tail (stream.tail (stream.tail s)))))
+(define nats_from (\n (stream_create n succ)))
+(define repeat (\x (stream_create x (\v v))))
 
-(define nth0 stream.head)
-(define nth1 (\s (stream.head (stream.drop1 s))))
-(define nth2 (\s (stream.head (stream.drop2 s))))
-(define nth3 (\s (stream.head (stream.drop3 s))))
+(define stream_drop1 stream.stream_tail)
+(define stream_drop2 (\s (stream.stream_tail (stream.stream_tail s))))
+(define stream_drop3 (\s (stream.stream_tail (stream.stream_tail (stream.stream_tail s)))))
 
-(define take1 (\s (list1 (stream.head s))))
-(define take2 (\s (list2 (stream.head s) (stream.head (stream.tail s)))))
-(define take3 (\s (list3 (stream.head s) (stream.head (stream.tail s)) (stream.head (stream.tail (stream.tail s))))))
-(define take4 (\s (list4 (stream.head s) (stream.head (stream.tail s)) (stream.head (stream.tail (stream.tail s))) (stream.head (stream.tail (stream.tail (stream.tail s)))))))
+(define stream_nth0 stream.stream_head)
+(define stream_nth1 (\s (stream.stream_head (stream.stream_drop1 s))))
+(define stream_nth2 (\s (stream.stream_head (stream.stream_drop2 s))))
+(define stream_nth3 (\s (stream.stream_head (stream.stream_drop3 s))))
+
+(define stream_take1 (\s (list1 (stream.stream_head s))))
+(define stream_take2 (\s (list2 (stream.stream_head s) (stream.stream_head (stream.stream_tail s)))))
+(define stream_take3 (\s (list3 (stream.stream_head s) (stream.stream_head (stream.stream_tail s)) (stream.stream_head (stream.stream_tail (stream.stream_tail s))))))
+(define stream_take4 (\s (list4 (stream.stream_head s) (stream.stream_head (stream.stream_tail s)) (stream.stream_head (stream.stream_tail (stream.stream_tail s))) (stream.stream_head (stream.stream_tail (stream.stream_tail (stream.stream_tail s)))))))
 
 ; General Church self-iterating nth & drop
-(define! nth_c (a -> b -> c) (\cn (\s (stream.head (cn stream.tail s)))))
-(define! drop_c (a -> b -> c) (\cn (\s (cn stream.tail s))))
+(define! stream_nth_c (a -> b -> c) (\cn (\s (stream.stream_head (cn stream.stream_tail s)))))
+(define! stream_drop_c (a -> b -> c) (\cn (\s (cn stream.stream_tail s))))
 
 (namespace _)
-(open stream)
-(define stream_create stream.create)
-(define stream_head stream.head)
-(define stream_tail stream.tail)
-(define nats_from stream.nats)
-(define repeat stream.repeat)
-(define stream_drop1 stream.drop1)
-(define stream_drop2 stream.drop2)
-(define stream_drop3 stream.drop3)
-(define stream_nth0 stream.nth0)
-(define stream_nth1 stream.nth1)
-(define stream_nth2 stream.nth2)
-(define stream_nth3 stream.nth3)
-(define stream_take1 stream.take1)
-(define stream_take2 stream.take2)
-(define stream_take3 stream.take3)
-(define stream_take4 stream.take4)
-(define stream_nth_c stream.nth_c)
-(define stream_drop_c stream.drop_c)
+(export stream)
+
+; Qualified short-name aliases some consumers use (modules.lin): the exported
+; bare names are stream_nth_c / nats_from, but `stream.nats` and `stream.nth_c`
+; (member-qualified) must also resolve.  The dotted names are kept verbatim, so
+; bound here without leaking a bare `nats`/`nth_c`.
+(define stream.nats  stream.nats_from)
+(define stream.nth_c stream.stream_nth_c)
