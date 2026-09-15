@@ -349,13 +349,32 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
   if (t1 > t2) { int t = t1; t1 = t2; t2 = t; }
   if (t1 == LAM && t2 == APP) {
-    /* `_ffi` closures must NOT be claimed: the base engine folds a saturated
-       `_ffi` LAM (lin_fold_ffi) into a concrete value BEFORE beta; if the GPU
-       claimed this LAM x APP it would beta-reduce on-device and skip the fold,
-       leaving the arithmetic window/`_ffi` residual (e.g. `add 18 24` under the
-       GPU driver).  Hand it to the base engine (which folds) instead. */
+    /* The GPU kernel's beta (std/drivers/reduce.comp) ONLY rewires wires — it
+       does not fold.  So a LAM x APP redex whose head OR whose applied argument
+       is a foldable saturated `_op`/`_ffi` closure must NOT be claimed: the base
+       engine folds those (lin_fold_op / lin_fold_ffi, and the eager argument
+       `fold_arg` inside beta) into a concrete value, and claiming such a redex
+       on-device would beta-reduce instead, leaving a different net than the
+       host — the per-wave differential mismatch observed under gpu.  Hand them
+       to the base engine (which folds). */
     const char *lnm = p1.node < n->nn ? (n->name[p1.node] ? n->name[p1.node] : "") : "";
-    if (ctor_tag(lnm) == DT_FFI) return 0;
+    int c = ctor_tag(lnm);
+    if (c == DT_FFI || c == DT_OP) return 0;            /* head is a foldable closure */
+    /* argument `aa` = APP port 2; a foldable closure argument is eagerly folded
+       inside the host's beta (fold_arg), which the kernel cannot replicate */
+    Port aa = WIRE(n, ((Port){p2.node, 2}));
+    if (aa.node >= 0 && aa.node < n->nn && !n->dead[aa.node]) {
+      if (n->tag[aa.node] == LAM) {
+        int ac = n->name[aa.node] ? ctor_tag(n->name[aa.node]) : -1;
+        if (ac == DT_FFI || ac == DT_OP) return 0;
+      } else if (n->tag[aa.node] == APP) {
+        Port h = WIRE(n, ((Port){aa.node, 0}));
+        if (h.node >= 0 && h.node < n->nn && !n->dead[h.node] && n->tag[h.node] == LAM) {
+          int hc = n->name[h.node] ? ctor_tag(n->name[h.node]) : -1;
+          if (hc == DT_OP || hc == DT_FFI) return 0;
+        }
+      }
+    }
     return 1;                                                 /* beta */
   }
   if (t1 == DUP && t2 == DUP)
@@ -385,9 +404,17 @@ static int gpu_reduce(Net *n, Port *redexes, int nred, long limit, int *changed)
     return nred;
   }
 
-  /* sector-disjoint filter: on-GPU subset vs host-fallback subset */
+  /* sector-disjoint filter: on-GPU subset vs the rest.  Crucially, the net is
+     NOT mutated while collecting the GPU slice: a fallback redex's net_interact
+     rewires nodes, and if it shared nodes with a to-dispatch redex the GPU would
+     fold a redex whose wire structure no longer matched the claim-time validity
+     (and the differential replay) — the per-wave mismatch.  Collect the
+     fallback redexes here and re-queue them AFTER the GPU dispatch+commit, so
+     the main pipeline (with its `_op`/`_ffi` deferral + blocked-drain) resolves
+     them. */
   uint32_t *g = (uint32_t *)g_redex.map;
   int ng = 0;
+  Port *fb = NULL; int nfb = 0, fbcap = 0;
   for (int i = 0; i < nred; i++) {
     Port p1 = redexes[i*2], p2 = redexes[i*2+1];
     int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
@@ -403,9 +430,8 @@ static int gpu_reduce(Net *n, Port *redexes, int nred, long limit, int *changed)
       g[ng*2+1] = ((uint32_t)(p2.node & 0x3fffffff)) | (p2.port << 30);
       ng++;
     } else {
-      /* host fallback for this redex */
-      if (net_interact(n, p1, p2)) (*changed)++;
-      n->steps++;
+      if (nfb + 2 > fbcap) { fbcap = fbcap ? fbcap * 2 : 128; Port *t = realloc(fb, (size_t)fbcap * sizeof(Port)); if (!t) { free(fb); fb = NULL; nfb = 0; goto gpu_done; } fb = t; }
+      fb[nfb++] = p1; fb[nfb++] = p2;
     }
   }
 
@@ -462,6 +488,25 @@ static int gpu_reduce(Net *n, Port *redexes, int nred, long limit, int *changed)
     *changed += ng;
     n->steps += ng;
   }
+
+gpu_done:
+  /* Host-fallback the sector-conflicted redexes on the (GPU-committed) net.
+     net_interact parks `_op`/`_ffi` closures with non-concrete operands on
+     n->blocked; net_reduce drains those only at a wave boundary, so we must
+     drain them HERE or a closure in a fallback redex is stranded (the
+     composed-`if` residual `(if (geq 1 (min 4 5)) 1 8) -> ((_ 1) 8)` under gpu).
+     */
+  for (int i = 0; i + 1 < nfb; i += 2) {
+    if (!n->dead[fb[i].node] && !n->dead[fb[i+1].node] && net_interact(n, fb[i], fb[i+1])) (*changed)++;
+    n->steps++;
+  }
+  for (int i = 0; i + 1 < n->nblocked; i += 2) {
+    Port a = n->blocked[i], b = n->blocked[i + 1];
+    if (a.node < 0 || a.node >= n->nn || b.node < 0 || b.node >= n->nn || n->dead[a.node] || n->dead[b.node]) continue;
+    lin_enqueue(n, a, b);
+  }
+  n->nblocked = 0;
+  free(fb);
 
   /* Rebuild the active list from the committed net (mirrors net_reduce's gc
      tail): enqueue every principal port directed at a higher-indexed node. */

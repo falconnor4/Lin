@@ -96,6 +96,77 @@ one canonical, driver-agnostic selftest, not by per-driver test files:
   equality everywhere; `selftest.h` proves per-wave device-redux bit-exactness
   where a device actually ran.
 
+## SIMD / GPU acceleration vs. the current engine
+
+Both drivers predate the "arithmetic is pure Lin" migration, when scalar ops
+were `_ffi`/`ccall2` closures the drivers folded natively.  After the migration
+(`std/num.lin` `_op` closures, base-folded by `lin_fold_op`), each was left
+with nothing of its old class to fold: SIMD's DT_FFI-only claim never matched
+the `_op` closures (a silent no-op), and the GPU's beta kernel (which only
+rewires wires) mishandled the `_op`/`_ffi` closures it claimed (a bit-exactness
+mismatch plus segfault on a real device).  Their adaptation to the current
+engine:
+
+- **SIMD folds `_op` closures.**  `std/drivers/simd.c` now claims saturated
+  pure-Lin `_op` redexes (DT_OP) alongside DT_FFI.  `claim` gates on an
+  **operand-readiness predicate** (`simd_op_ready`: every operand concrete and
+  the shared `lin_arith_scalar` table claims the op) so a driver never strands a
+  claimed-but-unfoldable redex (a claimed redex is removed from the wave; the
+  base engine DEFERS non-concrete operands, a driver cannot).  `reduce` folds
+  via the shared `net_spine_args` decoder + `lin_arith_scalar` table, rewiring
+  exactly like `lin_fold_op`.  The float `_ffi` arm is preserved but
+  near-vestigial: floats already fold at readback in a couple of steps, so there
+  is no reduction-time win to capture.
+  *Fold-accounting note:* SIMD's native-fold count matches, not exceeds, the
+  base engine's on the same programs (e.g. 71 vs 71 on `fact 6`), because the
+  base's `lin_fold_op` already folds every saturated `_op` closure in O(1) via
+  the one shared scalar table.  SIMD is a *correct* offload point — the fold
+  fires and is bit-exact — but a larger raw speedup requires actually
+  vectorizing a batch of independent `_op` redexes across `SIMD_WIDTH` lanes
+  (more throughput, same fold count) rather than the scalar fold the base
+  already performs.
+- **GPU beta must not claim foldable closures.**  The GPU kernel's beta only
+  rewires wires; it does not fold.  So `gpu_claim` rejects any LAM x APP whose
+  head **or** applied argument is a saturated `_op`/`_ffi` closure — the base
+  engine folds those (via `lin_fold_op`/`lin_fold_ffi` and the eager `fold_arg`
+  inside beta).  Claiming them would beta-reduce on-device instead of folding,
+  the exact per-wave differential mismatch observed.
+- **GPU wave dispatch is two-phase.**  `gpu_reduce` interleaved host-fallback
+  `net_interact` calls with GPU-slice collection, mutating the net so later
+  reads saw stale wire structure and the differential replay diverged (a
+  concurrency bug).  It now (1) collects the sector-disjoint GPU slice and the
+  host-fallback list **without mutating the net**, (2) dispatches the GPU, (3)
+  commits, then (4) host-falls-back.  On real AMD hardware `LIN_GPU_SELFTEST=1`
+  the dispatched waves are **bit-exact OK** (previously a mismatch within two
+  waves and a segfault).
+- **GPU fallback must not strand deferred `_op`.**  GPU `gpu_reduce`'s
+  host-fallback used `net_interact` directly, which parks `_op`/`_ffi` closures
+  with non-concrete operands on `n->blocked`; only `net_reduce`'s main loop
+  drains that, so a closure in a fallback redex was stranded (the composed-`if`
+  probe `(if (geq 1 (min 4 5)) 1 8) -> ((_ 1) 8)` under gpu).  `gpu_reduce` now
+  drains `n->blocked` after the fallback, so deferred closures are re-queued and
+  resolve; the composed probe reduces to `8` and every dispatched wave stays
+  bit-exact.
+- **`run_ffi` guards mixed-type arguments.**  The core's `run_ffi` strcmp'd a
+  `c_args[i]` as a char* even when the arg decoded as an INT/BOOL/FLOAT;
+  a `_ffi` closure under an accelerator read back with a mismatched arg type
+  (e.g. an int where a string was expected) segfaulted in `__strcmp`.  The
+  string-taking FFIs (`lin_streq`, `puts`, `dlopen`, `getenv`,
+  `lin_parse_float`) now guard on the argument kind, so a malformed closure
+  yields a clean no-value instead of a crash.  This is a core robustness fix
+  that all drivers benefit from and does not regress the host suite.
+- **GPU verified bit-exact on a real device.**  With a correct std (`LIN_STD_DIR`
+  set to a working std tree), the full canonical corpus reduces under GPU with
+  **all 23 value probes matching the CPU golden and every dispatched wave
+  `[GPU selftest] OK` (1602/1602)**, no crash (exit 0).  `test/driver_selftest.sh`
+  reports `PASS gpu (23 probes equal; N native folds)` on the device.  The one
+  earlier "long-run divergence" was **not a GPU bug but the flake's installed std
+  failing to load** (`num._padd` unbound — a pre-existing std/load-path defect
+  that also affects a pure-CPU run of `./result/bin/lin` with its store std);
+  pointing `LIN_STD_DIR` at a working std eliminates it.  That flake-std load
+  defect is tracked separately; with it fixed, the GPU passes the canonical
+  selftest end-to-end.
+
 ## Arithmetic: one shared table, any reduction strategy
 
 There is **exactly one** place that knows what `lin_add`, `lin_eq`,

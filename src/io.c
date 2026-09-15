@@ -302,12 +302,23 @@ static Val run_ffi(Net *n, Port p) {
   }
   if (!strcmp(fn, "lin_folds")) { v.kind = 1; v.iv = lin_fold_total(); return v; }
   B3("lin_folded", lin_fold_total() > 0);
-  if (!strcmp(fn, "lin_parse_float")) { double d = strtod(argc > 0 ? (char*)c_args[0] : "0", NULL); long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
+  /* String-typed-arg only: np closure carrying an INT/BOOL/FLOAT where a
+     string is expected (e.g. a residual under an accelerator driver) must NOT
+     strcmp()/strtod()/strlen/dlsym-call through an int-garbage pointer — that
+     segfaults.  Guard each on its argument kind: a known string FFI with a
+     non-string arg yields a clean no-value instead of a crash. */
+  if (fargs[0].kind != 2 && argc > 0 &&
+      (!strcmp(fn, "lin_parse_float") || !strcmp(fn, "lin_streq") ||
+       !strcmp(fn, "dlopen") || !strcmp(fn, "puts") || !strcmp(fn, "getenv")))
+    return v;
+  if (fargs[0].kind == 2) {
+    if (!strcmp(fn, "lin_parse_float") && argc > 0) { double d = strtod((char *)c_args[0], NULL); long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
+    if (!strcmp(fn, "lin_streq") && argc >= 2 && fargs[1].kind == 2) { v.kind = 3; v.iv = !strcmp((char *)c_args[0], (char *)c_args[1]); return v; }
+    if (!strcmp(fn, "dlopen") && argc > 0) { v.kind = 1; v.iv = (long)(intptr_t)dlopen((char *)c_args[0], RTLD_NOW | RTLD_GLOBAL); return v; }
+    if (!strcmp(fn, "puts") && argc > 0) { v.kind = 1; v.iv = puts((char *)c_args[0]); return v; }
+    if (!strcmp(fn, "getenv") && argc > 0) { char *ev = getenv((char *)c_args[0]); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", ev ? ev : "(null)"); return v; }
+  }
   if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
-  B3("lin_streq", argc >= 2 && !strcmp((char *)c_args[0], (char *)c_args[1]));
-  B1("dlopen", (long)(intptr_t)dlopen(argc > 0 ? (char *)c_args[0] : NULL, RTLD_NOW | RTLD_GLOBAL));
-  B1("puts", puts(argc > 0 ? (char *)c_args[0] : ""));
-  if (!strcmp(fn, "getenv")) { char *ev = getenv(argc > 0 ? (char *)c_args[0] : ""); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", ev ? ev : "(null)"); return v; }
   fflush(stdout); void *sym = dlsym(RTLD_DEFAULT, fn);
   if (!sym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
   long (*f)() = (long (*)())sym;
