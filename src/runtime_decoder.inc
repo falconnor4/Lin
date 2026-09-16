@@ -20,6 +20,8 @@ static int dec_arg(Net *n, Port p, Val *v) {
   N = n;
   p = skip_dup(n, p);
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
+  long bv;
+  if (num_box_value(n, p.node, &bv)) { v->iv = bv; v->kind = 1; return 1; } /* O(1) compact numeral box */
   if (ctor_tag(NNM(n, p.node)) == DT_FFI) { *v = run_ffi(n, (Port){p.node, 0}); return v->kind != 0; }
   if (ctor_tag(NNM(n, p.node)) == DT_FLOAT) { double d; if (!net_read_float(n, p, &d)) return 0; memcpy(&v->iv, &d, 8); v->kind = 4; return 1; }
   if (ctor_tag(NNM(n, p.node)) == DT_BOOL) { int b = net_read_bool(n, p); if (b < 0) return 0; v->iv = b; v->kind = 3; return 1; }

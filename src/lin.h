@@ -131,6 +131,10 @@ int  ctor_register(const char *name, int tag, const char *c1, const char *c2);
 void ctor_init_builtins(void);
 Port net_alloc_scott(Net *n, long k); Port net_alloc_bool(Net *n, int v);
 Port net_alloc_float(Net *n, double d);
+/* O(1) read of a compact integer value box ("_vb<val>", emitted by fold results);
+   returns 1 and sets *v if `node` is a box. net.c expands a box to a full Scott
+   numeral at beta-consumption; io.c reads it at fold-operand / readback. */
+int lin_num_box_value(Net *n, int node, long *v);
 
 /* ---------------- goi ---------------- */
 long long goi_det(Net *n);
