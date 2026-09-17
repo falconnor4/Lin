@@ -441,74 +441,8 @@ static const char *op_tag_to_fn(const char *tag) {
 /* forward decl (defined after use in this TU) */
 static int op_value_from_lam(Net *n, Port lam, Port app, Val *v);
 
-/* ---- fold-privacy gate (default OFF) ----
-   Strategy: when enabled, a saturated `_op`/`_ffi` fold that would DESTRUCTIVELY
-   consume a closure (LAM + β-body + operand spine) which is SHARED behind a live
-   DUP fan (the `d2` wire the commute rule fans) is deferred instead.  Sharing a
-   composite body across fan copies must be materialized per copy before any one
-   copy folds, else the fold reads the base operand and kills the shared node
-   sibling copies still need (this is the `loop c2 step` -> 4-vs-5 defect).
-   It is PURE: it only changes WHEN an existing fold rewires the net (defer vs
-   fold-and-kill); it adds no node semantics, no value encoding, no new rules.
-   Default OFF => byte-for-byte current behaviour.  With it ON, shared closures
-   strand/defer (a known, expected red for THIS increment; Inc2 materializes them). */
-/* How many live DUP fans must be crossed to deref `p` (0 = direct value).
-   Uses `n->wire` directly so it is safe to call from any fold path without
-   relying on the file-static `N`. */
-static int fan_crossed(Net *n, Port p) {
-  int c = 0;
-  while (p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP) {
-    c++; p = n->wire[p.node * 3 + 0];
-  }
-  return c;
-}
-static int lin_fold_gate_shared(Net *n, Port lam, Port redex) {
-  /* The closure is fan-shared iff a live DUP fan lies in the path the fold
-     reads: the operand spine root or the β-body root is a live DUP, or an
-     operand value must be DUP-crossed to be decoded.  Pure topology; no
-     in-degree heuristics (which false-positive on a closure's own body-app
-     + redex refs).  Note: sharing that is only *global* (the whole closure
-     body came from a `d2` fan, with operands already materialized to plain
-     numerals) is not locally detectable here and is the Inc2 materialization
-     case; this gate never false-positives on isolated closures. */
-  Port aa = n->wire[redex.node * 3 + 2];
-  if (aa.node >= 0 && aa.node < n->nn && !n->dead[aa.node]) {
-    if (n->tag[aa.node] == DUP || fan_crossed(n, aa) > 0) return 1;
-    /* walk the `_cl`-spine; defer if any operand is fan-crossed */
-    Port cur = aa;
-    while (cur.node >= 0 && cur.node < n->nn && !n->dead[cur.node] && n->tag[cur.node] == DUP) cur = n->wire[cur.node * 3 + 0];
-    for (int step = 0; step < n->nn; step++) {
-      if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) break;
-      if (!(n->tag[cur.node] == LAM && ctor_tag(NNM(n, cur.node)) == DT_STR)) break;
-      Port inner = n->wire[cur.node * 3 + 2];
-      while (inner.node >= 0 && inner.node < n->nn && !n->dead[inner.node] && n->tag[inner.node] == DUP) inner = n->wire[inner.node * 3 + 0];
-      if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
-      Port body = n->wire[inner.node * 3 + 2];
-      while (body.node >= 0 && body.node < n->nn && !n->dead[body.node] && n->tag[body.node] == DUP) body = n->wire[body.node * 3 + 0];
-      if (body.node < 0 || n->tag[body.node] != APP) break;
-      Port ia = n->wire[body.node * 3 + 0];
-      while (ia.node >= 0 && ia.node < n->nn && !n->dead[ia.node] && n->tag[ia.node] == DUP) ia = n->wire[ia.node * 3 + 0];
-      if (ia.node >= 0 && n->tag[ia.node] == APP) {
-        if (fan_crossed(n, n->wire[ia.node * 3 + 2]) > 0) return 1;
-      } else break;
-      cur = n->wire[body.node * 3 + 2];
-    }
-  }
-  Port body = n->wire[lam.node * 3 + 2];
-  if (body.node >= 0 && body.node < n->nn && !n->dead[body.node] && n->tag[body.node] == DUP) return 1;
-  return 0;
-}
-static int lin_fold_gate_on(void) {
-  static int v = -1, inited = 0;
-  if (!inited) { v = getenv("LIN_FOLD_GATE") != NULL; inited = 1; }
-  return v;
-}
-
 int lin_fold_op(Net *n, Port lam, Port app) {
   N = n;
-  /* fold-privacy gate (default OFF): defer folding a fan-shared closure so a
-     destructive fold never consumes a body/spine a sibling copy still needs. */
-  if (lin_fold_gate_on() && lin_fold_gate_shared(n, lam, app)) return 0;
   /* a saturated _op redex is ((\_add <pure-Lin-β-body>) <_cl-spine>); fold reads the op token from the LAM name and RAW operands via the SHARED decoder (arith.so); no provider/non-concrete operand => 0, so the pure-Lin β-body computes slowly but correctly */
   Val v;
   if (!op_value_from_lam(n, lam, app, &v)) return 0;
@@ -536,10 +470,6 @@ static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped); /*
 int lin_op_needs_operand(Net *n, Port lam, Port app) {
   if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
   if (!op_tag_to_fn(n->name[lam.node] ? n->name[lam.node] : "")) return 0;
-  /* fold-privacy gate: a fan-shared closure must be deferred (parked on the
-     per-net blocked list) so the wave may materialize its own copy before any
-     fold, and never β-squashed while shared. */
-  if (lin_fold_gate_on() && lin_fold_gate_shared(n, lam, app)) return 1;
   Port argp = wire((Port){app.node, 2});
   Val fargs[8] = {{0}}; int skipped = 0;
   int argc = decode_spine(n, argp, fargs, 8, &skipped);
@@ -565,9 +495,6 @@ int lin_fold_op_arg(Net *n, Port p, Port out) {
         !op_tag_to_fn(n->name[h.node] ? n->name[h.node] : "")) return 0;
     lam = h; redex = p;
   } else return 0;
-  /* fold-privacy gate (default OFF): defer folding a fan-shared closure so a
-     destructive eager argument-fold never consumes a body/spine a sibling needs. */
-  if (lin_fold_gate_on() && lin_fold_gate_shared(n, lam, redex)) return 0;
   Val v;
   if (!op_value_from_lam(n, lam, redex, &v)) return 0;
   if (v.kind != 1 && v.kind != 3) return 0;          /* int/bool values re-link safely mid-beta */
