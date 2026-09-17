@@ -184,16 +184,6 @@ int net_interact(Net *n, Port p1, Port p2) {
     fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
 
   if (t1 == LAM && t2 == APP) {
-    /* a compact value box ("_vb<val>", see io.c) is a fold-result numeral kept as
-       a single node; if it is ever beta-consumed as a Scott numeral, materialize
-       the real structure lazily and re-queue the redex against it (bit-exact). */
-    long bv;
-    if (lin_num_box_value(n, n1, &bv)) {
-        Port real = net_alloc_scott(n, bv);
-        n->dead[n1] = 1;
-        net_link(n, real, (Port){n2, 0}, 1);   /* real.port0 takes the box's place on the redex */
-        return 1;
-    }
     /* a saturated _ffi closure folds to a concrete value (int/bool/float) rather than beta-reducing, so e.g. float comparisons materialise as Church bools — independent of any driver */
     const char *lnm = n->name[n1] ? n->name[n1] : "";
     if (ctor_tag(lnm) == DT_FFI && lin_fold_ffi(n, (Port){n1, 0}, (Port){n2, 0})) return 1;

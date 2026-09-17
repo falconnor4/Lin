@@ -97,35 +97,6 @@ static Port alloc_scott(Net *n, long k) {
   return cur;
 }
 
-/* --- Compact integer value box ---- 
-   A fold-result materialized for the integer domain is EMITTED as a single LAM
-   node named "_vb<VALUE>", NOT as a full Scott numeral. When that result is
-   immediately consumed by another `_op`/`_ffi` fold (the numeric accumulation in
-   e.g. str_parse_int_help / sum / rec), the operand decoder reads the value O(1)
-   from the name instead of O(value)-walking a Scott spine; and threading a single
-   box node through a recursion does not trigger the LAM/APPxDUP commutative
-   churn that an O(value)-deep Scott numeral does (that churn is what dominates
-   str_parse_int's ~7M steps). A box is bit-exact: if it is ever beta-consumed as
-   a Scott numeral it is expanded lazily to a real net_alloc_scott structure in
-   net_interact (net.c) before the beta proceeds, and scott_peel / net_read_int
-   read it O(1) at the readback/ROOT boundary. The value rides in the node NAME so
-   copies produced by LAM/APP x DUP commutes and GC compaction preserve it (node
-   `scope` is reserved for gauge commutation metadata). */
-static int num_box_value(Net *n, int node, long *v) {
-  if (node < 0 || node >= n->nn || n->dead[node] || n->tag[node] != LAM) return 0;
-  const char *nm = n->name[node];
-  if (!nm || strncmp(nm, "_vb", 3)) return 0;
-  char *end; long val = strtol(nm + 3, &end, 10);
-  if (*end != '\0') return 0;
-  if (v) { *v = val; }
-  return 1;
-}
-static Port num_box_alloc(Net *n, long v) {
-  char nm[64]; snprintf(nm, sizeof nm, "_vb%ld", v);
-  return net_alloc(n, LAM, scope_nil(), nm);
-}
-int lin_num_box_value(Net *n, int node, long *v) { return num_box_value(n, node, v); }
-
 /* --- Geometry of Interaction (GoI) Value Marshaling --- */
 static inline Port dup_hop(Net *n, Port p) {
   for (int step = 0; step < n->nn && p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP; step++) {
@@ -142,12 +113,6 @@ static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold); /* fwd */
 static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), long *count) {
   for (int step = 0; step < n->nn; step++) {
     p = dup_hop(n, p);
-    if (carrier == DT_NUM) {
-      long bv;
-      /* a compact box is a terminal numeral; ADD its value to the succ-layers
-         already peeled (a top-level box has count==0). */
-      if (num_box_value(n, p.node, &bv)) { *count += bv; return 1; }
-    }
     if (peek && !peek(n, &p)) return 0;
     if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM ||
         ctor_tag(NNM(n, p.node)) != carrier) return 0;
@@ -431,7 +396,7 @@ int lin_ffi_needs_operand(Net *n, Port lam) {
 
 /* fold a saturated _ffi closure into a concrete value during reduction (so float comparisons materialise as Church bools); only PURE `lin_*` closures fold, side-effecting FFI stays readback-only */
 static Port val_to_port(Net *n, Val v) {           /* alloc concrete value node */
-  if (v.kind == 1) return num_box_alloc(n, v.iv);  /* compact box: materialize on beta-consumption / readback */
+  if (v.kind == 1) return net_alloc_scott(n, v.iv);
   if (v.kind == 3) return net_alloc_bool(n, (int)v.iv);
   double d; memcpy(&d, &v.iv, 8); return net_alloc_float(n, d);
 }
