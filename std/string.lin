@@ -52,6 +52,21 @@
 ; Character-by-character string equality (FFI).
 (define streq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
 (define str_eq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
+; --- String -> Scott numeral parsing (pure Lin, no C) ------------------------
+; A decimal digit string is a Scott char-list of ASCII codes; parse by peeling
+; one char per recursion step: n <- n*10 + (code - 48).  `str_parse_int` folds a
+; clean all-digit string to its Scott numeral; empty/invalid input yields `0`.
+(define str_is_digit (\c (and (geq c 48) (leq c 57))))
+(define! str_parse_int_help (list a -> num -> num) (\s (\n
+  (ifl (str_is_empty s)
+    (\_ n)
+    (\_ (str_parse_int_help (str_tail s) (add (mul n 10) (sub (str_first s) 48))))))))
+(define! str_parse_int (list a -> num) (\s
+  (ifl (str_is_empty s)
+    (\_ 0)
+    (\_ (ifl (str_is_digit (str_first s))
+          (\_ (str_parse_int_help s 0))
+          (\_ 0))))))
 
 ; --- Re-export the safe str_* / streq names into root scope ---
 (namespace _)
@@ -63,3 +78,4 @@
 (define str.is_empty str_is_empty)
 (define str.length  str_length)
 (define str.eq      str_eq)
+(define str.parse_int str_parse_int)
