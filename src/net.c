@@ -119,14 +119,12 @@ void net_init(Net *n, int cap) {
   n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
   n->scope = malloc(cap * sizeof(Scope)); n->name = calloc(cap, sizeof(char *));
   n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
-  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0; n->declines = 0;
-  n->blocked = NULL; n->nblocked = 0; n->blockedcap = 0;
+  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0; n->driver_pending = 0;
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
 void net_free(Net *n) {
   free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->sca);
-  free(n->blocked);
   if (n->name) { for (int i = 0; i < n->nn; i++) free(n->name[i]); free(n->name); }
 }
 
@@ -200,21 +198,17 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
 /* four rules of the scope-gauge calculus (wave-opt-reduction main.hs); ERA is inert (era pairs dropped) */
 static int lin_trace = -1; /* cached LIN_TRACE */
 
-/* fold `aa` if a saturated arithmetic closure (a `_ffi` LAM, a pure-Lin `_op` LAM, or an `_op` redex APP whose head is a DT_OP LAM), routing to the appropriate *_fold_arg with the value at `target`; shared by the identity and eager-argument-fold edges in beta */
-static int fold_arg(Net *n, Port aa, Port target) {
-  if (aa.node < 0 || aa.port != 0 || aa.node >= n->nn || n->dead[aa.node]) return 0;
-  if (n->tag[aa.node] == LAM) {
-    int c = ctor_tag(n->name[aa.node] ? n->name[aa.node] : "");
-    if (c == DT_FFI) return lin_fold_ffi_arg(n, aa, target);
-    if (c == DT_OP)  return lin_fold_op_arg(n, aa, target);
-    return 0;
-  }
-  if (n->tag[aa.node] == APP) {
-    Port h = WIRE(n, ((Port){aa.node, 0}));
-    if (h.node >= 0 && h.node < n->nn && !n->dead[h.node] && n->tag[h.node] == LAM &&
-        ctor_tag(n->name[h.node] ? n->name[h.node] : "") == DT_OP)
-      return lin_fold_op_arg(n, aa, target);
-  }
+/* Driver pipeline: sorted by priority (ascending); core waves fan out to each in priority order, each *claiming*
+   the redexes it handles, so drivers compose.  Declared up here because β consults it (lin_argfold). */
+static LinDriver *drv[16]; static int ndrv;
+
+/* Ask each driver, in priority order, to pre-empt a sub-term β is about to substitute.  A saturated closure in an
+   *argument* position is never a principal×principal redex, so a driver can only reach it through this hook.  The
+   first driver that materialises `arg` at `target` wins; otherwise β substitutes the term unchanged and the
+   pure-Lin fallback body computes it (slower, but exactly). */
+static int lin_argfold(Net *n, Port arg, Port target) {
+  for (int di = 0; di < ndrv; di++)
+    if (drv[di]->arg_fold && drv[di]->arg_fold(n, arg, target)) return 1;
   return 0;
 }
 
@@ -227,33 +221,24 @@ int net_interact(Net *n, Port p1, Port p2) {
     fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
 
   if (t1 == LAM && t2 == APP) {
-    /* a saturated _ffi closure folds to a concrete value (int/bool/float) rather than beta-reducing, so e.g. float comparisons materialise as Church bools — independent of any driver */
-    const char *lnm = n->name[n1] ? n->name[n1] : "";
-    if (ctor_tag(lnm) == DT_FFI && lin_fold_ffi(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
-    /* pure-Lin DT_OP closure (no new agent): fold via shared scalar table if a provider claims it, else fall to β-body */
-    if (ctor_tag(lnm) == DT_OP && lin_fold_op(n, (Port){n1, 0}, (Port){n2, 0})) return 1;
-    /* A pure-lin `_ffi`/`_op` closure with a non-concrete operand must not be β-squashed here (β-duplication strangles the operand sub-net); defer (re-queue) so its redexes run first, bounded so a genuinely-stranded operand falls through; only defer for real reductions (not open free-var precompile) */
-    if (lin_precompile_depth == 0 && n->declines < (long)(1 << 15) &&
-        ((ctor_tag(lnm) == DT_FFI && lin_ffi_needs_operand(n, (Port){n1, 0})) ||
-         (ctor_tag(lnm) == DT_OP  && lin_op_needs_operand(n, (Port){n1, 0}, (Port){n2, 0})))) {
-      n->declines++;
-      /* hold the pair on a separate BLOCKED list (NOT re-queued into `act`, else the inner loop never drains); re-added only after the wave drains */
-      Port a = (Port){n1, 0}, b = (Port){n2, 0};
-      if (n->nblocked + 2 > n->blockedcap)
-        n->blocked = realloc(n->blocked, (size_t)(n->blockedcap = n->blockedcap ? n->blockedcap * 2 : 64) * sizeof(Port));
-      n->blocked[n->nblocked++] = a; n->blocked[n->nblocked++] = b;
-      return 1;
-    }
+    /* β, and nothing else.  Native folding of `_op`/`_ffi` closures, its saturation guard and its deferral
+       policy all live in a driver (std/drivers/arith.so, LIN_CAP_PREEMPT): such a closure is claimed as a redex
+       *before* it ever reaches here, so this rule sees only closures no driver wanted and β-reduces their
+       pure-Lin fallback body.  That keeps the core a complete calculus on its own — a driver can pre-empt a
+       redex class, never replace this rule. */
     Port lv = WIRE(n, ((Port){n1, 1})), lb = WIRE(n, ((Port){n1, 2}));
     Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;
     if (lv.node == n1 && lv.port == 2 && lb.node == n1 && lb.port == 1) {
-      /* identity: V = (\x. x) V — but V may be a saturated _ffi/_op closure, so fold the argument */
-      if (fold_arg(n, aa, ar)) return 1;
+      /* degenerate binder: for `\x.x` the compiler cross-links the binder and body ports, so there is no
+         separate substitution to make — connect argument to result.  This is β itself, not fold machinery:
+         without it `((\x x) V)` strands V on a dead node and readback yields nothing. */
+      if (lin_argfold(n, aa, ar)) return 1;
       net_link(n, aa, ar, 1); return 1;
     }
-    /* eager argument fold: a saturated _ffi/_op closure passed as data (not head) would be β-duplicated without folding (e.g. `succ (mul 2 2)`); fold so the substitution binds a concrete value.  A pure-Lin `_op` closure is a REDEX ((\_add <pure-body>) <spine>) */
-    if (fold_arg(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
+    /* A driver may pre-empt the argument before it is substituted: a saturated closure passed as data (e.g. the
+       `(mul 2 2)` of `succ (mul 2 2)`) would otherwise be β-duplicated without ever being materialised. */
+    if (lin_argfold(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
     net_link(n, lv, aa, 1); net_link(n, lb, ar, 1);
     return 1;
   }
@@ -335,8 +320,8 @@ static void net_compact(Net *n, const unsigned char *reach) {
 }
 
 typedef struct { Port p1, p2; } Pair;
-/* Driver pipeline: drivers sorted by priority (ascending); the core waves fan out to each in priority order, each *claiming* the redexes it handles, so drivers compose */
-static LinDriver *drv[16]; static int ndrv;
+/* Driver registration (the table itself is declared above β, which consults it).  Drivers are sorted by priority
+   ascending and the core waves fan out to each in that order, so a driver with a lower priority number pre-empts. */
 void lin_driver_add(LinDriver *d) {
   if (!d || ndrv >= 16) return;
   if (d->magic != LIN_DRIVER_MAGIC || d->abi != LIN_DRIVER_ABI) {
@@ -349,8 +334,35 @@ void lin_driver_add(LinDriver *d) {
   while (i > 0 && drv[i-1]->priority > d->priority) { drv[i] = drv[i-1]; i--; }
   drv[i] = d; ndrv++;
 }
-void lin_driver_clear(void) { ndrv = 0; }
-LinDriver *lin_get_driver(void) { return ndrv ? drv[ndrv-1] : NULL; }
+/* `(set_driver ...)`/`driver_clear` selects a *strategy*; pre-emptors are a reduction pre-pass that composes with
+   whichever strategy is chosen, so clearing must not silently disable native folding (or, once Move 2/3 land, the
+   AOT sharing decisions that ride the same hook).  Compacting in place keeps the priority order intact. */
+void lin_driver_clear(void) {
+  int w = 0;
+  for (int i = 0; i < ndrv; i++) if (drv[i]->caps & LIN_CAP_PREEMPT) drv[w++] = drv[i];
+  ndrv = w;
+}
+/* the active *strategy* (never a pre-emptor), so `(get_driver)` still reports cpu/simd/gpu */
+LinDriver *lin_get_driver(void) {
+  for (int i = ndrv - 1; i >= 0; i--) if (!(drv[i]->caps & LIN_CAP_PREEMPT)) return drv[i];
+  return NULL;
+}
+/* A driver reports that it claimed a redex it could not materialise (Net.driver_pending), or answers directly
+   through its own `pending` hook.  The core only asks *whether* the net is a value; the reason stays the driver's. */
+void lin_pending_bump(Net *n) { n->driver_pending = 1; }
+int lin_any_pending(const Net *n) {
+  if (n->driver_pending) return 1;
+  for (int i = 0; i < ndrv; i++) if (drv[i]->pending && drv[i]->pending(n)) return 1;
+  return 0;
+}
+/* Readback pre-pass: let a driver turn a sub-term the reducer left as a foldable closure (e.g. a saturated `_ffi`
+   closure embedded in a numeral spine, which no β redex ever reached) into a concrete value node.  Returns 1 and
+   sets `*out` when a driver materialised it; otherwise the caller decodes `p` as it stands. */
+int lin_materialize(Net *n, Port p, Port *out) {
+  for (int i = 0; i < ndrv; i++)
+    if (drv[i]->materialize && drv[i]->materialize(n, p, out)) return 1;
+  return 0;
+}
 
 /* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs, an even count): spatial-disjoint pairs run concurrently via OpenMP, the rest serially; exposed so driver reducers fan out a real wave in parallel — the base correctness rules all live here */
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
@@ -432,6 +444,7 @@ long net_reduce(Net *n, long limit) {
   unsigned char *reach = NULL; int *q = NULL; long qcap = 0, gcmark = 1L << 20;
   /* per-driver slice buckets (rebuilt each wave) */
   Port *slices[16] = {0}; int scaps[16] = {0}, scnts[16] = {0};
+  long last_drain_steps = -1; int stalled_drains = 0;   /* livelock guard for driver drain loops */
   while (n->steps < limit) {
     int changed = 0;
     while (n->atop > 0 && n->steps < limit) {
@@ -466,15 +479,20 @@ long net_reduce(Net *n, long limit) {
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
     }
-    /* active wave fully drained: DEFERRED FFI/op head-redexes (operands weren't concrete yet) get another chance now their operand computations have run */
-    if (n->nblocked > 0) {
-      for (int i = 0; i + 1 < n->nblocked; i += 2) {
-        Port a = n->blocked[i], b = n->blocked[i + 1];
-        if (a.node < 0 || a.node >= n->nn || b.node < 0 || b.node >= n->nn || n->dead[a.node] || n->dead[b.node]) continue;
-        act_push(n, a, b);
+    /* The active wave is fully drained.  Give every driver its drain point: a driver that parked a redex because
+       its operands were not concrete yet retries it here and re-enqueues what it still expects to materialise.
+       The *policy* (how long to wait, when to give up) is the driver's; the core only supplies the point and a
+       livelock guard, since a driver that re-enqueues without anything progressing would otherwise spin forever. */
+    {
+      int re = 0;
+      for (int di = 0; di < ndrv; di++) if (drv[di]->drain) re += drv[di]->drain(n);
+      if (re > 0) {
+        if (n->steps == last_drain_steps) { if (++stalled_drains > 4096) { n->atop = 0; break; } }
+        else stalled_drains = 0;
+        last_drain_steps = n->steps;
+        continue;
       }
-      n->nblocked = 0;
-      continue;
+      stalled_drains = 0;
     }
     if (changed == 0 && n->atop == 0) break;
     if (n->atop == 0 && (long)n->nn > gcmark) {
@@ -506,8 +524,6 @@ Net *net_copy(const Net *n) {
   c->dead = malloc(c->cap); memcpy(c->dead, n->dead, c->cap);
   c->sca = n->scn ? malloc((size_t)n->scn * sizeof(uint64_t)) : NULL;
   if (n->scn) memcpy(c->sca, n->sca, (size_t)n->scn * sizeof(uint64_t));
-  c->act = NULL; c->actcap = c->atop = 0; c->steps = 0;
-  /* blocked list is drained before net_copy is ever used; don't share the array */
-  c->blocked = NULL; c->nblocked = 0; c->blockedcap = 0;
+  c->act = NULL; c->actcap = c->atop = 0; c->steps = 0; c->driver_pending = 0;
   return c;
 }

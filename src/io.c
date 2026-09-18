@@ -108,7 +108,6 @@ static inline Port dup_hop(Net *n, Port p) {
 }
 
 static Val run_ffi(Net *n, Port p); /* fwd */
-static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold); /* fwd */
 
 /* Scott-spine walk: count succ layers (optional `peek` folds embedded `_ffi` closures per layer); 1 at zero-terminal (count set) or 0 malformed. */
 static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), long *count) {
@@ -132,16 +131,14 @@ static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), l
   return 0;
 }
 
-/* fold an embedded saturated `_ffi` closure (e.g. the `n` of `\_sz \_ss (_ss (mul 2 2))`) that never folded during reduction, on read, so the numeral decodes; pure int/bool only */
+/* On read, give a driver the chance to materialise a closure the reducer left embedded (e.g. the `n` of
+   `\_sz \_ss (_ss (mul 2 2))`, which no β redex ever reached) so the numeral decodes.  The core has no opinion
+   about which closures those are — that is the driver's fold policy. */
 static int read_int_peek(Net *n, Port *cur) {
-  if ((*cur).node >= 0 && (*cur).node < n->nn && !n->dead[(*cur).node] && n->tag[(*cur).node] == LAM) {
-    const char *cn = n->name[(*cur).node];
-    if (cn && ctor_tag(cn) == DT_FFI) {
-      long v = -1; Val vv;
-      if (lin_ffi_peek(n, (Port){(*cur).node, 0}, &vv, 1) && vv.kind == 1) v = vv.iv;
-      if (v >= 0) *cur = net_alloc_scott(n, v);
-    }
-  }
+  Port out;
+  if ((*cur).node >= 0 && (*cur).node < n->nn && !n->dead[(*cur).node] && n->tag[(*cur).node] == LAM &&
+      lin_materialize(n, *cur, &out))
+    *cur = out;
   return 1;
 }
 
@@ -326,222 +323,6 @@ static Val run_ffi(Net *n, Port p) {
   v.kind = 1; v.iv = (argc <= 0) ? f() : (argc == 1) ? f(c_args[0]) : (argc == 2) ? f(c_args[0], c_args[1]) :
            (argc == 3) ? f(c_args[0], c_args[1], c_args[2]) : f(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]);
   return v;
-}
-
-/* Compute a saturated _ffi closure's concrete value (pure lin_* only); shared by head-fold and eager argument-fold. */
-static int ffi_ops_concrete(Net *n, Port lam); /* fwd */
-int lin_precompile_depth = 0; /* set around def_precompile's net_reduce */
-int lin_stuck_ffi_count = 0;  /* _ffi closure β-consumed during a free-var precompile */
-static int lin_ffi_peek(Net *n, Port lam, Val *vout, int argfold) {
-  if (lin_precompile_depth > 0) return 0; /* free-var body: don't fold yet */
-  char fn[256];
-  Port a1, argp;
-  if (!ffi_header(n, lam, &a1, &argp)) return 0;
-  if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
-  if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return 0;
-  if (strncmp(fn, "lin_", 4)) return 0;      /* only pure lin_* builtins fold */
-  if (!strncmp(fn, "lin_streq", 9)) return 0; /* needs C strings, keep readback */
-  /* Saturation guard: only fold a FULLY-saturated closure whose operands are all concrete, else read garbage. */
-  if (!ffi_ops_concrete(n, (Port){lam.node, 0})) return 0;
-  if (argfold) {
-    /* eager arg-fold is re-entrancy-safe only for pure scalar results; `lin_ffloor` is the sole int-result `_ffi` op; others stay head-fold/readback */
-    static const char *safe[] = { "lin_ffloor" };
-    int ok = 0;
-    for (int s = 0; s < (int)(sizeof safe / sizeof safe[0]); s++) if (!strcmp(fn, safe[s])) { ok = 1; break; }
-    if (!ok) return 0;
-  }
-  Val v = run_ffi(n, (Port){lam.node, 0});
-  if (v.kind != 1 && v.kind != 3 && v.kind != 4) return 0;
-  if (argfold && v.kind == 4) return 0; /* floats stay on head-fold/readback */
-  *vout = v; return 1;
-}
-
-/* are ALL of `lam`'s operands concretely readable or a foldable pure-lin_* closure?  Walks the whole arg `_cl`-spine (previously checked only the FIRST operand, letting later non-concrete ones fold as garbage — the `(min 4 5)`-as-if stranding) */
-static int ffi_ops_concrete(Net *n, Port lam) {
-  Port cur, argp;
-  if (!ffi_header(n, lam, 0, &argp)) return 0;
-  cur = skip_dup(n, argp);
-  if (cur.node < 0 || cur.node >= n->nn || n->tag[cur.node] != LAM ||
-      ctor_tag(NNM(n, cur.node)) != DT_STR) return 0;   /* arg list is a cons spine */
-  if (skip_dup(n, wire((Port){cur.node, 2})).port != 0) return 0;
-  for (int step = 0; step < n->nn; step++) {
-    Port inner = skip_dup(n, wire((Port){cur.node, 2}));
-    if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) return 1;
-    Port body = skip_dup(n, wire((Port){inner.node, 2}));
-    if (body.node < 0 || n->tag[body.node] != APP) return 1;
-    Port ia = skip_dup(n, wire((Port){body.node, 0}));
-    if (ia.node < 0 || n->tag[ia.node] != APP) return 1;
-    Port ap = skip_dup(n, wire((Port){ia.node, 2}));
-    if (ap.node < 0 || ap.node >= n->nn || n->dead[ap.node] || n->tag[ap.node] != LAM) return 0;
-    if (ctor_tag(NNM(n, ap.node)) == DT_FLOAT) { double d; if (!net_read_float(n, ap, &d)) return 0; }
-    else if (ctor_tag(NNM(n, ap.node)) == DT_BOOL) { if (net_read_bool(n, ap) < 0) return 0; }
-    else if (ctor_tag(NNM(n, ap.node)) == DT_STR) { char sb[64]; if (net_read_string(n, ap, sb, sizeof sb) < 0) return 0; }
-    else if (ctor_tag(NNM(n, ap.node)) == DT_FFI) {
-      if (lin_precompile_depth > 0) return 0;           /* free-var context: not concrete */
-      if (lin_ffi_needs_operand(n, ap)) return 0;       /* nested closure not fully concrete */
-      Val nv = run_ffi(n, ap);
-      if (nv.kind != 1 && nv.kind != 3 && nv.kind != 4) return 0;
-    }
-    else if (net_read_int(n, ap) < 0) return 0;
-    cur = skip_dup(n, wire((Port){body.node, 2}));
-  }
-  return 1;
-}
-
-/* Non-destructive pre-scan: 1 if a pure-lin `_ffi` closure is blocked only by a non-concrete operand (e.g. live `(min 4 5)`) — the reducer DEFERS rather than β-destroying */
-int lin_ffi_needs_operand(Net *n, Port lam) {
-  if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
-  if (n->name[lam.node] && ctor_tag(n->name[lam.node]) != DT_FFI) return 0;
-  return !ffi_ops_concrete(n, lam);
-}
-
-/* fold a saturated _ffi closure into a concrete value during reduction (so float comparisons materialise as Church bools); only PURE `lin_*` closures fold, side-effecting FFI stays readback-only */
-static Port val_to_port(Net *n, Val v) {           /* alloc concrete value node */
-  if (v.kind == 1) return net_alloc_scott(n, v.iv);
-  if (v.kind == 3) return net_alloc_bool(n, (int)v.iv);
-  double d; memcpy(&d, &v.iv, 8); return net_alloc_float(n, d);
-}
-/* link a folded scalar `v` as the concrete value replacing closure `lam`: rewires output to `target`, kills `lam`, resets deferral budget (a fold is progress) */
-static int fold_link(Net *n, Port lam, Port target, Val v) {
-  Port res = val_to_port(n, v);
-  n->dead[lam.node] = 1;
-  n->declines = 0;
-  net_link(n, res, target, 1);
-  return 1;
-}
-int lin_fold_ffi(Net *n, Port lam, Port app) {
-  Val v; N = n;
-  if (!lin_ffi_peek(n, lam, &v, 0)) {
-    /* during an open free-var precompile a non-foldable `_ffi` closure used as bool/function would be β-destroyed; flag the def as uncacheable */
-    if (lin_precompile_depth > 0) lin_stuck_ffi_count++;
-    return 0;
-  }
-  return fold_link(n, lam, (Port){app.node, 0}, v);
-}
-
-/* fold saturated `_ffi` closures wherever embedded (not just beta head/arg) at a fixed point by linking the concrete value to the closure's output wire */
-int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
-  Val v; N = n;
-  if (lam.port != 0 || lam.node < 0 || lam.node >= n->nn || n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
-  if (ctor_tag(n->name[lam.node] ? n->name[lam.node] : "") != DT_FFI) return 0;
-  if (!lin_ffi_peek(n, lam, &v, 1)) return 0;
-  /* only fold concrete INTEGER/BOOL scalar results as beta args here; floats stay on head-fold/readback (box-index encoded, re-linking mid-beta is unsafe) */
-  if (v.kind != 1 && v.kind != 3) return 0;
-  return fold_link(n, lam, out, v);
-}
-
-/* Fold a saturated pure-Lin `_op` closure (a DT_OP LAM applied to RAW operands; β-body is the pure-Lin fallback).  Mirror of lin_fold_ffi; value from the shared scalar table (arith.so), and with no driver it still reduces exactly via the interaction calculus */
-/* Consume a node this redex *exclusively* owns.  `lam`/`app` are principal-
-   connected to each other, so nothing else can be attached to them, but the
-   β-body and the operand spine can be SHARED: a live DUP on that port means a
-   sibling redex reaches the same sub-net through the fan, so marking the fan (or
-   a node behind it) dead would strand the sibling — the fold would then read a
-   destroyed operand and one consumer's result would leak into another's.  Shared
-   structure is left for the reachability GC instead. */
-static void fold_own(Net *n, Port p) {
-  if (p.node < 0 || p.node >= n->nn || n->dead[p.node]) return;
-  if (n->tag[p.node] == DUP) return;                 /* behind a fan: not ours alone */
-  n->dead[p.node] = 1;
-}
-
-/* derive the shared-table scalar op name from a DT_OP carrier tag (e.g. `_add` -> "lin_add") */
-static const char *op_tag_to_fn(const char *tag) {
-  if (!tag || tag[0] != '_') return NULL;
-  static char fn[256];
-  snprintf(fn, sizeof fn, "lin_%s", tag + 1);   /* "_add" -> "lin_add" */
-  return fn;
-}
-
-/* forward decl (defined after use in this TU) */
-static int op_value_from_lam(Net *n, Port lam, Port app, Val *v);
-
-int lin_fold_op(Net *n, Port lam, Port app) {
-  N = n;
-  /* a saturated _op redex is ((\_add <pure-Lin-β-body>) <_cl-spine>); fold reads the op token from the LAM name and RAW operands via the SHARED decoder (arith.so); no provider/non-concrete operand => 0, so the pure-Lin β-body computes slowly but correctly */
-  Val v;
-  if (!op_value_from_lam(n, lam, app, &v)) return 0;
-  Port res = val_to_port(n, v);
-  /* substitute the concrete result for the saturated redex (exactly as β threads the body out through APP port-1) */
-  Port ar = wire((Port){app.node, 1});
-  Port aa = wire((Port){app.node, 2});
-  Port body = wire((Port){lam.node, 2});             /* the pure-Lin β-body residual */
-  n->dead[lam.node] = 1; n->dead[app.node] = 1;
-  fold_own(n, body); fold_own(n, aa);                /* only what this redex owns outright */
-  if (ar.node >= 0 && ar.node < n->nn && !n->dead[ar.node]) {
-    /* `ar` is the APP's port-1 body-slot partner — where β threads the result out — so inject `res` AT `ar` (linking into {app,1} would REPLACE `ar`, stranding the consumer) */
-    net_link(n, res, ar, 1);
-  } else {
-    /* beta threads the result through app's port-1 body slot; fall back to it if `ar` was already consumed. */
-    net_link(n, res, (Port){app.node, 1}, 1);
-  }
-  lin_fold_bump();
-  return 1;
-}
-
-/* 1 if `lam` (a DT_OP head-LAM) is applied to operands not yet ALL decodable, so the `_add` head-redex should be DEFERRED (parked on the per-net blocked list) rather than β-squashed.  Mirrors lin_ffi_needs_operand; an un-folded `_op` operand (e.g. `(omul 6 (oadd 24 96))`) counts pending via decode_spine's skipped-slot detection */
-static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped); /* decoder */
-int lin_op_needs_operand(Net *n, Port lam, Port app) {
-  if (n->dead[lam.node] || n->tag[lam.node] != LAM) return 0;
-  if (!op_tag_to_fn(n->name[lam.node] ? n->name[lam.node] : "")) return 0;
-  Port argp = wire((Port){app.node, 2});
-  Val fargs[8] = {{0}}; int skipped = 0;
-  int argc = decode_spine(n, argp, fargs, 8, &skipped);
-  if (skipped) return 1;                             /* a present operand slot is not concrete yet */
-  if (argc < 1) return 1;                            /* spine not reduced/readable yet */
-  for (int i = 0; i < argc; i++)
-    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return 1;
-  return 0;                                          /* ready to fold */
-}
-
-/* fold a saturated pure-Lin `_op` closure appearing as a beta ARGUMENT (e.g. the `n` of `\_sz \_ss (_ss n)` in `succ (add 2 2)`) so the substitution binds a concrete scalar; `p` is the `_op` LAM or the redex APP.  Mirrors lin_fold_ffi_arg */
-int lin_fold_op_arg(Net *n, Port p, Port out) {
-  N = n;
-  Port lam, redex;
-  if (p.node < 0 || p.node >= n->nn || n->dead[p.node]) return 0;
-  if (n->tag[p.node] == LAM && op_tag_to_fn(n->name[p.node] ? n->name[p.node] : "")) {
-    lam = p;
-    redex = wire((Port){p.node, 0});                 /* the APP this LAM is applied to */
-    if (redex.node < 0 || redex.node >= n->nn || n->dead[redex.node] || n->tag[redex.node] != APP) return 0;
-  } else if (n->tag[p.node] == APP) {
-    Port h = wire((Port){p.node, 0});                /* an APP-headed _op redex */
-    if (h.node < 0 || h.node >= n->nn || n->dead[h.node] || n->tag[h.node] != LAM ||
-        !op_tag_to_fn(n->name[h.node] ? n->name[h.node] : "")) return 0;
-    lam = h; redex = p;
-  } else return 0;
-  Val v;
-  if (!op_value_from_lam(n, lam, redex, &v)) return 0;
-  if (v.kind != 1 && v.kind != 3) return 0;          /* int/bool values re-link safely mid-beta */
-  Port res = val_to_port(n, v);
-  Port body = wire((Port){lam.node, 2});             /* the pure-Lin β-body residual */
-  Port aa = wire((Port){redex.node, 2});             /* the operand spine */
-  n->dead[lam.node] = 1; n->dead[redex.node] = 1;
-  fold_own(n, body); fold_own(n, aa);
-  net_link(n, res, out, 1);
-  lin_fold_bump();
-  return 1;
-}
-
-/* compute the concrete value of a saturated `_op` redex headed by LAM `lam` (DT_OP) applied to `app` (its redex APP carrying the operand spine); on success fills `*v` and returns 1.  Shared by head-fold and eager argument-fold */
-static int op_value_from_lam(Net *n, Port lam, Port app, Val *v) {
-  const char *tag = n->name[lam.node] ? n->name[lam.node] : "";
-  const char *fn = op_tag_to_fn(tag);
-  if (!fn) return 0;
-  /* during an open free-var precompile `_op` operands are legitimately free vars that never become concrete, so signal the stuck closure so def_precompile declines this def's cache and it stays textual */
-  if (lin_precompile_depth > 0) { lin_stuck_ffi_count++; return 0; }
-  Port argp = wire((Port){app.node, 2});             /* the applied `_cl`-spine */
-  Val fargs[8] = {{0}};
-  int argc = net_spine_args(n, argp, fargs, 8);
-  if (argc < 1) return 0;
-  long c_args[8] = {0};
-  for (int i = 0; i < argc; i++) if (fargs[i].kind == 1 || fargs[i].kind == 3 || fargs[i].kind == 4) c_args[i] = fargs[i].iv;
-  else return 0;                                     /* non-concrete operand: don't fold */
-  long out; int okind = 0;
-  int claimed = 0;
-  for (int s = 0; s < n_scalar_ops; s++) if (scalar_ops[s](fn, argc, c_args, &out, &okind)) { claimed = 1; break; }
-  if (!claimed) return 0;                            /* no scalar provider: fall through to pure-Lin β */
-  if (okind == 4) v->kind = 4; else if (okind == 3) v->kind = 3; else v->kind = 1;
-  v->iv = out;
-  return 1;
 }
 
 Port net_alloc_bool(Net *n, int val) {

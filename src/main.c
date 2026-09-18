@@ -61,6 +61,11 @@ static int guard_has(Guard *g, const char *name) {
   return 0;
 }
 
+/* !=0 while def_precompile reduces an open body.  It is the core's one statement to drivers about precompilation:
+   the operands here are free variables that never become concrete, so a driver must not fold (a baked closure
+   would capture a stale value).  Which redexes that affects is the driver's business. */
+int lin_precompile_depth = 0;
+
 /* Non-recursive define: evaluate once and cache the reduced net so each reference clones it; recursive/too-big bodies keep the textual path. */
 static void def_precompile(Def *d) {
   if (d->comp_tried) return;
@@ -69,14 +74,16 @@ static void def_precompile(Def *d) {
   char err[512]; Term *ex = expand_defs(d->term);
   Net src; net_init(&src, 1 << 14);
   if (!compile(ex, &src, err, sizeof err)) { net_free(&src); term_free(ex); return; }
-  /* Free-var body: suppress FFI folding so no closure bakes a stale value from the open bound vars (lin_ffi_peek saturation + nested-closure paths bail while lin_precompile_depth > 0). */
   lin_precompile_depth++;
-  lin_stuck_ffi_count = 0;
+  src.driver_pending = 0;
   long full = net_reduce(&src, STEP_LIMIT);
   lin_precompile_depth--;
   if (full >= STEP_LIMIT) { net_free(&src); term_free(ex); return; }
-  /* If this free-var body β-consumed an _ffi closure (fold suppressed by lin_precompile_depth destroyed it), the baked net is broken for composed use — decline the cache. */
-  if (lin_stuck_ffi_count > 0) { net_free(&src); term_free(ex); return; }
+  /* A driver that claimed a redex it could not materialise here leaves the body not-a-value: β went on to destroy
+     a closure the driver would have folded, so the baked net is broken for composed use.  Decline the cache and
+     keep the def textual.  Once Move 3 chooses precompile-vs-textual AOT this try-and-decline becomes a decision
+     made up front; the *signal* stays the same generic one, so no driver policy leaks into the core either way. */
+  if (lin_any_pending(&src)) { net_free(&src); term_free(ex); return; }
   d->compiled = net_copy(&src); net_free(&src); term_free(ex);
 }
 
@@ -167,9 +174,25 @@ static int widen_recursion(void) {
   for (int i = 0; i < ndefs; i++) if (defs[i].rec && defs[i].rec_body) {
     defs[i].rec_k = defs[i].rec_k < (1 << 22) ? defs[i].rec_k * 2 : defs[i].rec_k;
     term_free(defs[i].term);
-    defs[i].term = build_bound_rec(defs[i].name, defs[i].rec_body, defs[i].rec_k);
-    defs[i].expanded = NULL;
+    defs[i].term = build_bound_rec(defs[i].rec_name, defs[i].rec_body, defs[i].rec_k);
     wid = 1;
+  }
+  /* EVERY def's cached expansion may have inlined a recursive body's unrolling, not just
+     the recursive defs themselves: `num.eq` merely *calls* `num._peq`, so clearing only
+     `defs[i].rec` left its expansion pinned to the old depth.  The net then came out
+     byte-identical on every round, the `_rec` sentinel never cleared, and widening doubled
+     the bound forever -- re-expanding a larger chain each time (96ms, 192ms, 372ms ...
+     21.8s) for no change in the result.  Clearing all of them is what makes the wider
+     bound actually reach the compiled graph. */
+  if (wid) for (int i = 0; i < ndefs; i++) {
+    term_free(defs[i].expanded); defs[i].expanded = NULL;
+    /* A precompiled net is the other place the old depth can hide, and it is the one that
+       matters when NO driver is loaded: with nothing to report the body un-materialised,
+       a def like `num.eq` IS baked, at whatever k was current, and clearing only the term
+       expansion then leaves widening with nothing to widen.  Baking is a cache, so drop
+       it and let the next use bake again at the new depth. */
+    if (defs[i].compiled) { net_free(defs[i].compiled); free(defs[i].compiled); defs[i].compiled = NULL; }
+    defs[i].comp_tried = 0;
   }
   return wid;
 }
@@ -302,9 +325,15 @@ static void process_def(Term *t) {
   d->sch = sch; d->typed = 1; d->rec = rec;
   if (rec) {
     d->rec_k = 24; d->rec_body = t->l;                  /* keep body for widening */
-    d->term = build_bound_rec(t->name, t->l, d->rec_k);
+    /* The binder must carry the name the body's SELF-REFERENCES actually use, which is
+       `t->name` and NOT the namespace-qualified `d->name`: qualify_free ran before this
+       def existed, so `lookup_raw("num._peq")` was still NULL and the self-reference was
+       never rewritten.  Widening used to rebuild with the qualified name, producing a
+       chain whose binders no longer matched the body ("unbound variable '_peq'"). */
+    snprintf(d->rec_name, NAME, "%s", t->name);
+    d->term = build_bound_rec(d->rec_name, t->l, d->rec_k);
   } else {
-    d->rec_k = 0; d->rec_body = NULL; d->term = t->l;
+    d->rec_k = 0; d->rec_body = NULL; d->rec_name[0] = 0; d->term = t->l;
   }
   d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;
   t->l = NULL;
