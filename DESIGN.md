@@ -375,14 +375,26 @@ with `vulkan-headers`/`vulkan-loader`, and wraps the binary with the bundled
 
 ## Test status
 
-The full suite is green: **52 suites / 940 assertions** (Tiers 1-6: core
+The full suite is green: **53 suites / 978 assertions** (Tiers 1-6: core
 primitives, FFI/system drivers, SAT & term rewriting, non-trivial workloads,
-`.line` containers, and CLI invariants).  A driver's native folds are asserted
+`.line` containers, and CLI invariants, plus the independent soundness oracle
+below).  A driver's native folds are asserted
 by `(folded)`/`lin_folds` in the driver suites; cross-driver correctness is
 asserted by the canonical selftest (`test/driver_selftest.sh` validates every
 driver against the base-CPU golden via `std/selftest.lin`); the GPU driver's
 per-wave bit-exactness is asserted by `LIN_GPU_SELFTEST` through the shared
 `std/drivers/selftest.h` harness (no mismatches on a device).
+
+**Values are pinned to an independent oracle, not to the suite's own comments.**
+`test/soundness_enum.py` (Tier 2.6, in both runners) evaluates the boolean
+formulas of `test/sat.lin`, `test/sat_verify.lin` and `test/tseitin.lin` by
+ordinary lambda evaluation — no nets, no fans, no sharing — and requires the
+engine's readback to agree (35 evaluations, all comparison-free of the `; expect`
+comments).  This exists because the suite once *asserted* the wrong values the
+unsound fan sharing produced: `sat_verify.lin` labelled its own answer a
+"superposition collapse false negative".  Editing an expectation can no longer
+make an unsound engine pass, and the oracle fails loudly if its vocabulary stops
+covering an expression rather than skipping it.
 
 ## Line budget
 
@@ -401,7 +413,7 @@ shared beta `fold_arg` edge — and expository comments/blank lines were compres
 
 ## Status (honest)
 
-**All green: 52 suites / 940 assertions.**
+**All green: 53 suites / 978 assertions.**
 
 - **Integer/comparison arithmetic is now PURE LIN.**  `std/num.lin` no longer
   uses any integer `_ffi`/`ccall2`: `add/sub/mul/div/mod/pow/eq/lt/gt/leq/geq`
@@ -476,4 +488,4 @@ The whole std was migrated to this template, with two idioms applied per module:
 
 A proper distinct `float` annotation type remains a compiler/type-checker task
 (annotations only have builtin atoms `num`/`bool`/`a`/`(list a)`); `float.lin` is
-reworked to the export template but its ops stay `num`-typed.  Suite: 52/940.
+reworked to the export template but its ops stay `num`-typed.  Suite: 53/978.

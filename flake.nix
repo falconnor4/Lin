@@ -144,6 +144,22 @@
               bash test/driver_selftest.sh "$LIN_BIN" "$LIN_STD_DIR" || true
             fi
 
+            printf "\n''${C_TIER}[Tier 2.6: Independent Soundness Oracle]''${C_RESET}\n"
+            # The sharing-sensitive files are checked against an independent
+            # evaluation of their boolean formulas, not against their ; expect
+            # comments (which previously asserted the unsound sharing's values).
+            if ${pkgs.python3}/bin/python3 test/soundness_enum.py "$LIN_BIN" "$LIN_STD_DIR" \
+                 test/sat.lin test/sat_verify.lin test/tseitin.lin >/dev/null 2>&1; then
+              pass=$((pass + 1))
+              total_checks=$((total_checks + 35))
+              printf "  ''${C_PASS}PASS''${C_RESET} %-32s\n" "test/soundness_enum.py (35 evaluations)"
+            else
+              fail=$((fail + 1))
+              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/soundness_enum.py"
+              ${pkgs.python3}/bin/python3 test/soundness_enum.py "$LIN_BIN" "$LIN_STD_DIR" \
+                 test/sat.lin test/sat_verify.lin test/tseitin.lin || true
+            fi
+
             printf "\n''${C_TIER}[Tier 3: Constraint Satisfaction & Term Rewriting]''${C_RESET}\n"
             for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do
               run_test "$f"

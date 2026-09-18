@@ -93,6 +93,26 @@ else
   fail=$((fail+1)); echo "FAIL test/driver_selftest.sh"; cat "$DS_LOG"; rm -f "$DS_LOG"
 fi
 
+# ----------------------------------------------------------------------------
+# Tier 2.6: Independent soundness oracle
+#   The sharing-sensitive files (sat / sat_verify / tseitin) are checked against
+#   an independent evaluation of their boolean formulas rather than against their
+#   own `; expect` comments: the suite previously ASSERTED the wrong values the
+#   unsound fan sharing produced (sat_verify.lin documented its own answer as a
+#   "superposition collapse false negative").  Editing an expectation can no
+#   longer make an unsound engine pass.
+# ----------------------------------------------------------------------------
+SO_LOG=$(mktemp)
+if ! command -v python3 >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL test/soundness_enum.py (python3 not found)"
+elif python3 test/soundness_enum.py "$LIN_BIN" "$STD_DIR" \
+     test/sat.lin test/sat_verify.lin test/tseitin.lin >"$SO_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 35)); echo "PASS test/soundness_enum.py (35 independent evaluations)"
+  rm -f "$SO_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/soundness_enum.py"; cat "$SO_LOG"; rm -f "$SO_LOG"
+fi
+
 printf "[Tier 3: Constraint Satisfaction & Term Rewriting]\n"
 for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do
   run_test "$f"

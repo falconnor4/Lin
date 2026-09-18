@@ -105,15 +105,40 @@ Term *expand_defs(Term *t) {
   Guard g = {0}; Term *res = expand(t, &g); free(g.names); return res;
 }
 
+/* Benchmark accounting.  `eval_form` reduces the net *before* its
+   recursion-sentinel check, so `run_and_report` used to re-reduce an
+   already-reduced net and its timer always read 0.00 ms while `net->steps`
+   showed the real total.  The reduction that happens is recorded here instead,
+   and the effect-continuation re-reductions in `net_run_io` are added to it, so
+   the reported time covers getting the net to a value (not compile/readback). */
+static int bench_measured;            /* a caller already reduced and timed it */
+static double bench_ms;
+static long long bench_goi0, bench_goi1;
+
+static double ms_since(struct timespec a, struct timespec b) {
+  return (b.tv_sec - a.tv_sec) * 1000.0 + (b.tv_nsec - a.tv_nsec) / 1000000.0;
+}
+
 static void run_and_report(Net *net) {
-  struct timespec t0, t1; long long d1 = 0, d2 = 0;
-  if (bench_mode) { d1 = goi_det(net); clock_gettime(CLOCK_MONOTONIC, &t0); }
-  net_reduce(net, STEP_LIMIT);
-  if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &t1); d2 = goi_det(net); }
-  if (!net_run_io(net, STEP_LIMIT)) { printf("=> "); net_print(net); putchar('\n'); }
+  struct timespec t0, t1;
+  if (!bench_measured) {                 /* nobody reduced this net yet: do it here */
+    if (bench_mode) {
+      bench_goi0 = goi_det(net); clock_gettime(CLOCK_MONOTONIC, &t0);
+      net_reduce(net, STEP_LIMIT);
+      clock_gettime(CLOCK_MONOTONIC, &t1); bench_goi1 = goi_det(net);
+      bench_ms = ms_since(t0, t1);
+    } else {
+      net_reduce(net, STEP_LIMIT);
+    }
+  }
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  int no_io = !net_run_io(net, STEP_LIMIT);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  if (no_io) { printf("=> "); net_print(net); putchar('\n'); }
   if (bench_mode) {
-    double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1000000.0;
-    fprintf(stderr, "[bench] %ld steps | %d nodes | %.2f ms | GoI det: %lld -> %lld\n", net->steps, net->nn, ms, d1, d2);
+    fprintf(stderr, "[bench] %ld steps | %d nodes | %.2f ms | GoI det: %lld -> %lld\n",
+            net->steps, net->nn, bench_ms + ms_since(t0, t1), bench_goi0, bench_goi1);
+    bench_measured = 0;
   }
 }
 
@@ -156,7 +181,11 @@ void eval_form(Term *t) {
   for (int round = 0; round < 16; round++) {
     Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
     if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
+    struct timespec b0, b1;
+    bench_measured = bench_mode;
+    if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
     net_reduce(&net, STEP_LIMIT);
+    if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
     if (net_has_reachable(&net, REC_SENTINEL)) {   /* self-recursion exceeded k */
       net_free(&net); term_free(ex);
       if (!widen_recursion()) { printf("error: recursion depth exceeded unravelling bound\n"); return; }
