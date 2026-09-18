@@ -19,6 +19,15 @@ computed but the closure is left applied), `(mul 2 3)` stuck, g3 stuck.  Folds a
 off in this configuration, so the mis-threading is in the **base beta rule** interacting
 with knot-shared nodes (`n->dead[n1] = n->dead[n2] = 1` kills a copy the sibling needs).
 
+`LIN_TRACE=1` on `(add 1 2)` shows what that costs: **22,584,025 steps** and nodes up to
+18,443,735 for a program HEAD finishes in about thirty — the tail is an unbroken run of
+`1.* x 2.*` (APP x DUP) commutations, i.e. the knot inflates the spine-building
+applications without ever converging, then the wave loop gives up and prints the partial
+structure.  So the symptom to chase is two-sided: runaway fan/app commutation *and* the
+result landing in the wrong slot.  Note also that `ct_splice` copies node 0 (ROOT) like
+any other node, so a spliced net carries a second ROOT-tagged node whose wires are
+deliberately not linked — worth checking when hunting the growth.
+
 ## The patch set
 
 1. `src/compile.c` — knot constructor (also change `ct_splice`'s link call to `enqueue = 1`;
