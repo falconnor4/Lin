@@ -298,7 +298,36 @@ int net_interact(Net *n, Port p1, Port p2) {
     net_link(n, (Port){m1, 0}, da, 1); net_link(n, (Port){m2, 0}, db, 1);
     return 1;
   }
-  return 0; /* era or stuck gauge pair: dropped, as in the reference */
+  /* ---------------- epsilon (ERA), now ACTIVE ----------------
+     Erasure used to be passive: an ERA pair was simply dropped and its port left
+     dangling, which is enough for the reachability GC to reclaim a sub-net that becomes
+     unreachable on its own.  It is NOT enough for a sub-net a FAN still points at.  A DUP
+     whose two auxiliaries have both been consumed keeps its PRINCIPAL wired to the value
+     it was duplicating, so that value stays reachable, stays live, and is re-serialised --
+     which is exactly why CSE (which turns a repeated computation into one shared thunk
+     behind a fan) made the compiled net 27x smaller and the .line artifact 30x LARGER.
+     Propagating erasure through the agent is what lets a spent fan actually disappear.
+
+     Standard interaction-combinator rules, with gamma ranging over LAM and APP:
+         eps x eps  -> annihilate
+         eps x delta -> delta removed, eps on both auxiliaries
+         eps x gamma -> gamma removed, eps on both auxiliaries
+
+     A branch whose far end is itself an AUXILIARY port cannot fire yet -- only
+     principal-principal links are redexes -- so its eps simply waits there.  That is the
+     lazy behaviour we want: the agent owning that port erases or consumes it later, and
+     until then the sub-net is unreachable from ROOT and the GC reclaims it. */
+  if (t2 == ERA) {
+    if (t1 == ERA) { n->dead[n1] = 1; n->dead[n2] = 1; return 1; }
+    Port a[2] = { WIRE(n, ((Port){n1, 1})), WIRE(n, ((Port){n1, 2})) };
+    n->dead[n1] = 1; n->dead[n2] = 1;
+    for (int k = 0; k < 2; k++) {
+      if (a[k].node < 0 || a[k].node == n1) continue;   /* nothing there, or wired back into the agent itself */
+      net_link(n, net_alloc(n, ERA, scope_nil(), ""), a[k], 1);
+    }
+    return 1;
+  }
+  return 0; /* unmatched pair: dropped, as in the reference */
 }
 
 /* Reclaim every node not reachable from ROOT.  The reduce loop calls this
