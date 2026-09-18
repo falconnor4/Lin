@@ -377,8 +377,13 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
     }
     return 1;                                                 /* beta */
   }
+  /* DUP x DUP: the kernel only annihilates.  With EQUAL gauges that is exactly
+     what the base engine does; with differing gauges the base engine *commutes*
+     the two fans (Lafont's delta-delta rule), which the kernel does not
+     implement, so those redexes must be left to the base engine. */
   if (t1 == DUP && t2 == DUP)
-    return !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
+    return scope_eq(n, n->scope[p1.node], n->scope[p2.node]) &&
+           !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
   return 0;                                              /* commute / erase */
 }
 

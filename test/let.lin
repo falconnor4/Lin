@@ -95,3 +95,15 @@
 
 (let ((h (cons 1 nil))) (head h))
 ; expect => 1
+; --- sharing soundness ---
+; A fan-shared binder must give each consumer its own result: with independent
+; fans sharing one gauge, the two arguments used to merge ((pair 1 2) twice here)
+; rather than reaching the two consumers separately.
+(let ((f (\x (pair x x)))) (pair (f 1) (f 2)))
+; expect => (\f ((f (\f ((f 1) 1))) (\f ((f 2) 2))))
+
+(let ((f (\x (add x 1)))) (pair (f 1) (f 2)))
+; expect => (\f ((f 2) 3))
+
+(let ((f (\x (\y (pair x y))))) (pair (f 1 2) (f 3 4)))
+; expect => (\f ((f (\f ((f 1) 2))) (\f ((f 3) 4))))

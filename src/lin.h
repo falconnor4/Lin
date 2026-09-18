@@ -37,6 +37,8 @@ void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, 
 long net_reduce(Net *n, long limit);
 Net *net_copy(const Net *n); Scope scope_nil(void);
 Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
+Scope scope_prefix(Net *n, Scope lvl, Scope s);
+Scope scope_from_bits(Net *n, const uint64_t *bits, int len);
 
 /* ---------------- driver ABI ---------------- */
 /* Drivers reduce a redex *class*; core waves fan out to each in priority order, each claiming the redexes it handles. */

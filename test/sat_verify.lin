@@ -87,9 +87,9 @@
 ; -------------------------------------------------------------------
 ; 5. 3-SAT Formula Reduction
 ; -------------------------------------------------------------------
-; N=3 Unsatisfiable (m=12 clauses)
+; N=3 clause set (m=12 clauses): SATISFIABLE (all-true satisfies every clause)
 (exists (\x1 (exists (\x2 (exists (\x3 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((or (not x1)) ((or x3) (not x1)))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x2)) ((or x1) (not x2))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))))))))
-; expect => false
+; expect => true
 
 ; -------------------------------------------------------------------
 ; 6. 5-Variable Constrained SAT & Verification:
@@ -142,9 +142,10 @@
 ; 1-variable contradictory formula: x1 and not x1 (UNSAT)
 (define f_unsat1 (\x1 ((and x1) (not x1))))
 
-; Direct exists exhibits superposition collapse (false positive):
+; Direct exists over the same formula (was a superposition-collapse false
+; positive before sharing was made sound; it now agrees with the desugaring):
 (exists f_unsat1)
-; expect => true
+; expect => false
 
 ; Probe extracts candidate witness based on collapsed superposition:
 (define m_unsat1 (probe1 f_unsat1))
@@ -160,9 +161,10 @@
 ; 1-variable idempotence: x1 and x1 (SAT with x1=true)
 (define f_sat1 (\x1 ((and x1) x1)))
 
-; Direct exists exhibits superposition collapse (false negative):
+; Direct exists over the same formula (was a superposition-collapse false
+; negative before sharing was made sound; it now agrees with the desugaring):
 (exists f_sat1)
-; expect => false
+; expect => true
 
 ; Explicit branch desugaring correctly proves satisfiability:
 ((or (f_sat1 tru)) (f_sat1 fls))

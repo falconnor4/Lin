@@ -52,6 +52,21 @@ static Scope scope_cat(Net *n, int bit, Scope a, Scope b) {
   return r;
 }
 
+/* Build a scope from a bit array in ONE allocation (SSO when short).  The
+   per-bit scope_ext loop it replaces allocated once per bit for words past the
+   SSO limit, which dominated compile time on long gauge words. */
+Scope scope_from_bits(Net *n, const uint64_t *bits, int len) {
+  if (len <= 57) {
+    Scope r; r.raw = 0; r.sso.len = (uint64_t)len;
+    for (int i = 0; i < len; i++) r.sso.bits |= (uint64_t)(bits[i] & 1) << i;
+    return r;
+  }
+  int off = sc_alloc(n, len);
+  for (int i = 0; i < len; i++) n->sca[off + i] = bits[i] & 1;
+  Scope r; r.raw = 0; r.heap.is_heap = 1; r.heap.len = (uint64_t)len; r.heap.off = (uint64_t)off;
+  return r;
+}
+
 Scope scope_ext(Net *n, Scope s, int bit) {
   int ls = scope_len(s);
   if (ls + 1 <= 57 && !s.sso.is_heap) {
@@ -60,6 +75,12 @@ Scope scope_ext(Net *n, Scope s, int bit) {
     return r;
   }
   return scope_cat(n, bit, s, scope_nil());
+}
+
+/* lvl ++ s: inject a gauge level as a prefix (the paper's non-abelian prefix
+   injection).  A nil level leaves `s` untouched. */
+Scope scope_prefix(Net *n, Scope lvl, Scope s) {
+  return scope_len(lvl) ? scope_cat(n, 0, lvl, s) : s;
 }
 
 int scope_eq(Net *n, Scope a, Scope b) {
@@ -216,8 +237,29 @@ int net_interact(Net *n, Port p1, Port p2) {
   }
 
   if (t1 == DUP && t2 == DUP) {
-    if (!scope_eq(n, n->scope[n1], n->scope[n2]))
-      return 0; /* gauge mismatch (dropped) */
+    if (!scope_eq(n, n->scope[n1], n->scope[n2])) {
+      /* Two *independent* fans meet (distinct gauges = distinct sharing points):
+         commute them (Lafont's delta-delta rule) instead of dropping the pair, so
+         nested sharing distributes correctly.  Each fan is copied by the other —
+         delta_a's two auxiliaries get a delta_b each, delta_b's two auxiliaries get
+         a delta_a each, cross-connected — exactly the shape of the gamma x delta
+         commutation below.  Without this rule the only options are annihilating
+         two unrelated fans (wrong value) or stranding the pair (no reduction), so
+         a fan-shared body could never be reduced. */
+      Scope sa = n->scope[n1], sb = n->scope[n2];
+      Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
+      Port b1 = WIRE(n, ((Port){n2, 1})), b2 = WIRE(n, ((Port){n2, 2}));
+      const char *nm = n->name[n1] ? n->name[n1] : "";
+      int m1 = net_alloc(n, DUP, sa, nm).node;
+      int m2 = net_alloc(n, DUP, sa, nm).node;
+      int d1 = net_alloc(n, DUP, sb, nm).node, d2 = net_alloc(n, DUP, sb, nm).node;
+      n->dead[n1] = 1; n->dead[n2] = 1;
+      net_link(n, (Port){d1, 1}, (Port){m1, 1}, 0); net_link(n, (Port){d1, 2}, (Port){m2, 1}, 0);
+      net_link(n, (Port){d2, 1}, (Port){m1, 2}, 0); net_link(n, (Port){d2, 2}, (Port){m2, 2}, 0);
+      net_link(n, (Port){d1, 0}, a1, 1); net_link(n, (Port){d2, 0}, a2, 1);
+      net_link(n, (Port){m1, 0}, b1, 1); net_link(n, (Port){m2, 0}, b2, 1);
+      return 1;
+    }
     Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
     Port b1 = WIRE(n, ((Port){n2, 1})), b2 = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;

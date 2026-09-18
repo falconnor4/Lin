@@ -251,6 +251,59 @@ Result: `(if (geq 1 (min 4 5)) 1 8)` → `8`, `(mul 6 (add 24 96))` → `720`,
 and the previously-failing composed de-ladered tests (`math`, `map`, `set`,
 `nqueens`, `sudoku`, `algorithms`) all pass.
 
+## Sharing soundness: fan–fan commutation and the gauge discipline
+
+Lin's DUP sharing was **unsound**: every fan carried the *empty* gauge, and a fan
+annihilates only when gauges match, so two *independent* sharing points
+annihilated against each other and merged their values.  Minimal witness on the
+unmodified engine (plain `let`, no compiler fan-sharing involved):
+
+```
+(let ((f (\x (pair x x)))) (pair (f 1) (f 2)))   =>  (pair 1 2) (pair 1 2)     ; should be (1 1) (2 2)
+(let ((f (\x (add x 1)))) (pair (f 1) (f 2)))    =>  (pair 3 3)                ; should be (2 3)
+```
+
+The suite documented the same defect as a "superposition collapse": it asserted
+`(exists f_sat1) => false` for the satisfiable `f_sat1 = \x1 (x1 and x1)` and
+labelled it a *false negative*, while asserting the correct `true` for the
+explicitly-desugared form of the same formula.  Three changes make sharing sound:
+
+1. **Fan–fan commutation (the missing rule).**  `net_interact`'s `DUP × DUP` case
+   only annihilated equal-gauge fans and *silently dropped* mismatched pairs;
+   there was no rule at all for two independent fans meeting, so a fan-shared
+   body could never be reduced correctly.  It now implements Lafont's δ⋈δ
+   commutation for differing gauges — each fan is copied by the other (a's
+   auxiliaries get a δ_b each, b's get a δ_a each, cross-connected) — with each
+   fan's copies keeping *that fan's own* gauge.  (The reference implementation
+   has only three rules — LAM↔APP, DUP↔DUP on scope match, LAM/APP↔DUP — and
+   leaves mismatched fans stuck.)
+2. **A real gauge discipline.**  Every fan now carries a gauge identifying *its*
+   sharing point — a compact unique marker — so fans for independent sharing
+   points are never equal and the gauge only annihilates a fan against a copy of
+   *itself*.  Structural nodes keep a uniform (empty) gauge: the commute modulates
+   copies as `1·s_node·s_dup`, so uniform node gauges are what keep copies of the
+   same fan matching.  Markers are compact (a counter that stays inside the 57-bit
+   inline scope word) rather than nesting-path words, because a path word grows
+   with depth and every scope operation on a spilled word allocates.
+3. **Re-gauging on splice.**  A precompiled body's fans were labelled during its
+   own precompile reduction, so splicing it verbatim gave every reference's copy
+   identical labels and independent sharing points collided again.  `ct_splice`
+   now re-gauges each clone at a fresh level.
+
+Result: the witnesses above reduce correctly, and every `exists` case in
+`test/sat.lin`, `test/sat_verify.lin` and `test/tseitin.lin` now agrees with the
+explicit-assignment enumeration.  Three expectations that encoded the unsound
+results were corrected: a Tseitin parity contradiction is unsatisfiable, so its
+`exists` is `false` rather than `true`, and `sat.lin`'s clause set
+(`~x1∨x3, ~x3∨x2, ~x2∨x1`, satisfied by all-true) is `true` rather than `false`.
+
+`scope_from_bits` (`net.c`) rebuilds a heap-backed scope in **one** allocation;
+the previous per-bit `scope_ext` loop allocated once per bit, which made
+per-node re-gauging of large spliced bodies dominate compile time.  Remaining
+cost: a large precompiled body is still cloned once per reference, and gauges
+make that clone's scope work non-trivial — sharing one copy across references
+(and making a shared body reduce per consumer) is the next step.
+
 ## Recursion
 
 Recursive defs are compiled by **bounded self-unravelling** (`build_bound_rec`:

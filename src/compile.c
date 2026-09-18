@@ -55,20 +55,41 @@ static Port dup_tree(Port *ts, int nts, Scope sc) {
   return cur;
 }
 
+/* A compact, unique gauge marker.  A gauge must identify *one* sharing point and
+   be distinct from every other fan's, but it must also stay inside the 57-bit
+   inline scope representation: a nesting-path word grows with depth, and once a
+   word spills to the heap every scope operation allocates, which dominated
+   compile time when re-gauging large spliced bodies.  The width is FIXED: a
+   commute builds a copy's gauge as `bit · s_node · s_dup`, so a variable-width
+   marker could collide with a longer modulated word (marker "11" vs the copy of a
+   fan whose marker is "1").  Fixed width keeps every base marker shorter than any
+   modulated word, and 20 bits (a million fans per compilation) cannot wrap in
+   practice. */
+#define FAN_LVL_BITS 20
+static int fan_ctr;
+static Scope fan_lvl(void) {
+  Scope s = scope_nil(); unsigned v = (unsigned)(++fan_ctr);
+  for (int b = 0; b < FAN_LVL_BITS; b++) s = scope_ext(N, s, (int)((v >> b) & 1));
+  return s;
+}
+
 /* Rebuild a source-net scope in the target gauge table; heap-backed ones re-register bit-by-bit into N->sca. */
 static Scope sc_rebuild(Net *d, int i) {
   Scope s = d->scope[i];
   if (!s.sso.is_heap) return s;
-  Scope r = scope_nil();
-  for (unsigned b = 0; b < (unsigned)s.heap.len; b++) r = scope_ext(N, r, (int)d->sca[s.heap.off + b]);
-  return r;
+  return scope_from_bits(N, d->sca + s.heap.off, (int)s.heap.len);
 }
 
-/* Clone a pre-reduced define value (closed normal-form net) into N; cut the source ROOT<->value clamp so the clone ties only to the caller. */
+/* Clone a pre-reduced define value (closed normal-form net) into N; cut the source ROOT<->value clamp so the clone ties only to the caller.  The clone is
+   re-gauged at a fresh level: the body's fans were labelled during its own
+   precompile reduction, so splicing it verbatim would give every reference's copy
+   identical labels and two independent sharing points would annihilate. */
 static Port ct_splice(Def *d, Scope sc) {
-  (void)sc; Net *s = d->compiled;
+  (void)sc;
+  Net *s = d->compiled;
+  Scope lvl = fan_lvl();
   int n = s->nn, *map = malloc(sizeof(int) * (size_t)(n ? n : 1));
-  for (int i = 0; i < n; i++) map[i] = net_alloc(N, s->tag[i], sc_rebuild(s, i), s->name[i]).node;
+  for (int i = 0; i < n; i++) map[i] = net_alloc(N, s->tag[i], scope_prefix(N, lvl, sc_rebuild(s, i)), s->name[i]).node;
   Port val = s->wire[0]; int vn = val.node;
   for (int i = 0; i < n; i++) {
     if (s->dead[i]) continue;
@@ -91,14 +112,17 @@ static Port ct(Term *t, Scope sc) {
       CVar *e = &cstack[i];
       e->count++;
       if (e->count == 1) return e->bind;
-      Port ph = net_alloc(N, ERA, sc, "");
+      Port ph = net_alloc(N, ERA, scope_nil(), "");
       add_extra(e, (Port){ph.node, 1});
       return (Port){ph.node, 1};
     }
     cfail("unbound variable '%s'", t->name);
   }
   case TLAM: {
-    Port self = net_alloc(N, LAM, sc, t->name);
+    Port self = net_alloc(N, LAM, scope_nil(), t->name);
+    /* the fan duplicating this binder's occurrences is one sharing point: it gets
+       its own gauge, so an unrelated fan never carries the same one */
+    Scope lvl = fan_lvl();
     push_var(t->name, (Port){self.node, 1});
     int my = csp - 1;
     Port body = ct(t->l, sc);
@@ -114,7 +138,7 @@ static Port ct(Term *t, Scope sc) {
         N->dead[e->extra[i].node] = 1;
         N->wire[e->extra[i].node * 3 + 1] = (Port){-1, 0};
       }
-      Port root = dup_tree(ts, e->count, sc);
+      Port root = dup_tree(ts, e->count, lvl);
       net_link(N, (Port){self.node, 1}, root, 0);
       free(ts);
     }
@@ -123,7 +147,7 @@ static Port ct(Term *t, Scope sc) {
     return self;
   }
   case TAPP: {
-    Port a = net_alloc(N, APP, sc, "");
+    Port a = net_alloc(N, APP, scope_nil(), "");
     net_link(N, (Port){a.node, 0}, ct(t->l, sc), 1);
     net_link(N, (Port){a.node, 2}, ct(t->r, sc), 1);
     return (Port){a.node, 1};
@@ -138,7 +162,7 @@ static Port ct(Term *t, Scope sc) {
 }
 
 int compile(Term *t, Net *n, char *err, int errsz) {
-  N = n; csp = 0;
+  N = n; csp = 0; fan_ctr = 0;
   if (!cstack) { ccsp = 64; cstack = malloc((size_t)ccsp * sizeof(CVar)); }
   if (setjmp(CJ)) {
     snprintf(err, errsz, "%s", CMSG);
