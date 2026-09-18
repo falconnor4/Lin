@@ -216,3 +216,40 @@ a fixed term -- e.g. drain `act` LIFO instead of FIFO, or for a driver claim LAM
 pairs and defer gamma-delta until nothing else is pending.  If cost moves materially, the
 order policy is the lever and the optimality work belongs in the scheduler / a strategy
 driver, not in the sharing pass.
+
+## RESOLVED: there is no tree-sharing defect.  Sharing works.  The "anomaly" was arithmetic.
+
+Ran the schedule experiment too: `LIN_WAVE_REV=1` drains each wave LIFO instead of FIFO
+(same pairs, same confluence, different order).  Costs were **identical to the step** again
+(230124 / 92172 / 268007).  So neither the fan tree nor the schedule order explains the
+spread, which left only the possibility I should have checked FIRST: the two shapes are
+different arithmetic.
+
+`num.add` is Scott-recursive on its FIRST argument, monotonically:
+
+    (add 0 126)   12921        (add 42 84)   20961
+    (add 126 0)   35265        (add 84 42)   32337
+
+So `(add (add v v) v)` = (v+v)+v recurses on the RESULT 84, while `(add v (add v v))` =
+v+(v+v) recurses on v = 42.  The 2.2-2.5x spread is genuine, correct extra reduction for
+genuinely different sums -- not duplicated work, and not a sharing failure.
+
+**Conclusion of the tree-sharing investigation.** All three of my hypotheses are dead, and
+the positive result stands:
+
+  - fan-based tree sharing WORKS and its advantage over copying GROWS with use count
+    (0.55 / 0.40 / 0.34 of copying for 2 / 3 / 4 uses);
+  - the fan tree's construction is irrelevant (identical to the step);
+  - the schedule order is irrelevant (identical to the step);
+  - what looked like a 2.5x anomaly is `add` recursing on its first argument.
+
+So there is no low-hanging fruit in the sharing machinery, and nothing here to "fix".  The
+things that remain genuinely open are (a) whether full Levy-optimality would reduce the
+ARITHMETIC itself by sharing partial results -- which is a much deeper claim and I am NOT
+asserting it without measurement -- and (b) cyclic sharing / the knot, which DESIGN already
+scopes to brackets/abstractors behind a driver.
+
+Method note, since three hypotheses died the same death: every one came from reasoning
+about mechanism and was killed by a measurement.  The two isolating experiments above (vary
+only the fan tree; vary only the schedule) both cost a few lines and took one command each.
+Do those first next time.
