@@ -463,6 +463,27 @@ so `test/selfrecursion.lin` prints structures rather than 0/1/120.  A3 alone can
 land; and note this **reverses** the earlier ordering guess: A2 (sound fan reading) is
 the prerequisite, A3 the follower.
 
+**The fold handles shared operands fine — the failure is specific to nested recursion.**
+Four probes on the unmodified engine (all correct, all under 0.5 s):
+
+| probe | result |
+|---|---|
+| `(let ((x (add 1 2))) (pair (add x 10) (add x 20)))` — shared *computed* operand | `(13, 23)` |
+| `(let ((x 3)) (pair (add x 1) (add x 2)))` — shared literal operand | `(4, 5)` |
+| `(let ((f (\y (add y 1)))) (pair (f 3) (f 4)))` — shared closure over an `_op` | `(4, 5)` |
+| `(let ((h (add 2))) (pair (h 3) (h 4)))` — shared **partial application** of `add` | `(5, 6)` |
+
+So neither sharing, nor a computed operand, nor partial application of an `_op` wrapper
+breaks the fold.  What breaks it is `mul`: `_pmul` recurses through `_padd`, another
+recursive define, so each `_pmul` copy carries a 24-fold unrolled `_padd` — the
+sharing × unrolling product that produces the 30,773 -> 111,933 node oscillation.  That
+also fits the knot result: the knot removes the unrolling (the `(peel 3)` readback became
+compact) but the folds stop firing, and `peel` uses only `is_zero`/`pred`, so with a knot
+something *else* suppresses folding.  The next diagnostic is therefore narrow: on a knot
+build, run `(peel 1)` with the fold counters instrumented and determine whether
+`lin_fold_op` is called at all and where `op_value_from_lam` fails — that decides what A2
+actually has to read.
+
 **Reading a value "through the fan" is unsound — measured.**  Adding an aux-side
 fallback to `dec_arg` (if the direct read fails and the port is a DUP, try the two
 auxiliary sides, on the theory that a fan's sides carry the same value) makes
