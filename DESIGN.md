@@ -452,6 +452,26 @@ widening loop (30,733 <-> 111,933 nodes) fires from inside a baked net.  Reverte
 So the lever can only be turned on once **no** define is unrolled anywhere: the knot is
 the prerequisite, not the follow-up.
 
+**Knot attempt #2 (implemented, structurally right, still not landable).**  The
+construction above was built (`compile_knot` in `compile.c`: wrap the body in a LAM
+named after the define, then a fresh `fan_lvl()`-gauged DUP whose principal takes the
+body, whose aux1 feeds the define's own references and whose aux2 is the value ROOT
+exposes; nothing is reduced, so the cycle unfolds lazily).  It works: `(peel 3)` now
+readbacks a *compact* cyclic term instead of the 24-fold unrolled structure, so the
+unrolling is genuinely gone.  But the value is unreduced — the `_op` folds never fire —
+so `test/selfrecursion.lin` prints structures rather than 0/1/120.  A3 alone cannot
+land; and note this **reverses** the earlier ordering guess: A2 (sound fan reading) is
+the prerequisite, A3 the follower.
+
+**Reading a value "through the fan" is unsound — measured.**  Adding an aux-side
+fallback to `dec_arg` (if the direct read fails and the port is a DUP, try the two
+auxiliary sides, on the theory that a fan's sides carry the same value) makes
+`(let ((g (mul 2))) (pair (g 3) (g 4)))` *terminate* — with `(6, 6)` where `(6, 8)` is
+correct.  One consumer read the other consumer's branch.  So the fold must read the
+value on the *consumer's own* branch (or the fan must be materialised before folding);
+"a copy is as good as the original" is false here, and this is the third unsound
+shortcut around the fan (after 225 -> 1 and the net-lifetime budget).
+
 **Knot attempt #1's bug, identified.**  The construction linked the occurrence fan to
 the body's own root port by *overwriting that port's wire* (`net_link(occ, b)` writes
 `wire[b] = occ`), which leaves `b` pointing back at the fan — a closed loop with no
