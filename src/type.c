@@ -96,7 +96,22 @@ static void unify(Type *x, Type *y) {
   tfail("type mismatch");
 }
 
-typedef struct { char name[NAME]; Scheme s; } TEnv;
+/* Environment entries come in two kinds, and the distinction is what makes
+   generalization both order-independent and cheap:
+
+     - a DEFINITION scheme is closed and never mutated after registration, so the
+       set of type variables it contributes to the environment is fixed and is
+       maintained incrementally in a refcount table (`envrc`) instead of being
+       recomputed by walking every scheme on every `generalize` (that walk was
+       160k entry scans / 11.9M node visits per std load -- 372 of its 421 ms);
+
+     - a BINDER entry (`\x.` and the self-recursive `f : a` slot) holds a fresh
+       variable that unification may LINK LATER, so its contribution cannot be
+       cached at push time: `(\x (x 5))` pushes `a`, then `unify(a, num -> c)`
+       makes `c` free in the environment through `x`.  Those are resolved when
+       `generalize` runs -- O(1) while the root is still a bare variable, and a
+       walk only in the rare case that it was linked. */
+typedef struct { char name[NAME]; Scheme s; int isdef; } TEnv;
 static TEnv *env;
 static int envn, envcap;
 
@@ -104,7 +119,8 @@ static void env_push(const char *name, Scheme s) {
   if (envn >= envcap)
     env = realloc(env, (size_t)(envcap = envcap ? envcap * 2 : 128) * sizeof(TEnv));
   snprintf(env[envn].name, NAME, "%s", name);
-  env[envn++].s = s;
+  env[envn].s = s; env[envn].isdef = 0;
+  envn++;
 }
 
 static Scheme *env_find(const char *name) {
@@ -128,6 +144,20 @@ static void fv(Type *t, int *set, int *n) {
   if (t->kind == TNOM) { if (t->a) fv(t->a, set, n); }
   if (t->kind == TARG) { fv(t->a, set, n); if (t->b) fv(t->b, set, n); }
 }
+
+/* ---- environment free-variable set (see the TEnv comment): membership is a refcount
+   lookup, so `generalize` never iterates the environment and its answer depends on the
+   environment as a *set*, not on the order entries were pushed. ---- */
+static int *envrc; static int envrc_cap;
+static void rc_grow(int id) {
+  if (id < envrc_cap) return;
+  int nc = envrc_cap ? envrc_cap : 1024;
+  while (nc <= id) nc *= 2;
+  envrc = realloc(envrc, (size_t)nc * sizeof(int));
+  memset(envrc + envrc_cap, 0, (size_t)(nc - envrc_cap) * sizeof(int));
+  envrc_cap = nc;
+}
+static int rc_has(int id) { return id < envrc_cap && envrc[id] > 0; }
 
 static int mid[256];
 static Type *mty[256];
@@ -154,15 +184,23 @@ static Type *instantiate(Scheme *s) {
 
 static Scheme generalize(Type *t) {
   int f[256], fn = 0; fv(t, f, &fn);
+  /* Binder entries first: O(1) each while the pushed variable is still bare, and only
+     an entry whose variable was linked needs the walk. */
+  int dyn[256], dn = 0;
   for (int i = 0; i < envn; i++) {
-    int g[256], gn = 0; fv(env[i].s.t, g, &gn);
-    for (int j = 0; j < fn; j++) {
-      int hit = 0;
-      for (int k = 0; k < gn; k++) if (f[j] == g[k]) { hit = 1; break; }
-      if (hit) { f[j] = f[--fn]; j--; }
-    }
+    if (env[i].isdef) continue;
+    Type *u = find(env[i].s.t);
+    if (u->kind == TVR) { if (dn < 256) dyn[dn++] = u->id; }
+    else fv(env[i].s.t, dyn, &dn);
   }
-  Scheme s; s.nq = fn; memcpy(s.q, f, (size_t)fn * sizeof(int)); s.t = t; return s;
+  int q[256], qn = 0;
+  for (int j = 0; j < fn; j++) {
+    if (rc_has(f[j])) continue;                       /* free in a def scheme's type */
+    int hit = 0;
+    for (int k = 0; k < dn; k++) if (dyn[k] == f[j]) { hit = 1; break; }
+    if (!hit && qn < 256) q[qn++] = f[j];
+  }
+  Scheme s; s.nq = qn; memcpy(s.q, q, (size_t)qn * sizeof(int)); s.t = t; return s;
 }
 
 static Type *infer(Term *t) {
@@ -190,9 +228,23 @@ static Type *infer(Term *t) {
   return NULL;
 }
 
+/* Registering a def scheme's free variables happens ONCE PER DEF, not once per check.
+   The old code walked all 319 schemes on each of the 512 checks (160k walks, 11.9M node
+   visits) purely to rediscover an unchanging answer.  Loading the array itself stays
+   per-call but is only a copy, so `env_find` still sees every def. */
 static void env_load_defs(void) {
+  static int reg_n = 0;                     /* defs whose free variables are already counted */
+  for (int i = reg_n; i < ndefs; i++) {
+    if (!defs[i].typed) continue;
+    int f[256], n = 0; fv(defs[i].sch.t, f, &n);
+    for (int j = 0; j < n; j++) { rc_grow(f[j]); envrc[f[j]]++; }
+  }
+  reg_n = ndefs;
   envn = 0;
-  for (int i = 0; i < ndefs; i++) if (defs[i].typed) env_push(defs[i].name, defs[i].sch);
+  for (int i = 0; i < ndefs; i++) if (defs[i].typed) {
+    env_push(defs[i].name, defs[i].sch);
+    env[envn - 1].isdef = 1;                /* its contribution is already in envrc */
+  }
 }
 
 int type_check(Term *t, Scheme *out, char *err, int errsz) {
