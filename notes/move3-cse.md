@@ -85,3 +85,45 @@ sharing cannot pay.  So the ordering is:
 Until then, CSE is a pass that shrinks the compiled net 27× and makes the shipped
 artifact 30× bigger, so it does not ship.  The pass source is in this note's history
 rather than the tree; the six bug notes above are the expensive part and they are kept.
+
+## CORRECTION: active erasure is NOT what sharing was waiting for
+
+I hypothesised that a spent fan was pinning the shared sub-net, so making erasure
+active (ε×δ / ε×γ, now landed in the core and suite- and oracle-green) would let
+CSE pay.  **That is falsified.**  Re-measured with active erasure in the core:
+
+| artifact | no CSE | with CSE (active erasure) |
+|---|---|---|
+| `line_binary.line` | 106,243 B / 3,832 nodes | 309,113 B / 11,668 nodes |
+| `line_ffi.line` | 92,853 B / 3,397 nodes | 2,785,843 B / 107,258 nodes |
+
+Identical to the pre-erasure numbers — erasure changed nothing here, and CSE still
+*increases* build-time work (`line_ffi`: 114,909 → 173,004 steps).  The rewrite also
+regressed correctness (`FFI_LINE_OK: 144` → `?`), so it was reverted a second time.
+
+## The real cause: a fan COPIES, it does not SHARE
+
+`ε×δ` cannot help because the problem is not that spent fans linger.  It is that a fan
+meeting a redex *commutes* — γ⋈δ turns one redex into **two** — so CSE's "shared"
+sub-term is not reduced once and read twice; it is duplicated into two computations that
+then each reduce.  That is exactly the measured signature: more steps and a bigger
+residual, while the compiled net is 27× smaller (the duplication is deferred into the
+fan instead of being materialised at compile time).
+
+Genuine sharing requires the two copies to be **identified when they meet**, which is
+what Lamping's brackets/abstractors exist for: the fan carries an identifier, the
+abstractor guards the term, and when the two copies are recognised the fan annihilates
+and the work collapses to one reduction.  Lin's gauges + `scope_meet` are the *level*
+discipline and are landed and oracle-green, but there are no brackets or abstractors —
+which is precisely DESIGN.md's "optimal for acyclic sharing; full Levy-optimality for
+cyclic sharing needs the bracket machinery, which belongs in a driver, not the core".
+
+**So the order was wrong, and this is the correction that matters:** CSE is a *decision*
+about what to share, and a decision is worthless without a *discipline* that makes
+sharing actually share.  The bracket/abstractor strategy (a driver, per the Move 4 spec:
+"brackets/abstractors only as a driver-level Levy strategy, never in the core") has to
+exist FIRST; only then can a sharing decision be measured, let alone be profitable.
+
+Active erasure stays: it is one of the four core rules, it was inert, and it is now
+doing its job against the full suite and the independent oracle.  It is just not the
+thing that unblocks sharing.
