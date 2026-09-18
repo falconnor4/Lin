@@ -1,1060 +1,645 @@
-# Lin Architecture Notes
+# Lin — Design
 
-## Goal
+Lin is a functional language whose evaluation model *is* an interaction net. A program is
+compiled to a net of agents and wires; running it is cut-elimination on that net; the
+answer is a value read back out of the normal form. There is no intermediate abstract
+machine, no runtime graph rewriting a heap of closures, and no garbage collector in the
+usual sense — allocation and reclamation are consequences of the reduction rules.
 
-Lin is a functional language where every program is inherently optimal
-(Lévy-optimal interaction-combinator reduction) and parallel (wavefront
-fan-out), implemented compactly.
+That choice is what makes the two headline goals achievable at all:
 
-## Target architecture (the five moves)
+- **Inherently optimal.** Sharing is a first-class net structure (fan nodes with a gauge
+  discipline), so a shared sub-computation is reduced once and its result distributed.
+- **Inherently parallel.** The rules are *local*: a redex is two principal ports meeting,
+  and whether two redexes are independent is a structural property of the net, not the
+  result of a dependence analysis.
 
-Lin's goal: every Lin program inherently parallel and inherently optimally reduced,
-with Lin itself portable and simple, deep optimization and reduction strategy pushed
-into drivers, e-graphs used for AOT, and Levy-optimal reduction for everything the
-compiler leaves behind.
+Everything else in this document exists to keep those two properties honest: a core that
+is complete by itself, and every opportunistic or hardware-specific concern pushed out of
+it into drivers and the standard library.
 
-The layering, and the one rule that keeps it honest:
+---
 
-| layer | owns | invariant |
+## 1. Goals
+
+**G1 — Optimality by construction.** Sharing is expressed in the net, so evaluating a
+shared sub-term once is the *default* behaviour rather than an optimisation pass that has
+to be trusted. Measured today for acyclic sharing: a computation shared between N uses
+costs one execution, with a marginal ~177 steps per additional forced use (0.8% of the
+computation). The open half of this goal is cyclic sharing — see §11.2.
+
+**G2 — Parallelism by construction.** Independent redexes are contracted simultaneously
+across threads. Confluence makes the *answer* independent of the schedule, so a scheduler
+can only ever be a performance choice, never a semantic one.
+
+**G3 — A small, auditable, portable core.** The core is the interaction calculus and
+nothing else: 2,872 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
+no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
+the layering claim of §2 checkable by reading it.
+
+**G4 — AOT-first.** `lin build` runs the whole pipeline — including partial evaluation of
+the program — and ships a `.line` container holding the *residual* net. The artifact keeps
+exactly the work the runtime genuinely must do (effects, IO, non-pure FFI) and nothing
+else. Interpretation stays as the development path and shares the same front end, so there
+is one semantics and two schedules.
+
+**G5 — Verification before claims.** Values are pinned to an *independent* oracle (ordinary
+lambda evaluation, no nets, no sharing, no fans), not to the test suite's own expectations.
+Accelerators must reproduce the base engine's rewrites, not merely produce the same answer.
+
+### The rule that keeps the layering honest
+
+A driver may **pre-empt** a rule on a redex class. It may never **replace** a rule. A
+program whose redexes no driver claims must still reduce to exactly the same value, by
+plain β. Every architectural decision below is an instance of that one rule.
+
+---
+
+## 2. Layering
+
+| layer | owns | invariant it must uphold |
 |---|---|---|
-| surface + e-graph AOT | program rewrites, sharing (CSE -> fan introduction), precompile/unroll choices, driver selection | leaves a net whose semantics are already finished |
-| **calculus core** | agents, wires, and the rules: beta, delta-delta, gamma-delta, epsilon — nothing else | **complete and correct alone**; a strategy may pre-empt a rule, never replace it |
-| drivers | arithmetic folding, wave execution (SIMD/GPU/threads), parallel policy, optionally alternative sharing disciplines | never load-bearing for correctness |
-| std runtime (`.inc`) | readback, IO, decoders | same as drivers |
+| surface + AOT passes | program rewrites, def precompilation, e-graph saturation/extraction, net compilation | the term handed to the compiler is semantically finished; every rewrite is meaning-preserving |
+| **calculus core** (`src/net.c`) | agents, wires, scopes, and the four rules: β, δ⋈δ, γ⋈δ, ε — nothing else | **complete and correct alone**; with no driver loaded, every program still reduces exactly |
+| drivers (`std/drivers/*.so`) | arithmetic folding, wave dispatch to SIMD/GPU/threads, waiting policy, Lévy bracketing if it ever lands | never load-bearing for correctness; must be bit-exact against the base engine |
+| std runtime (`src/runtime_*.inc`, `std/`) | readback, IO/effect continuations, the `.line` container, the language library | same as drivers: convenience, not correctness |
 
-*Inherently parallel* = rule locality (true by construction), confluence (results
-schedule-independent — pinned by the independent oracle), and a **work-efficient
-frontier** (the missing piece: the scheduler rescans the net per wave, which is why
-threaded runs measure *slower* than serial: 13.2 s vs 15.6 s on `numbers.lin`, every
-threshold 512 -> 32k >= serial, while reduction is only ~3% of runtime).
+The dependency direction is one-way. The core may call a driver through the ABI (§5); no
+driver may require the core to know what it is for. The one thing the core tells drivers
+about itself is *context*, via two flags — `lin_precompile_depth` ("these operands are free
+variables and will never become concrete") and `lin_build_depth` ("this reduction is
+happening at build time, so nothing the program would observe at run time may be baked").
+Both are statements about *when*, not about *what*.
 
-*Inherently optimal* = sharing as fans with a discipline identifying sharing points.
-Gauges + the meet do that and are landed and oracle-green, but there are no brackets or
-abstractors — and the knot investigation proved the consequence: **a fan wrapped around
-a cyclic body is divergent by construction**, so lazy recursion is not expressible
-today.  Honest status: optimal for acyclic sharing; full Levy-optimality for cyclic
-sharing needs the bracket machinery, which belongs in a driver, not the core.
+---
 
-### Move 1: evict the fold machinery (~390 lines off the core)
+## 3. The calculus core
 
-The core currently carries arithmetic *strategy*: `lin_ffi_peek`, `ffi_ops_concrete`,
-`fold_link`, `lin_fold_ffi(_arg)`, `lin_fold_op(_arg)`, `op_value_from_lam`,
-`lin_*_needs_operand`, the blocked/deferral list in `net_reduce`, and the
-`lin_stuck_ffi_count` cache-decline plumbing — roughly 330 of `io.c`'s 559 lines plus
-~60 across `net.c`/`main.c`.
+### 3.1 Nets
 
-Survey result: **no new core surface is needed.**  The driver ABI already exposes
-`claim`/`reduce` with `LIN_CAP_NATIVE_NUM`, and the core already exports `net_spine_args`,
-`net_ffi_args`, `net_ffi_fn`, `net_dhop`, `ctor_tag`, `net_alloc_scott/bool/float`,
-`net_link`, `net_alloc`, `net_interact`, `net_copy`, `lin_scalar_ops_add` and
-`lin_arith_scalar`.  `std/drivers/arith.c` even documents the split already: "the strategy
-keeps its own concern — how it extracts/decodes args from the net and when it folds — and
-calls this for the math itself".
+A net is a graph of agents with wires between ports. Exactly four agent kinds exist:
 
-So Move 1 is a port, not a redesign:
-
-1. `std/drivers/fold.c` — a driver that claims saturated `_op`/`_ffi` closure redexes
-   (LAM named `_x` meeting its APP), decodes the operand spine with `net_spine_args`,
-   calls `lin_arith_scalar` for the value, and rewrites the redex with
-   `net_alloc_scott`/`net_link` — including the argument-fold edge.
-2. Its *waiting policy is its own business*, and the simplest correct one is not to wait
-   at all: if it cannot fold, it declines and the core betas the closure, which is
-   exactly the pure-Lin body and therefore today's semantics.  That deletes the shared
-   `_op` livelock class outright (measured: ~2400 deferrals/s at a frozen 111,933-node
-   net, plus a beta cycle at a stable 30,684-node net, neither of which the scheduler can
-   see) instead of inventing another heuristic in the semantics.
-3. Delete the machinery from the core; the LAM×APP branch becomes plain beta, and
-   `!lin_has_knot`-style contamination becomes impossible because there is nothing left
-   to guard.
-
-Gate: `test/driver_selftest.sh` + `test/run_tests.sh` + `test/soundness_enum.py`, with the
-acceptance matrix in `notes/knot-wip.md`.  The oracle is what makes this kind of move
-safe — it pins values independently, so a driver can never certify its own correctness.
-
-## Core philosophy: pure interaction nets + pluggable optimizations
-
-The **base engine** (`src/`) is pure interaction-net reduction: the four
-scope-gauge rules (beta, annihilate, commute, erase) plus readback/effects,
-with no hardware-specific or opportunistic fast paths baked in.  That purity
-is what keeps the core small (the pure `src/` core is **2,923 lines** incl.
-`lin.h`, under the 3,000 target) and auditable.
-
-**All optimization/acceleration lives outside the core**, in `std/` and
-`std/drivers/*.so`:
-
-- **Drivers** (`std/drivers/simd.so`, `gpu.so`) reduce a *class* of redexes
-  more cheaply than the base rules (SIMD native arithmetic; the GPU kernel)
-  but must reproduce the base engine's reduction *exactly* — the base engine
-  is always the correctness oracle, and `LIN_GPU_SELFTEST` asserts a driver's
-  rewrites are bit-identical to `lin_reduce_wave_parallel`.
-- **Scalar-op semantics** live in one shared table (`std/drivers/arith.so`),
-  not in the core and not per-driver.
-- **Non-calculus runtime** (readback/IO effects, the `.line` container) lives
-  in `std/runtime/`, `#include`d into the core for a single binary.
-
-This boundary is what permits "every program is inherently optimal" in the core
-while still admitting hardware acceleration as an opt-in concern.
-
-## Generality principles (post-refactor)
-
-1. **Datatype registry** (`ctor_tag` / `ctor_register` in `src/io.c`).
-   Value domains (`num`, `bool`, `string`, `ffi`, `effect`) are keyed by their
-   carrier node names in one registry; the readback decoders consult it via
-   `ctor_tag(name)` instead of hard-coded prefixes.  This removed a latent bug
-   where any user identifier starting with `c`/`n` (e.g. `cons`, `car`) could
-   be mis-decoded as a string.
-
-2. **User-declared algebraic datatypes** (`datatype` + `match` in the parser).
-   Constructors are generated Scott encodings — `C_i = \f1..\fk \d0..\d_{m-1}
-   (d_i f1 .. fk)` — and type-check through ordinary Hindley-Milner
-   let-generalization.  No new type-system machinery is required.
-
-3. **Open effect/continuation protocol.**  Effect kinds (`_iod`, `_iop`,
-   `_ior`, `_iow`, `_ffi`) are registry entries under one `DT_EFF`/`DT_FFI`
-   tag set.  The monadic continuation step — apply continuation to the
-   produced value, relink `ROOT`, re-reduce — is a single `eff_apply`
-   primitive shared by every effect.  New effects are added by registering a
-   carrier, not by growing `net_run_io` with new branches.
-
-4. **Optional accelerator drivers.**  The wavefront reducer exposes a driver
-   pipeline (`lin_driver_add`, sorted by descending priority).  The SIMD
-   driver folds Scott×Scott native small-integer arithmetic *during*
-   reduction; the GPU driver dispatches the fixed-allocation rules
-   (beta/annihilate-inline/erase) to a Vulkan compute kernel.  Both are
-   host-authoritative (the base engine is ground truth and a driver only
-   commits when its output is proven bit-exact).
-
-## Canonical driver selftest (the driver correctness contract)
-
-Every reduction driver — current (`cpu` fold, SIMD, GPU) or future — must
-reproduce the base engine's reduction exactly.  That invariant is enforced by
-one canonical, driver-agnostic selftest, not by per-driver test files:
-
-- **Corpus: `std/selftest.lin`.**  A single module that loads `std.lin` and
-  reduces a fixed set of pure probes covering each redex/capability class a
-  driver claims (`_op` integer folds, saturated comparisons, float folds,
-  composed/deferred operands, annihilate/erase identities, beta-heavy nesting).
-  It activates **no** driver and carries **no** expected values: it just emits
-  the readback tokens.  It is meaningful under cpu, SIMD, GPU and any future
-  driver because every value follows from core confluence plus the one shared
-  scalar-op table (`arith.so`).
-- **Runner: `test/driver_selftest.sh`.**  Runs the corpus under the base CPU
-  engine (golden), then under each driver in a `DRIVERS` registry array, and
-  requires the driver's probe lines to equal the golden **value-for-value**.
-  It also reports each driver's native fold count (`(folds)`), which is
-  informational — folding is a driver's own optimization decision, so `folded`
-  need **not** be true for a driver to pass.
-- **The contract for a new driver is two lines of work, not a new test file:**
-  1. ship its `std/drivers/<name>.lin` plugin, and
-  2. add `<name>` to the `DRIVERS` array in `test/driver_selftest.sh`.
-  The runner then validates it against the base engine exactly as it does SIMD
-  and GPU.  No bespoke expected values, no driver-specific assertions to
-  maintain, no drift.
-- **Device reducers get a stronger, per-wave oracle.**  `std/drivers/selftest.h`
-  is the shared, std-wide extraction of what was `gpu_selftest`: a device
-  driver calls `lin_selftest_replay(...)` after committing a wave, and the
-  harness clones the host net, replays the *same* redexes through the canonical
-  `lin_reduce_wave_parallel`, and diffs `wire[]`/`dead[]` **bit-exactly**
-  (env-gated, e.g. `LIN_GPU_SELFTEST=1`).  Host-native reducers (SIMD) have no
-  separable device state to compare, so their oracle is the value-level corpus.
-  The two layers compose: `std/selftest.lin` proves cross-driver value
-  equality everywhere; `selftest.h` proves per-wave device-redux bit-exactness
-  where a device actually ran.
-
-## SIMD / GPU acceleration vs. the current engine
-
-Both drivers predate the "arithmetic is pure Lin" migration, when scalar ops
-were `_ffi`/`ccall2` closures the drivers folded natively.  After the migration
-(`std/num.lin` `_op` closures, base-folded by `lin_fold_op`), each was left
-with nothing of its old class to fold: SIMD's DT_FFI-only claim never matched
-the `_op` closures (a silent no-op), and the GPU's beta kernel (which only
-rewires wires) mishandled the `_op`/`_ffi` closures it claimed (a bit-exactness
-mismatch plus segfault on a real device).  Their adaptation to the current
-engine:
-
-- **SIMD folds `_op` closures.**  `std/drivers/simd.c` now claims saturated
-  pure-Lin `_op` redexes (DT_OP) alongside DT_FFI.  `claim` gates on an
-  **operand-readiness predicate** (`simd_op_ready`: every operand concrete and
-  the shared `lin_arith_scalar` table claims the op) so a driver never strands a
-  claimed-but-unfoldable redex (a claimed redex is removed from the wave; the
-  base engine DEFERS non-concrete operands, a driver cannot).  `reduce` folds
-  via the shared `net_spine_args` decoder + `lin_arith_scalar` table, rewiring
-  exactly like `lin_fold_op`.  The float `_ffi` arm is preserved but
-  near-vestigial: floats already fold at readback in a couple of steps, so there
-  is no reduction-time win to capture.
-  *Fold-accounting note:* SIMD's native-fold count matches, not exceeds, the
-  base engine's on the same programs (e.g. 71 vs 71 on `fact 6`), because the
-  base's `lin_fold_op` already folds every saturated `_op` closure in O(1) via
-  the one shared scalar table.  `simd_reduce` implements the **SIMD_WIDTH
-  factorization**: it processes the claimed slice in batches of up to
-  `SIMD_WIDTH` redexes, running a side-effect-free *eval* pass (decode operands
-  + shared-table value) for the whole batch, then a sequential *apply* pass
-  (net rewire) — so the independent value computations decouple from mutation
-  and can be auto-vectorized.  It stays bit-exact (canonical selftest green),
-  but rigorously no wall-clock win over the base on `_op` scalar folding: the
-  base's O(1) fold already dominates and the surrounding interaction-net
-  reduction, which neither SIMD nor batching accelerates, is the real cost.
-- **GPU beta must not claim foldable closures.**  The GPU kernel's beta only
-  rewires wires; it does not fold.  So `gpu_claim` rejects any LAM x APP whose
-  head **or** applied argument is a saturated `_op`/`_ffi` closure — the base
-  engine folds those (via `lin_fold_op`/`lin_fold_ffi` and the eager `fold_arg`
-  inside beta).  Claiming them would beta-reduce on-device instead of folding,
-  the exact per-wave differential mismatch observed.
-- **GPU wave dispatch is two-phase.**  `gpu_reduce` interleaved host-fallback
-  `net_interact` calls with GPU-slice collection, mutating the net so later
-  reads saw stale wire structure and the differential replay diverged (a
-  concurrency bug).  It now (1) collects the sector-disjoint GPU slice and the
-  host-fallback list **without mutating the net**, (2) dispatches the GPU, (3)
-  commits, then (4) host-falls-back.  On real AMD hardware `LIN_GPU_SELFTEST=1`
-  the dispatched waves are **bit-exact OK** (previously a mismatch within two
-  waves and a segfault).
-- **GPU fallback must not strand deferred `_op`.**  GPU `gpu_reduce`'s
-  host-fallback used `net_interact` directly, which parks `_op`/`_ffi` closures
-  with non-concrete operands on `n->blocked`; only `net_reduce`'s main loop
-  drains that, so a closure in a fallback redex was stranded (the composed-`if`
-  probe `(if (geq 1 (min 4 5)) 1 8) -> ((_ 1) 8)` under gpu).  `gpu_reduce` now
-  drains `n->blocked` after the fallback, so deferred closures are re-queued and
-  resolve; the composed probe reduces to `8` and every dispatched wave stays
-  bit-exact.
-- **`run_ffi` guards mixed-type arguments.**  The core's `run_ffi` strcmp'd a
-  `c_args[i]` as a char* even when the arg decoded as an INT/BOOL/FLOAT;
-  a `_ffi` closure under an accelerator read back with a mismatched arg type
-  (e.g. an int where a string was expected) segfaulted in `__strcmp`.  The
-  string-taking FFIs (`lin_streq`, `puts`, `dlopen`, `getenv`,
-  `lin_parse_float`) now guard on the argument kind, so a malformed closure
-  yields a clean no-value instead of a crash.  This is a core robustness fix
-  that all drivers benefit from and does not regress the host suite.
-- **GPU verified bit-exact on a real device.**  With a correct std, the full
-  canonical corpus reduces under GPU with **all 23 value probes matching the CPU
-  golden and every dispatched wave `[GPU selftest] OK` (1602/1602)**, no crash
-  (exit 0).  `test/driver_selftest.sh` reports `PASS gpu (23 probes equal; N
-  native folds)` on the device.  The one earlier "long-run divergence" was **not
-  a GPU bug but a std-load-path defect**: `resolve_path` (src/main.c) resolved a
-  `(load "std/...")` to a coincidental `./std` in the process CWD before trying
-  the configured `LIN_STD_DIR`, so a checkout run mixed a local std onto the
-  configured one and stranded private defs (`num._padd` unbound).  Fixed: a
-  `std/`-prefixed load now honors `LIN_STD_DIR` first.  The flake's packaged
-  std loads cleanly and the GPU dispatches to hardware through the normal
-  `nix run #.lin` / `result/bin/lin` path (all corpus values correct, real
-  device dispatch).
-- **Flake std loads cleanly.**  From a non-checkout CWD the flake binary
-  (`./result/bin/lin`, store std) was already correct; the `resolve_path` fix
-  (prefer `LIN_STD_DIR` for `std/...`) closes the checkout-CWD mixing case so
-  `add 8 5 -> 13` holds even when `./std` exists beside an overridden
-  `LIN_STD_DIR`.
-
-## Arithmetic: one shared table, any reduction strategy
-
-There is **exactly one** place that knows what `lin_add`, `lin_eq`,
-`lin_fadd`, … mean: `lin_arith_scalar()` in `std/drivers/arith.so`.  A
-reduction *strategy* (base cpu fold, SIMD, GPU) decides **how** to reduce a
-net; it resolves arithmetic by calling that one table.  This is the key
-separation:
-
-- `arith.so` is a **semantic provider**, deliberately *not* a reduction
-  strategy (its `claim` is a no-op) — it only answers "what is the value of
-  this operation".  New ops are one table row, not a new switch arm per driver.
-- The **core hook is general-purpose**: `lin_scalar_ops_add()` /
-  `lin_scalar_ops_load(sym)` let any driver register any number of
-  `ScalarOpFn` providers, tried in registration order; arithmetic is just the
-  first consumer.  `run_ffi` delegates unclaimed `lin_*` ops to them.
-- `simd.c`'s `ev_ffi` decodes args and then calls `lin_arith_scalar` (dlsym,
-  cached) instead of carrying its own switch; the GPU strategy already
-  relegates `_ffi` folding to the base fold, so cpu, SIMD and GPU resolve the
-  same math.
-- **Non-movable C stays in the core**: memory/device/OS (`exit`, `driver_*`,
-  `dlopen`, `puts`, `getenv`), float parsing (`lin_parse_float`/`lin_float`),
-  string compare (`lin_streq`), and fold accounting (`lin_folds`/`lin_folded`).
-
-## Pure-Lin arithmetic: `num.lin` is driver-foldable `_op` closures
-
-`std/num.lin`'s integer/comparison ops are **pure-Lin Scott recursion wrapped as
-driver-foldable `_op` closures** (replacing the old direct-`ccall2` de-ladered
-form).  Each op emits a saturated redex whose head is a **DT_OP-named LAM** — the
-same named-LAM pattern `_ffi` uses, no new interaction agent:
-`add 4 3 = ((\_add (padd 4 3)) (cons 4 (cons 3 nil)))`.  The `_add` LAM applied
-to the operand `_cl`-spine is routed by `net_interact` to `lin_fold_op`, which
-derives the op token from the LAM's name, decodes the operands via the shared
-`net_spine_args`, and folds through the one shared `lin_arith_scalar` table
-(arith.so) whenever the operands are concrete.  The embedded pure-Scott body
-(`padd` etc.) is the **always-correct β fallback**: with no scalar provider the
-same redex reduces by the interaction calculus (slow but exact).  Drivers fold
-the same saturated `_op` redexes through the same table, so the base engine,
-SIMD and GPU resolve identical math.
-
-The enabling engine behavior is a **confluence-preserving fold deferral** in
-`src/net.c` / `src/io.c` (see *Fold routing* below) that threads each operand's
-computed value into the closure before folding (for `_op` too, an outer redex
-whose spine operand is an un-folded inner `_op` is deferred until the inner
-folds).  Without it, a still-live operand such as `(min 4 5)` (a
-`if`-application, not a scalar) would be β-squashed or mis-folded.
-
-Two latent engine defects the old FFI overloads hid, now fixed: `egraph_optimize`
-out-of-bounds-read for body-less TDEF/TDEFX/TFLOAT value markers (corrupted
-`lin build`), and `net_load_line` not seeding the active-redex queue (loaded
-`.line` containers didn't reduce).
-
-## Fold routing (the composed-`if` fix)
-
-The reducer folds a saturated pure-`lin_*` closure at the right moment:
-
-- `lin_ffi_peek` refuses to fold unless **every** operand is a concrete scalar
-  or a recursively-foldable closure (`ffi_ops_concrete`: walks the arg
-  `_cl`-spine exactly like `unpack_args`).
-- When a head-closure `lin_ffi_needs_operand` (an operand is still live, not
-  yet concrete), the reducer **defers** rather than β-squashes: the head-redex
-  is parked on a per-net `blocked` list and re-added to the active list only
-  *after* the current wave drains, so the operand's own redexes materialise
-  its value first.  Bounded by a per-net `declines` budget (reset on every
-  real fold) so a genuinely-stranded operand falls back to β; deferral is
-  disabled during open free-var precompiles.
-- Nested `_ffi` operands recurse (an outer closure whose operand is itself a
-  closure with an unresolved operand — the deep nqueens/`attacks` case — is
-  deferred rather than baked with a wrong scalar).
-
-Result: `(if (geq 1 (min 4 5)) 1 8)` → `8`, `(mul 6 (add 24 96))` → `720`,
-and the previously-failing composed de-ladered tests (`math`, `map`, `set`,
-`nqueens`, `sudoku`, `algorithms`) all pass.
-
-## Sharing soundness: fan–fan commutation and the gauge discipline
-
-Lin's DUP sharing was **unsound**: every fan carried the *empty* gauge, and a fan
-annihilates only when gauges match, so two *independent* sharing points
-annihilated against each other and merged their values.  Minimal witness on the
-unmodified engine (plain `let`, no compiler fan-sharing involved):
-
-```
-(let ((f (\x (pair x x)))) (pair (f 1) (f 2)))   =>  (pair 1 2) (pair 1 2)     ; should be (1 1) (2 2)
-(let ((f (\x (add x 1)))) (pair (f 1) (f 2)))    =>  (pair 3 3)                ; should be (2 3)
-```
-
-The suite documented the same defect as a "superposition collapse": it asserted
-`(exists f_sat1) => false` for the satisfiable `f_sat1 = \x1 (x1 and x1)` and
-labelled it a *false negative*, while asserting the correct `true` for the
-explicitly-desugared form of the same formula.  Three changes make sharing sound:
-
-1. **Fan–fan commutation (the missing rule).**  `net_interact`'s `DUP × DUP` case
-   only annihilated equal-gauge fans and *silently dropped* mismatched pairs;
-   there was no rule at all for two independent fans meeting, so a fan-shared
-   body could never be reduced correctly.  It now implements Lafont's δ⋈δ
-   commutation for differing gauges — each fan is copied by the other (a's
-   auxiliaries get a δ_b each, b's get a δ_a each, cross-connected) — with each
-   fan's copies keeping *that fan's own* gauge.  (The reference implementation
-   has only three rules — LAM↔APP, DUP↔DUP on scope match, LAM/APP↔DUP — and
-   leaves mismatched fans stuck.)
-2. **A real gauge discipline.**  Every fan now carries a gauge identifying *its*
-   sharing point — a compact unique marker — so fans for independent sharing
-   points are never equal and the gauge only annihilates a fan against a copy of
-   *itself*.  Structural nodes keep a uniform (empty) gauge: the commute modulates
-   copies as `1·s_node·s_dup`, so uniform node gauges are what keep copies of the
-   same fan matching.  Markers are compact (a counter that stays inside the 57-bit
-   inline scope word) rather than nesting-path words, because a path word grows
-   with depth and every scope operation on a spilled word allocates.
-3. **Re-gauging on splice.**  A precompiled body's fans were labelled during its
-   own precompile reduction, so splicing it verbatim gave every reference's copy
-   identical labels and independent sharing points collided again.  `ct_splice`
-   now re-gauges each clone at a fresh level.
-
-Result: the witnesses above reduce correctly, and every `exists` case in
-`test/sat.lin`, `test/sat_verify.lin` and `test/tseitin.lin` now agrees with the
-explicit-assignment enumeration.  Three expectations that encoded the unsound
-results were corrected: a Tseitin parity contradiction is unsatisfiable, so its
-`exists` is `false` rather than `true`, and `sat.lin`'s clause set
-(`~x1∨x3, ~x3∨x2, ~x2∨x1`, satisfied by all-true) is `true` rather than `false`.
-
-`scope_from_bits` (`net.c`) rebuilds a heap-backed scope in **one** allocation;
-the previous per-bit `scope_ext` loop allocated once per bit, which made
-per-node re-gauging of large spliced bodies dominate compile time.  Remaining
-cost: a large precompiled body is still cloned once per reference, and gauges
-make that clone's scope work non-trivial — sharing one copy across references
-(and making a shared body reduce per consumer) is the next step.
-
-## Gauges as levels: the meet modulation (a large compile-time win)
-
-A gauge is meant to be a Lamping *level*, and levels **meet**: two sharing points
-that have crossed each other share the prefix of their histories, so their meet is
-the level they genuinely have in common.  The paper's modulation
-(`s₁ = 1·s_node·s_dup`) only ever *concatenates*, so words grow without bound: two
-fans that meet inside a cycle commute again and again and the cycle never closes,
-and later scope operations pay for words of ever-increasing length.
-
-`scope_meet` (the longest common prefix) now supplies the meet, and the
-`LAM/APP × DUP` commute modulates the copies through it:
-`s₁ = 1·(s_node ⊓ s_dup)`, `s₂ = 2·(s_node ⊓ s_dup)`.  Copies therefore *converge*
-towards the level the two histories share instead of diverging, which is what makes
-repeat crossing settle.  Measured effect (all of it with the suite and the
-soundness oracle green):
-
-| program | before | after |
+| agent | symbol | ports |
 |---|---|---|
-| `test/modules.lin` | 17.3 s | **2.3 s** |
-| `test/numbers.lin` | 14.4 s | **4.9 s** |
-| `test/string.lin` | 1.8 s | **0.6 s** |
-| `test/selfrecursion.lin` | 3.6 s | 2.8 s |
+| `LAM` | γ | binder (1), body (2), principal (0) |
+| `APP` | γ | function (0), argument (2), principal (1) |
+| `DUP` | δ | principal (0), two auxiliaries (1, 2) |
+| `ERA` | ε | principal (0) |
 
-The gain is mostly that words stay short: the expensive part of compiling had been
-scope work on long words, and converging gauges also make more fans annihilate
-instead of commuting (less duplicated work).
+`ROOT` is node 0, the observation point. A net is stored flat — `tag[]`, `wire[]`
+(3 ports per node), `scope[]`, `name[]`, `dead[]` — so drivers can read and rewrite the
+graph directly, and the wavefront scheduler can reason about node indices.
 
-**A gauge must be a PATH, not a bare level.**  Relabelling fans by their binder
-*depth* (so the meet is trivially the shallower level) is unsound: two sibling
-binders at the same depth get the same label, their fans annihilate, and values
-merge — with depth labels the oracle reports 5 mismatches (including the
-`(let ((f (\x (pair x x)))) (pair (f 1) (f 2)))` witness, which correctly reduces to
-`(1 1) (2 2)` only with path labels).  The paper's "binder paths as free-group word
-invariants" is therefore load-bearing: the *path* (one generator per binder, one
-per application child) distinguishes siblings, and the *meet* of two paths supplies
-the level behaviour.  Path labels + meet keep every check green.
+`name[]` is load-bearing rather than decorative: a node's *name* is its carrier tag, and
+the value domains Lin supports are recognized by carrier name through one registry
+(§7.3). This is why "add a value domain" is a registration, not a new agent.
 
-**Open soundness question.**  Annihilating two fans is only sound when equal gauges
-really mean "the same sharing point", i.e. when the labels *are* levels.  Today a
-fan's label is a unique marker, so the meet of two unrelated markers is empty and
-unrelated fans can collapse to the same level.  The corpus above is green, but the
-cyclic-knot experiment below produces exactly that failure (`_op` folds stop being
-wired correctly, 5 suites red), so the discipline is not yet consistent.  The fix is
-to label fans by their true level (the binder depth they duplicate at, which the
-compiler already threads as its scope) so that the meet is the genuine LCA.
+### 3.2 Gauges: scopes as levels
 
-## Recursion
+Every fan carries a **scope** — a bit word over the free group ⟨1,2⟩* — that identifies the
+sharing point it belongs to. Two fans annihilate only when their scopes are *equal*; when
+they differ, they commute and the copies' scopes are modulated through the **meet**
+(longest common prefix) of the two words.
 
-Recursive defs are compiled by **bounded self-unravelling** (`build_bound_rec`:
-`Y_k f = f (f (... (f base) ...))`, k=24, `base = \args 0`) instead of the
-Y-fixpoint.  This sidesteps the continuation-knot stranding the Y-form caused,
-and single/linear self-recursion reduces to the correct value (`peel 3→0`,
-`fact 4→24`, `sumto 5→15`, `pow2 4→16`).  Pure and engine-native
-(`process_def` in `src/main.c`); no new interaction agents.  Recursion deeper
-than the bound truncates to the base value.  Regression test:
-`test/selfrecursion.lin`.
+The representation is a union: 57 bits inline, or an offset/length into a per-net heap
+table when a word is longer. The inline case is not an optimisation detail — every scope
+operation on a spilled word allocates, and that dominated compile time until long words
+were made to converge (below).
 
-**Why the bound is still there (a cyclic knot was tried).**  The alternative — one
-compiled body whose self-reference is fed by a fan (the def's lambda put on a DUP
-whose one auxiliary is the public value and whose other auxiliary feeds every
-occurrence of the def's own name) — *converges* once the meet modulation above is in
-place, and gives the right values with **linear** steps and tiny nets
-(`(rec n)` for n = 0,1,2,4,8,16: 410, 416, 426, 458, 570, 986 steps; 1.8–3.5 k
-nodes) where the unrolled chain needs k copies of the body.  What it does *not* yet
-do is reach the `_op` folds at all: with a knot anywhere in the program,
-`(add 8 5)` reduces to `((\_add 13) <spine>)` instead of `13`, and 5 suites go red.
-Instrumented, the `_op` closure's head-fold (`lin_fold_op`) and its eager-argument
-fold (`lin_fold_op_arg`) are **never called** for `_add` (both counters stay 0),
-while the non-knot build folds immediately (`lam=6 app=5 ar=0 aa=1242 body=43`), and
-the knot's own unfolding does run (many `_padd` LAM×APP events; the stray `13` comes
-from the pure-Scott β fallback).  A post-compile dump shows the pair *is* formed
-(`_add node=6 principal=5(t1.p0)`, an APP) — so the redex exists and the fold simply
-never gets to run on it: this is the pre-existing `_op`-fold operand-deferral bug
-that a shared closure already exposed before the knot (a fold whose operands sit
-behind a fan never decodes them, `lin_op_needs_operand` keeps answering "defer", and
-the redex parks on the blocked list forever because unrelated folds keep resetting
-the decline budget).  The knot just makes every `_op` closure shared.  Two fixes are
-available: make the operand decoder fan-complete (it hops DUPs with `skip_dup`, so
-the failure is a direction/shape detail), or materialise the fan before folding.  This is independent of the label scheme (unique markers, depth levels and
-path labels all show it) and of whether recursion-referencing defs are precompiled;
-the next diagnostic is to dump the compiled net for `(add 8 5)` in both builds and
-compare what the `_add` LAM's principal port is wired to.  Before the meet existed the knot never became inert at all
-(traced: LAM×APP and DUP×DUP redexes still firing at step 3000, node ids still
-climbing) — the unrolled chain has no such problem because its leftover is inert
-(unapplied lambdas) that the reachability GC reclaims, whereas a live cycle cannot
-be dismantled because erasure is **passive**: `net_interact` has no ERA×DUP / ERA×LAM rule
-(those pairs are dropped, "as in the reference") and erasure works by leaving ports
-dangling.  A knot therefore needs either **active erasure** (ε×δ propagation — with
-the caveat that the naive "erase both auxiliaries" rule is unsound when a fan
-straddles an erase boundary) or a **level discipline** in which the cycle's fans
-annihilate once and for all: today's unique-per-fan markers deliberately keep
-unrelated fans from annihilating, which also stops the loop from closing.  Either
-is a prerequisite for deleting the unrolling bound along with the `_rec` sentinel
-and the widening machinery.  Two latent defects surfaced while doing this and are
-part of the same work: a def in a namespace kept its self-reference *unqualified*
-(`_padd` inside `num._padd`) because `qualify_free` ran before the def was
-registered, and precompiling a def whose expansion mentions recursion is pointless
-(there is no normal form to bake) yet burned the whole step limit.
+Operations: `scope_cat`, `scope_ext` (append one bit), `scope_meet` (LCP), `scope_prefix`,
+`scope_eq`, `scope_from_bits`.
 
-## A2/A3: the knot, and why it is the same change as fan-sharing a def body
+`scope_meet` is what makes repeat crossing *terminate*. The naive paper modulation
+concatenates (`s₁ = 1·s_node·s_dup`), so words grow without bound when two fans meet again
+inside a cycle and every later scope operation pays for the longer word. Meeting instead of
+concatenating makes copies converge toward the level the two histories genuinely share.
+Measured on the suite with the oracle green: `modules.lin` 17.3 s → 2.3 s, `numbers.lin`
+14.4 s → 4.9 s.
 
-`def_precompile` bakes a **non-recursive** define into a reduced net (`d->compiled`)
-and every reference clones it (`ct_splice`, one fresh re-gauged copy per reference),
-while **recursive** defines (`d->rec`) take the textual path: `expand` copies the
-body per reference and `build_bound_rec` wraps it in `k` unrollings whose innermost
-base carries a `_rec` sentinel; if that sentinel survives reduction, `eval_form`
-doubles `k` for every def and re-evaluates (16 rounds).  That is the machinery
-behind the two pathologies we measured: nets oscillating 30,733 <-> 111,933 through
-`widen_recursion`'s rounds (`(let ((g (mul 2))) (pair (g 3) (g 4)))`, and the shared
-`_op` hangs generally), and the reason a *shared* closure's fold failure turns into
-a blow-up rather than a slow path — the body being β-duplicated is the k-unrolled
-one.
+A gauge must be a **path**, not a bare binder depth: siblings at equal depth would get
+equal labels, their fans would annihilate, and independent values would merge. Depth
+labels are measurably unsound (5 oracle mismatches); path words are not.
 
-**The knot and "fan-share the body instead of copying it" are the same change.**
-Compile the body **once**, with the def's own name bound to a placeholder port, then
-wire that placeholder to the body's root: every self-reference is then a wire back
-into the shared body (a self-referential net) and every *reference site* can be fed
-from one spliced copy through a fan.  The compiler already has both halves of the
-mechanism: `push_var` + `ERA` placeholders for a variable's later occurrences
-(`ct`'s `TVAR`/`TLAM` cases), and `fan_lvl`/`dup_tree` for re-gauged sharing.  It
-also gives mutual recursion for free (a cycle through two bodies is still just
-wires), which today is not handled at all: `expand`'s guard stops at the cycle and
-leaves a bare `TVAR`.
+### 3.3 The four rules
 
-Budget: this **removes** `build_bound_rec` + `widen_recursion` + `net_has_reachable`
-+ `REC_SENTINEL` + `eval_form`'s 16-round retry + the `rec_k`/`rec_body` fields
-(~90 lines in `main.c`, measured) and adds a knot constructor plus a memoised splice
-(~40 lines in `compile.c`), so the pure core goes *down*.  Core is 2,831 lines now.
+All four live in `net_interact` (`src/net.c`). That function is the entire semantics of the
+language.
 
-**Knot attempt #1 (reverted).**  The construction above was implemented: in
-`def_precompile`, a self-recursive define expands its body with its own name already
-guarded, wraps it in `(\name body)`, compiles that, then links what the binder feeds
-(the occurrence fan, or the single use) to the body's own root and re-points ROOT at
-the body.  It builds, costs +33 lines (core 2,864), and leaves the working acceptance
-cases alone (`(g 3)` -> 6, `(pair 8 15)`, `(pair 6 10)`) — but `test/selfrecursion.lin`
-prints **nothing** where HEAD prints 24/120/15/16, so the knot's cyclic net does not
-reduce (the same blocker class the first prototype hit).  Reverted.
+**β — `LAM × APP`.** Kill both nodes, link the binder's wire to the argument and the body's
+wire to the result. The degenerate binder (`\x.x`, where the compiler cross-links the
+binder and body ports) is detected and handled as a direct link: that is β itself, not fold
+machinery, and without it `((\x x) V)` strands `V` on a dead node. Before substituting, β
+offers the argument to every driver's `arg_fold` hook (§5.3) — a saturated closure sitting
+in an argument position is never a principal×principal redex, so β is the only place a
+driver can reach it.
 
-**The decline guard is load-bearing — verified.**  Turning the lever above on (delete
-`op_value_from_lam`'s `lin_precompile_depth` early return and its counter bump) does
-make the wrappers bake: instrumented, `[PC ok] num.mul nn=30876 stuck=0` and
-`[PC ok] mul nn=30877 stuck=0`.  But the suite then hangs at `test/scott_arith.lin`
-(5 suites in, no failure output) because baking `mul` bakes its reference to `_pmul` —
-which is *self-recursive*, so it is still the 24-fold unrolling, and the run-time
-widening loop (30,733 <-> 111,933 nodes) fires from inside a baked net.  Reverted.
-So the lever can only be turned on once **no** define is unrolled anywhere: the knot is
-the prerequisite, not the follow-up.
+**δ⋈δ — two fans meet.** Two cases, and the distinction is the whole sharing discipline:
 
-**Knot attempt #2 (implemented, structurally right, still not landable).**  The
-construction above was built (`compile_knot` in `compile.c`: wrap the body in a LAM
-named after the define, then a fresh `fan_lvl()`-gauged DUP whose principal takes the
-body, whose aux1 feeds the define's own references and whose aux2 is the value ROOT
-exposes; nothing is reduced, so the cycle unfolds lazily).  It works: `(peel 3)` now
-readbacks a *compact* cyclic term instead of the 24-fold unrolled structure, so the
-unrolling is genuinely gone.  But the value is unreduced — the `_op` folds never fire —
-so `test/selfrecursion.lin` prints structures rather than 0/1/120.  A3 alone cannot
-land; and note this **reverses** the earlier ordering guess: A2 (sound fan reading) is
-the prerequisite, A3 the follower.
+- *Equal scopes* → **annihilate**: the two fans are copies of one sharing point, so their
+  auxiliaries are cross-linked (with the identity-pairing cases handled explicitly) and both
+  fans disappear. This is what makes a copy as cheap as the original.
+- *Unequal scopes* → **commute** (Lafont's δ⋈δ): two independent sharing points met, so each
+  fan is copied by the other — `δ_a`'s auxiliaries each get a `δ_b`, `δ_b`'s each get a
+  `δ_a`, cross-connected — and each copy keeps *its own* fan's scope. Without this rule the
+  only options would be annihilating unrelated fans (wrong value) or stranding the pair (no
+  reduction), so a shared body could never be reduced.
 
-**The fold handles shared operands fine — the failure is specific to nested recursion.**
-Four probes on the unmodified engine (all correct, all under 0.5 s):
+**γ⋈δ — a fan meets a LAM or APP.** The fan duplicates the agent: two copies are allocated
+at `scope_ext(meet, 1)` and `scope_ext(meet, 2)`, two fresh fans carrying the *dup's* scope
+fan out the agent's auxiliary wires, and the copies' principals go to the fan's auxiliaries.
+The meet modulation (§3.2) is what keeps repeated crossings finite. The degenerate-binder
+case links the two fresh fan principals to each other instead.
 
-| probe | result |
+**ε — erasure is passive.** Pairs involving `ERA` are dropped; there is no ERA×DUP or
+ERA×LAM propagation. Erasure works by leaving ports dangling and letting reachability
+reclaim the nodes. This is the reference behaviour, and it has a sharp architectural
+consequence (§11.2): **nothing in the core can actively dismantle a cycle.**
+
+### 3.4 Sharing as the compiler introduces it
+
+The compiler (`src/compile.c`) turns a binder used N times into a `DUP` fan tree
+(`dup_tree`) whose gauge is a fresh **unique marker** (`fan_lvl`, a fixed 20-bit counter).
+
+- The width is fixed on purpose. A commute builds a copy's gauge as `bit · s_node · s_dup`,
+  so a variable-width marker could collide with a longer modulated word; fixed-width base
+  markers stay shorter than any modulated word. Twenty bits cannot wrap in practice.
+- A spliced precompiled define body (`ct_splice`) is **re-gauged** at a fresh level as it is
+  cloned. The body's fans were labelled during its own precompile reduction, so cloning it
+  verbatim would give every reference's copies identical labels and independent sharing
+  points would annihilate into each other.
+
+A unique marker identifies a sharing point but is not a *level*: the meet of two unrelated
+markers is empty. This is sound for the acyclic case (verified), and it is exactly the gap
+that cyclic sharing runs into (§11.2).
+
+### 3.5 What the core deliberately does not have
+
+**No brackets, no abstractors.** Lin has fans with gauges and the meet — enough to be
+Lévy-optimal for acyclic sharing — but not the bracket machinery that lets a *cyclic* body
+be shared. The consequence is architectural, not incidental: recursion cannot be a shared
+cyclic body today, so it is unrolled at compile time (§8, §11.2).
+
+---
+
+## 4. The reduction engine
+
+### 4.1 The wave loop
+
+`net_reduce` (`src/net.c`):
+
+1. `wave_snapshot` drains the active list into an immutable array of principal pairs and
+   empties it. Each pair is re-validated as it is reached (both nodes still live, their wires
+   still mutually facing), so a pair whose nodes an earlier redex already consumed is simply
+   skipped rather than contracted twice.
+2. Every loaded driver is asked to `claim` pairs, in ascending priority order; each gets a
+   slice of the pairs it claimed, and the unclaimed remainder goes to the base engine.
+3. Each driver `reduce`s its slice; `lin_reduce_wave_parallel` reduces the remainder, in
+   parallel or serially depending on the wave's size and the thread setting.
+4. The wave is fully drained, so every driver gets its `drain` point: retry what was parked
+   because an operand was not concrete yet, and re-enqueue what is still expected.
+5. If nothing changed and the active list is empty, the net is a normal form (or the step
+   limit was hit) and reduction stops.
+
+### 4.2 Independence and the wavefront scheduler
+
+Two redexes may run concurrently when their read/write footprints are disjoint. The test is
+structural and cheap: a pair's two principal nodes *and* the far ends of their four
+auxiliary ports must all lie in the same 64-node sector (`node >> 6`). Pairs that pass are
+grouped by sector and executed under `omp parallel for` with dynamic scheduling; pairs that
+fail go to a serial fallback within the same wave. All dispatch buffers are grow-only
+statics, so a wave allocates nothing and dispatch is O(pairs).
+
+**Policy: serial by default.** Threads are used only when asked (`-t`, `LIN_THREADS`,
+`OMP_NUM_THREADS`), and parallelism engages only for waves of at least 512 port entries (256
+redexes). This is a measured decision, not caution: waves are usually small and cheap
+relative to a fork/join, so threading them costs more than it saves.
+
+**The ceiling.** On `test/numbers.lin` the wall clock splits as:
+
+| phase | share |
 |---|---|
-| `(let ((x (add 1 2))) (pair (add x 10) (add x 20)))` — shared *computed* operand | `(13, 23)` |
-| `(let ((x 3)) (pair (add x 1) (add x 2)))` — shared literal operand | `(4, 5)` |
-| `(let ((f (\y (add y 1)))) (pair (f 3) (f 4)))` — shared closure over an `_op` | `(4, 5)` |
-| `(let ((h (add 2))) (pair (h 3) (h 4)))` — shared **partial application** of `add` | `(5, 6)` |
+| type check | 1% |
+| `expand_defs` (def inlining + precompilation) | **30%** |
+| `compile` (term → net) | **36%** |
+| `net_reduce` | **22%** |
+| load / IO / print / unaccounted | ~11% |
 
-So neither sharing, nor a computed operand, nor partial application of an `_op` wrapper
-breaks the fold.  What breaks it is `mul`: `_pmul` recurses through `_padd`, another
-recursive define, so each `_pmul` copy carries a 24-fold unrolled `_padd` — the
-sharing × unrolling product that produces the 30,773 -> 111,933 node oscillation.  That
-also fits the knot result: the knot removes the unrolling (the `(peel 3)` readback became
-compact) but the folds stop firing, and `peel` uses only `is_zero`/`pred`, so with a knot
-something *else* suppresses folding.  The next diagnostic is therefore narrow: on a knot
-build, run `(peel 1)` with the fold counters instrumented and determine whether
-`lin_fold_op` is called at all and where `op_value_from_lam` fails — that decides what A2
-actually has to read.
+So reduction is about a fifth of a run, and the front end about two thirds. A perfectly
+parallel, infinitely fast reducer would buy at most ~17% of wall clock; the front end is
+where both goals actually pay. (See §11.3 for the parallel experiments this table retired.)
 
-**BREAKTHROUGH: why folds never fired under a knot — `ct_splice` linked with
-`enqueue = 0`.**  A spliced precompiled body is normally a normal form, so scheduling
-nothing costs nothing — but a **knot body is deliberately unreduced**, so every redex
-inside it was spliced in *without entering the active queue*, and consequently never ran.
-Flipping that one flag to `enqueue = 1` (free for normal forms: there is nothing to
-schedule) makes the knot reduce: with it, `(peel 3)` -> `0`, `(peel 4)` -> `0`,
-`(peel 5)` -> `0`, `(fact 0)` -> `1` — the first time self-recursion has ever worked
-through the knot, and it means recursion is no longer bounded by the 24-fold unravelling.
+### 4.3 Reclamation
 
-**Round 3: what the knot breaks, narrowed to the fold's ownership assumption.**
-Isolations on the knot build (all with `enqueue = 1`):
+Reclamation is reachability compaction from ROOT, run when the active list empties and the
+node count has doubled past a high-water mark (`net_gc`). There is no incremental collector
+and no stop-the-world pause in the usual sense: dead nodes are a by-product of the rules,
+and the compact step is O(live net).
 
-- `enqueue = 1` **alone** (knot disabled) is harmless: `(let ((g (mul 2))) (g 3))` -> **6**.
-- The knot's nets are structurally correct for `peel`, `_padd` and `_pmul`: dumped, each has
-  `body = <a LAM's principal>` and `occ -> F.1`.
-- Simple recursion is right through the knot: `(peel 1)`/`(peel 2)`/`(peel 3)` -> 0,
-  `(fact 0)` -> 1, and **two references to one knot work** — `(pair (peel 1) (peel 2))`
-  -> `(0, 0)` — so multi-reference fans are fine.
-- `_op`-wrapper cases are wrong in a specific way: `(add 1 2)` prints `((\_add 3) <spine>)`
-  — the fold *computed* 3 but did not replace the redex. `(mul 2 3)` and
-  `(let ((g (mul 2))) (pair (g 3) (g 4)))` stay stuck instead.
-- Disabling the head folds whenever a knot is present (`lin_has_knot`, checked in
-  `net_interact`'s LAM×APP branch) gives `(peel …)` -> 0 and `(pair (peel 1) (peel 2))`
-  -> `(0, 0)`, but **segfaults** on `(add 1 2)`, `(let ((g (mul 2))) (g 3))` and g3.
+Because the `.line` container stores *every* node and *every* gauge, the AOT path compacts
+and trims before serialising (`net_gc`, then `net_trim_scopes`). Both are load-bearing for
+artifact size rather than cosmetic: a program that merely *referenced* a recursive define at
+depth 0 — never recursing — compacted to 3 live nodes and still shipped a 423,502-byte
+artifact, 99.98% of it gauge entries belonging to erased nodes. With trimming it is 142 B.
 
-**Round 4: the frontier is the fan's copy semantics, not the fold.**
-With the knot active *and* every fold edge guarded (head folds in `net_interact`, plus
-`fold_arg`), the results split cleanly:
+### 4.4 Accounting and livelock guards
 
-| program | knot, folds guarded |
+Reduction steps are counted on the net; a driver that re-enqueues parked work without
+progress is bounded by a stall counter in the wave loop, and a driver whose fold budget is
+exhausted must release its redex to β rather than hold it forever (§5.3). Both guards exist
+because a *driver* is where waiting policies live, and a bad policy must degrade to slower-
+but-correct, never to divergence.
+
+---
+
+## 5. Driver ABI
+
+Drivers are shared objects (`std/drivers/*.so`) exposing one `LinDriver` struct. The core
+loads them, sorts them by priority, and hands them redexes. This ABI is the whole extension
+surface of the engine.
+
+| field | meaning |
 |---|---|
-| `(peel 1/2/3)`, `(pair (peel 1) (peel 2))` | correct (0, and `(0, 0)`), ~2.7 s |
-| `(add 1 2)` | **segfault** |
-| `(let ((g (mul 2))) (g 3))` | **segfault** |
-| `(mul 2 3)` | **segfault** |
-| `(let ((g (mul 2))) (pair (g 3) (g 4)))` | **segfault** |
-
-Same programs, same knot, folds *left on*: no crash, but the fold computes the right
-value and mis-threads it (`(add 1 2)` -> `((\_add 3) <spine>)`) or stays stuck.  So the
-defect is not the fold and not the decoding: **both β and the folds mark the redex's
-nodes dead, which assumes the redex owns them, and a knot-shared body violates that.**
-The fan is supposed to make every demand private — F's principal meets the body's root
-agent and the LAM×DUP commutation copies it — but the copy shares the body's *sub-nets*,
-so a redex inside the body is still common to both copies, and the first consumer to
-reduce it kills nodes the sibling still points at (hence the segfaults once folds stop
-papering over it).
-
-**Round 5: the segfault was a stale static `N`, and the rest is the β path.**
-Two corrections to the paragraph above.
-
-*The γ⋈δ rule is already the full Lafont step*: it allocates two copies of the agent
-(`m1`, `m2` at the meet level, one per side) **and two fresh fans `d1`/`d2` that fan the
-agent's auxiliary wires**, then wires the copies' principals to the two auxiliaries of
-the fan being commuted.  The "shallow copy" hypothesis was wrong.
-
-*The segfault was not fan semantics.*  AddressSanitizer points at `io.c`'s `wire()` called
-from `lin_op_needs_operand`: that function reads wires through this TU's static `N` but
-never sets it — it was masked because `lin_fold_op` runs immediately before it in the same
-branch and does `N = n`, and guarding the folds off exposed the stale pointer (from the
-knot's temporary compilation net, already freed).  `N = n` at the entry of
-`lin_op_needs_operand`, `lin_ffi_needs_operand` and `ffi_ops_concrete` removes the crash
-entirely.  Worth keeping: it is a latent crash class for any future path that asks for a
-deferral before any fold has run.
-
-With that fixed and folds still off, the knot gives `(peel …)` -> 0 and
-`(pair (peel 1) (peel 2))` -> `(0, 0)`, while `(add 1 2)` prints `((\_add 3) <spine>)` and
-`(mul 2 3)` stays stuck.  Since no fold ran in either case, the mis-threading is in the
-**base β rule**: under a knot the `_op` closure's node is a *copy* left applied by the
-fan, so the LAM×APP branch β-reduces a different copy and the printed one never gets its
-result.  So the frontier is the knot's interaction with β's node-killing
-(`n->dead[n1] = n->dead[n2] = 1`), not decoding, and not the commutation rule.
-
-That is the real frontier for A3, and it is the same one as the session's opening
-request (fan-share a normalised body rather than copy it): the engine needs the full
-Lafont γ⋈δ step — fan the *auxiliary wires* as well, so an inner redex is private to its
-copy — not just a shallow agent copy.  Equivalently, keep the reverted fold-privacy idea
-but apply it to β as well, which is harder.  Everything else about the knot (cycle
-construction, gauges, laziness, multi-reference) is verified working, and `peel`-style
-plain recursion already reduces correctly and deeply.
-
-So the remaining defect is not decoding at all: it is that the `_op` fold's rewiring
-(`fold_own` + the `ar` selection in `lin_fold_op`) assumes the redex's nodes are private,
-which a knot-shared body violates — the fold has to either decline, or stop treating
-knot-shared nodes as its own. The segfault with only the head folds guarded shows the
-**argument** fold edges (`fold_arg` -> `lin_fold_op_arg` / `lin_fold_ffi_arg`) are on the
-same path and must be handled with it. That is the next thing to fix; the knot itself
-(cycle, gauges, laziness, multi-reference) is in good shape.
-
-What that leaves is exactly A2 and nothing else.  With the same build (knot + enqueue),
-every `mul`-wrapper case *terminates* instead of hanging — `(let ((g (mul 2))) (pair
-(g 3) (g 4)))`, `(let ((g (\x (\y (mul x y))))) ...)`, `(let ((h (mul 2))) (g 3))` — but
-prints a stuck `_mul` application instead of a number (~7.9 s each), i.e. the `_mul`
-closure's fold does not fire, where `peel`'s `is_zero`/`pred` folds do.  So the knot is
-sound for plain-argument recursion and blocked only on the shared-partial-application
-operand shape — the A2 target, now with a much better test: correct value *and* no
-regression on `(let ((h (mul 2))) (g 3))` -> 6.  The knot cannot land before A2, because
-it currently breaks cases that work today.
-
-**Reading a value "through the fan" is unsound — measured.**  Adding an aux-side
-fallback to `dec_arg` (if the direct read fails and the port is a DUP, try the two
-auxiliary sides, on the theory that a fan's sides carry the same value) makes
-`(let ((g (mul 2))) (pair (g 3) (g 4)))` *terminate* — with `(6, 6)` where `(6, 8)` is
-correct.  One consumer read the other consumer's branch.  So the fold must read the
-value on the *consumer's own* branch (or the fan must be materialised before folding);
-"a copy is as good as the original" is false here, and this is the third unsound
-shortcut around the fan (after 225 -> 1 and the net-lifetime budget).
-
-**Knot attempt #1's bug, identified.**  The construction linked the occurrence fan to
-the body's own root port by *overwriting that port's wire* (`net_link(occ, b)` writes
-`wire[b] = occ`), which leaves `b` pointing back at the fan — a closed loop with no
-value in it, hence `test/selfrecursion.lin` printing nothing.  Attempt #2 must feed the
-occurrences from the body's root *agent* (pair the fan's principal with the body
-agent's principal and let the DUP duplicate the body on demand) without overwriting the
-wire the body already has.
-
-**Where the hanging repros actually come from (new).**  None of the four hanging cases
-involves self-recursion: they hang through the *non-recursive* `_op` wrappers (`mul`,
-`add`).  `def_precompile` declines to bake any define whose open-body precompile hit a
-suppressed fold — `op_value_from_lam` bumps `lin_stuck_ffi_count` whenever it is asked
-to fold while `lin_precompile_depth > 0` (`src/io.c`), and the cache is declined when
-that counter is non-zero (`src/main.c`).  So every `_op` wrapper stays **textual** and
-is re-expanded per reference, and the shared case degenerates into the unrolled path
-where the blow-up lives.  That is the concrete A2 lever: during an open-body precompile
-a fold blocked by *free-variable* operands is not "stuck" — the pure-Lin beta body is
-the semantics, and the fold simply happens later at run time when the operands are
-concrete — so such a define can be baked (splicing the knot for its recursive parts),
-which removes the unrolling that the hangs hide behind.
-
-Consequence for sequencing: A2 and A3 have to land together.  A knot shares every
-reference to the define through a fan, which is exactly the operand shape A2 must read;
-and A2's lever (baking the `_op` wrappers) is what removes the unrolling the hangs hide
-behind.  Acceptance for the pair: the four hanging repros, `test/selfrecursion.lin`,
-the suite and the oracle.
-
-Acceptance tests (all correct on HEAD, none of them terminating today):
-`(let ((g (mul 2))) (pair (g 3) (g 4)))` -> (6, 8);
-`(let ((g (\x (\y (mul x y))))) (pair (g 2 3) (g 4 5)))` -> (6, 20);
-`(let ((g (mul 2))) (g 3))` -> 6 (works today);
-`(let ((f (\x (\y (mul x y))))) (add (f 6 7) (f 3 4)))` -> 42 + 12;
-plus the suite (53/978), the soundness oracle, and the sharing witnesses.
-
-## The `_op` fold path: deferral is correctness-critical (measured)
-
-A saturated pure-Lin `_op` closure (`((\_add <pure-body>) <_cl-spine>)`) is folded
-to a scalar by reading its raw operands.  When an operand is not decodable yet the
-reducer does **not** β-squash the redex: it parks the pair on a per-net blocked
-list and re-examines it after each wave drains.  Two attempts to make that wait
-*terminate* were implemented and measured on this tree — **both are unsound and
-were reverted**:
-
-| attempt | result |
-|---|---|
-| a fan-wrapped operand slot (`skipped == 2`) falls through to β instead of waiting | `test/modules.lin` returns **1** where the answer is **225** |
-| deferral budget made net-lifetime (never reset by a fold, cap 4096) | same suite fails; a following suite hangs |
-
-So the wait is not an optimisation that can be shortened: it is what keeps a
-shared operand alive until it is concrete.  The fix has to make the shared operand
-*readable* (fan-complete operand decoding — materialise or route through the fan),
-never to skip the wait.
-
-**A2's failing read, seen whole.**  A local-graph dump of the undecodable operand
-slot in `(let ((g (mul 2))) (pair (g 3) (g 4)))` shows the slot resolving to a fan
-whose principal faces an *auxiliary pin of an APP* and whose two auxiliary pins face
-`_sz` (numeral) LAMs:
-
-```
-[SLOT-raw] 30750.0 tag=2 DUP   p0->30718.2 (APP arg pin)   p1->30770.0 (LAM '_sz')  p2->30774.0 (LAM '_sz')
-```
-
-`skip_dup` hops the principal and lands on that APP pin, which is not a value, so
-the fold cannot read it; and reading *through* the auxes instead is unsound (that is
-the shortcut that produced 225 -> 1).  So A2 needs the operand to become readable
-*in the shared case* rather than a cleverer hop, which is why it is pursued together
-with A3: with the unrolling gone the same program has no blow-up to hide behind.
-
-Instrumented diagnosis of the shared-closure case
-(`(let ((g (mul 2))) (pair (g 3) (g 4)))`):
-
-- the failing pair is re-examined ~10³ times/s with `argc=0 skipped=1`, i.e. the
-  operand slot resolves to a **DUP** (a fan) rather than a not-yet-reduced redex;
-- the per-net `declines` budget never expires because any successful fold resets
-  it, so the pair spins for ever (the pre-existing "shared `_op` closure hangs");
-- the same pair is examined on **two different nets** (nn = 30,733 and 111,933):
-  `eval_form`'s recursion-widening loop rebuilds the defs with a doubled
-  unravelling bound whenever the `_rec` sentinel survives reduction.  Per-net
-  bookkeeping therefore cannot carry state across waves (a persistent
-  blocked-entry count was tried, observed losing its count, and reverted).
-
-The hang is dominated by that recursion machinery rather than by the deferral:
-single use (`(g 3)`) and two *separate* closures (`(let ((g (mul 2))) (let ((h
-(mul 3))) (pair (g 4) (h 5))))` → `(pair 8 15)`) are both fine, and two nested
-`_op` operands through a shared closure also work (`(pair 6 10)`).  This inverts
-the earlier plan: the **knot (or another recursion mechanism) is the prerequisite**
-for these cases, and fan-complete operand decoding comes after it.
-
-## Type inference: order-dependence, and what fixing it costs
-
-`generalize` (HM) used to scan **every** scheme in the live environment and treat
-*all* its free vars as environment-free, including the scheme's own quantified
-vars.  A scheme's quantified vars are bound by the scheme, so this
-under-generalises every later definition against every earlier one — inference
-results depend on the order defs are checked in.  It is sound (it rejects some
-well-typed programs rather than accepting ill-typed ones) but it is what made the
-parallel def loader produce "infinite type"/"unbound variable" errors, and it is
-why a shared `_op` closure could infer differently from an unshared one.
-
-Two fixes were measured on the std load (`(load "std/std.lin")`, type checking is
-370 ms of the ~410 ms load), interleaved A/B, 3 runs each:
-
-| build | std load |
-|---|---|
-| committed | 400-440 ms |
-| incremental `efree` counters, *old* (over-)inclusive semantics | 508-518 ms |
-| incremental `efree`, correct HM semantics (skip `s.q`) | 597-617 ms |
-
-So the ~+100 ms is the maintenance scan (`fv` per push/pop, 593 def pushes at
-load) and another ~+100 ms is the *semantics*: correct generalisation makes
-schemes more polymorphic, and every use site then instantiates more type nodes.
-Neither was landed: +50 % on every program's startup for a latent
-(not currently observable in serial loading) incompleteness is a bad trade.
-
-The next attempt should remove the scan rather than pay it: `env_find` already
-falls back to `def_find`, so the 593 def schemes need not be pushed into `env` at
-all (they contribute no *mono* free vars — a closed def's scheme has none once
-`generalize` has run), leaving `efree` to track only local bindings, whose
-schemes are one `TVR` and cost O(1).  That should leave only the semantic ~+100 ms
-to argue about.
-
-## Parallelism: measured, and where it does and does not pay
-
-Reduction is **not** where Lin's time goes.  On the workloads in `test/` and
-`benchmarks/` the reducer accounts for ~3% of a run (`test/nqueens.lin`: 29 ms of
-849 ms, 38142 steps; `test/string.lin`: 6.8 ms of ~1600 ms, 4820 steps), and the
-fixed cost of every run is loading `std`: ~410 ms, of which **~370 ms is type
-checking** 593 defs (`process_def`), 10 ms is qualification/registration, and the
-rest is parsing.
-
-Two consequences, both measured:
-
-- **The wave reducer's parallelism does not amortise.**  A wave is usually small
-  (`test/string.lin`: 4621 waves under 64 redexes, 48 under 128, 326 under 256,
-  5 under 512, **none** ≥ 512), and the multi-redex waves that do occur are cheap,
-  so a fork/join per wave costs more than it saves.  Threads are therefore left
-  off unless asked for (`-t` / `LIN_THREADS` / `OMP_NUM_THREADS`).  Measured on
-  `test/numbers.lin`: 13.2 s with everything serial, 15.6 s with OpenMP's own
-  default, and 13.4–14.9 s when the parallel threshold is raised to 2k–32k — i.e.
-  no configuration beat serial.  (Note `omp_set_num_threads(...)` called at
-  runtime also measured worse than leaving OpenMP's default alone, so the core
-  does not force a thread count.)
-- **Type checking does parallelise well, but not yet soundly enough to switch
-  on.**  Type checking is 90% of the fixed cost and is independent per def, so
-  defs were queued and checked in dependency-ordered batches across threads: it
-  makes `std` load twice as fast (416 → 208 ms) and small programs 25–33% faster
-  (`test/tsp.lin` 452 → 318 ms).  It was *not* landed, because batching only
-  preserves the loader's exact semantics if a def's inferred scheme does not
-  depend on which *unrelated* defs were registered before it — and it currently
-  does: `generalize` counts a scheme's **quantified** type variables as free in
-  the environment, so an extra earlier def makes a later scheme *less* general.
-  Making that rule standard (only unquantified variables block generalization)
-  removes the order dependence, but costs 18–28% on the def-heavy programs
-  (`test/numbers.lin` 13.3 → 15.7 s, `test/selfrecursion.lin` 3.4 → 4.4 s), which
-  outweighs the gain.  That latent order-dependence is worth fixing on its own
-  terms (a def's type should not depend on unrelated defs), separately from
-  parallelism.
-
-## Net-manipulation primitives (runtime fan-out; pure deref/alias)
-
-The language gains "net manipulation" that stays **within the pure interaction
-combinators** — no new agents.  Recursion is denotationally present via
-Church numeration (`n f x = f^n x`); what the language adds is making that
-*structural*: driving sharing/iteration by a runtime count so `n` is data,
-done in the wave with optimal (Lévy) sharing of `f`/`x` across iterations.
-
-Design principle, unchanged: the base engine is the correctness oracle; it
-computes exactly the pure denotation of the λ-term; only the *reduction
-strategy* may change, and any accelerator must reproduce it bit-exactly.  A
-structural fast path in the core is therefore not a new combinator — it is a
-saturated-redex reduction of an existing pattern, exactly as `lin_fold_ffi`
-reduces a saturated `_ffi` closure into a concrete value during `net_interact`.
-
-Two capabilities and how they are realized:
-
-- **Runtime-n loop / fan-out.**  The iterator position is driven by a runtime
-  Scott/Church count on a wire.  The core expands an iterate by peeling one
-  application per step with a DUP-sharing rewrite, so the function/argument are
-  **shared** — not copied — across iterations (O(1) sharing growth per step).
-  A driver may fold the whole iterate cheaper, still bit-exact.
-- **Pointer deref/alias over shared structure.**  A *handle* is a shared wire
-  to a subterm (interaction-net structural sharing).  Deref follows the
-  handle; alias is sharing one handle from two sites.  Pure and confluent —
-  reads and pure updates only; no destructive in-place mutation (confluence
-  forbids aliased `set!`); an update is a pure rebinding to a new handle.
-
-Because no node tags are added, the interaction algebra, the compiler's port
-layout, the egraph optimizer, and the GPU fixed-allocation contract are
-unchanged.
-
-## Non-core runtime in `std/runtime/`
-
-The readback/IO-effect runtime and the `.line` binary container are **not**
-part of the pure `src/` core:
-
-- `std/runtime/io.c` — value rendering, the net printer, and the monadic
-  IO/effect continuation runner (`_iod`/`_iop`/`_ior`/`_iow`).
-- `std/runtime/line.c` — `.line` serialize/deserialize (self-running containers).
-
-These are `#include`d into the core TUs (unity build) so they share the same
-translation unit's statics and the binary remains single — but they are
-physically `std` code, keeping `src/` focused on the interaction calculus.
-No build-recipe change was needed (`src/*.c` still compiles alone).
-
-## Build
-
-```
-make all        # core (./lin) + driver plugins (std/drivers/*.so) + reduce.spv
-make lin        # core only
-make test       # build all + run the full suite
-```
-
-`nix build` also works (the flake compiles `src/*.c` plus the driver plugins
-with `vulkan-headers`/`vulkan-loader`, and wraps the binary with the bundled
-`std/`).
-
-## Test status
-
-The full suite is green: **53 suites / 978 assertions** (Tiers 1-6: core
-primitives, FFI/system drivers, SAT & term rewriting, non-trivial workloads,
-`.line` containers, and CLI invariants, plus the independent soundness oracle
-below).  A driver's native folds are asserted
-by `(folded)`/`lin_folds` in the driver suites; cross-driver correctness is
-asserted by the canonical selftest (`test/driver_selftest.sh` validates every
-driver against the base-CPU golden via `std/selftest.lin`); the GPU driver's
-per-wave bit-exactness is asserted by `LIN_GPU_SELFTEST` through the shared
-`std/drivers/selftest.h` harness (no mismatches on a device).
-
-**Values are pinned to an independent oracle, not to the suite's own comments.**
-`test/soundness_enum.py` (Tier 2.6, in both runners) evaluates the boolean
-formulas of `test/sat.lin`, `test/sat_verify.lin` and `test/tseitin.lin` by
-ordinary lambda evaluation — no nets, no fans, no sharing — and requires the
-engine's readback to agree (35 evaluations, all comparison-free of the `; expect`
-comments).  This exists because the suite once *asserted* the wrong values the
-unsound fan sharing produced: `sat_verify.lin` labelled its own answer a
-"superposition collapse false negative".  Editing an expectation can no longer
-make an unsound engine pass, and the oracle fails loudly if its vocabulary stops
-covering an expression rather than skipping it.
-
-## Readback: render once, replay for the shared rest
-
-`print_port` carried `vis_print[]` as a *cycle* guard (set on entry, cleared on
-exit), so a DAG-shaped result was fully re-walked at every sharing point — the
-printed size is exponential in the number of sharing points even though the net
-is small.  (An earlier note blamed `benchmarks/bench_combinators.lin` for this;
-that benchmark still does not complete even with the memo — >122 s on both builds
-— so its cost is *not* printing and stays an open item.  The memo's evidence is
-the synthetic repro below, where output is byte-identical.)
-
-The printer now appends into a buffer and memoises the rendered text per
-`(node, port)` (`viz_txt[]`, freed with the net), replaying it on later visits.
-A render is memoised only if it emitted no `?` on the way in: a `?` means the
-text was shaped by an in-progress ancestor (a real cycle), so that text is not
-context-free and must not be replayed.  Output is byte-identical — measured on a
-nested-sharing repro `(let ((f (\x (pair x x)))) (f (f … (f 1))))`:
-
-| sharing depth | before | after | output |
-|---|---|---|---|
-| 12 | 726 ms | 420 ms | 53,240 B, byte-identical |
-| 16 | >240 s (killed) | 793 ms | 851,960 B |
-
-`f` is fan-shared (the landed sharing soundness work) and each `(pair x x)` shares
-its `x`, so depth *n* is 2^n print work while the net stays O(n).
-
-## Line budget
-
-Pure core `src/` (`.c` + `lin.h`): **2,831 lines** (< **3,000 target**; the
-non-core readback runtime in `src/runtime_io.inc` is std and not counted, and the
-whole `.inc` set is 3,170).  The
-pure-Scott de-laddering added the driver-foldable `_op` machinery
-(`lin_fold_op`/`lin_fold_op_arg`/`op_value_from_lam`, `net_spine_args`, and the
-`_op` deferral + eager-argument-fold edges) in `src/io.c`/`src/net.c`, which is
-what lifts the count; the integer arithmetic itself was already retired to
-`std/drivers/arith.so`, so the migration costs fold machinery in the core rather
-than removing rows.  The fold machinery was then consolidated and generalised —
-one shared `_cl`-spine walk (`decode_spine`), one shared `_ffi`-header dig
-(`ffi_header`), a Scott-spine `scott_peel`, a fold-result `fold_link`, and a
-shared beta `fold_arg` edge — and expository comments/blank lines were compressed
-(3,085 → 2,923).  The arithmetic table, drivers, and `std/runtime/*` live outside
-`src/` and do not count against the core.
-
-## Status (honest)
-
-**All green: 53 suites / 978 assertions.**
-
-- **Integer/comparison arithmetic is now PURE LIN.**  `std/num.lin` no longer
-  uses any integer `_ffi`/`ccall2`: `add/sub/mul/div/mod/pow/eq/lt/gt/leq/geq`
-  are pure-Scott recursions wrapped as **driver-foldable `_op` closures** — a
-  saturated op is a DT_OP-named LAM (`_add`, …) applied to the operand
-  `_cl`-spine, whose head `lin_fold_op` folds through the one shared
-  `lin_arith_scalar` table (arith.so) when operands are concrete, and whose
-  pure-Scott body is the always-correct β fallback (verified correct with arith
-  absent).  `(mul 6 (add 24 96))` → 720 and `(if (geq 1 (min 4 5)) 1 8)` → 8
-  fold fast; the dead integer `_ffi` fold paths are trimmed.
-- **Drivers fold `_op` uniformly.**  The base fold's `lin_fold_op` IS the
-  uniform `_op` fold (op token from the DT_OP name, operands via the shared
-  `net_spine_args` decoder, value from the shared scalar table); SIMD keeps its
-  `_ffi` float fold and the GPU delegates to the base, so all strategies resolve
-  the same math.  `native.lin` no longer routes integers through `ccall2`.
-- **Arithmetic generalized.**  One shared `lin_arith_scalar` table is the single
-  authority; the core hook is a general-purpose `lin_scalar_ops_add/load`
-  registry.  Non-movable C (OS/device, float parsing, string compare, fold
-  accounting) stays in the core.
-- **Fold mechanics hardened.**  Two engine defects surfaced by the pure-Lin
-  closures were fixed: `egraph_optimize` no longer out-of-bounds reads for
-  body-less TDEF/TDEFX/TFLOAT value markers (was emitting a stray free `_sz` in
-  `lin build`), and `net_load_line` now seeds the active-redex queue so a loaded
-  `.line` container actually reduces.
-- **Recursion converges** via bounded self-unravelling (k=24), extended by the
-  `_rec` widening for deeper pure-Lin recursion.
-
-**Known limitations (genuinely hard, not patched here).**
-- Recursion depth is capped by the self-unravelling bound (truncates to the base
-  value beyond it); arbitrarily-deep recursion still needs a value to thread out
-  of a terminating recursive knot in the reducer.
-- The driver fold paths (`simd.c`'s `_ffi` arg-decoding) still parallel the
-  core's shared decoder; the scalar *semantics* are shared via `lin_arith_scalar`
-  and the `_op` operands are decoded by the shared `net_spine_args`, but a fuller
-  consolidation of each driver's net-side walk remains.
-- Core LOC is ~2,923, under the **3,000 target**: the pure-Scott `_op` machinery
-  is a deliberate cost, now consolidated (shared `decode_spine`/`ffi_header`/
-  `scott_peel`/`fold_link`/`fold_arg` and compressed comments).  The driver
-  fold paths (`simd.c`'s `_ffi` arg-decoding) still parallel the core's shared
-  decoder; a fuller consolidation of each driver's net-side walk would reclaim a
-  little more headroom.
-
-**Journey / lessons (compressed history).**  Earlier rounds documented in
-detail: Y-combinator recursion strands its base value on a continuation knot;
-deep windows in `num.lin` exploded node counts; a fold-on-saturation gap made
-composed direct-FFI comparisons strand until the fold-routing/deferral fix
-landed; readback folds and `lin_precompile_depth` suppression were incremental
-steps toward it.  These were resolved by the bounded self-unravelling and the
-deferral fix above; the per-round investigation is preserved in git history.
-
-## Standard library rework: `(export <ns>)`
-
-The std modules carried a per-module boilerplate tail — `(namespace _) (open X)`
-plus a hand-written `(define! y X.y …)` alias for every public name (~230 lines
-total).  A new compiler form `(export <ns>)` re-exports a namespace's public
-members into the current (root) scope in one form: `(namespace _) (export X)`.
-Each export is routed through `process_def` (matching the old `(define y X.y)`
-aliases exactly), `_`-prefixed members are treated as private and skipped, and
-last-loaded-wins resolve bare-name collisions the way the old alias modules did.
-
-The whole std was migrated to this template, with two idioms applied per module:
-- **Global-safe public names**: members are named so `(export X)` exposes the
-  exact bare names consumers use and nothing that collides across modules (e.g.
-  `str_eq`/`streq`/`maybe_map`/`empty_queue`/`io_read`; never a naked `eq`,
-  `length`, `head`, `empty`, …).  Qualified-only short names consumers still
-  reach (e.g. `str.eq`, `stream.nth_c`, `io.print`) are bound as dotted aliases
-  after the export so they resolve without re-exporting bare.
-- **De-laddering**: hand-unrolled positional families (list `first..eighth`,
-  string `length`/`concat`, map/set insert-ladders) were collapsed onto a single
-  terminating recursion or shared internal `_`-helpers without changing public
-  semantics.
-
-A proper distinct `float` annotation type remains a compiler/type-checker task
-(annotations only have builtin atoms `num`/`bool`/`a`/`(list a)`); `float.lin` is
-reworked to the export template but its ops stay `num`-typed.  Suite: 53/978.
-## AOT: `lin build` is the compiler, and it runs the whole pass pipeline
-
-Lin is AOT-compiled: `lin build prog.lin -o prog` runs the pipeline once and writes a
-`.line` container holding the **residual** net, and `./prog` only reduces what the
-compiler could not finish.  Interpretation (`lin prog.lin`) stays as the development
-path and shares the same front end, so there is one semantics and two schedules.
-
-Pipeline, in order (`do_build` in `src/main.c`):
+| `magic`, `abi` | identity; a mismatch is rejected **loudly** (an older `.so` is smaller than the current struct, so reading new fields would run past its end) |
+| `name`, `description` | what `(get_driver)` reports |
+| `caps` | `LIN_CAP_NATIVE_NUM` (scalar folds), `LIN_CAP_FIXED` (β/annihilate/erase), `LIN_CAP_COMMUTE` (allocating γ⋈δ), `LIN_CAP_PREEMPT` (pre-pass) |
+| `priority` | ascending; the wave partitions in this order |
+| `claim(n, p1, p2)` | **pure** predicate: will this driver handle this redex? |
+| `reduce(n, redexes, nred, limit, changed)` | consume a claimed slice |
+| `arg_fold(n, arg, target)` | pre-empt a sub-term in a β *argument* position |
+| `materialize(n, p, out)` | readback pre-pass: turn a foldable closure the reducer left behind into a value |
+| `drain(n)` | the wave emptied; retry parked work, return how many pairs were re-enqueued |
+| `pending(n)` | still holds un-materialised work for this net |
+
+### 5.1 Strategies vs pre-emptors
+
+A **strategy** (SIMD, GPU) reduces a redex *class* more cheaply than the base rules.
+A **pre-emptor** (`LIN_CAP_PREEMPT`) claims classes the core would otherwise handle
+anyway — native folds, guarded deferral — as a pre-pass, and composes with whichever
+strategy is selected. `(set_driver "cpu"|"simd"|"gpu")` clears strategies but **keeps**
+pre-emptors, so selecting a strategy never silently disables the fold pre-pass.
+
+### 5.2 The contract every driver must honour
+
+1. **`claim` never strands.** A claimed redex is removed from the wave; so claim returns 1
+   only when the driver will either rewrite it now or hold it deliberately and give it back.
+2. **The base engine is the oracle.** A driver's rewrite must be bit-exact against
+   `lin_reduce_wave_parallel` on the same redex (§10.2).
+3. **The waiting policy belongs to the driver.** The core supplies a drain point and a
+   livelock guard, nothing more. A driver that cannot materialise a redex must eventually
+   release it to β, which is always correct.
+4. **`pending` is honest.** A reduction that ends with a driver still holding work has not
+   reached a value, and the core acts on that: `def_precompile` refuses to bake such a net.
+5. **Respect the two context flags.** Do not fold while `lin_precompile_depth > 0` (the
+   operands are free variables that never become concrete), and do not bake anything
+   observable while `lin_build_depth > 0` (a program must still be able to observe its own
+   run).
+6. **File two lines, not a test file, to add a driver:** ship `std/drivers/<name>.lin` and
+   add `<name>` to the `DRIVERS` registry in `test/driver_selftest.sh` (§10.2).
+
+### 5.3 The two edges the wave cannot reach
+
+A principal×principal redex is the wave's unit, but two shapes are not one:
+
+- a saturated closure in an **argument** position (`succ (mul 2 2)`) — reached through
+  `arg_fold`, offered by β just before substitution;
+- a foldable closure left embedded in a value spine at **readback** — reached through
+  `materialize`.
+
+Both hooks exist so that drivers need not invent a way to see those shapes; a driver that
+implements neither simply leaves them to the core.
+
+### 5.4 The drivers that exist
+
+| driver | caps | what it does |
+|---|---|---|
+| `arith.so` | `NATIVE_NUM \| PREEMPT`, priority 5 | the fold pre-pass: claims saturated `_op`/`_ffi` closures and folds them through the shared scalar table, parking (and draining) the ones whose operands are not concrete yet. Also *is* the scalar table (§6). |
+| `simd.so` | `NATIVE_NUM`, priority 10 | claims saturated `_op` redexes (readiness-gated) and folds them in batches of `SIMD_WIDTH` — an eval pass over the batch, then an apply pass — so value computation decouples from mutation. Bit-exact. |
+| `gpu.so` | `FIXED`, priority 20 | dispatches the fixed-allocation rules (β, DUP×DUP with inline scopes, erase) to a Vulkan compute kernel over host-visible buffers; allocating commutes and heap-backed gauges are delegated to the base engine. Two-phase per wave: collect the sector-disjoint slice *without mutating the net*, dispatch, commit, then host-fall-back. Loader/device failure degrades to the base engine with one warning. |
+
+An important consequence of the layering shows up here: since integer arithmetic became
+pure Lin (§6), a driver's fold is only ever an *acceleration*. `simd.so` measured exactly the
+same native-fold count as the base engine on the same programs — because the base fold is
+already O(1) per saturated `_op` closure via the shared table. Its value is the batched
+structure, not the count.
+
+---
+
+## 6. Scalar semantics: one table, any strategy
+
+There is exactly **one** place that knows what `lin_add`, `lin_eq`, `lin_fadd`, … mean:
+`lin_arith_scalar()` in `std/drivers/arith.so`. A reduction *strategy* decides *how* to
+reduce a net; it resolves arithmetic by calling that one table.
+
+- **`arith.so` is a semantic provider, not a strategy.** Its table answers "what is the
+  value of this operation"; its `claim` is the pre-pass, not a reduction policy. New ops
+  are new table rows, not a new switch arm in every driver.
+- **The core hook is general-purpose.** `lin_scalar_ops_add()` / `lin_scalar_ops_load()`
+  let any driver register any number of `ScalarOpFn` providers, tried in registration
+  order; arithmetic is merely the first consumer. `run_ffi` delegates unclaimed `lin_*` ops
+  to them.
+- **Non-movable C stays in the core:** memory/device/OS (`exit`, `driver_*`, `dlopen`,
+  `puts`, `getenv`), float parsing, string comparison, and fold accounting. These are not
+  semantics that a strategy could vary; they are the host boundary.
+- **Arithmetic is pure Lin first.** `std/num.lin`'s integer and comparison ops are pure
+  Scott recursions wrapped as driver-foldable `_op` closures: `(add 4 3)` compiles to
+  `((\_add <pure-body>) (cons 4 (cons 3 nil)))`, a `DT_OP`-named `LAM` applied to an operand
+  spine. The embedded pure-Scott body is the **always-correct β fallback** — with no scalar
+  provider at all, the same redex still reduces by the interaction calculus, slowly and
+  exactly. The fold is an acceleration of a term that already means the right thing.
+
+That last point is the cleanest illustration of G4: the arithmetic table can be deleted and
+Lin still computes the right answers.
+
+---
+
+## 7. Language surface and types
+
+### 7.1 Forms
+
+S-expression syntax over curried lambda calculus. Reader forms: `(\x …)` / `(lambda …)`,
+`(define …)`, `(define! …)` (typed, checked at definition), `(let ((x v) …) body)`,
+`(namespace X)` / `(open X)` / `(export X)`, `(load "file.lin")`, `(datatype …)`,
+`(match scrut (pat body) …)`, integer literals of arbitrary magnitude, floats, strings.
+Macros are ordinary definitions — there is no separate macro layer.
+
+`(export X)` re-exports a namespace's public members into the current scope in one form
+(`_`-prefixed members are private, last-loader-wins on collisions). It replaced ~230 lines
+of hand-written alias boilerplate in the standard library.
+
+### 7.2 Hindley–Milner with nominal types
+
+`src/type.c` is a textbook HM checker: unification with occurs check, let-generalization,
+`Scheme` with up to 256 quantified variables, and nominal type constructors (`num`, `bool`,
+`float`, `list`, plus user-declared ones) alongside arrows and type parameters.
+
+One property is architectural rather than incidental: **a definition's type must not depend
+on which unrelated definitions were registered before it.** Generalization therefore counts
+only *unquantified* environment variables as free — a scheme's own quantified variables are
+bound by the scheme. This matters for two reasons: it is the correct HM rule, and it is the
+prerequisite for checking and compiling definitions concurrently (§11.3), where "which def
+came first" is a schedule rather than a fact.
+
+### 7.3 Data types
+
+- **Built-ins** are Scott-encoded: numerals (the successor case receives the predecessor
+  numeral, so `pred` is one application — O(1)), booleans, Church-list strings, floats (a
+  boxed double), and Church numerals for pure iteration.
+- **User ADTs** — `(datatype Name (Ctor field…) …)` introduces each constructor as a
+  Scott-encoded function `C_i = \f1..\fk \d0..\d_{m-1} (d_i f1 … fk)`, and `(match scrut
+  (pat body) …)` compiles to positional Scott dispatch. They type-check through ordinary
+  let-generalization: no new type-system machinery and no new net agents.
+- **The datatype registry** keys every value domain by its *carrier node names*
+  (`_sz`/`_ss`, `_bt`/`_bf`, `_cl`/`_nl`, `_ffi`, `_fsz`, the `_op` LAMs, the effect
+  continuations). Readback decoders and drivers consult `ctor_tag(name)` instead of
+  pattern-matching identifiers, which is what makes a new value domain a registration
+  rather than a change spread across the readback path.
+
+---
+
+## 8. The AOT pipeline
+
+`lin build prog.lin -o prog` runs the whole pipeline once and writes a `.line` container;
+`./prog` then reduces only what the compiler could not finish. `lin prog.lin` (interpret)
+shares the identical front end.
 
 | pass | what it decides | where |
 |---|---|---|
-| load + type check | the program is well typed before anything is rewritten | `type_check` |
-| `expand_defs` | defs inlined, and non-recursive defs **precompiled** (baked as nets) where that is sound | `def_precompile` |
-| e-graph saturate + extract | β/η/projection rewrites by equality saturation, then cheapest form | `egraph_optimize` |
-| CSE → sharing | which repeated sub-terms earn one fan (see below) | `cse_share` |
-| compile | term → interaction net; a multi-use variable becomes a DUP fan tree | `compile` |
-| **AOT evaluation** | reduce the net at build time with `net_reduce`, stopping at effects | `do_build` |
-| compact | drop reduction intermediates before serialising | `net_gc` |
+| load + type check | the program is well typed before anything is rewritten | `load_file`, `type_check` |
+| `expand_defs` | defs inlined; non-recursive defs **precompiled** (baked to a reduced net) where that is sound | `expand`, `def_precompile` |
+| e-graph saturate + extract | β/η rewrites by equality saturation, then cheapest form | `egraph_optimize` |
+| compile | term → interaction net; each multi-use variable becomes a `DUP` fan tree | `compile`, `ct`, `dup_tree` |
+| **AOT evaluation** | reduce the net at build time, stopping at effects | `do_build`, `net_reduce` |
+| compact + trim | drop reduction intermediates and dead gauges before serialising | `net_gc`, `net_trim_scopes` |
 
-The last two steps are what make it AOT rather than merely optimizing.  `net_reduce`
-folds pure scalars and β-reduces, and is *stuck* at an IO effect or a non-pure FFI
-closure — so the artifact keeps exactly the work that genuinely needs the runtime,
-and `net_run_io` still finds its continuation intact.  `lin_build_depth` is set around
-that reduction: it tells a driver "this is build time", so a probe like `(lin_folds)`
-is *not* folded into the artifact (a program must still be able to observe its own run).
+The last three steps are what make this AOT rather than merely optimising. Partial
+evaluation folds and β-reduces everything that does not need the runtime, and is *stuck*
+exactly at an IO effect or a non-pure FFI closure — so the artifact contains precisely the
+work that genuinely needs a runtime, with the effect continuation intact. Measured today on
+the container tests (`LIN_PASSES=1`): `line_binary` compiles 8,238 nodes and finishes 3,842
+of them at build time, shipping 3,832 live nodes in a ~105 KB container; `line_ffi` compiles
+63,890 nodes, runs 114,909 build-time steps, and compacts 346,627 nodes to 3,397. Without
+the compaction the artifact came out *twice* the size of the un-evaluated one despite being a
+value, because the container stores every node the reduction ever allocated.
 
-Measured on the two container tests (`LIN_PASSES=1` prints the stats):
+Two invariants constrain the passes:
 
-| | before | after |
-|---|---|---|
-| `line_binary.line` size | 223,555 B | **106,243 B** |
-| `line_binary` nodes at run time | 18,360 | **3,835** |
-| `line_binary` run-time reduction | 3,846 steps | **5 steps** |
-| `line_ffi` build-time reduction | 0 | **114,909 steps** |
-| `line_ffi` artifact nodes | 346,627 → | **3,397** |
+- **Precompilation must not bake a lie.** A define is baked only if its open-body
+  precompile finished (not truncated by the step limit) and no driver reports `pending` on
+  the result. Otherwise the define stays textual and is expanded per reference. The signal
+  is generic — "this net is not a value" — so no driver's policy leaks into the core.
+- **Build-time answers must not become runtime facts.** `lin_build_depth` marks the AOT
+  reduction so a driver will not fold a probe like `(lin_folds)` into the artifact.
 
-Compaction is not cosmetic: the container stores *every* node, and an actual
-evaluation leaves far more dead intermediates than live ones, so serialising without
-`net_gc` produced an artifact twice the size of the un-evaluated one (474 KB vs
-224 KB) *despite being a value*.
+**E-graph status, honestly.** The pass runs only on the AOT path, saturates β and η for four
+rounds under a node cap, and extracts lowest-cost forms. It is a scaffold, not yet a
+decision layer: `eg_extract` rebuilds a *tree*, so a class with two parents is emitted
+twice — the sharing it discovers is thrown away; dedup is a linear scan, so insertion is
+quadratic in the cap; and on the only two programs that exercise it the shipped artifact was
+byte-identical with and without it (the compiled node count `LIN_PASSES=1` reports is where
+its one measurable effect — 4.6% fewer nodes on `line_ffi` — shows up, without reaching the
+artifact). What it is *supposed* to own — CSE, precompile-vs-textual choice, unrolling
+strategy — is the subject of §11.3.
 
-`LIN_PASSES=1` makes every pass report, so "the passes ran" is observable rather than
-assumed.
+---
+
+## 9. Runtime: effects, readback, containers
+
+These live in `src/runtime_*.inc`, `#include`d into core translation units for a single
+binary, but they are std code: the readback/IO runtime, the shared on-net decoder, and the
+`.line` container. They share the core's statics (`N`, the wire accessors) rather than
+duplicating them.
+
+### 9.1 Effects as a protocol, not a switch
+
+An effect is a continuation named by a registered carrier (`_iod` done, `_iop` print,
+`_ior` read, `_iow` wait). The monadic step is one primitive — `eff_apply`: apply the
+continuation to the produced value, relink ROOT, re-reduce. New effects are added by
+registering a carrier plus, where the host is involved, one arm in the runner; the
+continuation protocol itself never changes. `_ffi` is the general escape hatch: resolve a
+symbol and call it.
+
+This is also where the language's "wait for anything" facility lives (`io_wait`): a
+selector string chooses stdin, a file descriptor, a subprocess (`!cmd`), a file, a timer,
+or an FFI call — all funneling into the same continuation step.
+
+### 9.2 Readback
+
+Decoding is registry-driven (`ctor_tag`), so an identifier that happens to start with `c`
+or `n` can never be mis-decoded as a string spine.
+
+Printing renders into a buffer and **memoises the rendered text per (node, port)**, replaying
+it on later visits. Without the memo, a DAG-shaped result is re-walked at every sharing point
+and printed output becomes exponential in the number of sharing points while the net stays
+linear. A render is memoised only if it emitted no `?` on the way in: a `?` means the text was
+shaped by an in-progress ancestor (a real cycle), so it is not context-free and must not be
+replayed. Output is byte-identical either way.
+
+### 9.3 The `.line` container
+
+A `.line` file is a shebang line (re-invoking the engine that produced it) followed by a
+`LINE` magic, a versioned header `{version, nn, scn, nnamed}`, the node arrays (`tag`,
+`dead`, `wire`, `scope`), the named nodes, and the gauge table. Loading reconstructs the
+active-redex queue from live principal pairs — the queue is not serialised, so without that
+a loaded container would sit inert.
+
+---
+
+## 10. Verification
+
+The architecture is only as good as the mechanism that catches it when it lies, so
+verification is part of the design rather than a separate activity.
+
+### 10.1 The independent oracle
+
+`test/soundness_enum.py` evaluates the boolean formulas of the SAT/Tseitin suites by
+ordinary lambda evaluation — no nets, no fans, no sharing, no engine — and requires the
+engine's readback to agree, 35 evaluations. It exists because the suite once *asserted* the
+wrong values that unsound fan sharing produced, and even labelled one of them a "false
+negative". Editing an expectation can no longer make an unsound engine pass, and the oracle
+fails loudly if its vocabulary stops covering an expression instead of silently skipping it.
+
+### 10.2 The canonical driver contract
+
+- **Corpus `std/selftest.lin`** activates no driver and carries no expected values; it just
+  prints the readback of a fixed set of pure probes covering every redex/capability class a
+  driver may claim.
+- **Runner `test/driver_selftest.sh`** reduces the corpus under the base CPU engine (golden)
+  and then under each driver in its `DRIVERS` registry, requiring value-for-value equality.
+  Adding a driver is two lines of work, and no expected values to maintain.
+- **Device reducers get a stronger oracle.** `std/drivers/selftest.h` lets a device driver
+  replay *the same redexes* it just committed through the canonical host reducer and diff
+  `wire[]`/`dead[]` bit-exactly (env-gated, `LIN_GPU_SELFTEST=1`). The two layers compose:
+  the corpus proves cross-driver value equality, the replay proves per-wave device
+  bit-exactness where a device actually ran.
+
+### 10.3 The suite
+
+`test/run_tests.sh` runs **53 suites / 978 assertions** in ~39 s across six tiers: core
+primitives, FFI/system drivers, cross-driver selftest, the soundness oracle, constraint
+satisfaction and rewriting, non-trivial workloads and confluence invariants, `.line`
+containers, and CLI invariants. The Nix runner mirrors it for CI against committed content;
+`make test` runs the working tree.
+
+Useful observability knobs: `LIN_PASSES=1` (per-pass AOT stats), `LIN_TRACE=1` (per-step
+rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
+
+---
+
+## 11. Status and open problems
+
+### 11.1 Landed
+
+- The core is a complete four-rule calculus with no fold machinery in it: `net_interact`
+  contains β plus the two commutation rules and passive erasure, and nothing else. The
+  `_ffi`/`_op` fold, its saturation guard, its waiting policy and its decline signalling all
+  live in `arith.so` as a pre-emptor.
+- Arithmetic is pure Lin with a single shared scalar table behind it.
+- Sharing is verified Lévy-optimal **for acyclic values**, with measured marginal cost.
+- Fan–fan commutation and the gauge/meet discipline are in, and every sharing witness in the
+  SAT/Tseitin suites agrees with the oracle.
+- `lin build` runs the pipeline end to end and bakes a compacted residual.
+- Definition types are order-independent.
+- Gate: 53 suites / 978 assertions, oracle green, core 2,872 lines.
+
+### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
+
+Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
+**bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k = 24
+copies of the body, tagged with a `_rec` sentinel; if the sentinel survives reduction the
+whole program is recompiled with k doubled (up to 16 rounds). Multiplexed across nested
+recursive defines this multiplies: `fact` alone reaches a 981,286-node net, and one
+multiplication costs the same at depth 1 as at depth 4 — the runtime is dominated by the
+unrolling, not by the depth needed. It is also why `expand_defs` alone is 30% of real
+runtime, and it is why artifacts used to scale with k rather than with the program.
+
+The fix is architectural and known: compile the body **once**, wire the define's own name to
+a path back into that body, and share the body across reference sites through a fan — the
+"knot". It is not landed because it does not yet work, and the reason is a core property, not
+a bug: **a fan wrapped around a cyclic body is divergent by construction.** Today's gauges
+are unique per-sharing-point markers, so the cycle's fans never annihilate and the loop never
+closes; erasure is passive, so nothing tears the cycle down either. Turning the knot on was
+implemented more than once and each time produced a net that does not reduce.
+
+So the prerequisite is a **level discipline** in which the labels really are levels, so a
+cycle's fans annihilate once and for all — the meet of two related histories has to be their
+genuine common ancestor rather than the empty word. That is a research question in the
+sharing discipline, not an implementation task, and it gates: deleting the unrolling
+machinery (`build_bound_rec`, `widen_recursion`, the sentinel, the 16-round retry) *and* the
+front-end cost that motivates §11.3.
+
+Active erasure (propagating ε through agents) was implemented as the alternative and measured
+as paying nothing; it was reverted. It also carries a soundness caveat when a fan straddles
+an erase boundary.
+
+### 11.3 Open: make the front end the place decisions live
+
+Both headline goals now pay *here*, not in the reducer (§4.2):
+
+- **Share recurrence at the net level** rather than copying unrolled levels (§11.2) — attacks
+  the measured 30%.
+- **Give the e-graph real decisions to make:** CSE, precompile-vs-textual choice per define,
+  unrolling strategy. Today `eg_extract` throws away the sharing the e-graph discovers, and
+  the pass is a measured no-op on the programs that exercise it. A term-level CSE pass was
+  written and rejected on evidence: it shrank the compiled net 27× and made the shipped
+  artifact **30× larger** (line_ffi: 92,853 B → 2,785,843 B), because hoisting sharing into
+  the residual defeats the compaction that AOT partial evaluation does. The lesson is
+  structural: sharing decisions must be made *before* partial evaluation, or they cost more
+  than they save.
+- **Parallelise definitions, not waves.** Defs are independent units of type checking and
+  compilation, they are 66% of wall clock, and order-independent generalization is now in
+  place — that is where the cores are. Parallel *reduction* measurements (a precise
+  independence test doubled the parallel fraction from 28% to 53% and still left wall clock
+  2% worse; per-pair work is ~140 ns and the allocating rules contend on one atomic node
+  counter) are bounded by the ~17% ceiling §4.2 records, while threading defs is not.
+
+### 11.4 Open: smaller items
+
+- **Float typing is nominal but not enforced.** `float` is a registered nominal annotation
+  and a float is a Scott numeral carrying an IEEE-754 bit pattern under the `_fsz`/`_fss`
+  spine (so it never collides with integer numerals), but `std/float.lin`'s operations are
+  declared `num`-typed and route through `_ffi` closures to libm. A distinct, checked float
+  type is a type-system task, not a net-level one.
+- **Driver net-side decoding** is not fully consolidated: drivers reuse the shared
+  `net_spine_args`/`net_ffi_args`/`net_dhop` walkers, but `simd.c` still parallels parts of
+  the `_ffi` argument walk. A fuller consolidation would reclaim headroom against the LOC
+  gate.
+
+### 11.5 Standing policy
+
+Land only what measurably pays. Three reverted attempts are the reference points, and each
+was reverted *on numbers*: a term-level CSE (artifact 30× worse), a precise independence
+scheduler (wall clock 2% worse for ~40 lines), and active erasure (paid nothing). A change
+that adds lines without moving a measurement does not ship; the measurement is the
+deliverable.
+
+---
+
+## 12. Building and layout
+
+```
+make all       # core (./lin) + driver plugins (std/drivers/*.so)
+make lin       # core only
+make test      # build everything, run the full suite against the working tree
+nix build      # hermetic build: core + plugins + the Vulkan compute shader
+               #   (reduce.spv is compiled from reduce.comp by glslangValidator)
+nix flake check
+```
+
+`nix build` sees only **committed** content (flakes stage `src = ./`), so use `make test` for
+day-to-day work and treat Nix as the CI/reproducibility path.
+
+| path | contents |
+|---|---|
+| `src/net.c` | nets, scopes/gauges, the four rules, wave scheduler, GC, driver pipeline |
+| `src/compile.c` | term → net, fan trees, define splicing, e-graph, `.line` (via `runtime_line.inc`) |
+| `src/io.c` | readback decoders, datatype registry, FFI runner, scalar-op hook (via `runtime_io.inc`, `runtime_decoder.inc`) |
+| `src/main.c` | pipeline, defines/namespaces, recursion unrolling, CLI/REPL |
+| `src/parse.c`, `src/type.c`, `src/goi.c` | reader, HM type checker, GoI determinant benchmark invariant |
+| `std/*.lin` | the library, in Lin |
+| `std/drivers/` | `arith.so` (scalar table + fold pre-pass), `simd.so`, `gpu.so` (+ `reduce.comp`), `selftest.h` |
+| `test/` | suite, driver selftest, soundness oracle |
+| `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
+
+**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,872 lines** against a 3,000-line gate.
+The three `src/runtime_*.inc` files (349 lines) are std code and are excluded; `stdio`-level
+readback, IO, and the container format do not count against the calculus.
