@@ -531,6 +531,31 @@ so a redex inside the body is still common to both copies, and the first consume
 reduce it kills nodes the sibling still points at (hence the segfaults once folds stop
 papering over it).
 
+**Round 5: the segfault was a stale static `N`, and the rest is the β path.**
+Two corrections to the paragraph above.
+
+*The γ⋈δ rule is already the full Lafont step*: it allocates two copies of the agent
+(`m1`, `m2` at the meet level, one per side) **and two fresh fans `d1`/`d2` that fan the
+agent's auxiliary wires**, then wires the copies' principals to the two auxiliaries of
+the fan being commuted.  The "shallow copy" hypothesis was wrong.
+
+*The segfault was not fan semantics.*  AddressSanitizer points at `io.c`'s `wire()` called
+from `lin_op_needs_operand`: that function reads wires through this TU's static `N` but
+never sets it — it was masked because `lin_fold_op` runs immediately before it in the same
+branch and does `N = n`, and guarding the folds off exposed the stale pointer (from the
+knot's temporary compilation net, already freed).  `N = n` at the entry of
+`lin_op_needs_operand`, `lin_ffi_needs_operand` and `ffi_ops_concrete` removes the crash
+entirely.  Worth keeping: it is a latent crash class for any future path that asks for a
+deferral before any fold has run.
+
+With that fixed and folds still off, the knot gives `(peel …)` -> 0 and
+`(pair (peel 1) (peel 2))` -> `(0, 0)`, while `(add 1 2)` prints `((\_add 3) <spine>)` and
+`(mul 2 3)` stays stuck.  Since no fold ran in either case, the mis-threading is in the
+**base β rule**: under a knot the `_op` closure's node is a *copy* left applied by the
+fan, so the LAM×APP branch β-reduces a different copy and the printed one never gets its
+result.  So the frontier is the knot's interaction with β's node-killing
+(`n->dead[n1] = n->dead[n2] = 1`), not decoding, and not the commutation rule.
+
 That is the real frontier for A3, and it is the same one as the session's opening
 request (fan-share a normalised body rather than copy it): the engine needs the full
 Lafont γ⋈δ step — fan the *auxiliary wires* as well, so an inner redex is private to its
