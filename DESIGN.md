@@ -304,6 +304,42 @@ cost: a large precompiled body is still cloned once per reference, and gauges
 make that clone's scope work non-trivial — sharing one copy across references
 (and making a shared body reduce per consumer) is the next step.
 
+## Gauges as levels: the meet modulation (a large compile-time win)
+
+A gauge is meant to be a Lamping *level*, and levels **meet**: two sharing points
+that have crossed each other share the prefix of their histories, so their meet is
+the level they genuinely have in common.  The paper's modulation
+(`s₁ = 1·s_node·s_dup`) only ever *concatenates*, so words grow without bound: two
+fans that meet inside a cycle commute again and again and the cycle never closes,
+and later scope operations pay for words of ever-increasing length.
+
+`scope_meet` (the longest common prefix) now supplies the meet, and the
+`LAM/APP × DUP` commute modulates the copies through it:
+`s₁ = 1·(s_node ⊓ s_dup)`, `s₂ = 2·(s_node ⊓ s_dup)`.  Copies therefore *converge*
+towards the level the two histories share instead of diverging, which is what makes
+repeat crossing settle.  Measured effect (all of it with the suite and the
+soundness oracle green):
+
+| program | before | after |
+|---|---|---|
+| `test/modules.lin` | 17.3 s | **2.3 s** |
+| `test/numbers.lin` | 14.4 s | **4.9 s** |
+| `test/string.lin` | 1.8 s | **0.6 s** |
+| `test/selfrecursion.lin` | 3.6 s | 2.8 s |
+
+The gain is mostly that words stay short: the expensive part of compiling had been
+scope work on long words, and converging gauges also make more fans annihilate
+instead of commuting (less duplicated work).
+
+**Open soundness question.**  Annihilating two fans is only sound when equal gauges
+really mean "the same sharing point", i.e. when the labels *are* levels.  Today a
+fan's label is a unique marker, so the meet of two unrelated markers is empty and
+unrelated fans can collapse to the same level.  The corpus above is green, but the
+cyclic-knot experiment below produces exactly that failure (`_op` folds stop being
+wired correctly, 5 suites red), so the discipline is not yet consistent.  The fix is
+to label fans by their true level (the binder depth they duplicate at, which the
+compiler already threads as its scope) so that the meet is the genuine LCA.
+
 ## Recursion
 
 Recursive defs are compiled by **bounded self-unravelling** (`build_bound_rec`:
@@ -314,6 +350,71 @@ and single/linear self-recursion reduces to the correct value (`peel 3→0`,
 (`process_def` in `src/main.c`); no new interaction agents.  Recursion deeper
 than the bound truncates to the base value.  Regression test:
 `test/selfrecursion.lin`.
+
+**Why the bound is still there (a cyclic knot was tried).**  The alternative — one
+compiled body whose self-reference is fed by a fan (the def's lambda put on a DUP
+whose one auxiliary is the public value and whose other auxiliary feeds every
+occurrence of the def's own name) — *converges* once the meet modulation above is in
+place, and gives the right values with **linear** steps and tiny nets
+(`(rec n)` for n = 0,1,2,4,8,16: 410, 416, 426, 458, 570, 986 steps; 1.8–3.5 k
+nodes) where the unrolled chain needs k copies of the body.  What it does *not* yet
+do is keep the `_op` folds wired correctly: with unique-marker labels the meet
+collapses unrelated fans (see the open question above) and folded results end up in
+the β-body slot (`(add 8 5)` reduces to `((\_add 13) <spine>)` rather than `13`), so
+5 suites go red.  Before the meet existed the knot never became inert at all
+(traced: LAM×APP and DUP×DUP redexes still firing at step 3000, node ids still
+climbing) — the unrolled chain has no such problem because its leftover is inert
+(unapplied lambdas) that the reachability GC reclaims, whereas a live cycle cannot
+be dismantled because erasure is **passive**: `net_interact` has no ERA×DUP / ERA×LAM rule
+(those pairs are dropped, "as in the reference") and erasure works by leaving ports
+dangling.  A knot therefore needs either **active erasure** (ε×δ propagation — with
+the caveat that the naive "erase both auxiliaries" rule is unsound when a fan
+straddles an erase boundary) or a **level discipline** in which the cycle's fans
+annihilate once and for all: today's unique-per-fan markers deliberately keep
+unrelated fans from annihilating, which also stops the loop from closing.  Either
+is a prerequisite for deleting the unrolling bound along with the `_rec` sentinel
+and the widening machinery.  Two latent defects surfaced while doing this and are
+part of the same work: a def in a namespace kept its self-reference *unqualified*
+(`_padd` inside `num._padd`) because `qualify_free` ran before the def was
+registered, and precompiling a def whose expansion mentions recursion is pointless
+(there is no normal form to bake) yet burned the whole step limit.
+
+## Parallelism: measured, and where it does and does not pay
+
+Reduction is **not** where Lin's time goes.  On the workloads in `test/` and
+`benchmarks/` the reducer accounts for ~3% of a run (`test/nqueens.lin`: 29 ms of
+849 ms, 38142 steps; `test/string.lin`: 6.8 ms of ~1600 ms, 4820 steps), and the
+fixed cost of every run is loading `std`: ~410 ms, of which **~370 ms is type
+checking** 593 defs (`process_def`), 10 ms is qualification/registration, and the
+rest is parsing.
+
+Two consequences, both measured:
+
+- **The wave reducer's parallelism does not amortise.**  A wave is usually small
+  (`test/string.lin`: 4621 waves under 64 redexes, 48 under 128, 326 under 256,
+  5 under 512, **none** ≥ 512), and the multi-redex waves that do occur are cheap,
+  so a fork/join per wave costs more than it saves.  Threads are therefore left
+  off unless asked for (`-t` / `LIN_THREADS` / `OMP_NUM_THREADS`).  Measured on
+  `test/numbers.lin`: 13.2 s with everything serial, 15.6 s with OpenMP's own
+  default, and 13.4–14.9 s when the parallel threshold is raised to 2k–32k — i.e.
+  no configuration beat serial.  (Note `omp_set_num_threads(...)` called at
+  runtime also measured worse than leaving OpenMP's default alone, so the core
+  does not force a thread count.)
+- **Type checking does parallelise well, but not yet soundly enough to switch
+  on.**  Type checking is 90% of the fixed cost and is independent per def, so
+  defs were queued and checked in dependency-ordered batches across threads: it
+  makes `std` load twice as fast (416 → 208 ms) and small programs 25–33% faster
+  (`test/tsp.lin` 452 → 318 ms).  It was *not* landed, because batching only
+  preserves the loader's exact semantics if a def's inferred scheme does not
+  depend on which *unrelated* defs were registered before it — and it currently
+  does: `generalize` counts a scheme's **quantified** type variables as free in
+  the environment, so an extra earlier def makes a later scheme *less* general.
+  Making that rule standard (only unquantified variables block generalization)
+  removes the order dependence, but costs 18–28% on the def-heavy programs
+  (`test/numbers.lin` 13.3 → 15.7 s, `test/selfrecursion.lin` 3.4 → 4.4 s), which
+  outweighs the gain.  That latent order-dependence is worth fixing on its own
+  terms (a def's type should not depend on unrelated defs), separately from
+  parallelism.
 
 ## Net-manipulation primitives (runtime fan-out; pure deref/alias)
 

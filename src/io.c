@@ -429,7 +429,20 @@ int lin_fold_ffi_arg(Net *n, Port lam, Port out) {
   return fold_link(n, lam, out, v);
 }
 
-/* fold a saturated pure-Lin `_op` closure (a DT_OP LAM applied to RAW operands; β-body is the pure-Lin fallback).  Mirror of lin_fold_ffi; value from the shared scalar table (arith.so), and with no driver it still reduces exactly via the interaction calculus */
+/* Fold a saturated pure-Lin `_op` closure (a DT_OP LAM applied to RAW operands; β-body is the pure-Lin fallback).  Mirror of lin_fold_ffi; value from the shared scalar table (arith.so), and with no driver it still reduces exactly via the interaction calculus */
+/* Consume a node this redex *exclusively* owns.  `lam`/`app` are principal-
+   connected to each other, so nothing else can be attached to them, but the
+   β-body and the operand spine can be SHARED: a live DUP on that port means a
+   sibling redex reaches the same sub-net through the fan, so marking the fan (or
+   a node behind it) dead would strand the sibling — the fold would then read a
+   destroyed operand and one consumer's result would leak into another's.  Shared
+   structure is left for the reachability GC instead. */
+static void fold_own(Net *n, Port p) {
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node]) return;
+  if (n->tag[p.node] == DUP) return;                 /* behind a fan: not ours alone */
+  n->dead[p.node] = 1;
+}
+
 /* derive the shared-table scalar op name from a DT_OP carrier tag (e.g. `_add` -> "lin_add") */
 static const char *op_tag_to_fn(const char *tag) {
   if (!tag || tag[0] != '_') return NULL;
@@ -447,13 +460,12 @@ int lin_fold_op(Net *n, Port lam, Port app) {
   Val v;
   if (!op_value_from_lam(n, lam, app, &v)) return 0;
   Port res = val_to_port(n, v);
-  /* substitute the concrete result for the saturated redex (exactly as β threads the body out through APP port-1); kill LAM, β-body, and operand spine so nothing competes */
+  /* substitute the concrete result for the saturated redex (exactly as β threads the body out through APP port-1) */
   Port ar = wire((Port){app.node, 1});
   Port aa = wire((Port){app.node, 2});
   Port body = wire((Port){lam.node, 2});             /* the pure-Lin β-body residual */
   n->dead[lam.node] = 1; n->dead[app.node] = 1;
-  if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
-  if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
+  fold_own(n, body); fold_own(n, aa);                /* only what this redex owns outright */
   if (ar.node >= 0 && ar.node < n->nn && !n->dead[ar.node]) {
     /* `ar` is the APP's port-1 body-slot partner — where β threads the result out — so inject `res` AT `ar` (linking into {app,1} would REPLACE `ar`, stranding the consumer) */
     net_link(n, res, ar, 1);
@@ -502,8 +514,7 @@ int lin_fold_op_arg(Net *n, Port p, Port out) {
   Port body = wire((Port){lam.node, 2});             /* the pure-Lin β-body residual */
   Port aa = wire((Port){redex.node, 2});             /* the operand spine */
   n->dead[lam.node] = 1; n->dead[redex.node] = 1;
-  if (body.node >= 0 && body.node < n->nn) n->dead[body.node] = 1;
-  if (aa.node >= 0 && aa.node < n->nn) n->dead[aa.node] = 1;
+  fold_own(n, body); fold_own(n, aa);
   net_link(n, res, out, 1);
   lin_fold_bump();
   return 1;

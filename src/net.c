@@ -52,6 +52,28 @@ static Scope scope_cat(Net *n, int bit, Scope a, Scope b) {
   return r;
 }
 
+/* The meet of two gauges: their longest common prefix.  A gauge is a *level*
+   (Lamping/Asperti) when it behaves like one, and levels meet: two sharing points
+   that have crossed each other share the prefix of their histories, so the meet
+   is what makes repeated commutation *converge* instead of growing a word
+   forever.  With the paper's plain concatenation the words only ever get longer,
+   so two fans that meet inside a cycle commute again and again and the cycle
+   never closes. */
+static Scope scope_meet(Net *n, Scope a, Scope b) {
+  int la = scope_len(a), lb = scope_len(b), l = la < lb ? la : lb, k = 0;
+  while (k < l && scope_bit(n, a, k) == scope_bit(n, b, k)) k++;
+  if (k == 0) return scope_nil();
+  if (k <= 57) {
+    Scope r; r.raw = 0; r.sso.len = (uint64_t)k; r.sso.bits = 0;
+    for (int i = 0; i < k; i++) r.sso.bits |= (uint64_t)scope_bit(n, a, i) << i;
+    return r;
+  }
+  int off = sc_alloc(n, k);
+  for (int i = 0; i < k; i++) n->sca[off + i] = (uint64_t)scope_bit(n, a, i);
+  Scope r; r.raw = 0; r.heap.is_heap = 1; r.heap.len = (uint64_t)k; r.heap.off = (uint64_t)off;
+  return r;
+}
+
 /* Build a scope from a bit array in ONE allocation (SSO when short).  The
    per-bit scope_ext loop it replaces allocated once per bit for words past the
    SSO limit, which dominated compile time on long gauge words. */
@@ -273,11 +295,12 @@ int net_interact(Net *n, Port p1, Port p2) {
 
   if ((t1 == LAM || t1 == APP) && t2 == DUP) {
     Scope sn = n->scope[n1], sd = n->scope[n2];
+    Scope sm = scope_meet(n, sn, sd);        /* the level the two histories share */
     Port nv = WIRE(n, ((Port){n1, 1})), nb = WIRE(n, ((Port){n1, 2}));
     Port da = WIRE(n, ((Port){n2, 1})), db = WIRE(n, ((Port){n2, 2}));
     const char *nm = n->name[n1] ? n->name[n1] : "";
-    int m1 = net_alloc(n, t1, scope_cat(n, 1, sn, sd), nm).node;
-    int m2 = net_alloc(n, t1, scope_cat(n, 2, sn, sd), nm).node;
+    int m1 = net_alloc(n, t1, scope_ext(n, sm, 1), nm).node;
+    int m2 = net_alloc(n, t1, scope_ext(n, sm, 2), nm).node;
     int d1 = net_alloc(n, DUP, sd, "").node, d2 = net_alloc(n, DUP, sd, "").node;
     n->dead[n1] = 1; n->dead[n2] = 1;
     net_link(n, (Port){d1, 1}, (Port){m1, 1}, 0); net_link(n, (Port){d1, 2}, (Port){m2, 1}, 0);
