@@ -139,3 +139,24 @@ static void def_knot(Def *d, Term *body) {
 The programs above are one-liners to type at the prompt (with the repo root as cwd), or
 paste into a scratch file *outside* the repo — this note deliberately carries no repro
 files, and none belong in the tree.
+
+## Conclusion after round 7: redirect A3 away from the knot
+
+`(peel 1..3)` and `(fact 0)` do reduce correctly through the knot — recursion of depth 1-3
+finishes before the copy-around-the-cycle dominates.  Anything deeper (`(fact 1)`, `(mul 2 3)`,
+`(add 1 2)`) runs away, for the structural reason above: **any fan placed on a recursive
+term sits on a cycle, and every commutation around that cycle copies the body that contains
+the fan.**  In Lamping-style systems that is exactly what brackets/abstractors exist to
+control; this engine has fans with a gauge discipline but no brackets, so a lazy recursion
+knot is not expressible in it.  That is a property of the sharing model, not a bug to hunt.
+
+The redirect that keeps the engine pure and stays inside its model: keep the bounded
+unrolling (it is sound and already landed), and attack its *cost* by sharing what the
+unrolled levels have in common instead of duplicating whole bodies.  Today
+`build_bound_rec` emits `k` textual copies, so a define that recurses through another
+recursive define (`_pmul` through `_padd`) carries a 24-fold `_padd` inside *each* of its
+own 24 levels — the 30,773 -> 111,933 node oscillation.  Fan-sharing the levels' common
+sub-nets (no cycle: each level stays a distinct tree level, but their shared parts become
+one node) removes the nesting blow-up without touching the reduction rules, which is
+exactly the "fan-share a normalised body rather than copy it" goal the session opened
+with — applied to the unrolled net rather than to the recursive name.
