@@ -24,7 +24,23 @@ with knot-shared nodes (`n->dead[n1] = n->dead[n2] = 1` kills a copy the sibling
 `1.* x 2.*` (APP x DUP) commutations, i.e. the knot inflates the spine-building
 applications without ever converging, then the wave loop gives up and prints the partial
 structure.  So the symptom to chase is two-sided: runaway fan/app commutation *and* the
-result landing in the wrong slot.  Note also that `ct_splice` copies node 0 (ROOT) like
+result landing in the wrong slot.
+
+**Probe 1 (done, negative but informative).** Dead-flagging the cloned ROOT node makes no
+difference at all (same ~7.7 s, same output), so the stray ROOT agent is not the growth.
+
+**Why the growth is expected, and where it must be fixed.** The knot's fan `F` feeds the
+define's own references, and those references live *inside the body that `F` duplicates*.
+So every γ⋈δ commutation around the cycle produces another copy of the body, and with it
+another `F` feeding the same references — the fan meets itself inside a cycle. The engine
+already has machinery aimed exactly at that case: the scope word is a non-abelian prefix
+injection on commutation (`src/net.c`, top comment) so that two fans meeting inside a cycle
+*converge* instead of growing a word — and the commutation rule allocates its copies at
+`scope_ext(sm, 1/2)`, i.e. as an extension of the meet. The knot's fan is instead allocated
+with a bare `fan_lvl()`, which is fine for tree-shaped sharing (every compiler fan) but is
+the suspicious part for a fan in a cycle. Getting the knot fan's gauge right — so a
+commutation around the cycle is recognised as the same sharing point rather than a new one
+— is the next thing to try, and it is a change of a few lines in `compile_knot`.  Note also that `ct_splice` copies node 0 (ROOT) like
 any other node, so a spliced net carries a second ROOT-tagged node whose wires are
 deliberately not linked — worth checking when hunting the growth.
 
