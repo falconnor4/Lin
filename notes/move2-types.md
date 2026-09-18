@@ -114,3 +114,46 @@ sound to reorder, which is what order-independent `generalize` bought) are the
 next increments, together with replacing the linear `env_find`/`def_find`
 `strcmp` scans over 319 defs with a name hash.  None of these is needed for
 correctness; they are what is left of the 98 ms.
+
+## The remaining 57 ms: measured, and why the next two steps are not worth their cost
+
+Profiled after step 1 (temporary counters, then reverted):
+
+```
+tc_calls=508  tc_ms=57.1  env_find=21080  strcmps=210061
+instantiate=21080  tvar=67877  gen=519  fv_visits=76076
+```
+
+`fv_visits` fell from 11.9M to 76k, so `generalize` is solved.  Of the 98 ms std
+load, type checking is now 57 ms and the rest is parse/expand.
+
+I implemented and measured both remaining ideas from the original plan, then
+**reverted them** because neither paid:
+
+- a name hash for the def half of the environment (to kill the 210k `strcmp`s),
+  plus
+- returning `s->t` directly for a monomorphic scheme instead of copying the whole
+  arrow structure on every occurrence.
+
+Same-session, 6 runs each: previous commit **95 ms**, with both changes **94 ms** —
+within noise.  The lookup cost was never the bottleneck once `generalize` stopped
+re-walking the environment; the remaining time is the inference itself (67,877
+`tvar()` allocations and the `unify`/`occurs` work over 319 def bodies).  The hash
+also introduced a real regression while I had it in — returning NULL on a hash miss
+instead of falling through to `def_find`, which broke the *unqualified* lookup a
+recursive def's own self-reference needs (`_plt` for `num._plt`) — so it was both
+unprofitable and a source of subtle breakage.
+
+**Parallel def checking** is the remaining step of this move, and I judged it not
+worth its risk at this size: inference is not currently reentrant, because `env` /
+`envn`, `instantiate`'s `mn`/`mid`/`mty` scratch and `next_id` are all file-scope
+globals, so parallelising it means making that state per-thread — a substantial
+refactor of the whole checker to recover roughly 40 ms of a 98 ms load (the suite
+is 38.6 s, dominated by reduction rather than typing).  Order-independent
+`generalize` is the prerequisite and is landed, so this stays available if the
+load cost ever matters again.
+
+Both reverted changes were verified semantically identical before reverting: 24
+expressions still produce byte-identical `:type` output against the previous
+commit, including identical type-variable ids and identical error text
+(`error: infinite type`).
