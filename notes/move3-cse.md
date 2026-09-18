@@ -127,3 +127,59 @@ exist FIRST; only then can a sharing decision be measured, let alone be profitab
 Active erasure stays: it is one of the four core rules, it was inert, and it is now
 doing its job against the full suite and the independent oracle.  It is just not the
 thing that unblocks sharing.
+
+## Tree sharing: measured properly, and my label hypothesis is dead
+
+Active erasure is REVERTED (`f23f572`).  It did not pay, and the only reason to carry
+it would have been the knot; it is a clean revert if the knot later needs it.
+
+### Sharing works, and gets better with more uses
+
+My earlier "copying vs sharing" table was built on an additive model (M per mul, A per
+add) that I never validated -- and `(mul 6 7)` alone is 21,661 steps while two of them in
+context measured 129,009, so the model was simply wrong.  Re-measured against real
+baselines, with the computation WRITTEN OUT rather than predicted (pure beta, no arith
+driver, so steps reflect sharing rather than folding):
+
+| uses of a let-bound value | copy (written out) | shared | ratio |
+|---|---|---|---|
+| 2 | 129,009 | 71,041 | 0.55 |
+| 3 | 581,837 | 230,124 | 0.40 |
+| 4 | 795,577 | 268,007 | 0.34 |
+
+So fan-based tree sharing WORKS, and its advantage GROWS with the number of uses.  There
+is no "degrades to copying at 3+" defect, and therefore no support for the fan-tree gauge
+collision I proposed to fix -- so that fix was NOT implemented.  (For the record the code
+fact is real: `dup_tree` gives every DUP in one tree the same `sc`, while DESIGN.md says a
+gauge must identify exactly one sharing point.  The data says it does not matter here.)
+
+### The real anomaly: cost is wildly shape-sensitive at EQUAL use count
+
+Same value, same number of uses, same number of `add`s -- only the association differs:
+
+| shape | uses | steps |
+|---|---|---|
+| `(add (add v v) v)`   | 3 | 230,124 |
+| `(add v (add v v))`   | 3 | **92,172** |
+| `(add (add v v) (add v v))` | 4 | 268,007 |
+| `(add v (add v (add v v)))` | 4 | **121,535** |
+
+2.2-2.5x on identical work.  A bare `add` is 431 steps, so this is not the adds: some
+shapes are duplicating the shared computation.  Marginals per extra use are also
+non-monotonic (159k, 518k, 93k for one extra `add`).
+
+### What is NOT established (do not build on it)
+
+The four shapes above differ in *add association*, so this measurement does NOT isolate
+whether the cause is (a) the fan tree `dup_tree` builds, (b) the ORDER in which uses
+consume their copies, or (c) add association itself.  The isolating experiment is to hold
+the term fixed and change ONLY `dup_tree`, and separately hold the fan tree fixed and vary
+only the association.  That experiment has NOT been run.
+
+Working hypothesis, explicitly unproven: the engine reduces in a fixed wave order, so a
+fan can duplicate a still-UNREDUCED redex before that redex is reduced, and a later use
+then redoes the work.  That is exactly the failure Levy-optimal reduction exists to avoid
+-- fan out AFTER reducing, not before -- which would put the real optimality work in
+reduction ORDER and the fan/copy discipline, not in fan labels.  If that is right, it is
+also why CSE (which creates the multi-use sharing in the first place) increased work: it
+creates sharing that the engine then re-duplicates.
