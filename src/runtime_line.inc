@@ -10,6 +10,8 @@ void lin_set_self_path(const char *p) {
 
 int net_save_line(Net *n, const char *path) {
   FILE *f = fopen(path, "wb"); if (!f) return 0;
+  /* the container stores the entire gauge table, so trim it to what the live nodes use */
+  net_trim_scopes(n);
   fprintf(f, "#!%s\n", self_path); fwrite("LINE", 1, 4, f);
   uint32_t nnamed = 0; for (int i = 0; i < n->nn; i++) if (n->name[i] && n->name[i][0]) nnamed++;
   uint32_t meta[4] = { 2, (uint32_t)n->nn, (uint32_t)n->scn, nnamed };

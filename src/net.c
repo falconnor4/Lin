@@ -308,6 +308,46 @@ int net_interact(Net *n, Port p1, Port p2) {
    ~2x LARGER than the un-evaluated one (474 KB vs 224 KB) despite being a value. */
 static void net_compact(Net *n, const unsigned char *reach);   /* fwd */
 
+/* Drop gauge-table entries no live node references.
+   The `.line` container serialises the WHOLE gauge table, and an AOT evaluation leaves it
+   enormous: a program that merely *references* a recursive def at depth 0 -- never
+   recursing at all -- compacted to 3 nodes and still shipped a 423,502-byte artifact, of
+   which 423,360 bytes (52,920 entries) was dead gauge data against 66 bytes of actual net.
+   Those gauges are the k-unrolled recursion levels' levels: the reduction erased the nodes,
+   and `net_gc` drops the nodes, but nothing ever dropped their gauges.
+   Ranges are copied in order, so a referenced range stays contiguous and remapping its
+   start is enough. */
+void net_trim_scopes(Net *n) {
+  if (n->scn <= 0 || !n->sca) return;
+  unsigned char *used = calloc((size_t)n->scn, 1);
+  int *remap = malloc((size_t)n->scn * sizeof(int));
+  if (!used || !remap) { free(used); free(remap); return; }
+  /* Mark for EVERY node, dead ones included: a node left holding a stale offset would
+     point past the trimmed table.  (The AOT path compacts first, so there are no dead
+     nodes left to pay for this by then.) */
+  for (int i = 0; i < n->nn; i++) {
+    Scope s = n->scope[i];
+    if (!s.sso.is_heap) continue;                       /* lives in the inline 57 bits */
+    int off = (int)s.heap.off, len = (int)s.heap.len;
+    if (off < 0 || len <= 0 || off + len > n->scn) { n->scope[i] = scope_nil(); continue; }
+    memset(used + off, 1, (size_t)len);
+  }
+  int w = 0;
+  for (int i = 0; i < n->scn; i++) {
+    if (used[i]) { remap[i] = w; n->sca[w++] = n->sca[i]; }
+    else remap[i] = -1;
+  }
+  for (int i = 0; i < n->nn; i++) {
+    Scope s = n->scope[i];
+    if (!s.sso.is_heap) continue;
+    int off = (int)s.heap.off;
+    if (off < 0 || off >= n->scn || remap[off] < 0) { n->scope[i] = scope_nil(); continue; }
+    n->scope[i].heap.off = (uint64_t)remap[off];
+  }
+  n->scn = w;
+  free(used); free(remap);
+}
+
 void net_gc(Net *n) {
   if (n->nn <= 1) return;
   unsigned char *reach = malloc((size_t)n->nn + 1);

@@ -45,6 +45,9 @@ Net *net_copy(const Net *n); Scope scope_nil(void);
 /* reclaim every node not reachable from ROOT (identity-preserving; safe at any point a
    net is a value or a residual -- the AOT build compacts before serialising) */
 void net_gc(Net *n);
+/* drop gauge-table entries no live node references (call before serialising: the container
+   stores the whole table, and an AOT evaluation leaves far more gauges than live nodes) */
+void net_trim_scopes(Net *n);
 Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
 Scope scope_prefix(Net *n, Scope lvl, Scope s);
 Scope scope_from_bits(Net *n, const uint64_t *bits, int len);
