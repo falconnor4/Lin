@@ -243,3 +243,27 @@ capture `n->steps` when the wave starts and spend the budget when a wave leaves 
 (deferring is not an interaction, so a wave that only re-examined deferred pairs leaves
 `steps` exactly as it was).  That is the next thing to try; the monotonic-`declines` variant
 is separately known to be unsound at a small cap (`modules.lin` 225 -> 1).
+
+## Round 11: why `steps` cannot be the progress signal
+
+The progress-based expiry was implemented as "if a wave leaves `n->steps` unchanged while
+redexes are still deferred, spend the deferral budget" (with a two-wave debounce).  It does
+not fire: **a deferral is itself an interaction attempt and increments `n->steps`**, so a
+livelocked wave always looks like progress (the instrumented trace shows exactly that —
+`steps` creeping 41,477 -> 41,478 -> ... between deferrals).  `changed` is no better: the
+deferral path returns 1 from `net_interact`, so it counts as handled there too.
+
+So the measure has to be *completed rewrites*, not attempts: one counter incremented where a
+rule actually rewrites (next to the `return 1`s that follow real work, not the deferral
+return), and the drain spends the budget when a wave finishes with that counter unchanged and
+blocked pairs present.
+
+Two shortcuts are ruled out for the record, both because β of a deferred pair can *destroy*
+shared operand structure, which is why the wait exists at all:
+
+- a small per-pair or net-lifetime cap (round 2: `modules.lin` 225 -> 1);
+- "queue empty ⇒ beta" — the drain always runs with `atop == 0`, so that degenerates into
+  "defer once, then beta", the same over-eager rule.
+
+The sound discriminator is genuinely "nothing else can ever run", which is why it must be
+based on real rewrites rather than on attempts, queue state, or step counts.
