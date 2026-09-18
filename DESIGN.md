@@ -33,7 +33,7 @@ across threads. Confluence makes the *answer* independent of the schedule, so a 
 can only ever be a performance choice, never a semantic one.
 
 **G3 — A small, auditable, portable core.** The core is the interaction calculus and
-nothing else: 2,918 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
+nothing else: 2,932 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
 no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
 the layering claim of §2 checkable by reading it.
 
@@ -130,9 +130,15 @@ All four live in `net_interact` (`src/net.c`). That function is the entire seman
 language.
 
 **β — `LAM × APP`.** Kill both nodes, link the binder's wire to the argument and the body's
-wire to the result. The degenerate binder (`\x.x`, where the compiler cross-links the
-binder and body ports) is detected and handled as a direct link: that is β itself, not fold
-machinery, and without it `((\x x) V)` strands `V` on a dead node. Before substituting, β
+wire to the result. Two degenerate shapes are detected first, and both are β itself rather
+than fold machinery:
+
+- the degenerate binder (`\x.x`, where the compiler cross-links the binder and body ports) is
+  handled as a direct link; without it `((\x x) V)` strands `V` on a dead node;
+- when two of the four wires are ports of the *same* fan (the fan sits between the binder and
+  the argument, or between the body and the result) the fan already relates them, so that pair
+  is not linked — linking it would wire a fan's principal to its own auxiliary, a pair no rule
+  fires on, and the net would reach a "normal form" whose value cannot be read back. Before substituting, β
 offers the argument to every driver's `arg_fold` hook (§5.3) — a saturated closure sitting
 in an argument position is never a principal×principal redex, so β is the only place a
 driver can reach it.
@@ -551,7 +557,7 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 53 suites / 978 assertions, oracle green, core 2,918 lines.
+- Gate: 53 suites / 978 assertions, oracle green, core 2,932 lines.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -681,6 +687,6 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,918 lines** against a 3,000-line gate.
+**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,932 lines** against a 3,000-line gate.
 The three `src/runtime_*.inc` files (349 lines) are std code and are excluded; `stdio`-level
 readback, IO, and the container format do not count against the calculus.

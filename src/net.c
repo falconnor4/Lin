@@ -251,6 +251,20 @@ int net_interact(Net *n, Port p1, Port p2) {
       if (lin_argfold(n, aa, ar)) return 1;
       net_link(n, aa, ar, 1); return 1;
     }
+    /* Two of beta's four wires can be ports of the SAME fan -- the fan sits between the binder
+       and the argument, or between the body and the result, and already relates them (its
+       auxiliary carries the value to one side, its principal receives it from the other).
+       Linking them would wire a fan's principal to its own auxiliary: a pair no rule fires on,
+       which leaves a "normal form" whose value cannot be read back (measured on a knot: the
+       printer emitted `?` and the answer was lost).  So substitute on the other pair only, and
+       when both pairs are the fan's own ports there is nothing left to link. */
+    {
+      int fan_ba = (lv.node == aa.node && n->tag[lv.node] == DUP);
+      int fan_br = (lb.node == ar.node && n->tag[lb.node] == DUP);
+      if (fan_ba && fan_br) return 1;
+      if (fan_ba) { net_link(n, lb, ar, 1); return 1; }
+      if (fan_br) { net_link(n, lv, aa, 1); return 1; }
+    }
     /* A driver may pre-empt the argument before it is substituted: a saturated closure passed as data (e.g. the
        `(mul 2 2)` of `succ (mul 2 2)`) would otherwise be β-duplicated without ever being materialised. */
     if (lin_argfold(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
