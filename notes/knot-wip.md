@@ -267,3 +267,27 @@ shared operand structure, which is why the wait exists at all:
 
 The sound discriminator is genuinely "nothing else can ever run", which is why it must be
 based on real rewrites rather than on attempts, queue state, or step counts.
+
+## Round 12: the "no completed rewrites" signal is also wrong — the livelock *is* rewrites
+
+Implemented as designed: `Net.nrew` counts completed rewrites (incremented at the two beta
+returns, the delta-delta and gamma-delta rules, and in `fold_link` so folds count too), the
+drain sets `no_defer` when a wave leaves `nrew` unchanged, and the deferral test skips when
+`no_defer` is set — so precisely the currently-blocked pairs beta, and the flag clears as soon
+as any wave completes a rewrite.
+
+Two things came out of it.  First, the bypass **never fires** (`[NODEFER]` never prints) —
+because rewrites never stop.  Second, the instrumented trace shows what is actually happening
+on `(let ((g (mul 2))) (pair (g 3) (g 4)))`: 14,000+ betas in 20 s at a **stable 30,684-node
+net**, on ordinary std lambdas (`c`, `n`, `t`, `f`, `a`) — a **beta cycle**, not a stalled
+queue.  Round 10's "2400 deferrals/s at a frozen net" is the other half of the same thing:
+the engine alternates between beta-cycling and re-deferring the `_mul` redex, makes no
+progress in either, and the perceived hang is `eval_form` re-running that under its widening
+loop (16 rounds, each rebuilding with a doubled unravelling bound).
+
+So the discriminator cannot be "did any rewrite happen": it has to be "is the net making
+progress", i.e. detecting a repeated state — a reduction-level loop, not a scheduling
+livelock.  That is a different mechanism to build (state repetition / cycle detection in the
+wave loop, or a much lower step budget before the widening loop is allowed to re-run), and it
+is the honest state of A2: the shared partial application of `_op` wrappers puts the reducer
+into a beta cycle that nothing in the scheduler can see.
