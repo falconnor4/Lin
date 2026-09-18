@@ -1,0 +1,2 @@
+(load "std/std.lin")
+(let ((g (mul 2))) (pair (g 3) (g 4)))
