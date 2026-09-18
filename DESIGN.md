@@ -331,6 +331,16 @@ The gain is mostly that words stay short: the expensive part of compiling had be
 scope work on long words, and converging gauges also make more fans annihilate
 instead of commuting (less duplicated work).
 
+**A gauge must be a PATH, not a bare level.**  Relabelling fans by their binder
+*depth* (so the meet is trivially the shallower level) is unsound: two sibling
+binders at the same depth get the same label, their fans annihilate, and values
+merge — with depth labels the oracle reports 5 mismatches (including the
+`(let ((f (\x (pair x x)))) (pair (f 1) (f 2)))` witness, which correctly reduces to
+`(1 1) (2 2)` only with path labels).  The paper's "binder paths as free-group word
+invariants" is therefore load-bearing: the *path* (one generator per binder, one
+per application child) distinguishes siblings, and the *meet* of two paths supplies
+the level behaviour.  Path labels + meet keep every check green.
+
 **Open soundness question.**  Annihilating two fans is only sound when equal gauges
 really mean "the same sharing point", i.e. when the labels *are* levels.  Today a
 fan's label is a unique marker, so the meet of two unrelated markers is empty and
@@ -358,10 +368,24 @@ occurrence of the def's own name) — *converges* once the meet modulation above
 place, and gives the right values with **linear** steps and tiny nets
 (`(rec n)` for n = 0,1,2,4,8,16: 410, 416, 426, 458, 570, 986 steps; 1.8–3.5 k
 nodes) where the unrolled chain needs k copies of the body.  What it does *not* yet
-do is keep the `_op` folds wired correctly: with unique-marker labels the meet
-collapses unrelated fans (see the open question above) and folded results end up in
-the β-body slot (`(add 8 5)` reduces to `((\_add 13) <spine>)` rather than `13`), so
-5 suites go red.  Before the meet existed the knot never became inert at all
+do is reach the `_op` folds at all: with a knot anywhere in the program,
+`(add 8 5)` reduces to `((\_add 13) <spine>)` instead of `13`, and 5 suites go red.
+Instrumented, the `_op` closure's head-fold (`lin_fold_op`) and its eager-argument
+fold (`lin_fold_op_arg`) are **never called** for `_add` (both counters stay 0),
+while the non-knot build folds immediately (`lam=6 app=5 ar=0 aa=1242 body=43`), and
+the knot's own unfolding does run (many `_padd` LAM×APP events; the stray `13` comes
+from the pure-Scott β fallback).  A post-compile dump shows the pair *is* formed
+(`_add node=6 principal=5(t1.p0)`, an APP) — so the redex exists and the fold simply
+never gets to run on it: this is the pre-existing `_op`-fold operand-deferral bug
+that a shared closure already exposed before the knot (a fold whose operands sit
+behind a fan never decodes them, `lin_op_needs_operand` keeps answering "defer", and
+the redex parks on the blocked list forever because unrelated folds keep resetting
+the decline budget).  The knot just makes every `_op` closure shared.  Two fixes are
+available: make the operand decoder fan-complete (it hops DUPs with `skip_dup`, so
+the failure is a direction/shape detail), or materialise the fan before folding.  This is independent of the label scheme (unique markers, depth levels and
+path labels all show it) and of whether recursion-referencing defs are precompiled;
+the next diagnostic is to dump the compiled net for `(add 8 5)` in both builds and
+compare what the `_add` LAM's principal port is wired to.  Before the meet existed the knot never became inert at all
 (traced: LAM×APP and DUP×DUP redexes still firing at step 3000, node ids still
 climbing) — the unrolled chain has no such problem because its leftover is inert
 (unapplied lambdas) that the reachability GC reclaims, whereas a live cycle cannot
@@ -497,9 +521,34 @@ unsound fan sharing produced: `sat_verify.lin` labelled its own answer a
 make an unsound engine pass, and the oracle fails loudly if its vocabulary stops
 covering an expression rather than skipping it.
 
+## Readback: render once, replay for the shared rest
+
+`print_port` carried `vis_print[]` as a *cycle* guard (set on entry, cleared on
+exit), so a DAG-shaped result was fully re-walked at every sharing point — the
+printed size is exponential in the number of sharing points even though the net
+is small.  `benchmarks/bench_combinators.lin` spent ~62 s printing a value whose
+reduction takes 1.1 s (`(is_zero (main))`, which never prints it, is fast).
+
+The printer now appends into a buffer and memoises the rendered text per
+`(node, port)` (`viz_txt[]`, freed with the net), replaying it on later visits.
+A render is memoised only if it emitted no `?` on the way in: a `?` means the
+text was shaped by an in-progress ancestor (a real cycle), so that text is not
+context-free and must not be replayed.  Output is byte-identical — measured on a
+nested-sharing repro `(let ((f (\x (pair x x)))) (f (f … (f 1))))`:
+
+| sharing depth | before | after | output |
+|---|---|---|---|
+| 12 | 726 ms | 420 ms | 53,240 B, byte-identical |
+| 16 | >240 s (killed) | 793 ms | 851,960 B |
+
+`f` is fan-shared (the landed sharing soundness work) and each `(pair x x)` shares
+its `x`, so depth *n* is 2^n print work while the net stays O(n).
+
 ## Line budget
 
-Pure core `src/` (`.c` + `lin.h`): **2,923 lines** (< **3,000 target**).  The
+Pure core `src/` (`.c` + `lin.h`): **2,831 lines** (< **3,000 target**; the
+non-core readback runtime in `src/runtime_io.inc` is std and not counted, and the
+whole `.inc` set is 3,170).  The
 pure-Scott de-laddering added the driver-foldable `_op` machinery
 (`lin_fold_op`/`lin_fold_op_arg`/`op_value_from_lam`, `net_spine_args`, and the
 `_op` deferral + eager-argument-fold edges) in `src/io.c`/`src/net.c`, which is

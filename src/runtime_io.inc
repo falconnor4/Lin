@@ -26,31 +26,62 @@ static int net_try_ffi(Net *n, Port p) {
 
 static unsigned char *vis_print = NULL;
 
-/* Print a port representation to stdout */
+/* Readback renders into a buffer so a shared (DAG) subterm is rendered ONCE and
+   replayed from a memo on later visits; re-walking it was exponential in the number
+   of sharing points (bench_combinators: 62 s of printing for 1.1 s of reduction). */
+static char *ob_buf = NULL; static size_t ob_len, ob_cap;
+static char **viz_txt = NULL;      /* memo: node*3+port -> rendered text */
+static long qmarks = 0;            /* '?' (cycle/over-depth) marks emitted so far */
+
+static void ob_need(size_t k) {
+  if (ob_len + k + 1 > ob_cap) {
+    size_t c = ob_cap ? ob_cap : 256;
+    while (c < ob_len + k + 1) c *= 2;
+    ob_buf = realloc(ob_buf, c); ob_cap = c;
+  }
+}
+static void ob_putc(int c) { ob_need(1); ob_buf[ob_len++] = (char)c; }
+static void ob_puts(const char *s) { size_t k = strlen(s); ob_need(k); memcpy(ob_buf + ob_len, s, k); ob_len += k; }
+static void ob_printf(const char *f, ...) {
+  char tmp[128]; va_list ap; va_start(ap, f);
+  int k = vsnprintf(tmp, sizeof tmp, f, ap); va_end(ap);
+  if (k > 0) ob_puts(tmp);
+}
+
+/* Render a port representation into the output buffer. */
 static void print_port(Port p, int depth) {
-  if (depth > N->nn || p.node < 0 || p.node >= N->nn) { putchar('?'); return; }
-  if (N->dead[p.node]) { putchar('_'); return; }
-  if (N->tag[p.node] == LAM && p.port == 1) { fputs(NNM(N, p.node), stdout); return; }
-  if (vis_print && vis_print[p.node]) { putchar('?'); return; }
+  if (depth > N->nn || p.node < 0 || p.node >= N->nn) { ob_putc('?'); qmarks++; return; }
+  if (N->dead[p.node]) { ob_putc('_'); return; }
+  if (N->tag[p.node] == LAM && p.port == 1) { ob_puts(NNM(N, p.node)); return; }
+  size_t key = (size_t)p.node * 3 + (size_t)p.port;
+  if (viz_txt && viz_txt[key]) { ob_puts(viz_txt[key]); return; }
+  if (vis_print && vis_print[p.node]) { ob_putc('?'); qmarks++; return; }
   if (vis_print) vis_print[p.node] = 1;
+  long q0 = qmarks; size_t o0 = ob_len;
   switch (N->tag[p.node]) {
   case ROOT: print_port(wire(p), depth + 1); break;
-  case ERA: putchar('_'); break;
+  case ERA: ob_putc('_'); break;
   case DUP: print_port(p.port == 0 ? wire((Port){p.node, 1}) : wire((Port){p.node, 0}), depth + 1); break;
   case APP:
-    putchar('('); print_port(wire((Port){p.node, 0}), depth + 1); putchar(' ');
-    print_port(wire((Port){p.node, 2}), depth + 1); putchar(')'); break;
+    ob_putc('('); print_port(wire((Port){p.node, 0}), depth + 1); ob_putc(' ');
+    print_port(wire((Port){p.node, 2}), depth + 1); ob_putc(')'); break;
   case LAM:
-    if (p.port == 1) { fputs(NNM(N, p.node), stdout); break; }
     if (p.port == 0) {
-      double d; if (net_read_float(N, p, &d)) { printf("%g", d); break; }
-      long v = net_read_int(N, p); if (v >= 0) { printf("%ld", v); break; }
-      int b = net_read_bool(N, p); if (b >= 0) { fputs(b ? "true" : "false", stdout); break; }
-      printf("(\\%s ", NNM(N, p.node)); print_port(wire((Port){p.node, 2}), depth + 1); putchar(')'); break;
+      double d; if (net_read_float(N, p, &d)) { ob_printf("%g", d); break; }
+      long v = net_read_int(N, p); if (v >= 0) { ob_printf("%ld", v); break; }
+      int b = net_read_bool(N, p); if (b >= 0) { ob_puts(b ? "true" : "false"); break; }
+      ob_printf("(\\%s ", NNM(N, p.node)); print_port(wire((Port){p.node, 2}), depth + 1); ob_putc(')'); break;
     }
     print_port(wire(p), depth + 1); break;
   }
   if (vis_print) vis_print[p.node] = 0;
+  /* memoise only context-free renders: a '?' on the way in means this text was
+     shaped by an in-progress ancestor (a real cycle), so it must not be replayed. */
+  if (viz_txt && qmarks == q0) {
+    size_t k = ob_len - o0;
+    char *t = malloc(k + 1);
+    if (t) { memcpy(t, ob_buf + o0, k); t[k] = 0; viz_txt[key] = t; }
+  }
 }
 
 int net_print(Net *n) {
@@ -63,7 +94,11 @@ int net_print(Net *n) {
     if (render_val(stdout, v)) return 0;
   }
   vis_print = calloc((size_t)(n->nn + 1), 1);
+  viz_txt = calloc((size_t)(n->nn + 1) * 3, sizeof *viz_txt);
+  ob_len = 0; qmarks = 0;
   print_port(r, 0);
+  fwrite(ob_buf, 1, ob_len, stdout);
+  if (viz_txt) { for (size_t i = 0; i < (size_t)(n->nn + 1) * 3; i++) free(viz_txt[i]); free(viz_txt); viz_txt = NULL; }
   free(vis_print); vis_print = NULL;
   return 0;
 }
