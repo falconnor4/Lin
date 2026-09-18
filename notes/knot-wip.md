@@ -210,3 +210,36 @@ correct in ~0.5 s), and the half that must be re-thought is (2), because "free-v
 and "closure that β will destroy" are not the same condition — the fix has to detect the
 latter (what β actually consumed) rather than the former (an operand that merely is not
 concrete yet).
+
+## Round 10: HEAD's shared-mul hang is a measured deferral livelock (correction to round 8)
+
+Instrumented on unmodified HEAD, `(let ((g (mul 2))) (pair (g 3) (g 4)))`:
+
+```
+[NQ 1]   _mul argc=0 sk=0 declines=0     nn=30733  steps=2978
+[DEFER 1] lam=45 app=44                  nn=30733
+[NQ 2]   _mul argc=1 sk=1 declines=1     nn=111933 steps=41477
+[DEFER 20000] lam=45 app=44              nn=111933 declines=20000
+[DEFER 60000] lam=45 app=44              nn=111933 declines=27232
+```
+
+The net reaches 111,933 nodes once and then **freezes**; the `_mul` redex is re-examined and
+re-deferred at ~2400/s for ever, with `argc=1 sk=1` — one operand decodes, one slot is
+"present, not concrete" and never becomes concrete because nothing else in the net can run.
+`declines` never reaches the `1 << 15` cap because folds elsewhere keep resetting it.  So the
+shared case is a **livelock**, not a blow-up (the growth happens once, earlier).
+
+**Correction to round 8's table.**  `(add 1 2)`, `(mul 2 3)` and `(let ((g (mul 2))) (g 3))`
+already produce 3/6/6 on unmodified HEAD in 440-530 ms; the "stuck" column there was measured
+on knot builds, not on HEAD.  Change 1 alone (precompile the self-recursive define)
+is therefore **safe but neutral** — `(eq 42 42)` still works, `(scott_arith)` prints its
+correct values, and timings are unchanged (408-709 ms) — so it is not worth landing by itself.
+`let_mul_shared` and `let_mul_lambda` hang on HEAD and in every variant tried.
+
+**The quiescence rule (tried, did not fire).**  Spending the deferral budget when the drain
+sees `changed == 0 && n->atop == 0` never triggers: the re-queued blocked pair *is* the thing
+in the queue, so `atop` is never 0 there.  The right signal is **progress**, not emptiness —
+capture `n->steps` when the wave starts and spend the budget when a wave leaves it unchanged
+(deferring is not an interaction, so a wave that only re-examined deferred pairs leaves
+`steps` exactly as it was).  That is the next thing to try; the monotonic-`declines` variant
+is separately known to be unsound at a small cap (`modules.lin` 225 -> 1).
