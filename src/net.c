@@ -384,6 +384,12 @@ int lin_materialize(Net *n, Port p, Port *out) {
   return 0;
 }
 
+/* Work-efficient frontier scratch: grown, never freed per wave (a driver may hold the
+   wave for a long time, so these are file-scope and reused across waves). */
+static Pair *inter, *bound;
+static int *fw_next, *fw_slot, *fw_occ;
+static int fw_cap, fw_pair_cap, fw_slot_cap;
+
 /* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs, an even count): spatial-disjoint pairs run concurrently via OpenMP, the rest serially; exposed so driver reducers fan out a real wave in parallel — the base correctness rules all live here */
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
 #ifdef _OPENMP
@@ -391,8 +397,13 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
   int nth = omp_get_max_threads();
 
   if (nth > 1 && wave_cnt >= 512) {
-    int np = wave_cnt / 2, nsec = (n->nn + 63) >> 6;
-    Pair *inter = malloc((size_t)np * sizeof(Pair)), *bound = malloc((size_t)np * sizeof(Pair));
+    int np = wave_cnt / 2;
+    /* grow-only scratch, so a wave performs no allocation at all */
+    if (np > fw_cap) {
+      fw_cap = np;
+      inter = realloc(inter, (size_t)np * sizeof(Pair));
+      bound = realloc(bound, (size_t)np * sizeof(Pair));
+    }
     int n_int = 0, n_bnd = 0, sc_need = 0;
     for (int i = 0; i < wave_cnt; i += 2) {
       Port p1 = curr[i], p2 = curr[i + 1];
@@ -410,22 +421,51 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       if (1 + lu + lv > 57 || n->scope[u].sso.is_heap || n->scope[v].sso.is_heap) sc_need += 2 * (1 + lu + lv);
     }
     if (n_int > 0) {
-      int *head = malloc((size_t)nsec * sizeof(int)), *next = malloc((size_t)n_int * sizeof(int));
-      memset(head, -1, (size_t)nsec * sizeof(int));
-      for (int i = 0; i < n_int; i++) { int s = inter[i].p1.node >> 6; next[i] = head[s]; head[s] = i; }
+      /* Work-efficient frontier.  The previous form allocated and memset a sector table
+         of `nn/64` entries on EVERY wave and then swept all of it, so its cost was
+         proportional to the NET rather than to the wave: a 512-pair wave on a 100k-node
+         net walked ~1.5k empty sectors, and every wave also paid four mallocs.  Measured,
+         8 threads came out 2x SLOWER than serial (2115ms vs 1041ms) over identical
+         5,165,799 steps -- all overhead, no speedup.
+         Now the pairs are bucketed by sector in a table sized to the WAVE, only the
+         occupied buckets are iterated (collected in `occ`), and all buffers are
+         grow-only statics, so a wave allocates nothing and its dispatch costs O(pairs).
+         The buckets are cleared by walking `occ`, so there is no per-wave memset either. */
+      int need = 8; while (need < n_int * 2) need *= 2;
+      if (need > fw_slot_cap) {
+        fw_slot = realloc(fw_slot, (size_t)need * sizeof(int));
+        for (int i = fw_slot_cap; i < need; i++) fw_slot[i] = -1;
+        fw_slot_cap = need;
+      }
+      if (n_int > fw_pair_cap) {
+        fw_pair_cap = n_int;
+        fw_next = realloc(fw_next, (size_t)n_int * sizeof(int));
+        fw_occ = realloc(fw_occ, (size_t)n_int * sizeof(int));
+      }
+      const int mask = need - 1;
+      int n_occ = 0;
+      for (int i = 0; i < n_int; i++) {
+        int sec = inter[i].p1.node >> 6;
+        unsigned h = (unsigned)sec & (unsigned)mask;
+        while (fw_slot[h] >= 0 && (inter[fw_slot[h]].p1.node >> 6) != sec) h = (h + 1) & (unsigned)mask;
+        if (fw_slot[h] < 0) { fw_slot[h] = i; fw_next[i] = -1; fw_occ[n_occ++] = (int)h; }
+        else { fw_next[i] = fw_slot[h]; fw_slot[h] = i; }
+      }
       net_ensure_cap(n, n->nn + n_int * 4); sc_ensure_cap(n, n->scn + sc_need);
       in_parallel = 1; int batch_changed = 0;
       #pragma omp parallel for reduction(+:batch_changed) schedule(dynamic)
-      for (int s = 0; s < nsec; s++)
-        for (int i = head[s]; i >= 0; i = next[i])
+      for (int oi = 0; oi < n_occ; oi++) {
+        int h = fw_occ[oi];
+        for (int i = fw_slot[h]; i >= 0; i = fw_next[i])
           if (WIRE(n, inter[i].p1).node == inter[i].p2.node && !n->dead[inter[i].p1.node] && !n->dead[inter[i].p2.node])
             if (net_interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
+      }
       in_parallel = 0; n->steps += n_int; *changed += batch_changed;
       for (int t = 0; t < nth; t++) {
         for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
         t_act[t].top = 0;
       }
-      free(head); free(next);
+      for (int oi = 0; oi < n_occ; oi++) fw_slot[fw_occ[oi]] = -1;   /* clear only what we used */
     }
     for (int i = 0; i < n_bnd; i++) {
       Port p1 = bound[i].p1, p2 = bound[i].p2;
@@ -435,7 +475,6 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
         n->steps++;
       }
     }
-    free(inter); free(bound);
     return;
   }
 #endif
