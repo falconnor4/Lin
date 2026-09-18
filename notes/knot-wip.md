@@ -191,3 +191,22 @@ first, so it is a specific shape, not a general collapse: the next iteration sho
 expression in `scott_arith.lin` / `selfrecursion.lin` follows the last printed value and trace
 it, and it should also consider a size bound on what may be baked (a baked recursive net that
 is large is exactly the thing that can run away at run time).
+
+## Round 9: the runaway is `eq`, and it is exactly what the decline guard was for
+
+Bisecting `test/scott_arith.lin` form by form under the round-8 build: every form up to
+`(mod 23 5)` -> 3 is correct and fast (388-1155 ms), including `(div 100 5)` -> 20 and
+`(mul 6 7)` -> 42.  The runaway is `(eq 42 42)` and `(eq 42 43)`, both of which hang, while
+`(lt 5 10)`, `(lt 10 5)`, `(leq 5 5)` and `(gt 10 5)` — same family — are correct in ~400 ms.
+
+That closes the loop on the lever: `def_precompile`'s `lin_stuck_ffi_count` test exists
+precisely to refuse caching a define whose open-body precompile β-consumed a closure it
+could not fold ("the baked net is broken for composed use").  Removing the *detection* (the
+`_op` bail) without replacing it lets such a net be cached, and `eq`'s cached net runs away —
+`eq` is the define whose body applies an `_op` closure to free variables in a way that β then
+eats.  So the lever must be replaced, not removed: the useful half of round 8 is change (1)
+(baking the recursive define, which is what made `(mul 2 3)` and `(let ((g (mul 2))) (g 3))`
+correct in ~0.5 s), and the half that must be re-thought is (2), because "free-variable operand"
+and "closure that β will destroy" are not the same condition — the fix has to detect the
+latter (what β actually consumed) rather than the former (an operand that merely is not
+concrete yet).
