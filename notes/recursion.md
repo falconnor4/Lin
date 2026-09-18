@@ -89,3 +89,63 @@ Checkpoints for the knot, in the order that makes failure cheap to localise:
   c. require compile nodes to stop scaling with k (the quantifiable AOT goal);
   d. require runtime steps to scale with the DEPTH needed, not with k;
   e. only then widen to multi-reference recursion, and only if the oracle stays green.
+
+## Checkpoint (a) is NOT a fresh experiment -- it was attempted twice and failed
+
+"Compile ONE body and wire the self-reference through a fan" is DESIGN.md's **knot
+attempt #1**, already implemented and reverted:
+
+> in `def_precompile`, a self-recursive define expands its body with its own name already
+> guarded, wraps it in `(\name body)`, compiles that, then links what the binder feeds (the
+> occurrence fan, or the single use) to the body's own root and re-points ROOT at the body.
+> It builds ... but `test/selfrecursion.lin` prints **nothing** where HEAD prints
+> 24/120/15/16, so the knot's cyclic net does not reduce.
+
+and the notes record the structural diagnosis, not a bug: *"a fan wrapped around a cyclic
+body is divergent by construction (22.5M-step trace explained); the fix is a knot that shares
+the body's REDUCT, not its term."*
+
+So (a) needs a NEW element, and there are exactly two candidates on record: the level
+discipline arranged so the cycle's fan annihilates, or active erasure.  The latter was
+landed, measured as paying nothing, and reverted on the user's instruction.  That leaves the
+level discipline -- which is a research question, not an implementation.
+
+## Baselines the knot has to beat (new, measured)
+
+`fact n` in pure beta (no arithmetic driver), `fact` = single linear self-recursion:
+
+| n | steps | nodes |
+|---|---|---|
+| 1 | 191,490 | 981,286 |
+| 2 | 191,628 | 981,685 |
+| 3 | 192,612 | 984,472 |
+| 4 | 198,826 | 1,002,367 |
+| 5 | **1,608,474** | 47,748 |
+
+Two things this says, both bad:
+
+1. **Depth 1 to 4 is FLAT.**  One multiplication and four multiplications cost the same
+   ~191k steps, so essentially none of the runtime is depth-driven -- it is a large FIXED
+   cost, and `(fact 1)` builds a **981,286-node net** to do one multiplication.  That is the
+   k-unrolling: each referenced recursive def contributes k=24 body copies, and nested
+   recursive defs MULTIPLY (`fact` x `mul` x `_padd` = 24^3 body copies), which is why the
+   net is ~1M nodes.
+2. **`fact 5` falls off a cliff** (1.6M steps, and the node count collapses 20x), which is
+   the widening path being entered -- the same class as the hang fixed earlier.
+
+Checkpoint (c) is therefore already quantified: compile nodes must stop scaling with k.
+Checkpoint (d) is quantified too, and is the more damning number: steps must start
+*increasing* with depth, because right now they do not depend on it at all.
+
+## Why I stopped here rather than shipping something
+
+The knot needs the fan-in-a-cycle question answered first, and that is a research step whose
+outcome decides whether this is a contained change or a redesign of the sharing discipline.
+Building it blind would most likely produce the recorded failure mode again (a net that does
+not reduce, or diverges) -- and the standing rule is to commit only at a checkpoint with the
+suite and oracle green.  An unverified core change would violate that and leave the tree
+worse than the baseline, which now has the scope trim landed and every measurement recorded.
+
+Next attempt should therefore start from the recorded lesson -- share the body's REDUCT, not
+its term -- and from the fan-annihilation question, with (b) (inertness at a stable node
+count) as the first thing measured, since that is exactly what failed both prior attempts.
