@@ -40,7 +40,26 @@ injection on commutation (`src/net.c`, top comment) so that two fans meeting ins
 with a bare `fan_lvl()`, which is fine for tree-shaped sharing (every compiler fan) but is
 the suspicious part for a fan in a cycle. Getting the knot fan's gauge right — so a
 commutation around the cycle is recognised as the same sharing point rather than a new one
-— is the next thing to try, and it is a change of a few lines in `compile_knot`.  Note also that `ct_splice` copies node 0 (ROOT) like
+— is one candidate.  But the gauge machinery is in better shape than that suggests:
+`fan_lvl()` builds each level as a *path* of bits (`scope_ext` per bit of a counter), the
+γ⋈δ rule allocates its copies at `scope_ext(meet, 1/2)` and gives the two new fans the
+commuted fan's own gauge, and equal gauges annihilate (`δ⋈δ`) — so fan identity does
+propagate and copies of one sharing point do collapse.  What no gauge can fix is this:
+
+**A sharing fan wrapped around a *cyclic* body is divergent by construction.**  `F`'s
+principal sits on the body's root agent, and the body contains the reference sites that
+`F` feeds.  Every γ⋈δ commutation therefore copies the body — and the copy contains `F`
+again, feeding the same sites — so the number of agents grows once per commutation around
+the cycle, whatever the gauges say.  That is precisely the 22.5M-step trace: unbroken
+`APP × DUP` with nodes climbing to 18M.
+
+The fix is a different knot, not a different gauge: recursion must share the body's
+*reduct* through the cycle, i.e. the reference sites should be fed from what the body
+*produces* (its result wire), rather than the body being wrapped in a fan and copied per
+demand.  Lamping-style systems handle this with brackets/abstractors, which this engine
+does not have; the alternative within the current design is to place the sharing point on
+the body's output (the value) so a commutation meets an already-copied value rather than
+the term that contains the fan.  That is the next construction to try.  Note also that `ct_splice` copies node 0 (ROOT) like
 any other node, so a spliced net carries a second ROOT-tagged node whose wires are
 deliberately not linked — worth checking when hunting the growth.
 
