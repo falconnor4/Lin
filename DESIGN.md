@@ -6,6 +6,71 @@ Lin is a functional language where every program is inherently optimal
 (Lévy-optimal interaction-combinator reduction) and parallel (wavefront
 fan-out), implemented compactly.
 
+## Target architecture (the five moves)
+
+Lin's goal: every Lin program inherently parallel and inherently optimally reduced,
+with Lin itself portable and simple, deep optimization and reduction strategy pushed
+into drivers, e-graphs used for AOT, and Levy-optimal reduction for everything the
+compiler leaves behind.
+
+The layering, and the one rule that keeps it honest:
+
+| layer | owns | invariant |
+|---|---|---|
+| surface + e-graph AOT | program rewrites, sharing (CSE -> fan introduction), precompile/unroll choices, driver selection | leaves a net whose semantics are already finished |
+| **calculus core** | agents, wires, and the rules: beta, delta-delta, gamma-delta, epsilon — nothing else | **complete and correct alone**; a strategy may pre-empt a rule, never replace it |
+| drivers | arithmetic folding, wave execution (SIMD/GPU/threads), parallel policy, optionally alternative sharing disciplines | never load-bearing for correctness |
+| std runtime (`.inc`) | readback, IO, decoders | same as drivers |
+
+*Inherently parallel* = rule locality (true by construction), confluence (results
+schedule-independent — pinned by the independent oracle), and a **work-efficient
+frontier** (the missing piece: the scheduler rescans the net per wave, which is why
+threaded runs measure *slower* than serial: 13.2 s vs 15.6 s on `numbers.lin`, every
+threshold 512 -> 32k >= serial, while reduction is only ~3% of runtime).
+
+*Inherently optimal* = sharing as fans with a discipline identifying sharing points.
+Gauges + the meet do that and are landed and oracle-green, but there are no brackets or
+abstractors — and the knot investigation proved the consequence: **a fan wrapped around
+a cyclic body is divergent by construction**, so lazy recursion is not expressible
+today.  Honest status: optimal for acyclic sharing; full Levy-optimality for cyclic
+sharing needs the bracket machinery, which belongs in a driver, not the core.
+
+### Move 1: evict the fold machinery (~390 lines off the core)
+
+The core currently carries arithmetic *strategy*: `lin_ffi_peek`, `ffi_ops_concrete`,
+`fold_link`, `lin_fold_ffi(_arg)`, `lin_fold_op(_arg)`, `op_value_from_lam`,
+`lin_*_needs_operand`, the blocked/deferral list in `net_reduce`, and the
+`lin_stuck_ffi_count` cache-decline plumbing — roughly 330 of `io.c`'s 559 lines plus
+~60 across `net.c`/`main.c`.
+
+Survey result: **no new core surface is needed.**  The driver ABI already exposes
+`claim`/`reduce` with `LIN_CAP_NATIVE_NUM`, and the core already exports `net_spine_args`,
+`net_ffi_args`, `net_ffi_fn`, `net_dhop`, `ctor_tag`, `net_alloc_scott/bool/float`,
+`net_link`, `net_alloc`, `net_interact`, `net_copy`, `lin_scalar_ops_add` and
+`lin_arith_scalar`.  `std/drivers/arith.c` even documents the split already: "the strategy
+keeps its own concern — how it extracts/decodes args from the net and when it folds — and
+calls this for the math itself".
+
+So Move 1 is a port, not a redesign:
+
+1. `std/drivers/fold.c` — a driver that claims saturated `_op`/`_ffi` closure redexes
+   (LAM named `_x` meeting its APP), decodes the operand spine with `net_spine_args`,
+   calls `lin_arith_scalar` for the value, and rewrites the redex with
+   `net_alloc_scott`/`net_link` — including the argument-fold edge.
+2. Its *waiting policy is its own business*, and the simplest correct one is not to wait
+   at all: if it cannot fold, it declines and the core betas the closure, which is
+   exactly the pure-Lin body and therefore today's semantics.  That deletes the shared
+   `_op` livelock class outright (measured: ~2400 deferrals/s at a frozen 111,933-node
+   net, plus a beta cycle at a stable 30,684-node net, neither of which the scheduler can
+   see) instead of inventing another heuristic in the semantics.
+3. Delete the machinery from the core; the LAM×APP branch becomes plain beta, and
+   `!lin_has_knot`-style contamination becomes impossible because there is nothing left
+   to guard.
+
+Gate: `test/driver_selftest.sh` + `test/run_tests.sh` + `test/soundness_enum.py`, with the
+acceptance matrix in `notes/knot-wip.md`.  The oracle is what makes this kind of move
+safe — it pins values independently, so a driver can never certify its own correctness.
+
 ## Core philosophy: pure interaction nets + pluggable optimizations
 
 The **base engine** (`src/`) is pure interaction-net reduction: the four
