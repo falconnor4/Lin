@@ -433,6 +433,34 @@ Budget: this **removes** `build_bound_rec` + `widen_recursion` + `net_has_reacha
 (~90 lines in `main.c`, measured) and adds a knot constructor plus a memoised splice
 (~40 lines in `compile.c`), so the pure core goes *down*.  Core is 2,831 lines now.
 
+**Knot attempt #1 (reverted).**  The construction above was implemented: in
+`def_precompile`, a self-recursive define expands its body with its own name already
+guarded, wraps it in `(\name body)`, compiles that, then links what the binder feeds
+(the occurrence fan, or the single use) to the body's own root and re-points ROOT at
+the body.  It builds, costs +33 lines (core 2,864), and leaves the working acceptance
+cases alone (`(g 3)` -> 6, `(pair 8 15)`, `(pair 6 10)`) — but `test/selfrecursion.lin`
+prints **nothing** where HEAD prints 24/120/15/16, so the knot's cyclic net does not
+reduce (the same blocker class the first prototype hit).  Reverted.
+
+**Where the hanging repros actually come from (new).**  None of the four hanging cases
+involves self-recursion: they hang through the *non-recursive* `_op` wrappers (`mul`,
+`add`).  `def_precompile` declines to bake any define whose open-body precompile hit a
+suppressed fold — `op_value_from_lam` bumps `lin_stuck_ffi_count` whenever it is asked
+to fold while `lin_precompile_depth > 0` (`src/io.c`), and the cache is declined when
+that counter is non-zero (`src/main.c`).  So every `_op` wrapper stays **textual** and
+is re-expanded per reference, and the shared case degenerates into the unrolled path
+where the blow-up lives.  That is the concrete A2 lever: during an open-body precompile
+a fold blocked by *free-variable* operands is not "stuck" — the pure-Lin beta body is
+the semantics, and the fold simply happens later at run time when the operands are
+concrete — so such a define can be baked (splicing the knot for its recursive parts),
+which removes the unrolling that the hangs hide behind.
+
+Consequence for sequencing: A2 and A3 have to land together.  A knot shares every
+reference to the define through a fan, which is exactly the operand shape A2 must read;
+and A2's lever (baking the `_op` wrappers) is what removes the unrolling the hangs hide
+behind.  Acceptance for the pair: the four hanging repros, `test/selfrecursion.lin`,
+the suite and the oracle.
+
 Acceptance tests (all correct on HEAD, none of them terminating today):
 `(let ((g (mul 2))) (pair (g 3) (g 4)))` -> (6, 8);
 `(let ((g (\x (\y (mul x y))))) (pair (g 2 3) (g 4 5)))` -> (6, 20);
