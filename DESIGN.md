@@ -493,6 +493,30 @@ schedule) makes the knot reduce: with it, `(peel 3)` -> `0`, `(peel 4)` -> `0`,
 `(peel 5)` -> `0`, `(fact 0)` -> `1` — the first time self-recursion has ever worked
 through the knot, and it means recursion is no longer bounded by the 24-fold unravelling.
 
+**Round 3: what the knot breaks, narrowed to the fold's ownership assumption.**
+Isolations on the knot build (all with `enqueue = 1`):
+
+- `enqueue = 1` **alone** (knot disabled) is harmless: `(let ((g (mul 2))) (g 3))` -> **6**.
+- The knot's nets are structurally correct for `peel`, `_padd` and `_pmul`: dumped, each has
+  `body = <a LAM's principal>` and `occ -> F.1`.
+- Simple recursion is right through the knot: `(peel 1)`/`(peel 2)`/`(peel 3)` -> 0,
+  `(fact 0)` -> 1, and **two references to one knot work** — `(pair (peel 1) (peel 2))`
+  -> `(0, 0)` — so multi-reference fans are fine.
+- `_op`-wrapper cases are wrong in a specific way: `(add 1 2)` prints `((\_add 3) <spine>)`
+  — the fold *computed* 3 but did not replace the redex. `(mul 2 3)` and
+  `(let ((g (mul 2))) (pair (g 3) (g 4)))` stay stuck instead.
+- Disabling the head folds whenever a knot is present (`lin_has_knot`, checked in
+  `net_interact`'s LAM×APP branch) gives `(peel …)` -> 0 and `(pair (peel 1) (peel 2))`
+  -> `(0, 0)`, but **segfaults** on `(add 1 2)`, `(let ((g (mul 2))) (g 3))` and g3.
+
+So the remaining defect is not decoding at all: it is that the `_op` fold's rewiring
+(`fold_own` + the `ar` selection in `lin_fold_op`) assumes the redex's nodes are private,
+which a knot-shared body violates — the fold has to either decline, or stop treating
+knot-shared nodes as its own. The segfault with only the head folds guarded shows the
+**argument** fold edges (`fold_arg` -> `lin_fold_op_arg` / `lin_fold_ffi_arg`) are on the
+same path and must be handled with it. That is the next thing to fix; the knot itself
+(cycle, gauges, laziness, multi-reference) is in good shape.
+
 What that leaves is exactly A2 and nothing else.  With the same build (knot + enqueue),
 every `mul`-wrapper case *terminates* instead of hanging — `(let ((g (mul 2))) (pair
 (g 3) (g 4)))`, `(let ((g (\x (\y (mul x y))))) ...)`, `(let ((h (mul 2))) (g 3))` — but
