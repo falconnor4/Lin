@@ -403,6 +403,45 @@ part of the same work: a def in a namespace kept its self-reference *unqualified
 registered, and precompiling a def whose expansion mentions recursion is pointless
 (there is no normal form to bake) yet burned the whole step limit.
 
+## The `_op` fold path: deferral is correctness-critical (measured)
+
+A saturated pure-Lin `_op` closure (`((\_add <pure-body>) <_cl-spine>)`) is folded
+to a scalar by reading its raw operands.  When an operand is not decodable yet the
+reducer does **not** β-squash the redex: it parks the pair on a per-net blocked
+list and re-examines it after each wave drains.  Two attempts to make that wait
+*terminate* were implemented and measured on this tree — **both are unsound and
+were reverted**:
+
+| attempt | result |
+|---|---|
+| a fan-wrapped operand slot (`skipped == 2`) falls through to β instead of waiting | `test/modules.lin` returns **1** where the answer is **225** |
+| deferral budget made net-lifetime (never reset by a fold, cap 4096) | same suite fails; a following suite hangs |
+
+So the wait is not an optimisation that can be shortened: it is what keeps a
+shared operand alive until it is concrete.  The fix has to make the shared operand
+*readable* (fan-complete operand decoding — materialise or route through the fan),
+never to skip the wait.
+
+Instrumented diagnosis of the shared-closure case
+(`(let ((g (mul 2))) (pair (g 3) (g 4)))`):
+
+- the failing pair is re-examined ~10³ times/s with `argc=0 skipped=1`, i.e. the
+  operand slot resolves to a **DUP** (a fan) rather than a not-yet-reduced redex;
+- the per-net `declines` budget never expires because any successful fold resets
+  it, so the pair spins for ever (the pre-existing "shared `_op` closure hangs");
+- the same pair is examined on **two different nets** (nn = 30,733 and 111,933):
+  `eval_form`'s recursion-widening loop rebuilds the defs with a doubled
+  unravelling bound whenever the `_rec` sentinel survives reduction.  Per-net
+  bookkeeping therefore cannot carry state across waves (a persistent
+  blocked-entry count was tried, observed losing its count, and reverted).
+
+The hang is dominated by that recursion machinery rather than by the deferral:
+single use (`(g 3)`) and two *separate* closures (`(let ((g (mul 2))) (let ((h
+(mul 3))) (pair (g 4) (h 5))))` → `(pair 8 15)`) are both fine, and two nested
+`_op` operands through a shared closure also work (`(pair 6 10)`).  This inverts
+the earlier plan: the **knot (or another recursion mechanism) is the prerequisite**
+for these cases, and fan-complete operand decoding comes after it.
+
 ## Type inference: order-dependence, and what fixing it costs
 
 `generalize` (HM) used to scan **every** scheme in the live environment and treat
@@ -559,8 +598,10 @@ covering an expression rather than skipping it.
 `print_port` carried `vis_print[]` as a *cycle* guard (set on entry, cleared on
 exit), so a DAG-shaped result was fully re-walked at every sharing point — the
 printed size is exponential in the number of sharing points even though the net
-is small.  `benchmarks/bench_combinators.lin` spent ~62 s printing a value whose
-reduction takes 1.1 s (`(is_zero (main))`, which never prints it, is fast).
+is small.  (An earlier note blamed `benchmarks/bench_combinators.lin` for this;
+that benchmark still does not complete even with the memo — >122 s on both builds
+— so its cost is *not* printing and stays an open item.  The memo's evidence is
+the synthetic repro below, where output is byte-identical.)
 
 The printer now appends into a buffer and memoises the rendered text per
 `(node, port)` (`viz_txt[]`, freed with the net), replaying it on later visits.
