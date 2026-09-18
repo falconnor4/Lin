@@ -334,7 +334,16 @@ static void process_def(Term *t) {
   }
   d->sch = sch; d->typed = 1; d->rec = rec;
   if (rec) {
-    d->rec_k = 24; d->rec_body = t->l;                  /* keep body for widening */
+    /* Unravelling bound: nested recursive defines multiply k^depth, so k is the multiplier on
+       the whole front end.  Depth is unknowable statically but need not be guessed
+       pessimistically -- `widen_recursion` doubles k and recompiles if the `_rec` sentinel
+       survives, so a small k is correct and only programs that recurse deeper pay for it.
+       Measured with the oracle green: k = 6 runs the suite in 23.6 s against 48.7 s at k = 24,
+       and `(fact 1)` compiles 18,449 nodes instead of 981,287; a depth-12 case costs ~50 s
+       either way.  LIN_REC_K overrides. */
+    d->rec_k = getenv("LIN_REC_K") ? atoi(getenv("LIN_REC_K")) : 6;
+    if (d->rec_k < 1) d->rec_k = 1;
+    d->rec_body = t->l;                                /* keep body for widening */
     /* The binder must carry the name the body's SELF-REFERENCES actually use, which is
        `t->name` and NOT the namespace-qualified `d->name`: qualify_free ran before this
        def existed, so `lookup_raw("num._peq")` was still NULL and the self-reference was

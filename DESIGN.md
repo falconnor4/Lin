@@ -33,7 +33,7 @@ across threads. Confluence makes the *answer* independent of the schedule, so a 
 can only ever be a performance choice, never a semantic one.
 
 **G3 — A small, auditable, portable core.** The core is the interaction calculus and
-nothing else: 2,872 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
+nothing else: 2,918 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
 no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
 the layering claim of §2 checkable by reading it.
 
@@ -96,29 +96,33 @@ the value domains Lin supports are recognized by carrier name through one regist
 
 ### 3.2 Gauges: scopes as levels
 
-Every fan carries a **scope** — a bit word over the free group ⟨1,2⟩* — that identifies the
-sharing point it belongs to. Two fans annihilate only when their scopes are *equal*; when
-they differ, they commute and the copies' scopes are modulated through the **meet**
-(longest common prefix) of the two words.
+Every fan carries a **scope**: a bit word over ⟨1,2⟩* giving the *level* of the sharing point
+it belongs to. Words are stored root-first, so an enclosing sharing point's word is a
+**prefix** of everything nested inside it and `scope_meet` (longest common prefix) is the
+level the two sharing points genuinely have in common. Two fans annihilate only when their
+scopes are equal; when they differ they commute.
+
+Operations: `scope_app` (one step deeper), `scope_prefix` (concatenation, for a spliced
+clone), `scope_meet` (LCP), `scope_eq`, `scope_from_bits`.
+
+A gauge must be a **path**, not a bare binder depth: siblings at equal depth would get
+equal labels, their fans would annihilate, and independent values would merge. Depth labels
+are measurably unsound (5 oracle mismatches); path words are not. Paths also mean equal
+scopes *are* "the same sharing point" — two sharing points sit at different positions, so
+they never share a path, and no per-fan counter or fixed-width argument is needed for
+soundness. The unique markers this replaced built their words newest-first, so `scope_meet`
+compared counter bits and carried no ancestry at all.
 
 The representation is a union: 57 bits inline, or an offset/length into a per-net heap
 table when a word is longer. The inline case is not an optimisation detail — every scope
 operation on a spilled word allocates, and that dominated compile time until long words
 were made to converge (below).
 
-Operations: `scope_cat`, `scope_ext` (append one bit), `scope_meet` (LCP), `scope_prefix`,
-`scope_eq`, `scope_from_bits`.
-
-`scope_meet` is what makes repeat crossing *terminate*. The naive paper modulation
-concatenates (`s₁ = 1·s_node·s_dup`), so words grow without bound when two fans meet again
-inside a cycle and every later scope operation pays for the longer word. Meeting instead of
-concatenating makes copies converge toward the level the two histories genuinely share.
-Measured on the suite with the oracle green: `modules.lin` 17.3 s → 2.3 s, `numbers.lin`
-14.4 s → 4.9 s.
-
-A gauge must be a **path**, not a bare binder depth: siblings at equal depth would get
-equal labels, their fans would annihilate, and independent values would merge. Depth
-labels are measurably unsound (5 oracle mismatches); path words are not.
+The naive paper modulation concatenates (`s₁ = 1·s_node·s_dup`), so words grow without bound
+and every later scope operation pays for the longer word. γ⋈δ extends the **meet** instead,
+which keeps copies converging toward the level the two histories genuinely share — measured
+on the suite with the oracle green: `modules.lin` 17.3 s → 2.3 s, `numbers.lin` 14.4 s →
+4.9 s.
 
 ### 3.3 The four rules
 
@@ -133,19 +137,28 @@ offers the argument to every driver's `arg_fold` hook (§5.3) — a saturated cl
 in an argument position is never a principal×principal redex, so β is the only place a
 driver can reach it.
 
-**δ⋈δ — two fans meet.** Two cases, and the distinction is the whole sharing discipline:
+**δ⋈δ — two fans meet.** Three cases, and the case distinction *is* the duplication discipline:
 
 - *Equal scopes* → **annihilate**: the two fans are copies of one sharing point, so their
   auxiliaries are cross-linked (with the identity-pairing cases handled explicitly) and both
   fans disappear. This is what makes a copy as cheap as the original.
-- *Unequal scopes* → **commute** (Lafont's δ⋈δ): two independent sharing points met, so each
-  fan is copied by the other — `δ_a`'s auxiliaries each get a `δ_b`, `δ_b`'s each get a
-  `δ_a`, cross-connected — and each copy keeps *its own* fan's scope. Without this rule the
-  only options would be annihilating unrelated fans (wrong value) or stranding the pair (no
-  reduction), so a shared body could never be reduced.
+- *Nested scopes* (one gauge a proper prefix of the other: the two sharing points enclose one
+  another) → **share, do not duplicate**: the two fans are still copied by each other, but the
+  deeper fan's copies take the *shallower* level. Nested sharing points are related, so the
+  inner one belongs to the outer copies rather than being re-duplicated once per copy. This is
+  the bracket-free rule that bounds duplication, and it is what makes a cyclic knot finite:
+  measured on a knot, `(fact 0)` runs 2,000,000+ steps without a normal form under the plain
+  commutation and **33,200 steps / 1,122 nodes** with the right value under this rule, with
+  the suite and the oracle still green.
+- *Incomparable scopes* → **commute** (Lafont's δ⋈δ): two genuinely independent sharing points
+  met, so each fan is copied by the other — `δ_a`'s auxiliaries each get a `δ_b`, `δ_b`'s each
+  get a `δ_a`, cross-connected — and each copy keeps *its own* fan's scope. Without this rule
+  the only options would be annihilating unrelated fans (wrong value) or stranding the pair
+  (no reduction), so a shared body could never be reduced.
 
 **γ⋈δ — a fan meets a LAM or APP.** The fan duplicates the agent: two copies are allocated
-at `scope_ext(meet, 1)` and `scope_ext(meet, 2)`, two fresh fans carrying the *dup's* scope
+at `scope_app(meet, 1)` and `scope_app(meet, 2)` (one level deeper than the meet), two fresh
+fans carrying the *dup's* scope
 fan out the agent's auxiliary wires, and the copies' principals go to the fan's auxiliaries.
 The meet modulation (§3.2) is what keeps repeated crossings finite. The degenerate-binder
 case links the two fresh fan principals to each other instead.
@@ -158,19 +171,18 @@ consequence (§11.2): **nothing in the core can actively dismantle a cycle.**
 ### 3.4 Sharing as the compiler introduces it
 
 The compiler (`src/compile.c`) turns a binder used N times into a `DUP` fan tree
-(`dup_tree`) whose gauge is a fresh **unique marker** (`fan_lvl`, a fixed 20-bit counter).
+(`dup_tree`) whose gauge is the **path of the binder that owns it** — the sequence of branch
+choices from the term root, built with `scope_app`. LAM and APP nodes carry their own path as
+their scope too, so a fan crossing one of them meets at a real common level.
 
-- The width is fixed on purpose. A commute builds a copy's gauge as `bit · s_node · s_dup`,
-  so a variable-width marker could collide with a longer modulated word; fixed-width base
-  markers stay shorter than any modulated word. Twenty bits cannot wrap in practice.
-- A spliced precompiled define body (`ct_splice`) is **re-gauged** at a fresh level as it is
-  cloned. The body's fans were labelled during its own precompile reduction, so cloning it
-  verbatim would give every reference's copies identical labels and independent sharing
-  points would annihilate into each other.
+- A spliced precompiled define body (`ct_splice`) is **re-gauged** as it is cloned: the
+  occurrence's path is prepended to every path inside the clone (`scope_prefix`). The body's
+  fans were labelled during its own precompile reduction, so cloning it verbatim would give
+  every reference's copies identical labels — two independent sharing points would annihilate
+  into each other, and clones at different sites would not be distinguishable.
 
-A unique marker identifies a sharing point but is not a *level*: the meet of two unrelated
-markers is empty. This is sound for the acyclic case (verified), and it is exactly the gap
-that cyclic sharing runs into (§11.2).
+A path identifies a sharing point *and* its level, which is what the acyclic case needs for
+soundness (verified) and what cyclic sharing needs to close a fan on its own copies (§11.2).
 
 ### 3.5 What the core deliberately does not have
 
@@ -539,33 +551,62 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 53 suites / 978 assertions, oracle green, core 2,872 lines.
+- Gate: 53 suites / 978 assertions, oracle green, core 2,918 lines.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
 Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
-**bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k = 24
-copies of the body, tagged with a `_rec` sentinel; if the sentinel survives reduction the
-whole program is recompiled with k doubled (up to 16 rounds). Multiplexed across nested
-recursive defines this multiplies: `fact` alone reaches a 981,286-node net, and one
-multiplication costs the same at depth 1 as at depth 4 — the runtime is dominated by the
-unrolling, not by the depth needed. It is also why `expand_defs` alone is 30% of real
-runtime, and it is why artifacts used to scale with k rather than with the program.
+**bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k copies of
+the body, tagged with a `_rec` sentinel; if the sentinel survives reduction the whole program
+is recompiled with k doubled (up to 16 rounds). Multiplexed across nested recursive defines
+this multiplies — k^depth — so k is the multiplier on the whole front end and it is now small
+(k = 6, was 24): at k = 24 `(fact 1)` — one multiplication — compiled a 981,286-node net and
+the suite ran in 48.7 s; at k = 6 the same suite runs in 23.6 s with the oracle green and
+`(fact 1)` compiles 18,449 nodes. Depth is not guessed pessimistically; widening pays for it
+only where it is needed. The runtime is still dominated by the unravelling rather than by the
+depth needed (a depth-12 case costs ~50 s either way), which is why the knot below matters.
 
 The fix is architectural and known: compile the body **once**, wire the define's own name to
 a path back into that body, and share the body across reference sites through a fan — the
-"knot". It is not landed because it does not yet work, and the reason is a core property, not
-a bug: **a fan wrapped around a cyclic body is divergent by construction.** Today's gauges
-are unique per-sharing-point markers, so the cycle's fans never annihilate and the loop never
-closes; erasure is passive, so nothing tears the cycle down either. Turning the knot on was
-implemented more than once and each time produced a net that does not reduce.
+"knot". It is not landed because it does not reduce, and the mechanism is now measured rather
+than assumed. A knot net is *not* divergent by construction: with the self-reference wired to
+an `ERA` (the call never made) the same net becomes inert in **62 steps / 196 nodes**. What
+diverges is duplication:
 
-So the prerequisite is a **level discipline** in which the labels really are levels, so a
-cycle's fans annihilate once and for all — the meet of two related histories has to be their
-genuine common ancestor rather than the empty word. That is a research question in the
-sharing discipline, not an implementation task, and it gates: deleting the unrolling
-machinery (`build_bound_rec`, `widen_recursion`, the sentinel, the 16-round retry) *and* the
-front-end cost that motivates §11.3.
+- With the knot live, a profile at a 200k-step cap shows the work is **γ⋈δ crossings**, not
+  β: `peel 3` reaches 46,180 live `LAM` and 46,170 live `DUP` around just **18 `APP`**, with
+  γ⋈δ = 117,950 against β = 35,899; `fact 0` shows γ⋈δ = 145,002 against **β = 24**. Fan
+  crossings create two fans each, and δ⋈δ annihilations pair them off more slowly than they
+  are created, so the fan population grows with the step count.
+- It is not gauge naming. The same divergence appears under every arithmetic tried: the
+  current meet-extension, the paper's `1·s_node·s_dup`, unique markers, identity+path levels,
+  level-only paths, copies-at-the-fan's-level, twins-at-the-agent's-level, and the δ⋈δ
+  variants (mutual copy, meet-collapse, level-lowering). The two that *do* cut the cycle
+  (collapse the copies onto the meet) are measurably unsound: `test/let.lin`'s sharing probes
+  return `2` for both components of `(pair (f 1) (f 2))`, i.e. two independent sharing points
+  merged. A true δ⋈δ commutation needs four fans for the wiring to close, so fan duplication
+  is structural, and the only escapes are to *block* the crossing or to drop the pair.
+- It is not specific to recursion. The acyclic witness `(let ((g (mul 2))) (add (fst (pair
+  (g 3) (g 4))) 0))` — sharing a partially-applied closure, no recursion anywhere — fails to
+  terminate in reduction in every variant above (measured with printing disabled, so readback
+  is excluded), and the reference implementation (`wave-opt-reduction/main.hs`, whose rule set
+  has no unequal-fan rule at all) behaves the same way. That case is dominated by β instead
+  (1.68M β at a 738k-step cap), i.e. by the eager unrolling of the shared closure's body — so
+  it is the *unrolling* that makes ordinary closure sharing expensive, and the knot is what
+  would fix it, which is blocked by the duplication result above.
+
+So the prerequisite is **duplication control**, and the four rules do express it — as
+arithmetic on the gauge words, with no bracket and no new agent. Since gauges are paths, two
+fans' levels can be *nested* (one a prefix of the other) rather than merely equal or unrelated,
+and the δ⋈δ case analysis now uses that: nested sharing points **share** the inner one between
+the outer copies instead of re-duplicating it per copy (§3.3). With that rule the knot reaches
+a normal form — `(fact 0)` 33,200 steps / 1,122 nodes with the right value, `(peel 1)` and
+`(peel 2)` returning `0` — where the plain commutation ran 2,000,000+ steps without stopping.
+
+Cyclic sharing is therefore no longer divergent, but it is not yet correct: `(peel 3)` and
+`(peel 4)` reach a normal form (72 steps / 195 nodes) whose value does not read back (the
+printer emits `?`), so the sharing over-merges at deeper re-entries. Until that is fixed the
+knot is not landed and the unravelling below stays.
 
 Active erasure (propagating ε through agents) was implemented as the alternative and measured
 as paying nothing; it was reverted. It also carries a soundness caveat when a fan straddles
@@ -640,6 +681,6 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,872 lines** against a 3,000-line gate.
+**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,918 lines** against a 3,000-line gate.
 The three `src/runtime_*.inc` files (349 lines) are std code and are excluded; `stdio`-level
 readback, IO, and the container format do not count against the calculus.

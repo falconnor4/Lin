@@ -55,23 +55,25 @@ static Port dup_tree(Port *ts, int nts, Scope sc) {
   return cur;
 }
 
-/* A compact, unique gauge marker.  A gauge must identify *one* sharing point and
-   be distinct from every other fan's, but it must also stay inside the 57-bit
-   inline scope representation: a nesting-path word grows with depth, and once a
-   word spills to the heap every scope operation allocates, which dominated
-   compile time when re-gauging large spliced bodies.  The width is FIXED: a
-   commute builds a copy's gauge as `bit · s_node · s_dup`, so a variable-width
-   marker could collide with a longer modulated word (marker "11" vs the copy of a
-   fan whose marker is "1").  Fixed width keeps every base marker shorter than any
-   modulated word, and 20 bits (a million fans per compilation) cannot wrap in
-   practice. */
-#define FAN_LVL_BITS 20
-static int fan_ctr;
-static Scope fan_lvl(void) {
-  Scope s = scope_nil(); unsigned v = (unsigned)(++fan_ctr);
-  for (int b = 0; b < FAN_LVL_BITS; b++) s = scope_ext(N, s, (int)((v >> b) & 1));
-  return s;
+/* A fan's gauge is the LEVEL of its sharing point: the path from the term root to the binder
+   that owns it.  Two sharing points sit at different positions, so they never share a path --
+   equal gauges therefore means "the same sharing point", which makes annihilation sound with
+   no counter and no width argument -- and an enclosing binder's path is a prefix of everything
+   nested inside it, so scope_meet is a genuine common ancestor (what a fan that meets its own
+   copy around a cycle needs).  The unique markers this replaces built words newest-first, so
+   their meet compared counter bits and carried no ancestry at all. */
+static uint64_t *cpath; static int cpath_len, cpath_cap;
+static void cpath_push(uint64_t b) {
+  if (cpath_len >= cpath_cap) {
+    cpath_cap = cpath_cap ? cpath_cap * 2 : 1024;
+    cpath = realloc(cpath, sizeof(uint64_t) * (size_t)cpath_cap);
+  }
+  cpath[cpath_len++] = b;
 }
+/* the sharing point at the current position; `bit` steps one level in first (a binder's fan
+   sits just inside its binder, so it is gauged at the body's path) */
+static Scope fan_lvl(void) { return scope_from_bits(N, cpath, cpath_len); }
+static Scope fan_lvl_at(int bit) { cpath_push((uint64_t)(bit & 1)); Scope s = fan_lvl(); cpath_len--; return s; }
 
 /* Rebuild a source-net scope in the target gauge table; heap-backed ones re-register bit-by-bit into N->sca. */
 static Scope sc_rebuild(Net *d, int i) {
@@ -119,13 +121,15 @@ static Port ct(Term *t, Scope sc) {
     cfail("unbound variable '%s'", t->name);
   }
   case TLAM: {
-    Port self = net_alloc(N, LAM, scope_nil(), t->name);
-    /* the fan duplicating this binder's occurrences is one sharing point: it gets
-       its own gauge, so an unrelated fan never carries the same one */
-    Scope lvl = fan_lvl();
+    Port self = net_alloc(N, LAM, fan_lvl(), t->name);
+    /* the fan duplicating this binder's occurrences is one sharing point: it is gauged by the
+       body's path, which is unique per binder and non-empty even at the root */
+    Scope lvl = fan_lvl_at(1);
     push_var(t->name, (Port){self.node, 1});
     int my = csp - 1;
+    cpath_push(1);
     Port body = ct(t->l, sc);
+    cpath_len--;
     net_link(N, (Port){self.node, 2}, body, 0);
     CVar *e = &cstack[my];
     if (e->count == 0) {
@@ -147,9 +151,15 @@ static Port ct(Term *t, Scope sc) {
     return self;
   }
   case TAPP: {
-    Port a = net_alloc(N, APP, scope_nil(), "");
-    net_link(N, (Port){a.node, 0}, ct(t->l, sc), 1);
-    net_link(N, (Port){a.node, 2}, ct(t->r, sc), 1);
+    Port a = net_alloc(N, APP, fan_lvl(), "");
+    cpath_push(1);
+    Port fn = ct(t->l, sc);
+    cpath_len--;
+    net_link(N, (Port){a.node, 0}, fn, 1);
+    cpath_push(2);
+    Port x = ct(t->r, sc);
+    cpath_len--;
+    net_link(N, (Port){a.node, 2}, x, 1);
     return (Port){a.node, 1};
   }
   case TDEF: {
@@ -162,7 +172,7 @@ static Port ct(Term *t, Scope sc) {
 }
 
 int compile(Term *t, Net *n, char *err, int errsz) {
-  N = n; csp = 0; fan_ctr = 0;
+  N = n; csp = 0; cpath_len = 0;
   if (!cstack) { ccsp = 64; cstack = malloc((size_t)ccsp * sizeof(CVar)); }
   if (setjmp(CJ)) {
     snprintf(err, errsz, "%s", CMSG);
