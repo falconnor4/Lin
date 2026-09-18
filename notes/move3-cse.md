@@ -183,3 +183,36 @@ then redoes the work.  That is exactly the failure Levy-optimal reduction exists
 reduction ORDER and the fan/copy discipline, not in fan labels.  If that is right, it is
 also why CSE (which creates the multi-use sharing in the first place) increased work: it
 creates sharing that the engine then re-duplicates.
+
+## Isolated: the fan tree is NOT the cause -- cost is a REDUCTION-ORDER property
+
+Ran the isolating experiment.  `dup_tree` was given a switchable variant that feeds the
+shared value to the DUP serving the FIRST use instead of the LAST (`LIN_DUPTREE=1`), i.e.
+the only thing varied is which end of the caterpillar the value arrives at and therefore
+which use receives its copy first.  Same term, same use count, same fan count.
+
+    term                          default   fan-tree reversed
+    (add (add v v) v)             230124    230124
+    (add v (add v v))              92172     92172
+    (add (add v v) (add v v))     268007    268007
+    (add v (add v (add v v)))     121535    121535
+
+Identical to the step.  So the fan tree's construction order is irrelevant, and the
+2.2-2.5x spread is a property of the TERM's own association -- that is, of the ORDER in
+which the computation's redexes meet the fans.
+
+Conclusion, now grounded rather than hypothesised: **reduction cost here is dominated by
+reduction ORDER, not by fan structure.**  The engine takes pairs out of `act` in insertion
+order and fires whatever comes up, including gamma-delta (fan-meets-agent) commutation,
+which duplicates an agent that may still be an UNREDUCED redex.  A later use then redoes
+that work.  Reducing the redex BEFORE the fan duplicates it -- "fan out after reducing,
+not before" -- is exactly what Levy-optimal reduction is for, and it is the thing this
+engine has no mechanism for.  It also explains why CSE increased work while shrinking the
+compiled net: CSE manufactures multi-use sharing, and a non-optimal schedule then
+re-duplicates it.
+
+Next experiment (cheap, 3 lines, tests the order hypothesis directly): vary the SCHEDULE at
+a fixed term -- e.g. drain `act` LIFO instead of FIFO, or for a driver claim LAM|APP x DUP
+pairs and defer gamma-delta until nothing else is pending.  If cost moves materially, the
+order policy is the lever and the optimality work belongs in the scheduler / a strategy
+driver, not in the sharing pass.
