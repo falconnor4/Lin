@@ -301,6 +301,26 @@ int net_interact(Net *n, Port p1, Port p2) {
   return 0; /* era or stuck gauge pair: dropped, as in the reference */
 }
 
+/* Reclaim every node not reachable from ROOT.  The reduce loop calls this
+   opportunistically, and the AOT build calls it before serialising: the `.line`
+   container stores ALL nodes, and an actual evaluation leaves far more dead
+   intermediates behind than live nodes -- without this the baked artifact came out
+   ~2x LARGER than the un-evaluated one (474 KB vs 224 KB) despite being a value. */
+static void net_compact(Net *n, const unsigned char *reach);   /* fwd */
+
+void net_gc(Net *n) {
+  if (n->nn <= 1) return;
+  unsigned char *reach = malloc((size_t)n->nn + 1);
+  int *q = malloc(((size_t)n->nn + 1) * sizeof(int));
+  memset(reach, 0, (size_t)n->nn + 1);
+  int qh = 0, qt = 1; reach[0] = 1; q[0] = 0;
+  while (qh < qt) { int u = q[qh++];
+    for (int p = 0; p < 3; p++) { Port w = n->wire[u * 3 + p];
+      if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; } } }
+  net_compact(n, reach);
+  free(reach); free(q);
+}
+
 static void net_compact(Net *n, const unsigned char *reach) {
   int *remap = malloc((size_t)n->nn * sizeof(int)), new_nn = 0;
   for (int i = 0; i < n->nn; i++) {
@@ -496,19 +516,13 @@ long net_reduce(Net *n, long limit) {
     }
     if (changed == 0 && n->atop == 0) break;
     if (n->atop == 0 && (long)n->nn > gcmark) {
-      if ((long)n->nn + 1 > qcap) { free(reach); free(q); qcap = (long)n->nn + 1;
-        reach = malloc((size_t)qcap); q = malloc((size_t)qcap * sizeof(int)); }
-      memset(reach, 0, (size_t)qcap);
-      int qh = 0, qt = 1; reach[0] = 1; q[0] = 0;
-      while (qh < qt) { int u = q[qh++];
-        for (int p = 0; p < 3; p++) { Port w = WIRE(n, ((Port){u, p}));
-          if (w.node >= 0 && w.node < (int)n->nn && !n->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; } } }
-      net_compact(n, reach);
+      net_gc(n);
       gcmark = (long)n->nn * 2 + 64;
       for (int i = 1; i < n->nn; i++) if (n->wire[i * 3].port == 0 && n->wire[i * 3].node > i)
         act_push(n, (Port){i, 0}, n->wire[i * 3]);
     }
   }
+  (void)reach; (void)q; (void)qcap;
   free(reach); free(q); free(curr);
   for (int di = 0; di < ndrv; di++) free(slices[di]);
   return n->steps;

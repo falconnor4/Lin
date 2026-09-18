@@ -21,6 +21,9 @@ Def *defs;
 int ndefs = 0, defcap = 0;
 
 static long STEP_LIMIT = 1L << 24;
+/* Bounded so `lin build` cannot hang on a program that does not terminate at build
+   time: the residual is then simply "what the compiler did not finish". */
+static long AOT_STEP_LIMIT = 1L << 22;
 static int bench_mode = 0;
 
 char curr_ns[NAME] = "";
@@ -65,6 +68,13 @@ static int guard_has(Guard *g, const char *name) {
    the operands here are free variables that never become concrete, so a driver must not fold (a baked closure
    would capture a stale value).  Which redexes that affects is the driver's business. */
 int lin_precompile_depth = 0;
+/* !=0 while the AOT build is partially evaluating the program.  Distinct from
+   lin_precompile_depth: that one says "operands are free variables"; this one says
+   "this reduction is happening at BUILD time, so nothing the program would OBSERVE at
+   run time may be baked into the artifact".  A driver that folds a probe like
+   (lin_folds)/(lin_folded) would otherwise freeze the build-time answer into the
+   .line file and the program could never observe anything else. */
+int lin_build_depth = 0;
 
 /* Non-recursive define: evaluate once and cache the reduced net so each reference clones it; recursive/too-big bodies keep the textual path. */
 static void def_precompile(Def *d) {
@@ -482,9 +492,29 @@ static int do_build(const char *in_f, const char *out_f) {
   if (!build_term) { fprintf(stderr, "error: no expression to build in '%s'\n", in_f); return 1; }
   char err[512]; Scheme sch;
   if (!type_check(build_term, &sch, err, sizeof err)) { fprintf(stderr, "error: %s\n", err); return 1; }
-  Term *ex = expand_defs(build_term), *opt = egraph_optimize(ex);
+  Term *ex = expand_defs(build_term);
+  int n_exp = 0; (void)n_exp;
+  Term *opt = egraph_optimize(ex);
   Net net; net_init(&net, 1 << 16);
   if (!compile(opt, &net, err, sizeof err)) { fprintf(stderr, "error: %s\n", err); return 1; }
+  int nn_compiled = net.nn;
+  /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.
+     `net_reduce` folds pure scalars and beta-reduces, and is stuck at an IO effect or a
+     non-pure FFI closure -- so the artifact keeps exactly the work that genuinely needs
+     the runtime, and `net_run_io` still finds its continuation intact.  Nothing here
+     performs an effect: net_reduce never calls run_ffi, and lin_build_depth keeps a
+     driver from baking a build-time answer to a run-time observation. */
+  lin_build_depth++;
+  long aot_steps = net_reduce(&net, AOT_STEP_LIMIT);
+  lin_build_depth--;
+  int nn_reduced = net.nn;
+  /* A value's dead intermediates are pure overhead in the container: the format stores
+     every node, so compact to what is reachable from ROOT before serialising. */
+  net_gc(&net);
+  if (getenv("LIN_PASSES"))
+    fprintf(stderr, "[aot] expand=%d defs, compile=%d nodes, reduce=%ld steps (%s), nodes %d -> compact %d\n",
+            ndefs, nn_compiled, aot_steps, aot_steps >= AOT_STEP_LIMIT ? "TRUNCATED" : "complete",
+            nn_reduced, net.nn);
   if (!net_save_line(&net, out_f)) { fprintf(stderr, "error: cannot write '%s'\n", out_f); return 1; }
   net_free(&net); term_free(opt); term_free(ex); term_free(build_term);
   building = 0; build_term = NULL;

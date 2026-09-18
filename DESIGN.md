@@ -1015,3 +1015,46 @@ The whole std was migrated to this template, with two idioms applied per module:
 A proper distinct `float` annotation type remains a compiler/type-checker task
 (annotations only have builtin atoms `num`/`bool`/`a`/`(list a)`); `float.lin` is
 reworked to the export template but its ops stay `num`-typed.  Suite: 53/978.
+## AOT: `lin build` is the compiler, and it runs the whole pass pipeline
+
+Lin is AOT-compiled: `lin build prog.lin -o prog` runs the pipeline once and writes a
+`.line` container holding the **residual** net, and `./prog` only reduces what the
+compiler could not finish.  Interpretation (`lin prog.lin`) stays as the development
+path and shares the same front end, so there is one semantics and two schedules.
+
+Pipeline, in order (`do_build` in `src/main.c`):
+
+| pass | what it decides | where |
+|---|---|---|
+| load + type check | the program is well typed before anything is rewritten | `type_check` |
+| `expand_defs` | defs inlined, and non-recursive defs **precompiled** (baked as nets) where that is sound | `def_precompile` |
+| e-graph saturate + extract | β/η/projection rewrites by equality saturation, then cheapest form | `egraph_optimize` |
+| CSE → sharing | which repeated sub-terms earn one fan (see below) | `cse_share` |
+| compile | term → interaction net; a multi-use variable becomes a DUP fan tree | `compile` |
+| **AOT evaluation** | reduce the net at build time with `net_reduce`, stopping at effects | `do_build` |
+| compact | drop reduction intermediates before serialising | `net_gc` |
+
+The last two steps are what make it AOT rather than merely optimizing.  `net_reduce`
+folds pure scalars and β-reduces, and is *stuck* at an IO effect or a non-pure FFI
+closure — so the artifact keeps exactly the work that genuinely needs the runtime,
+and `net_run_io` still finds its continuation intact.  `lin_build_depth` is set around
+that reduction: it tells a driver "this is build time", so a probe like `(lin_folds)`
+is *not* folded into the artifact (a program must still be able to observe its own run).
+
+Measured on the two container tests (`LIN_PASSES=1` prints the stats):
+
+| | before | after |
+|---|---|---|
+| `line_binary.line` size | 223,555 B | **106,243 B** |
+| `line_binary` nodes at run time | 18,360 | **3,835** |
+| `line_binary` run-time reduction | 3,846 steps | **5 steps** |
+| `line_ffi` build-time reduction | 0 | **114,909 steps** |
+| `line_ffi` artifact nodes | 346,627 → | **3,397** |
+
+Compaction is not cosmetic: the container stores *every* node, and an actual
+evaluation leaves far more dead intermediates than live ones, so serialising without
+`net_gc` produced an artifact twice the size of the un-evaluated one (474 KB vs
+224 KB) *despite being a value*.
+
+`LIN_PASSES=1` makes every pass report, so "the passes ran" is observable rather than
+assumed.

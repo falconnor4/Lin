@@ -264,6 +264,12 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   /* Core readback builtins that are not scalar-table rows but ARE pure `lin_*`
      closures the evicted in-core fold used to materialise (run_ffi's builtin rows).
      Keeping them here preserves behaviour for `(folded)` / `(i2f n)` / `(float s)`. */
+  /* These two OBSERVE the reduction rather than compute anything.  Folding them during
+     the AOT build would freeze the build-time answer into the .line artifact (a program
+     could then never observe that folds happened at run time), so decline and let the
+     runtime's readback answer them.  Same reason the `_ffi` path refuses non-`lin_`
+     names: build-time evaluation must be observation-free. */
+  if (lin_build_depth > 0 && (!strcmp(fn, "lin_folds") || !strcmp(fn, "lin_folded"))) return EV_NO;
   if (!strcmp(fn, "lin_folds"))  { v->kind = 1; v->iv = lin_fold_total(); return EV_READY; }
   if (!strcmp(fn, "lin_folded")) { v->kind = 3; v->iv = lin_fold_total() > 0; return EV_READY; }
   if (!strcmp(fn, "lin_float") && slots >= 1) {

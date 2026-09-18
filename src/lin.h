@@ -42,6 +42,9 @@ void net_link(Net *n, Port a, Port b, int enqueue);
 void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, Port a, Port b);
 long net_reduce(Net *n, long limit);
 Net *net_copy(const Net *n); Scope scope_nil(void);
+/* reclaim every node not reachable from ROOT (identity-preserving; safe at any point a
+   net is a value or a residual -- the AOT build compacts before serialising) */
+void net_gc(Net *n);
 Scope scope_ext(Net *n, Scope s, int bit); int scope_eq(Net *n, Scope a, Scope b);
 Scope scope_prefix(Net *n, Scope lvl, Scope s);
 Scope scope_from_bits(Net *n, const uint64_t *bits, int len);
@@ -157,6 +160,9 @@ int  net_spine_args(Net *n, Port argp, Val *vals, int max); /* decode a `_cl`-sp
 /* !=0 while def_precompile reduces an open body: a driver must not fold there, since the operands are free vars
    that never become concrete and a baked closure would capture a stale value */
 extern int lin_precompile_depth;
+/* !=0 while the AOT build is partially evaluating: a driver must not bake anything the
+   program would observe at RUN time (e.g. a (lin_folds) probe) into the artifact */
+extern int lin_build_depth;
 /* datatype registry (populated by builtins + `datatype` forms) */
 int  ctor_tag(const char *name); /* builtin domain DT_*, or -1 */
 int  ctor_register(const char *name, int tag, const char *c1, const char *c2);
