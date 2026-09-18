@@ -484,6 +484,25 @@ build, run `(peel 1)` with the fold counters instrumented and determine whether
 `lin_fold_op` is called at all and where `op_value_from_lam` fails — that decides what A2
 actually has to read.
 
+**BREAKTHROUGH: why folds never fired under a knot — `ct_splice` linked with
+`enqueue = 0`.**  A spliced precompiled body is normally a normal form, so scheduling
+nothing costs nothing — but a **knot body is deliberately unreduced**, so every redex
+inside it was spliced in *without entering the active queue*, and consequently never ran.
+Flipping that one flag to `enqueue = 1` (free for normal forms: there is nothing to
+schedule) makes the knot reduce: with it, `(peel 3)` -> `0`, `(peel 4)` -> `0`,
+`(peel 5)` -> `0`, `(fact 0)` -> `1` — the first time self-recursion has ever worked
+through the knot, and it means recursion is no longer bounded by the 24-fold unravelling.
+
+What that leaves is exactly A2 and nothing else.  With the same build (knot + enqueue),
+every `mul`-wrapper case *terminates* instead of hanging — `(let ((g (mul 2))) (pair
+(g 3) (g 4)))`, `(let ((g (\x (\y (mul x y))))) ...)`, `(let ((h (mul 2))) (g 3))` — but
+prints a stuck `_mul` application instead of a number (~7.9 s each), i.e. the `_mul`
+closure's fold does not fire, where `peel`'s `is_zero`/`pred` folds do.  So the knot is
+sound for plain-argument recursion and blocked only on the shared-partial-application
+operand shape — the A2 target, now with a much better test: correct value *and* no
+regression on `(let ((h (mul 2))) (g 3))` -> 6.  The knot cannot land before A2, because
+it currently breaks cases that work today.
+
 **Reading a value "through the fan" is unsound — measured.**  Adding an aux-side
 fallback to `dec_arg` (if the direct read fails and the port is a DUP, try the two
 auxiliary sides, on the theory that a fan's sides carry the same value) makes
