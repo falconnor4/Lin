@@ -1,2 +1,0 @@
-(load "std/std.lin")
-(let ((g (\x (\y (mul x y))))) (pair (g 2 3) (g 4 5)))

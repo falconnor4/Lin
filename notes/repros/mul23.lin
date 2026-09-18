@@ -1,2 +1,0 @@
-(load "std/std.lin")
-(mul 2 3)

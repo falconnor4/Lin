@@ -92,4 +92,6 @@ static void def_knot(Def *d, Term *body) {
 | `(let ((g (\x (\y (mul x y))))) (pair (g 2 3) (g 4 5)))` | `(6, 20)` (hangs on HEAD too) |
 | `test/selfrecursion.lin`, `test/scott_arith.lin`, full suite + oracle | green |
 
-`notes/repros/*.lin` holds these as files; run them with the repo root as cwd.
+The programs above are one-liners to type at the prompt (with the repo root as cwd), or
+paste into a scratch file *outside* the repo — this note deliberately carries no repro
+files, and none belong in the tree.

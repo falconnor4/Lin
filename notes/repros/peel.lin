@@ -1,4 +1,0 @@
-(load "num.lin")
-(load "bool.lin")
-(define! peel (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (peel (pred n))))))
-(peel 3)

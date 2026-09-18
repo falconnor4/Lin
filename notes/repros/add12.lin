@@ -1,2 +1,0 @@
-(load "std/std.lin")
-(add 1 2)
