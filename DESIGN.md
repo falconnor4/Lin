@@ -442,6 +442,24 @@ cases alone (`(g 3)` -> 6, `(pair 8 15)`, `(pair 6 10)`) — but `test/selfrecur
 prints **nothing** where HEAD prints 24/120/15/16, so the knot's cyclic net does not
 reduce (the same blocker class the first prototype hit).  Reverted.
 
+**The decline guard is load-bearing — verified.**  Turning the lever above on (delete
+`op_value_from_lam`'s `lin_precompile_depth` early return and its counter bump) does
+make the wrappers bake: instrumented, `[PC ok] num.mul nn=30876 stuck=0` and
+`[PC ok] mul nn=30877 stuck=0`.  But the suite then hangs at `test/scott_arith.lin`
+(5 suites in, no failure output) because baking `mul` bakes its reference to `_pmul` —
+which is *self-recursive*, so it is still the 24-fold unrolling, and the run-time
+widening loop (30,733 <-> 111,933 nodes) fires from inside a baked net.  Reverted.
+So the lever can only be turned on once **no** define is unrolled anywhere: the knot is
+the prerequisite, not the follow-up.
+
+**Knot attempt #1's bug, identified.**  The construction linked the occurrence fan to
+the body's own root port by *overwriting that port's wire* (`net_link(occ, b)` writes
+`wire[b] = occ`), which leaves `b` pointing back at the fan — a closed loop with no
+value in it, hence `test/selfrecursion.lin` printing nothing.  Attempt #2 must feed the
+occurrences from the body's root *agent* (pair the fan's principal with the body
+agent's principal and let the DUP duplicate the body on demand) without overwriting the
+wire the body already has.
+
 **Where the hanging repros actually come from (new).**  None of the four hanging cases
 involves self-recursion: they hang through the *non-recursive* `_op` wrappers (`mul`,
 `add`).  `def_precompile` declines to bake any define whose open-body precompile hit a
