@@ -403,6 +403,39 @@ part of the same work: a def in a namespace kept its self-reference *unqualified
 registered, and precompiling a def whose expansion mentions recursion is pointless
 (there is no normal form to bake) yet burned the whole step limit.
 
+## Type inference: order-dependence, and what fixing it costs
+
+`generalize` (HM) used to scan **every** scheme in the live environment and treat
+*all* its free vars as environment-free, including the scheme's own quantified
+vars.  A scheme's quantified vars are bound by the scheme, so this
+under-generalises every later definition against every earlier one — inference
+results depend on the order defs are checked in.  It is sound (it rejects some
+well-typed programs rather than accepting ill-typed ones) but it is what made the
+parallel def loader produce "infinite type"/"unbound variable" errors, and it is
+why a shared `_op` closure could infer differently from an unshared one.
+
+Two fixes were measured on the std load (`(load "std/std.lin")`, type checking is
+370 ms of the ~410 ms load), interleaved A/B, 3 runs each:
+
+| build | std load |
+|---|---|
+| committed | 400-440 ms |
+| incremental `efree` counters, *old* (over-)inclusive semantics | 508-518 ms |
+| incremental `efree`, correct HM semantics (skip `s.q`) | 597-617 ms |
+
+So the ~+100 ms is the maintenance scan (`fv` per push/pop, 593 def pushes at
+load) and another ~+100 ms is the *semantics*: correct generalisation makes
+schemes more polymorphic, and every use site then instantiates more type nodes.
+Neither was landed: +50 % on every program's startup for a latent
+(not currently observable in serial loading) incompleteness is a bad trade.
+
+The next attempt should remove the scan rather than pay it: `env_find` already
+falls back to `def_find`, so the 593 def schemes need not be pushed into `env` at
+all (they contribute no *mono* free vars — a closed def's scheme has none once
+`generalize` has run), leaving `efree` to track only local bindings, whose
+schemes are one `TVR` and cost O(1).  That should leave only the semantic ~+100 ms
+to argue about.
+
 ## Parallelism: measured, and where it does and does not pay
 
 Reduction is **not** where Lin's time goes.  On the workloads in `test/` and
