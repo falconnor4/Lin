@@ -509,6 +509,36 @@ Isolations on the knot build (all with `enqueue = 1`):
   `net_interact`'s LAM×APP branch) gives `(peel …)` -> 0 and `(pair (peel 1) (peel 2))`
   -> `(0, 0)`, but **segfaults** on `(add 1 2)`, `(let ((g (mul 2))) (g 3))` and g3.
 
+**Round 4: the frontier is the fan's copy semantics, not the fold.**
+With the knot active *and* every fold edge guarded (head folds in `net_interact`, plus
+`fold_arg`), the results split cleanly:
+
+| program | knot, folds guarded |
+|---|---|
+| `(peel 1/2/3)`, `(pair (peel 1) (peel 2))` | correct (0, and `(0, 0)`), ~2.7 s |
+| `(add 1 2)` | **segfault** |
+| `(let ((g (mul 2))) (g 3))` | **segfault** |
+| `(mul 2 3)` | **segfault** |
+| `(let ((g (mul 2))) (pair (g 3) (g 4)))` | **segfault** |
+
+Same programs, same knot, folds *left on*: no crash, but the fold computes the right
+value and mis-threads it (`(add 1 2)` -> `((\_add 3) <spine>)`) or stays stuck.  So the
+defect is not the fold and not the decoding: **both β and the folds mark the redex's
+nodes dead, which assumes the redex owns them, and a knot-shared body violates that.**
+The fan is supposed to make every demand private — F's principal meets the body's root
+agent and the LAM×DUP commutation copies it — but the copy shares the body's *sub-nets*,
+so a redex inside the body is still common to both copies, and the first consumer to
+reduce it kills nodes the sibling still points at (hence the segfaults once folds stop
+papering over it).
+
+That is the real frontier for A3, and it is the same one as the session's opening
+request (fan-share a normalised body rather than copy it): the engine needs the full
+Lafont γ⋈δ step — fan the *auxiliary wires* as well, so an inner redex is private to its
+copy — not just a shallow agent copy.  Equivalently, keep the reverted fold-privacy idea
+but apply it to β as well, which is harder.  Everything else about the knot (cycle
+construction, gauges, laziness, multi-reference) is verified working, and `peel`-style
+plain recursion already reduces correctly and deeply.
+
 So the remaining defect is not decoding at all: it is that the `_op` fold's rewiring
 (`fold_own` + the `ar` selection in `lin_fold_op`) assumes the redex's nodes are private,
 which a knot-shared body violates — the fold has to either decline, or stop treating
