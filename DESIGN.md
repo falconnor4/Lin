@@ -403,6 +403,43 @@ part of the same work: a def in a namespace kept its self-reference *unqualified
 registered, and precompiling a def whose expansion mentions recursion is pointless
 (there is no normal form to bake) yet burned the whole step limit.
 
+## A2/A3: the knot, and why it is the same change as fan-sharing a def body
+
+`def_precompile` bakes a **non-recursive** define into a reduced net (`d->compiled`)
+and every reference clones it (`ct_splice`, one fresh re-gauged copy per reference),
+while **recursive** defines (`d->rec`) take the textual path: `expand` copies the
+body per reference and `build_bound_rec` wraps it in `k` unrollings whose innermost
+base carries a `_rec` sentinel; if that sentinel survives reduction, `eval_form`
+doubles `k` for every def and re-evaluates (16 rounds).  That is the machinery
+behind the two pathologies we measured: nets oscillating 30,733 <-> 111,933 through
+`widen_recursion`'s rounds (`(let ((g (mul 2))) (pair (g 3) (g 4)))`, and the shared
+`_op` hangs generally), and the reason a *shared* closure's fold failure turns into
+a blow-up rather than a slow path — the body being β-duplicated is the k-unrolled
+one.
+
+**The knot and "fan-share the body instead of copying it" are the same change.**
+Compile the body **once**, with the def's own name bound to a placeholder port, then
+wire that placeholder to the body's root: every self-reference is then a wire back
+into the shared body (a self-referential net) and every *reference site* can be fed
+from one spliced copy through a fan.  The compiler already has both halves of the
+mechanism: `push_var` + `ERA` placeholders for a variable's later occurrences
+(`ct`'s `TVAR`/`TLAM` cases), and `fan_lvl`/`dup_tree` for re-gauged sharing.  It
+also gives mutual recursion for free (a cycle through two bodies is still just
+wires), which today is not handled at all: `expand`'s guard stops at the cycle and
+leaves a bare `TVAR`.
+
+Budget: this **removes** `build_bound_rec` + `widen_recursion` + `net_has_reachable`
++ `REC_SENTINEL` + `eval_form`'s 16-round retry + the `rec_k`/`rec_body` fields
+(~90 lines in `main.c`, measured) and adds a knot constructor plus a memoised splice
+(~40 lines in `compile.c`), so the pure core goes *down*.  Core is 2,831 lines now.
+
+Acceptance tests (all correct on HEAD, none of them terminating today):
+`(let ((g (mul 2))) (pair (g 3) (g 4)))` -> (6, 8);
+`(let ((g (\x (\y (mul x y))))) (pair (g 2 3) (g 4 5)))` -> (6, 20);
+`(let ((g (mul 2))) (g 3))` -> 6 (works today);
+`(let ((f (\x (\y (mul x y))))) (add (f 6 7) (f 3 4)))` -> 42 + 12;
+plus the suite (53/978), the soundness oracle, and the sharing witnesses.
+
 ## The `_op` fold path: deferral is correctness-critical (measured)
 
 A saturated pure-Lin `_op` closure (`((\_add <pure-body>) <_cl-spine>)`) is folded
@@ -421,6 +458,21 @@ So the wait is not an optimisation that can be shortened: it is what keeps a
 shared operand alive until it is concrete.  The fix has to make the shared operand
 *readable* (fan-complete operand decoding — materialise or route through the fan),
 never to skip the wait.
+
+**A2's failing read, seen whole.**  A local-graph dump of the undecodable operand
+slot in `(let ((g (mul 2))) (pair (g 3) (g 4)))` shows the slot resolving to a fan
+whose principal faces an *auxiliary pin of an APP* and whose two auxiliary pins face
+`_sz` (numeral) LAMs:
+
+```
+[SLOT-raw] 30750.0 tag=2 DUP   p0->30718.2 (APP arg pin)   p1->30770.0 (LAM '_sz')  p2->30774.0 (LAM '_sz')
+```
+
+`skip_dup` hops the principal and lands on that APP pin, which is not a value, so
+the fold cannot read it; and reading *through* the auxes instead is unsound (that is
+the shortcut that produced 225 -> 1).  So A2 needs the operand to become readable
+*in the shared case* rather than a cleverer hop, which is why it is pursued together
+with A3: with the unrolling gone the same program has no blow-up to hide behind.
 
 Instrumented diagnosis of the shared-closure case
 (`(let ((g (mul 2))) (pair (g 3) (g 4)))`):
