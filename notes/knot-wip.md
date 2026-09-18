@@ -160,3 +160,34 @@ sub-nets (no cycle: each level stays a distinct tree level, but their shared par
 one node) removes the nesting blow-up without touching the reduction rules, which is
 exactly the "fan-share a normalised body rather than copy it" goal the session opened
 with — applied to the unrolled net rather than to the recursive name.
+
+## Round 8: precompiling the recursive define — real win, one runaway left
+
+Two changes, tried together as the redirect predicts:
+
+1. `def_precompile`: let self-recursive defines be baked too (`d->rec && !d->term` instead of
+   `d->rec`).  Their term is the bounded unravelling — a finite tree, no cycle — and once the
+   other recursive defines are baked, references to them inside it become value markers
+   instead of copies.
+2. `op_value_from_lam`: drop the open-body bail (the lever from round 2).
+
+Measured (core 2,842 lines):
+
+| program | HEAD | with both changes |
+|---|---|---|
+| `(add 1 2)` | 3, 414 ms | 3, **400 ms** |
+| `(mul 2 3)` | stuck | **6, 606 ms** |
+| `(let ((g (mul 2))) (g 3))` | stuck | **6, 550 ms** |
+| `(peel 1)` | 0, 419 ms | 0, 450 ms |
+| `(pair (peel 1) (peel 2))` | `(0, 0)` | `(0, 0)`, 428 ms |
+| std load | 433-440 ms | 459-464 ms |
+| `test/scott_arith.lin` | green | prints `20`, `3`, then **hangs** |
+| `test/selfrecursion.lin` | green | prints `6`, `24`, then **hangs** |
+
+So the nesting-blow-up fix is real — the `_op`-wrapper cases that were stuck on HEAD now
+return correct values in half a second — but some *later* case in each suite runs away, which
+is why this is reverted rather than landed.  Note the suites print several correct values
+first, so it is a specific shape, not a general collapse: the next iteration should find which
+expression in `scott_arith.lin` / `selfrecursion.lin` follows the last printed value and trace
+it, and it should also consider a size bound on what may be baked (a baked recursive net that
+is large is exactly the thing that can run away at run time).
