@@ -813,6 +813,21 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
   declared `num`-typed and route through `_ffi` closures to libm. A distinct, checked float
   type is a type-system task, not a net-level one.
 - **A shared float inside a spine does not read back.** `(let ((x (fmul (float "6") (float "7")))) (fadd x (float "1")))` folds to `43`, but the same shared float nested in a pair spine (`(pair x …)`) renders as the closure structure instead of a numeral: the readback decoders peel a fan at the top of a value, not one buried in a spine. Measured identical at `ddd1cd7`, i.e. pre-existing rather than a regression from the level representation, and `test/float_share.lin` leaves the shape unasserted until it is fixed.
+- **The fold pre-pass's deferral budget is engine-dependent, and that was measured the hard
+  way.** `ARITH_DEFER_BUDGET` is a flat `2^15` rounds, and `claim` also decodes the operand
+  spine to decide whether to wait. Under the eager core each round is cheap, so the bound is
+  a rounding error. Under needed-order reduction each round costs a whole wave, so a driver
+  that cannot read a *shared* operand spends all 32,768 of them: measured, `(s 1)` for
+  `s n = ifl (is_zero n) (\_ 0) (\_ (add 0 (s (pred n))))` is a 180 s+ apparent hang for a
+  bounded loop (and `add 1 …` / `add 2 …` / `add 3 …` in the same slot are all fine — the
+  trigger is the operand being a shared `scott(0)`). Replacing the flat budget with a
+  *progress* test was tried three ways and **reverted on numbers**: the step counter cannot
+  serve as the signal because a deferral itself spends a step (so every round looks like
+  progress, which is exactly why the flat bound exists), and comparing the decode result
+  across asks needs a grace window or it costs the eager engine every fold it has
+  (`selfrecursion` 396 ms → 6.6 s, `numbers` stops finishing). The honest fix is on the core
+  side — let readback force what it is about to decode instead of registering demand that a
+  driver cannot act on — not another budget.
 - **Driver net-side decoding** is not fully consolidated: drivers reuse the shared
   `net_spine_args`/`net_ffi_args`/`net_dhop` walkers, but `simd.c` still parallels parts of
   the `_ffi` argument walk. A fuller consolidation would reclaim headroom against the LOC
