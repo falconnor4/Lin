@@ -57,7 +57,8 @@ static int lv_intern(Net *n, int parent, int bit) {
     if (n->lv_parent[l] == parent && n->lv_bit[l] == (unsigned char)bit) return l;
     h = (h + 1) & (unsigned)(n->lv_hcap - 1);
   }
-  if (n->nlv + 1 > n->lvcap) lv_ensure(n, n->nlv + 1);
+  if (n->nlv + 2 > n->lvcap) lv_ensure(n, n->nlv + 2);   /* l = nlv+1 indexes entry l, so the
+                                                            arrays need nlv+2 entries, not nlv+1 */
   int l = ++n->nlv;                    /* ids start at 1; 0 is the root */
   n->lv_parent[l] = parent; n->lv_bit[l] = (unsigned char)bit;
   n->lv_depth[l] = parent ? n->lv_depth[parent] + 1 : 1;
