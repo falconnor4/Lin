@@ -634,7 +634,18 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
 > budget: a 180 s+ apparent hang for a bounded loop. Relaxing the test to the *shape* fixes `(s 1)`
 > (it returns 0) but breaks `(mul 6 7)`, so it is not the fix either.
 >
-> **The fix is a copy-aware decoder.** A fan's copies are equal in value — that is the premise of
+> **The fix is a copy-aware decoder, and it is implemented and measured** — kept with the
+> needed-order prototype rather than landed, because on the shipped engine it buys nothing and
+> costs 2.8× on decode-heavy work (`scott_arith` 114 ms → 324 ms, suite 15.9 s → 18.1 s, all still
+> green) while the shipped reader was already correct on every case tried, including §11.4's shared
+> float in a spine, which now reads back as 42. The rule that works is local and checkable: a
+> numeral's terminal is "the body of the `_ss` is the enclosing `_sz`'s binder", so a walk that
+> lands on a *different* copy of that binder is still a valid terminal **provided the candidate
+> shares this very `_ss`** — that one extra clause is what makes it copy-aware. Requiring node
+> identity made the peel fail on a shared `scott(0)`; relaxing it to the *shape* alone made every
+> `_sz` in the net read as a terminal, so real successors decoded as zero (`mul 6 7` → 0) and every
+> fold was lost. Both halves are needed, and this is the first configuration measured that fixes the
+> shared-operand hang without breaking a case that already worked. A fan's copies are equal in value — that is the premise of
 > sharing — so readback may land on any copy, but it must know *which* copy it is reading to cross
 > the next fan correctly. `dup_hop`'s one hard-coded choice cannot; `skip_dup` (always follow the
 > input) is wrong in the other direction. This is the same disagreement already noted between
