@@ -78,6 +78,8 @@ int lin_build_depth = 0;
 
 /* Non-recursive define: evaluate once and cache the reduced net so each reference clones it; recursive/too-big bodies keep the textual path. */
 static void def_precompile(Def *d) {
+  /* A build-time decision, not a rule: a candidate may ask for every define to stay textual. */
+  if (getenv("LIN_PRECOMPILE") && !strcmp(getenv("LIN_PRECOMPILE"), "0")) return;
   if (d->comp_tried) return;
   d->comp_tried = 1;
   if (d->rec) return;
@@ -338,9 +340,12 @@ static void process_def(Term *t) {
        the whole front end.  Depth is unknowable statically but need not be guessed
        pessimistically -- `widen_recursion` doubles k and recompiles if the `_rec` sentinel
        survives, so a small k is correct and only programs that recurse deeper pay for it.
-       Measured with the oracle green: k = 6 runs the suite in 23.6 s against 48.7 s at k = 24,
-       and `(fact 1)` compiles 18,449 nodes instead of 981,287; a depth-12 case costs ~50 s
-       either way.  LIN_REC_K overrides. */
+       NOT a sound optimization axis below 6: the AOT candidate search (`LIN_AOT_SEARCH=1`) found
+       k = 4 the byte winner on every program tried (`selfrecursion.lin` 21,608 B against 55,899 B),
+       but at k = 4 `test/selfrecursion.lin` returns 0 for `(fact 3)` where the answer is 6 -- the
+       unravelling ran out and the `_rec` sentinel was not detected, so no widening fired and a
+       wrong value was returned silently.  A build-time search may not trade correctness for bytes,
+       so the bound stays 6 and DESIGN.md 11.2 records the hazard.  LIN_REC_K overrides. */
     d->rec_k = getenv("LIN_REC_K") ? atoi(getenv("LIN_REC_K")) : 6;
     if (d->rec_k < 1) d->rec_k = 1;
     d->rec_body = t->l;                                /* keep body for widening */
@@ -494,6 +499,8 @@ static int load_file(const char *path) {
   return 1;
 }
 
+#include "runtime_aot.inc"
+
 static int do_build(const char *in_f, const char *out_f) {
   building = 1; build_term = NULL;
   if (!load_file(in_f)) { fprintf(stderr, "error: cannot read '%s'\n", in_f); return 1; }
@@ -501,50 +508,12 @@ static int do_build(const char *in_f, const char *out_f) {
   if (!build_term) { fprintf(stderr, "error: no expression to build in '%s'\n", in_f); return 1; }
   char err[512]; Scheme sch;
   if (!type_check(build_term, &sch, err, sizeof err)) { fprintf(stderr, "error: %s\n", err); return 1; }
-  Term *ex = expand_defs(build_term);
-  int n_exp = 0; (void)n_exp;
-  Term *opt = egraph_optimize(ex);
-  Net net; net_init(&net, 1 << 16);
-  if (!compile(opt, &net, err, sizeof err)) { fprintf(stderr, "error: %s\n", err); return 1; }
-  int nn_compiled = net.nn;
-  /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.
-     `net_reduce` folds pure scalars and beta-reduces, and is stuck at an IO effect or a
-     non-pure FFI closure -- so the artifact keeps exactly the work that genuinely needs
-     the runtime, and `net_run_io` still finds its continuation intact.  Nothing here
-     performs an effect: net_reduce never calls run_ffi, and lin_build_depth keeps a
-     driver from baking a build-time answer to a run-time observation. */
-  lin_build_depth++;
-  long aot_steps = net_reduce(&net, AOT_STEP_LIMIT);
-  lin_build_depth--;
-  int nn_reduced = net.nn;
-  /* A value's dead intermediates are pure overhead in the container: the format stores
-     every node, so compact to what is reachable from ROOT before serialising. */
-  net_gc(&net);
-  if (!net_save_line(&net, out_f)) { fprintf(stderr, "error: cannot write '%s'\n", out_f); return 1; }
-  /* The artifact is the deliverable, so report the two numbers an optimization decision has to
-     move: how many bytes ship, and how much work is left for the runtime to do.  The residual's
-     work is measured by loading the container back and reducing it once -- the same path a user's
-     `./prog` takes -- which is effect-free (net_reduce never runs an effect), and it is the one
-     number that says whether a build-time decision moved work out of the artifact or into it. */
-  if (getenv("LIN_PASSES")) {
-    long bytes = 0, rsteps = -1; int rnodes = 0;
-    FILE *f = fopen(out_f, "rb");
-    if (f) { fseek(f, 0, SEEK_END); bytes = ftell(f); fclose(f); }
-    Net run;
-    if (net_load_line(&run, out_f)) {
-      rsteps = net_reduce(&run, AOT_STEP_LIMIT);
-      rnodes = run.nn;
-      net_free(&run);
-    }
-    fprintf(stderr, "[aot] expand=%d defs, compile=%d nodes, reduce=%ld steps (%s), nodes %d -> compact %d | "
-                    "artifact=%ld B, residual=%d nodes, runtime=%ld reduce steps%s (effects excluded)\n",
-            ndefs, nn_compiled, aot_steps, aot_steps >= AOT_STEP_LIMIT ? "TRUNCATED" : "complete",
-            nn_reduced, net.nn, bytes, rnodes, rsteps,
-            rsteps >= AOT_STEP_LIMIT ? " (TRUNCATED)" : "");
-  }
-  net_free(&net); term_free(opt); term_free(ex); term_free(build_term);
+  /* The pipeline and the candidate search live in std (runtime_aot.inc): the artifact is the
+     deliverable, so the decisions are the ones the measurements choose. */
+  int rc = aot_search(build_term, out_f);
+  term_free(build_term);
   building = 0; build_term = NULL;
-  return 0;
+  return rc;
 }
 
 static Term *first_form;

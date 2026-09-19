@@ -624,6 +624,17 @@ Cyclic sharing is therefore no longer divergent, but it is not yet correct: `(pe
 printer emits `?`), so the sharing over-merges at deeper re-entries. Until that is fixed the
 knot is not landed and the unravelling below stays.
 
+**The unravelling bound is a hazard, not a tuning knob.** The AOT candidate search (§8) measured
+k = 4 as the byte winner on every program it tried (`selfrecursion.lin` 21,608 B against 55,899 B at
+k = 6), and it was wrong to take: at k = 4 `test/selfrecursion.lin` returns `0` for `(fact 3)` where
+the answer is 6.  The unravelling ran out, the `_rec` sentinel was not detected, no widening fired,
+and a wrong value was returned silently -- while the same bound at depth 8 widens correctly
+(`(fact 8)` = 40320 at k = 4), so the hazard is shape-specific rather than a simple cliff.  Two
+consequences: the bound stays at 6, and a build-time search may only range over axes where *every*
+candidate is correct — the search infrastructure now reports the artifact's cost, and correctness is
+checked by the suite and the oracle rather than by the search.  Until a cycle can be shared (§11.2)
+the real fix is to delete the bound, not to tune it.
+
 Active erasure (propagating ε through agents) was implemented as the alternative and measured
 as paying nothing; it was reverted. It also carries a soundness caveat when a fan straddles
 an erase boundary.
