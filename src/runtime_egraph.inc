@@ -36,10 +36,45 @@ static void eg_union(EGraph *g, int c1, int c2) {
   if (g->classes[c1].cost <= g->classes[c2].cost) g->classes[c2].parent = c1; else g->classes[c1].parent = c2;
 }
 
+/* The rewrite rules are data: a row per optimization, with which one is on and how often it
+   fired.  Adding an optimization is a row, not a new arm in the saturation loop, and each row can
+   be switched off (LIN_EGRULES=beta,eta) so its contribution is measured rather than assumed. */
+enum { EG_BETA = 1, EG_ETA };
+typedef struct { const char *name; int kind; int param; int on; long fires; } EgRule;
+static EgRule eg_rules[] = {
+  /* name   kind      param                     on  fires */
+  { "beta", EG_BETA,  64,                       1,  0 },   /* inline a lambda applied to an argument */
+  { "eta",  EG_ETA,   0,                        1,  0 },   /* collapse (\x (f x)) */
+};
+#define EG_NRULES ((int)(sizeof eg_rules / sizeof eg_rules[0]))
+static void eg_rules_init(void) {
+  const char *sel = getenv("LIN_EGRULES");
+  for (int i = 0; i < EG_NRULES; i++) { eg_rules[i].on = sel ? 0 : 1; eg_rules[i].fires = 0; }
+  if (sel)
+    for (const char *p = sel; *p; ) {
+      const char *comma = strchr(p, ',');
+      size_t n = comma ? (size_t)(comma - p) : strlen(p);
+      for (int i = 0; i < EG_NRULES; i++)
+        if (strlen(eg_rules[i].name) == n && !strncmp(eg_rules[i].name, p, n)) eg_rules[i].on = 1;
+      p = comma ? comma + 1 : p + strlen(p);
+    }
+}
+
+/* Cost of a form.  The tree model charges every child to every parent, which prices a value the
+   program computes once as if it were recomputed per use; the sharing-aware model charges a class
+   that is itself shared once (its `uses` are what the extraction binds), so the pass prefers forms
+   whose repeated parts are already shared.  LIN_EGCOST=tree|dag selects, default sharing-aware. */
+/* Default tree: the sharing-aware model as written does not terminate in the current saturation
+   (measured: it hangs on both container programs), so it stays behind LIN_EGCOST=dag until it is
+   stable.  The table below is what makes that a switch rather than a rewrite. */
+static int eg_cost_dag = 0;
 static int eg_cost(EGraph *g, ENode *n) {
   if (n->type == TVAR || eg_opaque(n->type)) return 1;
-  if (n->type == TLAM) return 2 + g->classes[eg_find(g, n->l)].cost;
-  return 3 + g->classes[eg_find(g, n->l)].cost + g->classes[eg_find(g, n->r)].cost;
+  if (n->l < 0 && n->r < 0) return 2;
+  int shared_l = (eg_cost_dag && g->uses && n->l >= 0 && g->uses[eg_find(g, n->l)] >= 2) ? 0 : g->classes[eg_find(g, n->l)].cost;
+  if (n->type == TLAM) return 2 + shared_l;
+  int shared_r = (eg_cost_dag && g->uses && n->r >= 0 && g->uses[eg_find(g, n->r)] >= 2) ? 0 : g->classes[eg_find(g, n->r)].cost;
+  return 3 + shared_l + shared_r;
 }
 
 /* e-node lookup by (type, name, children): a hash table, because the linear scan this replaces
@@ -128,27 +163,50 @@ static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
 }
 
 static void eg_saturate(EGraph *g) {
-  for (int round = 0; round < 4; round++) {
+  static int rounds = -1, cap = -1;
+  if (rounds < 0) { const char *e = getenv("LIN_EGROUNDS"); rounds = e ? atoi(e) : 4; }
+  if (cap < 0) { const char *e = getenv("LIN_EGCAP"); cap = e ? atoi(e) : 32768; }
+  eg_rules_init();
+  for (int round = 0; round < rounds; round++) {
     int start_n = g->nn;
-    for (int i = 0; i < start_n && g->nn < 32768; i++) {
-      ENode n = g->nodes[i]; int cls = eg_find(g, g->node_cls[i]);
-      if (n.type == TAPP) {
-        int fn_cls = eg_find(g, n.l), bn = g->classes[fn_cls].best_node;
-        if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TLAM) {
-          int bl = eg_find(g, g->nodes[bn].l);
-          if (g->classes[bl].cost <= 64) {
-            char vn[NAME]; snprintf(vn, NAME, "%s", g->nodes[bn].name);
-            eg_union(g, cls, eg_subst(g, g->nodes[bn].l, vn, n.r, 0));
-          }
+    /* the cost model asks which classes are shared, so the counts are refreshed per round */
+    if (eg_cost_dag) {
+      if (!g->uses) g->uses = calloc((size_t)g->nc + 1, sizeof(int));
+      if (g->uses) {
+        memset(g->uses, 0, ((size_t)g->nc + 1) * sizeof(int));
+        for (int i = 0; i < g->nn; i++) {
+          if (g->nodes[i].l >= 0) g->uses[eg_find(g, g->nodes[i].l)]++;
+          if (g->nodes[i].r >= 0) g->uses[eg_find(g, g->nodes[i].r)]++;
         }
-      } else if (n.type == TLAM) {
-        int body_cls = eg_find(g, n.l), bn = g->classes[body_cls].best_node;
-        if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TAPP) {
-          int an_node = g->classes[eg_find(g, g->nodes[bn].r)].best_node;
-          if (an_node >= 0 && an_node < g->nn) {
-            ENode an = g->nodes[an_node];
-            if (an.type == TVAR && !strcmp(an.name, n.name) && !eg_has_var(g, g->nodes[bn].l, n.name))
-              eg_union(g, cls, g->nodes[bn].l);
+      }
+    }
+    for (int i = 0; i < start_n && g->nn < cap; i++) {
+      ENode n = g->nodes[i]; int cls = eg_find(g, g->node_cls[i]);
+      for (int r = 0; r < EG_NRULES; r++) {
+        if (!eg_rules[r].on) continue;
+        if (eg_rules[r].kind == EG_BETA && n.type == TAPP) {
+          int fn_cls = eg_find(g, n.l), bn = g->classes[fn_cls].best_node;
+          if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TLAM) {
+            int bl = eg_find(g, g->nodes[bn].l);
+            if (g->classes[bl].cost <= eg_rules[r].param) {
+              char vn[NAME]; snprintf(vn, NAME, "%s", g->nodes[bn].name);
+              int before = eg_find(g, cls);
+              eg_union(g, cls, eg_subst(g, g->nodes[bn].l, vn, n.r, 0));
+              if (eg_find(g, cls) != before) eg_rules[r].fires++;
+            }
+          }
+        } else if (eg_rules[r].kind == EG_ETA && n.type == TLAM) {
+          int body_cls = eg_find(g, n.l), bn = g->classes[body_cls].best_node;
+          if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TAPP) {
+            int an_node = g->classes[eg_find(g, g->nodes[bn].r)].best_node;
+            if (an_node >= 0 && an_node < g->nn) {
+              ENode an = g->nodes[an_node];
+              if (an.type == TVAR && !strcmp(an.name, n.name) && !eg_has_var(g, g->nodes[bn].l, n.name)) {
+                int before = eg_find(g, cls);
+                eg_union(g, cls, g->nodes[bn].l);
+                if (eg_find(g, cls) != before) eg_rules[r].fires++;
+              }
+            }
           }
         }
       }
@@ -317,7 +375,9 @@ static Term *eg_extract_shared(EGraph *g, int root) {
 Term *egraph_optimize(Term *t) {
   if (!t) return NULL;
   if (getenv("LIN_NO_EGRAPH")) return term_copy(t);
-  static int share_env = -1;
+  static int share_env = -1, cost_env = -1;
+  if (cost_env < 0) { const char *e = getenv("LIN_EGCOST"); cost_env = (e && !strcmp(e, "dag")) ? 1 : 0; }
+  eg_cost_dag = cost_env;
   if (share_env < 0) share_env = getenv("LIN_EGSHARE") ? atoi(getenv("LIN_EGSHARE")) : 1;
   eg_share = share_env;
   EGraph g = {0}; int root = eg_add_term(&g, t); eg_saturate(&g);
@@ -334,10 +394,14 @@ Term *egraph_optimize(Term *t) {
   }
   Term *res = eg_share ? eg_extract_shared(&g, root)
                        : ((root < 0) ? NULL : eg_extract(&g, root, 0));
-  if (getenv("LIN_PASSES"))
-    fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, saturate %s, extract %s\n",
-            g.nc, g.nn, shared, getenv("LIN_NO_EGRAPH") ? "skipped" : "4 rounds",
+  if (getenv("LIN_PASSES")) {
+    fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, cost %s, extract %s, rules:",
+            g.nc, g.nn, shared, eg_cost_dag ? "sharing-aware" : "tree",
             eg_share ? "shared (lets)" : "tree (sharing discarded)");
+    for (int r = 0; r < EG_NRULES; r++)
+      fprintf(stderr, " %s=%s/%ld", eg_rules[r].name, eg_rules[r].on ? "on" : "off", eg_rules[r].fires);
+    fprintf(stderr, "\n");
+  }
   if (res && res != t) {
     /* A binding is wrapped around the whole term, which is only valid if the shared subterm did
        not need the lambda binders it sat under -- a subterm mentioning a variable that is bound

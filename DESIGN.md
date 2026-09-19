@@ -643,6 +643,16 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
   metric: with the pass, `line_ffi` compiles 8,166 → 7,802 nodes and ships **122,149 → 119,854 B**
   (the earlier claim that the pass was artifact-neutral was measured before the artifact cost was
   reported at all); `line_binary` is unchanged at 136,937 B.
+  Rules are now **data**: one table row per optimization, each switchable (`LIN_EGRULES=beta,eta`)
+  and each reporting how often it fired, with the search budget as data too (`LIN_EGROUNDS`,
+  `LIN_EGCAP`) and the cost model selectable (`LIN_EGCOST=tree|dag`).  That immediately produced
+  attribution the pass never had: `line_ffi`'s 8,166 → 7,802 nodes and 122,149 → 119,854 bytes come
+  from **beta** alone (13 unionations); disabling it (`LIN_EGRULES=eta`) reproduces the unoptimized
+  8,166/122,149 exactly, and eta itself fires **zero** times on both container programs — it is
+  carried but not yet earning its place.  The sharing-aware cost model (charging a shared child
+  once, so the pass prefers forms whose repeated parts are already shared) is implemented but
+  **hangs** in the current saturation, so it is an opt-in switch rather than the default; measured,
+  not assumed.
   The *sharing* half of that is not yet realized: a binding is wrapped around the whole term, and
   hoisting a subterm out of the λ binders its free variables come from is unsound.  Extraction
   therefore verifies its own output (no free generated name) and `egraph_optimize` compile-checks
