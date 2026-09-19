@@ -621,11 +621,23 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
 > (h 4 4)   ; => 8 expected, yields (\_sz (\_ss (_ss (\_sz ... (_ss _)))))) -- base erased
 > ```
 >
-> It is not the nested-scope δ⋈δ rule (disabling it changes nothing), not `b` being ignored
-> (`h a b = ... (succ (h (pred a) 0))` is correct at depth 5), and not basic sharing of a threaded
-> value (hand-unrolled `(let ((b 4)) (succ (succ (succ (succ b)))))` is correct at every depth). It
-> needs `b` to flow through *every* level. That is the next thing to chase, and it is what the
-> `numbers` and `selfrecursion` suites are waiting on.
+> It is **not** the demand walk: `LIN_ALLDEMAND=1`, which skips the filter and contracts every pair
+> in the active list, reproduces the wrong value exactly. It is **not** the recursion's shape: the
+> same body unrolled *finitely* — each level a separate compiler-emitted copy, no self-application —
+> is correct at depth 4 (`((F (F (F (F bottom)))) 4 4)` is 8). It is **not** the nested-scope rule,
+> the δ⋈δ case split (counters `ann 40→59→56→69`, `comm 9→11→12→13` are smooth across the boundary),
+> the fixpoint encoding (the call-by-value `Z` fails identically), or stranded fans (eager runs
+> strand plenty and are correct).
+>
+> What is left is the *sharing of the template*. Under a fixpoint the body's fans are duplicated at
+> run time by γ⋈δ instead of being emitted once per level by the compiler, and the fresh fans γ⋈δ
+> makes keep the source fan's scope **verbatim** — the same value at every crossing of the same pair
+> of levels. So a fan copied from one unfolding and a fan copied from the next are indistinguishable,
+> δ⋈δ reads them as copies of one sharing point, annihilates them, and a level of the recursion loses
+> its argument. Giving all four new fans the paper's `1·s_node·s_dup` modulation is too strong (every
+> value collapses to `_`); the next step is the modulation that separates crossings of the *template*
+> while keeping `scope_eq` sound for genuine copies. `net_interact`'s γ⋈δ branch is the only place to
+> touch, and `numbers` / `selfrecursion` are what wait on it.
 
 Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
 **bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k copies of
