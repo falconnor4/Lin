@@ -42,15 +42,13 @@ static void lv_rehash(Net *n, int cap) {
   n->lv_hcap = cap;
   n->lv_hash = realloc(n->lv_hash, (size_t)cap * sizeof(int));
   memset(n->lv_hash, 0, (size_t)cap * sizeof(int));
-  /* ids are 1..nlv, so `l < nlv` left the LAST live level out of the table: looking that path up
-     again found an empty slot and interned a second id for a path that already had one, so two
-     sharing points that must be equal were silently not equal -- copies that should annihilate,
-     and gauges `scope_eq` is the whole soundness argument for, stop matching. */
+  /* ids are 1..nlv: `l < nlv` left the LAST live level out of the table, so looking its path up
+     again interned a second id for a path that already had one. */
   for (int l = 1; l <= n->nlv; l++) {
     unsigned h = ((unsigned)n->lv_parent[l] * 2654435761u + (unsigned)n->lv_bit[l]) & (unsigned)(cap - 1);
     while (n->lv_hash[h]) h = (h + 1) & (unsigned)(cap - 1);
-    n->lv_hash[h] = l;
-  }
+    n->lv_hash[h] = l; }
+
 }
 static int lv_intern(Net *n, int parent, int bit) {
   if (!n->lv_hcap) lv_rehash(n, lv_hcap_for(n->nlv));

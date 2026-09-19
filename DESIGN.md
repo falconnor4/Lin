@@ -611,33 +611,46 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
 > discipline**: eager "so it bakes a normal form" bakes a divergence instead, because `Y (\f M)`
 > unfolds forever when nothing holds it back.
 >
-> **What is left is one reproducible core bug.** A recursive definition whose parameter is both
-> threaded through the recursive call *and* returned at the base case loses the base at depth ≥ 4:
+> **What is left is two bugs, in two different places.** With the arith driver's `.so` moved
+> aside so the pure-Lin β fallback computes everything, **46 of 51 runnable suites pass** (up from
+> 44) and `levels`, `scott_arith` and `selfrecursion` all go green — so most of what looked like one
+> calculus failure is the **fold driver**:
+>
+> ```scheme
+> (define! s (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add 0 (s (pred n)))))))
+> (s 1)   ; hangs with the driver, correct (0) without it
+> ```
+>
+> The trigger is the **first operand being `0`**: `add 1 …`, `add 2 …`, `add 3 …` in the same
+> position are correct, `add 0 …` hangs, and `(add 0 0)` standalone is fine. So it is
+> `op_eval`/`net_spine_slots`/park in `std/drivers/arith.c` deciding from a mis-measured spine — no
+> `src/` file is implicated. That is the smaller bug and the better target.
+>
+> The larger one is the fixpoint's *sharing*, and it is not the demand walk: `LIN_ALLDEMAND=1`,
+> which skips the filter and contracts every active pair, reproduces the wrong value exactly. It is
+> not the recursion's shape either — the same body unrolled *finitely*, each level a separate
+> compiler-emitted copy with no self-application, is correct at depth 4
+> (`((F (F (F (F bottom)))) 4 4)` is 8). Nor the nested-scope rule, nor a δ⋈δ discontinuity
+> (counters `ann 40→59→56→69`, `comm 9→11→12→13` are smooth across the boundary), nor the encoding
+> (the call-by-value `Z` fails identically), nor stranded fans (eager strands plenty and is correct).
 >
 > ```scheme
 > (define! h (num -> num -> num)
 >   (\a (\b (ifl (is_zero a) (\_ b) (\_ (succ (h (pred a) b)))))))
-> (h 3 3)   ; => 6   correct
-> (h 4 4)   ; => 8 expected, yields (\_sz (\_ss (_ss (\_sz ... (_ss _)))))) -- base erased
+> (h 3 3)   ; => 6  correct
+> (h 4 4)   ; => 8 expected; four `succ` wrappers and the base case erased
 > ```
 >
-> It is **not** the demand walk: `LIN_ALLDEMAND=1`, which skips the filter and contracts every pair
-> in the active list, reproduces the wrong value exactly. It is **not** the recursion's shape: the
-> same body unrolled *finitely* — each level a separate compiler-emitted copy, no self-application —
-> is correct at depth 4 (`((F (F (F (F bottom)))) 4 4)` is 8). It is **not** the nested-scope rule,
-> the δ⋈δ case split (counters `ann 40→59→56→69`, `comm 9→11→12→13` are smooth across the boundary),
-> the fixpoint encoding (the call-by-value `Z` fails identically), or stranded fans (eager runs
-> strand plenty and are correct).
->
-> What is left is the *sharing of the template*. Under a fixpoint the body's fans are duplicated at
-> run time by γ⋈δ instead of being emitted once per level by the compiler, and the fresh fans γ⋈δ
-> makes keep the source fan's scope **verbatim** — the same value at every crossing of the same pair
-> of levels. So a fan copied from one unfolding and a fan copied from the next are indistinguishable,
-> δ⋈δ reads them as copies of one sharing point, annihilates them, and a level of the recursion loses
-> its argument. Giving all four new fans the paper's `1·s_node·s_dup` modulation is too strong (every
-> value collapses to `_`); the next step is the modulation that separates crossings of the *template*
-> while keeping `scope_eq` sound for genuine copies. `net_interact`'s γ⋈δ branch is the only place to
-> touch, and `numbers` / `selfrecursion` are what wait on it.
+> **What does fix it** is unfolding **twice** per self-application —
+> `Y2 = λh. (λx. h (h (x x))) (λx. h (h (x x)))`: `h 4 4` is 8, `h 8 8` is 16, `h 24 24` is 48,
+> correct far past the boundary, so it is a real fix rather than a raised threshold. The reading is
+> that the standard `Y` duplicates the body once per step, and the gauge discipline must collapse a
+> 2^n fan population onto n sharing points; two unfoldings per self-application changes that ratio.
+> It is **not adopted** because it scores 43 against 44 across the suite (regressing `modules` and
+> `scott_arith`), i.e. it trades one shape's failure for another's. Gauge algebra was tried and is
+> destructive: modulating γ⋈δ's fresh fans at all collapses every value to `_`, so the fresh fans'
+> verbatim `sd` is load-bearing in a way the prototype does not yet model — the next attempt should
+> be built on an argument, not another variant.
 
 Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
 **bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k copies of
