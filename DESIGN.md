@@ -33,7 +33,7 @@ across threads. Confluence makes the *answer* independent of the schedule, so a 
 can only ever be a performance choice, never a semantic one.
 
 **G3 — A small, auditable, portable core.** The core is the interaction calculus and
-nothing else: 2,903 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
+nothing else: 2,781 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
 no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
 the layering claim of §2 checkable by reading it.
 
@@ -59,7 +59,7 @@ plain β. Every architectural decision below is an instance of that one rule.
 
 | layer | owns | invariant it must uphold |
 |---|---|---|
-| surface + AOT passes | program rewrites, def precompilation, e-graph saturation/extraction, net compilation | the term handed to the compiler is semantically finished; every rewrite is meaning-preserving |
+| surface + AOT passes | program rewrites, def precompilation, net compilation, and the e-graph optimizer (`src/runtime_egraph.inc`, std rather than core) | the term handed to the compiler is semantically finished; every rewrite is meaning-preserving, and every optimization is optional — the pass may be absent and programs still compile and run |
 | **calculus core** (`src/net.c`) | agents, wires, scopes, and the four rules: β, δ⋈δ, γ⋈δ, ε — nothing else | **complete and correct alone**; with no driver loaded, every program still reduces exactly |
 | drivers (`std/drivers/*.so`) | arithmetic folding, wave dispatch to SIMD/GPU/threads, waiting policy, Lévy bracketing if it ever lands | never load-bearing for correctness; must be bit-exact against the base engine |
 | std runtime (`src/runtime_*.inc`, `std/`) | readback, IO/effect continuations, the `.line` container, the language library | same as drivers: convenience, not correctness |
@@ -432,7 +432,7 @@ shares the identical front end.
 |---|---|---|
 | load + type check | the program is well typed before anything is rewritten | `load_file`, `type_check` |
 | `expand_defs` | defs inlined; non-recursive defs **precompiled** (baked to a reduced net) where that is sound | `expand`, `def_precompile` |
-| e-graph saturate + extract | β/η rewrites by equality saturation, then cheapest form | `egraph_optimize` |
+| e-graph saturate + extract | β/η rewrites by equality saturation, then cheapest form; classes with several parents are bound with a `let` (a DUP fan) instead of being copied per parent | `egraph_optimize`, `src/runtime_egraph.inc` |
 | compile | term → interaction net; each multi-use variable becomes a `DUP` fan tree | `compile`, `ct`, `dup_tree` |
 | **AOT evaluation** | reduce the net at build time, stopping at effects | `do_build`, `net_reduce` |
 | compact | drop reduction intermediates before serialising | `net_gc` |
@@ -567,7 +567,7 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 53 suites / 978 assertions, oracle green, core 2,903 lines.
+- Gate: 55 suites / 991 assertions, oracle green, core 2,781 lines.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -634,14 +634,22 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
 
 - **Share recurrence at the net level** rather than copying unrolled levels (§11.2) — attacks
   the measured 30%.
-- **Give the e-graph real decisions to make:** CSE, precompile-vs-textual choice per define,
-  unrolling strategy. Today `eg_extract` throws away the sharing the e-graph discovers, and
-  the pass is a measured no-op on the programs that exercise it. A term-level CSE pass was
-  written and rejected on evidence: it shrank the compiled net 27× and made the shipped
-  artifact **30× larger** (line_ffi: 92,853 B → 2,785,843 B), because hoisting sharing into
-  the residual defeats the compaction that AOT partial evaluation does. The lesson is
-  structural: sharing decisions must be made *before* partial evaluation, or they cost more
-  than they save.
+- **Give the e-graph real decisions to make — partially done, and now measured on the
+  artifact.** The pass was rewritten this round: e-node lookup is hashed (it was a linear scan,
+  i.e. quadratic in the node cap), the rules and extraction are reported under `LIN_PASSES`, an
+  `LIN_NO_EGRAPH=1` / `LIN_EGSHARE=0` A/B pair exists, and extraction is sharing-aware — a class
+  with several parents is bound with a `let`, which the compiler compiles into the same DUP fan a
+  multi-use binder gets, instead of being emitted once per parent. Measured on the shipped
+  metric: with the pass, `line_ffi` compiles 8,166 → 7,802 nodes and ships **122,149 → 119,854 B**
+  (the earlier claim that the pass was artifact-neutral was measured before the artifact cost was
+  reported at all); `line_binary` is unchanged at 136,937 B.
+  The *sharing* half of that is not yet realized: a binding is wrapped around the whole term, and
+  hoisting a subterm out of the λ binders its free variables come from is unsound.  Extraction
+  therefore verifies its own output (no free generated name) and `egraph_optimize` compile-checks
+  the result, falling back to the plain tree extraction when the check fails — which is what
+  happens on `line_ffi` today (`shared extraction rejected (unbound variable 'a')`). The next step
+  is **scope-aware placement**: bind each shared class at the innermost λ that encloses all of its
+  uses, which is what makes sharing pay on real programs rather than only on closed subterms.
 - **Parallelise definitions, not waves.** Defs are independent units of type checking and
   compilation, they are 66% of wall clock, and order-independent generalization is now in
   place — that is where the cores are. Parallel *reduction* measurements (a precise
@@ -689,7 +697,7 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | path | contents |
 |---|---|
 | `src/net.c` | nets, scopes/gauges, the four rules, wave scheduler, GC, driver pipeline |
-| `src/compile.c` | term → net, fan trees, define splicing, e-graph, `.line` (via `runtime_line.inc`) |
+| `src/compile.c` | term → net, fan trees, define splicing; `.line` container (`runtime_line.inc`) and e-graph optimizer (`runtime_egraph.inc`) are std, included here |
 | `src/io.c` | readback decoders, datatype registry, FFI runner, scalar-op hook (via `runtime_io.inc`, `runtime_decoder.inc`) |
 | `src/main.c` | pipeline, defines/namespaces, recursion unrolling, CLI/REPL |
 | `src/parse.c`, `src/type.c`, `src/goi.c` | reader, HM type checker, GoI determinant benchmark invariant |
