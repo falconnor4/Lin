@@ -622,9 +622,24 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
 > ```
 >
 > The trigger is the **first operand being `0`**: `add 1 …`, `add 2 …`, `add 3 …` in the same
-> position are correct, `add 0 …` hangs, and `(add 0 0)` standalone is fine. So it is
-> `op_eval`/`net_spine_slots`/park in `std/drivers/arith.c` deciding from a mis-measured spine — no
-> `src/` file is implicated. That is the smaller bug and the better target.
+> position are correct, `add 0 …` hangs, and `(add 0 0)` standalone is fine.
+>
+> The cause is neither the driver nor the reduction: instrumenting the decode shows the driver
+> bailing with `slots=1 argc=0`, i.e. it cannot read the first spine slot, and the slot is a live
+> `_sz` LAM — so `scott_peel` is what fails, on a **node-identity test applied to a shared numeral**.
+> Two `_sz` nodes share one `_ss` through two fans (the `scott(0)` literal was duplicated); the peel
+> reaches the fan from its *input* side, `dup_hop` crosses to aux1 unconditionally, and lands on the
+> *other* copy's binder, while the terminal test is `body.node == sz` — identity. So the peel gives
+> up, the driver parks with `argc < slots`, and the park/drain cycle runs out its 32 768-iteration
+> budget: a 180 s+ apparent hang for a bounded loop. Relaxing the test to the *shape* fixes `(s 1)`
+> (it returns 0) but breaks `(mul 6 7)`, so it is not the fix either.
+>
+> **The fix is a copy-aware decoder.** A fan's copies are equal in value — that is the premise of
+> sharing — so readback may land on any copy, but it must know *which* copy it is reading to cross
+> the next fan correctly. `dup_hop`'s one hard-coded choice cannot; `skip_dup` (always follow the
+> input) is wrong in the other direction. This is the same disagreement already noted between
+> `print_port` and the decoders about which way a live fan resolves, and it only became reachable
+> now that a lazy net keeps fans alive at readback time. It is the better-scoped target of the two.
 >
 > The larger one is the fixpoint's *sharing*, and it is not the demand walk: `LIN_ALLDEMAND=1`,
 > which skips the filter and contracts every active pair, reproduces the wrong value exactly. It is
