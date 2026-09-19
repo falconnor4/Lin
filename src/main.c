@@ -513,19 +513,11 @@ static int load_file(const char *path) {
   return 1;
 }
 
-/* AOT decision search (std — not core).
- *
- * The artifact is the deliverable, so a build-time decision is made by building the candidates and
- * measuring them, not by a pass order someone fixed earlier.  Two numbers decide: the work the
- * runtime still has to do (the residual's own reduction, which is what "AOT moved the work out"
- * means) and how many bytes ship.  The candidate space is the set of decisions this pass can vary
- * in-process -- the e-graph configuration, whether a define is precompiled or kept textual, and the
- * unravelling bound -- and the table below is data, so the space is a row list rather than a chain
- * of ifs.
- *
- * Default is a single candidate (the measured-best configuration).  `LIN_AOT_SEARCH=1` explores the
- * table and ships the winner, reporting every candidate's numbers, which is how the default itself
- * was chosen. */
+/* AOT decision search (std — not core).  The artifact is the deliverable, so a build-time decision
+ * is made by building the candidates and measuring them: the work the runtime still has to do (the
+ * residual's own reduction -- what "AOT moved the work out" means) and how many bytes ship.  The
+ * candidate space is a row list, not a chain of ifs; default is the single measured-best row, and
+ * `LIN_AOT_SEARCH=1` explores the table and ships the winner, reporting every candidate's numbers. */
 
 typedef struct { const char *name; const char *egraph; const char *rules; int precompile; int rec_k; } AotCand;
 
@@ -577,10 +569,18 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   aot_reset_defs(c->rec_k);
   Net net; net_init(&net, 1 << 16);
   /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  net_reduce
-     is stuck exactly at an IO effect or a non-pure FFI closure, so the artifact keeps the work that
-     genuinely needs the runtime and `net_run_io` still finds its continuation intact. */
-  long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
-  if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
+     is stuck exactly at an IO effect or a non-pure FFI closure, so the artifact keeps only what
+     genuinely needs the runtime.  `eval_form` re-drives with a doubled unravelling bound when the
+     `_rec` sentinel survives; the build did not, so it baked the sentinel as a value -- `(sumto 10)`
+     shipped an artifact printing a `_rec` spine where the interpreter printed 55. */
+  long baked;
+  for (int round = 0; round < 16; round++) {
+    baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
+    if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
+    if (!net_has_reachable(&net, REC_SENTINEL)) break;
+    net_free(&net); net_init(&net, 1 << 16);
+    if (!widen_recursion()) { fprintf(stderr, "error: recursion depth exceeded unravelling bound\n"); net_free(&net); return 0; }
+  }
   st->aot_steps = (int)baked; st->residual = net.nn;
   net_gc(&net);
   if (!net_save_line(&net, out_f)) { net_free(&net); return 0; }

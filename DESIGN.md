@@ -577,6 +577,29 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
+> **Update (measured, prototype in `scratch/lazy-reduction/`).** The analysis below treats the knot
+> as blocked on *duplication control* — a gauge arithmetic for δ⋈δ. That is not the binding
+> constraint. The binding constraint is that **this engine is eager**: it contracts every facing
+> principal pair the moment the pair exists, so the `(x x)` of *any* fixpoint encoding is fired
+> whether or not the term ever reaches for it, and no gauge discipline can fix that — it is a
+> reduction-order question, not a naming one.
+>
+> Under **needed-order reduction** the plain, unmodified `Y` works, with the four rules untouched
+> and no new agent: `(x x)` sits in the *argument* of `h`, off the demand walk until the body
+> actually reaches for `f`. Measured on a prototype: `peel 20` costs **1,585 steps / 4,336 nodes**
+> against a `sumto 10` that costs 46,674 steps under unrolling, and `(add 2 3)` runs in 74 ms
+> against 41 ms eager. The unravelling is not a knob with a bad value — every one of those 33,870
+> steps for `sumto 2` is k=6 copies compiled in regardless of actual depth.
+>
+> So the ordering is: **needed-order reduction first, knot second.** The prototype gets 51 of 56
+> suites green at roughly eager speed and stops on one case — an `_op` fold whose operand is a
+> recursive call (`(fact 1)` = `mul 1 (fact 0)`), where the demand a driver must place on its
+> strict operand also chases the knot behind it. The fix is per-decoder demand (force exactly the
+> ports `scott_peel`/`decode_spine` are about to inspect) rather than a generic deep walk; that is
+> bounded by the value and never by the knot. `scratch/lazy-reduction/README.md` has the design,
+> the two hazards (driver `.so` files carry the `Net` layout; `net_has_reachable` is not
+> demand-aware) and the exact failure signature.
+
 Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
 **bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k copies of
 the body, tagged with a `_rec` sentinel; if the sentinel survives reduction the whole program
