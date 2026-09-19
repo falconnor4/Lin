@@ -114,9 +114,10 @@ Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s) {
   return (Scope)cur;
 }
 
-/* the container hands the trie back in id order (parents precede children) */
+/* Install a level trie: level 0 is the root, levels 1..nlv come in id order (parents precede children,
+   the lv_intern invariant), so depths follow from parents.  Total: nlv == 0 is a valid net, which is
+   what a fresh copy is -- net_copy rebuilds through this, not by mirroring the trie's arrays. */
 void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit) {
-  if (nlv <= 0) return;
   lv_ensure(n, nlv + 1);
   n->nlv = nlv;
   n->lv_parent[0] = 0; n->lv_bit[0] = 0; n->lv_depth[0] = 0;
@@ -607,6 +608,9 @@ long net_reduce(Net *n, long limit) {
     if (n->atop == 0 && (long)n->nn > gcmark) {
       net_gc(n);
       gcmark = (long)n->nn * 2 + 64;
+      /* Resume-seed: every live principal pair EXCEPT ROOT's.  A fresh load seeds ROOT's pair too
+         (that is what starts the machine); here reduction is already under way and re-adding ROOT
+         would count its pair as a step again, so the two seeds are deliberately not one loop. */
       for (int i = 1; i < n->nn; i++) if (n->wire[i * 3].port == 0 && n->wire[i * 3].node > i)
         act_push(n, (Port){i, 0}, n->wire[i * 3]);
     }
@@ -624,14 +628,9 @@ Net *net_copy(const Net *n) {
   c->name = calloc(c->cap, sizeof(char *));
   for (int i = 0; i < n->nn; i++) if (n->name[i]) c->name[i] = strdup(n->name[i]);
   c->dead = malloc(c->cap); memcpy(c->dead, n->dead, c->cap);
-  c->nlv = n->nlv; c->lvcap = n->nlv + 1; c->lv_hcap = 0; c->lv_hash = NULL;
-  c->lv_parent = malloc((size_t)(n->nlv + 1) * sizeof(int));
-  c->lv_depth = malloc((size_t)(n->nlv + 1) * sizeof(int));
-  c->lv_bit = malloc((size_t)(n->nlv + 1));
-  memcpy(c->lv_parent, n->lv_parent, (size_t)(n->nlv + 1) * sizeof(int));
-  memcpy(c->lv_depth, n->lv_depth, (size_t)(n->nlv + 1) * sizeof(int));
-  memcpy(c->lv_bit, n->lv_bit, (size_t)(n->nlv + 1));
-  lv_rehash(c, lv_hcap_for(c->nlv));
+  c->nlv = 0; c->lvcap = 0; c->lv_hcap = 0; c->lv_hash = NULL;
+  c->lv_parent = NULL; c->lv_depth = NULL; c->lv_bit = NULL;
+  net_level_set(c, n->nlv, n->lv_parent + 1, n->lv_bit + 1);   /* rebuild the trie: parents precede children, ids reload directly */
   c->act = NULL; c->actcap = c->atop = 0; c->steps = 0; c->driver_pending = 0;
   return c;
 }

@@ -39,7 +39,7 @@ across threads. Confluence makes the *answer* independent of the schedule, so a 
 can only ever be a performance choice, never a semantic one.
 
 **G3 — A small, auditable, portable core.** The core is the interaction calculus and
-nothing else: **3,458 lines** across `src/` — core and runtime counted together, under one gate. It has
+nothing else: **3,462 lines** across `src/` — core and runtime counted together, under one gate. It has
 no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
 the layering claim of §2 checkable by reading it.
 
@@ -573,7 +573,7 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 55 suites / 991 assertions, oracle green, 3,458 lines across `src/`.
+- Gate: 55 suites / 991 assertions, oracle green, 3,462 lines across `src/`.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -771,9 +771,10 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** `src/` is **3,458 lines** — every file counted, no `*.inc` anywhere — against a
-3,500-line gate, so the gate is now met. Of those lines 3,012 are code, 192 are comment-only and 254
-are blank: the comments are rule semantics and hazard records (why a guard exists, what a measured
+**Line budget.** `src/` is **3,462 lines** — every file counted, no `*.inc` anywhere, and every file
+ending in a newline so `wc -l` cannot undercount it (four files did, which is the direction that
+flatters the number, so it is fixed) — against a 3,500-line gate, met. Of those lines 3,015 are code,
+193 are comment-only and 254 are blank: the comments are rule semantics and hazard records (why a guard exists, what a measured
 alternative cost), which is what makes the core auditable rather than merely small. Earlier revisions
 excluded `runtime_*.inc` files from the count; that was an accounting trick and it is gone — everything
 that ships is counted. What the gate protects is the calculus — four rules and nothing else — and the
@@ -781,7 +782,8 @@ honest way to protect it is to count everything that ships.
 
 The stretch target is **under 3,000**. A census of the tree says the remaining ~450 lines are live
 capability, not slack: there are no dead functions (every `static` has a caller) and the last
-duplicate mechanism — a second Scott-number allocator — was deleted at 3,458. What is left on the
+duplicate mechanism — a second Scott-number allocator, and a hand-mirrored level trie — was
+deleted. What is left on the
 interpreter side (REPL and `-e`, the GoI determinant benchmark, the `-b` report) is exactly the
 capability `lin build` makes optional, since the artifact is the deliverable; deleting it is a
 product decision recorded under §11.4, not a cleanup.
