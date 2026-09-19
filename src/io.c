@@ -81,29 +81,20 @@ void ctor_init_builtins(void) {
   ctor_register("_iow", DT_EFF, "_iow", NULL);
 }
 
-static Port alloc_scott(Net *n, long k) {
-  Scope sc = scope_nil(); Port cur = (Port){-1, 0};
-  for (long i = 0; i <= k; i++) {
-    Port sz = net_alloc(n, LAM, sc, "_sz"), ss = net_alloc(n, LAM, sc, "_ss");
-    net_link(n, (Port){sz.node, 2}, (Port){ss.node, 0}, 0);
-    if (i == 0) net_link(n, (Port){ss.node, 2}, (Port){sz.node, 1}, 0);
-    else {
-      Port app = net_alloc(n, APP, sc, "");
-      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0);
-      net_link(n, (Port){app.node, 2}, cur, 0);
-      net_link(n, (Port){ss.node, 2}, (Port){app.node, 1}, 0);
-    }
-    cur = (Port){sz.node, 0};
-  }
-  return cur;
-}
-
 /* --- Geometry of Interaction (GoI) Value Marshaling --- */
 static inline Port dup_hop(Net *n, Port p) {
   for (int step = 0; step < n->nn && p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP; step++) {
     if (p.port == 0) p = n->wire[p.node * 3 + 1];
     else p = n->wire[p.node * 3 + 0];
   }
+  return p;
+}
+
+/* Follow principal-to-principal through any chain of fans.  `dup_hop` is the crossing walk (it
+   reads whichever auxiliary the arriving port implies); this is the plain one readback uses when a
+   shared subterm stands for one value. */
+static inline Port skip_dup(Net *n, Port p) {
+  while (p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP) p = wire((Port){p.node, 0});
   return p;
 }
 
@@ -161,20 +152,11 @@ int net_read_bool(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM || ctor_tag(NNM(n, p.node)) != DT_BOOL) return -1;
   Port bf = wire((Port){p.node, 2});
   if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM || ctor_tag(NNM(n, bf.node)) != DT_BOOL) return -1;
-  Port cur = wire((Port){bf.node, 2});
-  for (int step = 0; step < n->nn; step++) {
-    if (cur.node < 0 || n->dead[cur.node]) return -1;
-    if (cur.node == p.node && cur.port == 1) return 1;
-    if (cur.node == bf.node && cur.port == 1) return 0;
-    if (n->tag[cur.node] == DUP) cur = wire((Port){cur.node, 0});
-    else break;
-  }
+  Port cur = skip_dup(n, wire((Port){bf.node, 2}));
+  if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
+  if (cur.node == p.node && cur.port == 1) return 1;
+  if (cur.node == bf.node && cur.port == 1) return 0;
   return -1;
-}
-
-static inline Port skip_dup(Net *n, Port p) {
-  while (p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP) p = wire((Port){p.node, 0});
-  return p;
 }
 
 /* dig the `_ffi`-closure header at LAM `lam` (shape \_ffi. \_ret. ((_ffi <fn>) <args>)) into `*a1` (fn APP) and `*argp` (`_cl`-spine) */
@@ -220,8 +202,6 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
 }
 
 static Val run_ffi(Net *n, Port p);
-
-/* arg decoding now lives in the shared net_ffi_args / std/runtime/decoder.c */
 
 /* Builtin dispatch: table rows for simple int/bool/str; side-effectors (exit) handled before the table, else dlsym. */
 #define B1(n, e) if (!strcmp(fn, n)) { v.kind = 1, v.iv = (long)(e); return v; }
@@ -332,10 +312,9 @@ Port net_alloc_bool(Net *n, int val) {
   return (Port){bt.node, 0};
 }
 
-Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k); }
+Port net_alloc_scott(Net *n, long k) { return alloc_scott_named(n, k, "_sz", "_ss"); }
 
-/* readback / IO-effect runtime + shared on-net FFI decoder live in std (not the core); included so they share this TU's statics */
-/* Lin readback / IO-effect runtime (std — not core). #included into src/io.c: value rendering, net printer, and the monadic IO/effect runner (_iod/_iop/_ior/_iow), sharing io.c's statics. */
+/* Value rendering, net printer, and the monadic IO/effect runner (_iod/_iop/_ior/_iow) — the readback half of the one runtime, beside the FFI decoder below that shares its statics. */
 
 /* render one decoded value to a stream (1=int, 2=str, 3=bool, 4=float); returns 1 if rendered, else 0 */
 static int render_val(FILE *f, Val v) {
@@ -557,7 +536,7 @@ int net_run_io(Net *n, long step_limit) {
   }
   return did_io;
 }
-/* Shared on-net decoder (std — not core): #included into src/io.c shares its statics; EXPORTED so driver plugins reuse the same arg-spine / DUP-hop walker.  A saturated `_ffi` closure is `\_ffi. \_ret. ((_ffi "lin_*") args)` with args a `_cl`-spine of scalars. */
+/* Shared on-net decoder: EXPORTED so driver plugins reuse the same arg-spine / DUP-hop walker.  A saturated `_ffi` closure is `\_ffi. \_ret. ((_ffi "lin_*") args)` with args a `_cl`-spine of scalars. */
 
 /* Deref a DUP (port 0) chain to the underlying wire; pure, no allocation. */
 Port net_dhop(Net *n, Port p) {

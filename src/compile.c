@@ -172,7 +172,7 @@ int compile(Term *t, Net *n, char *err, int errsz) {
   return 1;
 }
 
-/* E-graph AOT optimizer (std — not core): #included into src/compile.c.
+/* E-graph AOT optimizer (std — not core).
    Whole-program equality saturation over the expanded term, with sharing-aware extraction.
    This is a *pass*, not part of the calculus: it may be wrong or absent and every program still
    compiles and runs (egraph_optimize falls back to the term it was given), which is why it lives
@@ -409,8 +409,8 @@ Term *egraph_optimize(Term *t) {
   return res ? res : term_copy(t);
 }
 
-/* ---------------- .line Binary Container (lives in std; see std/runtime/line.c) ---------------- */
-/* Lin `.line` binary container runtime (std — not core): #included into src/compile.c serializes/deserializes a reduced Net to a self-running .line executable (shebang re-invokes the producing engine) */
+/* ---------------- .line Binary Container ---------------- */
+/* Serializes/deserializes a reduced Net to a self-running .line executable (shebang re-invokes the producing engine) */
 static char self_path[4096] = "lin";
 
 void lin_set_self_path(const char *p) {

@@ -429,6 +429,16 @@ int lin_materialize(Net *n, Port p, Port *out) {
   return 0;
 }
 
+/* Is (p1,p2) still one live redex?  A pair is a redex only while both ends are alive and still
+   wired to each other principal-to-principal; the wave snapshot is a snapshot, so any earlier
+   interaction in the same wave can invalidate a later pair. */
+static inline int redex_live(Net *n, Port p1, Port p2) {
+  if (p1.node < 0 || p2.node < 0 || p1.node >= n->nn || p2.node >= n->nn || p1.port || p2.port) return 0;
+  if (n->dead[p1.node] || n->dead[p2.node]) return 0;
+  return WIRE(n, p1).node == p2.node && WIRE(n, p1).port == p2.port &&
+         WIRE(n, p2).node == p1.node && WIRE(n, p2).port == p1.port;
+}
+
 /* Work-efficient frontier scratch: grown, never freed per wave (a driver may hold the
    wave for a long time, so these are file-scope and reused across waves). */
 static Pair *inter, *bound;
@@ -452,9 +462,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
     int n_int = 0, n_bnd = 0;
     for (int i = 0; i < wave_cnt; i += 2) {
       Port p1 = curr[i], p2 = curr[i + 1];
-      if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
-      if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
-      if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
+      if (!redex_live(n, p1, p2)) continue;
       int u = p1.node, v = p2.node, su = u >> 6, ok = (su == (v >> 6));
       if (ok) {
         int c[4] = { WIRE(n, ((Port){u, 1})).node, WIRE(n, ((Port){u, 2})).node,
@@ -517,20 +525,14 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
     }
     for (int i = 0; i < n_bnd; i++) {
       Port p1 = bound[i].p1, p2 = bound[i].p2;
-      if (p1.node >= 0 && p2.node >= 0 && !n->dead[p1.node] && !n->dead[p2.node] &&
-          WIRE(n, p1).node == p2.node && WIRE(n, p2).node == p1.node && !p1.port && !p2.port) {
-        if (net_interact(n, p1, p2)) *changed += 1;
-        n->steps++;
-      }
+      if (redex_live(n, p1, p2)) { if (net_interact(n, p1, p2)) *changed += 1; n->steps++; }
     }
     return;
   }
 #endif
   for (int i = 0; i < wave_cnt; i += 2) {
     Port p1 = curr[i], p2 = curr[i + 1];
-    if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
-    if (WIRE(n, p1).node != p2.node || WIRE(n, p1).port != p2.port) continue;
-    if (WIRE(n, p2).node != p1.node || WIRE(n, p2).port != p1.port || p1.port || p2.port) continue;
+    if (!redex_live(n, p1, p2)) continue;
     if (net_interact(n, p1, p2)) *changed += 1;
     n->steps++;
   }
@@ -548,7 +550,7 @@ int wave_snapshot(Net *n, Port **out, int *cap) {
 long net_reduce(Net *n, long limit) {
   /* Self-collecting nets reduce by the active list; BFS+compact reclaims memory after it doubles; waves fan out to every driver in priority order, base engine takes the remainder */
   Port *curr = NULL; int curr_cap = 0;
-  unsigned char *reach = NULL; int *q = NULL; long qcap = 0, gcmark = 1L << 20;
+  long gcmark = 1L << 20;
   /* per-driver slice buckets (rebuilt each wave) */
   Port *slices[16] = {0}; int scaps[16] = {0}, scnts[16] = {0};
   long last_drain_steps = -1; int stalled_drains = 0;   /* livelock guard for driver drain loops */
@@ -609,8 +611,7 @@ long net_reduce(Net *n, long limit) {
         act_push(n, (Port){i, 0}, n->wire[i * 3]);
     }
   }
-  (void)reach; (void)q; (void)qcap;
-  free(reach); free(q); free(curr);
+  free(curr);
   for (int di = 0; di < ndrv; di++) free(slices[di]);
   return n->steps;
 }

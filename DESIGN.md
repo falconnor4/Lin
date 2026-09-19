@@ -39,7 +39,7 @@ across threads. Confluence makes the *answer* independent of the schedule, so a 
 can only ever be a performance choice, never a semantic one.
 
 **G3 — A small, auditable, portable core.** The core is the interaction calculus and
-nothing else: **3,505 lines** across `src/` — core and runtime counted together, under one gate. It has
+nothing else: **3,458 lines** across `src/` — core and runtime counted together, under one gate. It has
 no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
 the layering claim of §2 checkable by reading it.
 
@@ -573,7 +573,7 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 55 suites / 991 assertions, oracle green, 3,505 lines across `src/`.
+- Gate: 55 suites / 991 assertions, oracle green, 3,458 lines across `src/`.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -727,6 +727,13 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
   `net_spine_args`/`net_ffi_args`/`net_dhop` walkers, but `simd.c` still parallels parts of
   the `_ffi` argument walk. A fuller consolidation would reclaim headroom against the LOC
   gate.
+- **The interpreter-side surface is the whole remaining gap to 3,000.** The REPL and `-e`
+  (`test/` never uses them), the GoI determinant benchmark (`src/goi.c` plus the `-b` report
+  that prints it) and `do_goi` are ~200 lines of capability `lin build` makes optional, since
+  the artifact is the deliverable. They are *not* dead weight — the suite's `-b`-independent
+  paths and `test/` run through the same `eval_form` — so deleting them is a product decision
+  about whether a source-level interpreter stays in the shipped binary, not a cleanup. Held
+  pending that decision rather than removed to flatter the line count.
 
 ### 11.5 Standing policy
 
@@ -764,10 +771,17 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** `src/` is **3,505 lines** — every file counted — against a 3,500-line gate (we are
-five over, so the next change has to pay for itself by deletion). The split between `.c` files and
-`runtime_*.inc` included into them is a *technical* one: those files need the core's statics (the
-container, readback and IO, the e-graph, the build driver). It is deliberately not an accounting
-trick, and earlier revisions that excluded them from the count were: the runtime grew while the
-"core" number stayed flat. What the gate protects is the calculus — four rules and nothing else — and
-the honest way to protect it is to count everything that ships.
+**Line budget.** `src/` is **3,458 lines** — every file counted, no `*.inc` anywhere — against a
+3,500-line gate, so the gate is now met. Of those lines 3,012 are code, 192 are comment-only and 254
+are blank: the comments are rule semantics and hazard records (why a guard exists, what a measured
+alternative cost), which is what makes the core auditable rather than merely small. Earlier revisions
+excluded `runtime_*.inc` files from the count; that was an accounting trick and it is gone — everything
+that ships is counted. What the gate protects is the calculus — four rules and nothing else — and the
+honest way to protect it is to count everything that ships.
+
+The stretch target is **under 3,000**. A census of the tree says the remaining ~450 lines are live
+capability, not slack: there are no dead functions (every `static` has a caller) and the last
+duplicate mechanism — a second Scott-number allocator — was deleted at 3,458. What is left on the
+interpreter side (REPL and `-e`, the GoI determinant benchmark, the `-b` report) is exactly the
+capability `lin build` makes optional, since the artifact is the deliverable; deleting it is a
+product decision recorded under §11.4, not a cleanup.

@@ -76,6 +76,26 @@ int lin_precompile_depth = 0;
    .line file and the program could never observe anything else. */
 int lin_build_depth = 0;
 
+/* The one pipeline: a term becomes a reduced net the same way in every mode — expand defines,
+   (AOT only) optimize, compile, run the core to the mode's limit.  `depth` raises the single
+   build-time marker the reduction happens under.  Returns steps run, or -1 if it did not compile. */
+enum { DEPTH_RUN = 0, DEPTH_PRECOMPILE = 1, DEPTH_BUILD = 2 };
+static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, int *compiled, char *err, int errsz) {
+  Term *ex = expand_defs(t);
+  Term *opt = optimize ? egraph_optimize(ex) : ex;
+  int ok = compile(opt, net, err, errsz);
+  if (opt != ex) term_free(opt);
+  if (!ok) { term_free(ex); return -1; }
+  if (compiled) *compiled = net->nn;
+  if (depth == DEPTH_PRECOMPILE) lin_precompile_depth++;
+  else if (depth == DEPTH_BUILD) lin_build_depth++;
+  long steps = net_reduce(net, limit);
+  if (depth == DEPTH_PRECOMPILE) lin_precompile_depth--;
+  else if (depth == DEPTH_BUILD) lin_build_depth--;
+  term_free(ex);
+  return steps;
+}
+
 /* Non-recursive define: evaluate once and cache the reduced net so each reference clones it; recursive/too-big bodies keep the textual path. */
 static void def_precompile(Def *d) {
   /* A build-time decision, not a rule: a candidate may ask for every define to stay textual. */
@@ -83,20 +103,14 @@ static void def_precompile(Def *d) {
   if (d->comp_tried) return;
   d->comp_tried = 1;
   if (d->rec) return;
-  char err[512]; Term *ex = expand_defs(d->term);
-  Net src; net_init(&src, 1 << 14);
-  if (!compile(ex, &src, err, sizeof err)) { net_free(&src); term_free(ex); return; }
-  lin_precompile_depth++;
-  src.driver_pending = 0;
-  long full = net_reduce(&src, STEP_LIMIT);
-  lin_precompile_depth--;
-  if (full >= STEP_LIMIT) { net_free(&src); term_free(ex); return; }
+  char err[512]; Net src; net_init(&src, 1 << 14);
+  long full = reduce_term(d->term, &src, 0, DEPTH_PRECOMPILE, STEP_LIMIT, NULL, err, sizeof err);
   /* A driver that claimed a redex it could not materialise here leaves the body not-a-value: β went on to destroy
      a closure the driver would have folded, so the baked net is broken for composed use.  Decline the cache and
      keep the def textual.  Once Move 3 chooses precompile-vs-textual AOT this try-and-decline becomes a decision
      made up front; the *signal* stays the same generic one, so no driver policy leaks into the core either way. */
-  if (lin_any_pending(&src)) { net_free(&src); term_free(ex); return; }
-  d->compiled = net_copy(&src); net_free(&src); term_free(ex);
+  if (full < 0 || full >= STEP_LIMIT || lin_any_pending(&src)) { net_free(&src); return; }
+  d->compiled = net_copy(&src); net_free(&src);
 }
 
 static Term *expand(Term *t, Guard *g) {
@@ -499,7 +513,7 @@ static int load_file(const char *path) {
   return 1;
 }
 
-/* AOT decision search (std — not core): #included into src/main.c.
+/* AOT decision search (std — not core).
  *
  * The artifact is the deliverable, so a build-time decision is made by building the candidates and
  * measuring them, not by a pass order someone fixed earlier.  Two numbers decide: the work the
@@ -561,34 +575,26 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   memset(st, 0, sizeof *st);
   aot_apply_cand(c);
   aot_reset_defs(c->rec_k);
-  Term *ex = expand_defs(build_term);
-  Term *opt = egraph_optimize(ex);
   Net net; net_init(&net, 1 << 16);
-  if (!compile(opt, &net, err, sizeof err)) {
-    fprintf(stderr, "error: %s\n", err);
-    net_free(&net); term_free(opt); term_free(ex);
-    return 0;
-  }
-  st->compiled = net.nn;
   /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  net_reduce
      is stuck exactly at an IO effect or a non-pure FFI closure, so the artifact keeps the work that
      genuinely needs the runtime and `net_run_io` still finds its continuation intact. */
-  lin_build_depth++;
-  st->aot_steps = (int)net_reduce(&net, AOT_STEP_LIMIT);
-  lin_build_depth--;
-  st->residual = net.nn;
+  long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
+  if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
+  st->aot_steps = (int)baked; st->residual = net.nn;
   net_gc(&net);
-  if (!net_save_line(&net, out_f)) { net_free(&net); term_free(opt); term_free(ex); return 0; }
+  if (!net_save_line(&net, out_f)) { net_free(&net); return 0; }
   FILE *f = fopen(out_f, "rb");
   if (f) { fseek(f, 0, SEEK_END); st->bytes = ftell(f); fclose(f); }
   Net run;
+  st->rsteps = -1;
   if (net_load_line(&run, out_f)) {
     lin_build_depth++;
     st->rsteps = net_reduce(&run, AOT_STEP_LIMIT);
     lin_build_depth--;
     net_free(&run);
-  } else st->rsteps = -1;
-  net_free(&net); term_free(opt); term_free(ex);
+  }
+  net_free(&net);
   st->ok = 1;
   return 1;
 }
@@ -641,8 +647,7 @@ static int do_build(const char *in_f, const char *out_f) {
   if (!build_term) { fprintf(stderr, "error: no expression to build in '%s'\n", in_f); return 1; }
   char err[512]; Scheme sch;
   if (!type_check(build_term, &sch, err, sizeof err)) { fprintf(stderr, "error: %s\n", err); return 1; }
-  /* The pipeline and the candidate search live in std (runtime_aot.inc): the artifact is the
-     deliverable, so the decisions are the ones the measurements choose. */
+  /* The artifact is the deliverable, so the build's decisions are the ones the measurements choose. */
   int rc = aot_search(build_term, out_f);
   term_free(build_term);
   building = 0; build_term = NULL;
