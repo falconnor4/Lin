@@ -22,11 +22,19 @@ typedef struct Term {
 enum { LAM, APP, DUP, ERA, ROOT };
 
 typedef struct { int node:30; unsigned int port:2; } Port;
-typedef union { uint64_t raw; struct { uint64_t is_heap:1, len:6, bits:57; } sso; struct { uint64_t is_heap:1, len:31, off:32; } heap; } Scope;
+/* A gauge is a LEVEL, held as an id into the net's level trie (0 = the term root).  Interning
+   makes equal paths equal ids net-wide, so equality is an integer compare, the meet is the
+   lowest common ancestor, and "nested inside" is a walk up the trie.  Nothing spills to a side
+   table, so a 300-step path costs exactly what a 3-step path does. */
+typedef uint32_t Scope;
 
 typedef struct {
   int cap, nn; unsigned char *tag; Port *wire; Scope *scope; char **name;
-  Port *act; int atop, actcap; unsigned char *dead; uint64_t *sca; int sccap, scn;
+  Port *act; int atop, actcap; unsigned char *dead;
+  /* level trie: lv_parent[l]/lv_bit[l] are the trie edge into level l (1 and 2 are term
+     branches, 0 is the knot namespace, which no term path can occupy); nlv is its size */
+  int *lv_parent, *lv_depth, *lv_hash, nlv, lvcap, lv_hcap;
+  unsigned char *lv_bit;
   long steps;
   /* A driver claims a redex it cannot materialise yet (operands not concrete, or an open precompile body) and
      reports it here.  The core never interprets the reason — it only uses it to know the net is not a value, so
@@ -45,12 +53,14 @@ Net *net_copy(const Net *n); Scope scope_nil(void);
 /* reclaim every node not reachable from ROOT (identity-preserving; safe at any point a
    net is a value or a residual -- the AOT build compacts before serialising) */
 void net_gc(Net *n);
-/* drop gauge-table entries no live node references (call before serialising: the container
-   stores the whole table, and an AOT evaluation leaves far more gauges than live nodes) */
-void net_trim_scopes(Net *n);
 int scope_eq(Net *n, Scope a, Scope b);
-Scope scope_prefix(Net *n, Scope lvl, Scope s);
-Scope scope_from_bits(Net *n, const uint64_t *bits, int len);
+Scope scope_app(Net *n, Scope s, int bit);   /* one step deeper */
+Scope scope_meet(Net *n, Scope a, Scope b);   /* lowest common ancestor */
+int scope_within(Net *n, Scope a, Scope b);   /* a is a proper ancestor of b */
+/* place `s` (a level in `src`) under `lvl` in `n`: what a spliced clone's gauges need */
+Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s);
+int net_level_count(const Net *n);
+void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit);
 
 /* ---------------- driver ABI ---------------- */
 /* Drivers reduce a redex *class*; core waves fan out to each in priority order, each claiming the redexes it handles.

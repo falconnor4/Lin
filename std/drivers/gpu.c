@@ -382,8 +382,7 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
      the two fans (Lafont's delta-delta rule), which the kernel does not
      implement, so those redexes must be left to the base engine. */
   if (t1 == DUP && t2 == DUP)
-    return scope_eq(n, n->scope[p1.node], n->scope[p2.node]) &&
-           !(n->scope[p1.node].sso.is_heap || n->scope[p2.node].sso.is_heap);
+    return scope_eq(n, n->scope[p1.node], n->scope[p2.node]);
   return 0;                                              /* commute / erase */
 }
 
@@ -445,7 +444,7 @@ static int gpu_reduce(Net *n, Port *redexes, int nred, long limit, int *changed)
     uint32_t *wires = (uint32_t *)g_wires.map;
     uint64_t *scopes = (uint64_t *)g_scopes.map;
     for (int i = 0; i < n->nn; i++) {
-      tags[i] = n->tag[i]; deads[i] = n->dead[i]; scopes[i] = n->scope[i].raw;
+      tags[i] = n->tag[i]; deads[i] = n->dead[i]; scopes[i] = (uint64_t)n->scope[i];
       for (int p = 0; p < 3; p++) {
         Port w = n->wire[i*3+p];
         wires[i*3+p] = w.node < 0 ? 0x3fffffffu : ((uint32_t)(w.node & 0x3fffffff) | (w.port << 30));

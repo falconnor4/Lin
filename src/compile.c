@@ -62,25 +62,11 @@ static Port dup_tree(Port *ts, int nts, Scope sc) {
    nested inside it, so scope_meet is a genuine common ancestor (what a fan that meets its own
    copy around a cycle needs).  The unique markers this replaces built words newest-first, so
    their meet compared counter bits and carried no ancestry at all. */
-static uint64_t *cpath; static int cpath_len, cpath_cap;
-static void cpath_push(uint64_t b) {
-  if (cpath_len >= cpath_cap) {
-    cpath_cap = cpath_cap ? cpath_cap * 2 : 1024;
-    cpath = realloc(cpath, sizeof(uint64_t) * (size_t)cpath_cap);
-  }
-  cpath[cpath_len++] = b;
-}
+static Scope cur_lvl;      /* the level of the position being compiled; 0 = the term root */
 /* the sharing point at the current position; `bit` steps one level in first (a binder's fan
-   sits just inside its binder, so it is gauged at the body's path) */
-static Scope fan_lvl(void) { return scope_from_bits(N, cpath, cpath_len); }
-static Scope fan_lvl_at(int bit) { cpath_push((uint64_t)(bit & 1)); Scope s = fan_lvl(); cpath_len--; return s; }
-
-/* Rebuild a source-net scope in the target gauge table; heap-backed ones re-register bit-by-bit into N->sca. */
-static Scope sc_rebuild(Net *d, int i) {
-  Scope s = d->scope[i];
-  if (!s.sso.is_heap) return s;
-  return scope_from_bits(N, d->sca + s.heap.off, (int)s.heap.len);
-}
+   sits just inside its binder, so it is gauged at the body's level) */
+static Scope fan_lvl(void) { return cur_lvl; }
+static Scope fan_lvl_at(int bit) { return scope_app(N, cur_lvl, bit); }
 
 /* Clone a pre-reduced define value (closed normal-form net) into N; cut the source ROOT<->value clamp so the clone ties only to the caller.  The clone is
    re-gauged at a fresh level: the body's fans were labelled during its own
@@ -91,7 +77,9 @@ static Port ct_splice(Def *d, Scope sc) {
   Net *s = d->compiled;
   Scope lvl = fan_lvl();
   int n = s->nn, *map = malloc(sizeof(int) * (size_t)(n ? n : 1));
-  for (int i = 0; i < n; i++) map[i] = net_alloc(N, s->tag[i], scope_prefix(N, lvl, sc_rebuild(s, i)), s->name[i]).node;
+  for (int i = 0; i < n; i++) {
+    map[i] = net_alloc(N, s->tag[i], scope_rebase(N, s, lvl, s->scope[i]), s->name[i]).node;
+  }
   Port val = s->wire[0]; int vn = val.node;
   for (int i = 0; i < n; i++) {
     if (s->dead[i]) continue;
@@ -127,9 +115,10 @@ static Port ct(Term *t, Scope sc) {
     Scope lvl = fan_lvl_at(1);
     push_var(t->name, (Port){self.node, 1});
     int my = csp - 1;
-    cpath_push(1);
+    Scope save = cur_lvl;
+    cur_lvl = scope_app(N, cur_lvl, 1);
     Port body = ct(t->l, sc);
-    cpath_len--;
+    cur_lvl = save;
     net_link(N, (Port){self.node, 2}, body, 0);
     CVar *e = &cstack[my];
     if (e->count == 0) {
@@ -151,15 +140,15 @@ static Port ct(Term *t, Scope sc) {
     return self;
   }
   case TAPP: {
+    /* the child compiles and their links stay interleaved exactly as before: the active-list
+       order a compile produces is part of the observable schedule (driver folds key off it) */
     Port a = net_alloc(N, APP, fan_lvl(), "");
-    cpath_push(1);
-    Port fn = ct(t->l, sc);
-    cpath_len--;
-    net_link(N, (Port){a.node, 0}, fn, 1);
-    cpath_push(2);
-    Port x = ct(t->r, sc);
-    cpath_len--;
-    net_link(N, (Port){a.node, 2}, x, 1);
+    Scope save = cur_lvl;
+    cur_lvl = scope_app(N, cur_lvl, 1);
+    net_link(N, (Port){a.node, 0}, ct(t->l, sc), 1);
+    cur_lvl = scope_app(N, save, 2);
+    net_link(N, (Port){a.node, 2}, ct(t->r, sc), 1);
+    cur_lvl = save;
     return (Port){a.node, 1};
   }
   case TDEF: {
@@ -172,7 +161,7 @@ static Port ct(Term *t, Scope sc) {
 }
 
 int compile(Term *t, Net *n, char *err, int errsz) {
-  N = n; csp = 0; cpath_len = 0;
+  N = n; csp = 0; cur_lvl = 0;
   if (!cstack) { ccsp = 64; cstack = malloc((size_t)ccsp * sizeof(CVar)); }
   if (setjmp(CJ)) {
     snprintf(err, errsz, "%s", CMSG);

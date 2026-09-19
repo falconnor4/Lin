@@ -70,12 +70,12 @@ run_test() {
 printf "Running Lin Confluence & Stability Test Suite against %s\n" "$LIN_BIN"
 
 printf "[Tier 1: Core Interaction Calculus & Primitives]\n"
-for f in test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/adt_types.lin test/loop.lin; do
+for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/adt_types.lin test/loop.lin; do
   run_test "$f"
 done
 
 printf "[Tier 2: Foreign Function Interface & System Drivers]\n"
-for f in test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin test/gpu_dispatch.lin test/unison.lin test/simd_fold.lin; do
+for f in test/float_share.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin test/gpu_dispatch.lin test/unison.lin test/simd_fold.lin; do
   run_test "$f"
 done
 
@@ -138,6 +138,11 @@ for spec in "test/line_binary.lin:LINE_BINARY_OK: 43" "test/line_ffi.lin:FFI_LIN
   line=$((line_total + 1))
   "$LIN_BIN" build "$src" -o "$TMP_DIR/$name.line"
   lok=1
+  # An artifact is a deliverable: its size is a first-class invariant.  Gauge representation
+  # once inflated these files 27x (a level bit-word spilling to a per-net table) and no value
+  # test noticed, so the container tier asserts a bound as well.
+  sz=$(wc -c < "$TMP_DIR/$name.line")
+  [ "$sz" -le 300000 ] || { echo "FAIL: $name.line is $sz bytes (bound 300000)"; lok=0; }
   [ -x "$TMP_DIR/$name.line" ] || { echo "FAIL: $name.line not executable"; lok=0; }
   head -n 1 "$TMP_DIR/$name.line" | grep -q '^#!' || { echo "FAIL: $name.line missing shebang"; lok=0; }
   out1=$("$LIN_BIN" "$TMP_DIR/$name.line")

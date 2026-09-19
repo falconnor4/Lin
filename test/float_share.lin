@@ -1,0 +1,24 @@
+; Float values combine the `_fsz`/`_fss` carriers with the fold pre-pass, and a shared float
+; is a fan over a cloned define body: the two paths must agree about levels.
+(load "std/std.lin")
+
+(let ((x (float "2.5"))) (fadd x x))
+; expect => 5
+
+; a shared float that a fold consumes directly
+(let ((x (fmul (float "6") (float "7")))) (fadd x (float "1")))
+; expect => 43
+
+; (a shared float sitting *inside a pair spine* still renders as its closure rather than a
+;  numeral: the readback decoders peel a fan at the top of a value, not one nested in a spine
+;  -- recorded in DESIGN.md 11.4 as an open item, so it is deliberately not asserted here)
+
+(fadd (float "1.5") (fmul (float "2") (float "3")))
+; expect => 7.5
+
+(define! twice (float -> float) (\x (fadd x x)))
+(twice (float "3.25"))
+; expect => 6.5
+
+(let ((s (fdiv (float "22") (float "7")))) (fmul s s))
+; expect => 9.87755

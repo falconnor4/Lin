@@ -9,137 +9,140 @@
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
 #define NONE ((Port){-1, 0})
 
-static inline int scope_len(Scope s) { return s.sso.is_heap ? (int)s.heap.len : (int)s.sso.len; }
-static inline int scope_bit(const Net *n, Scope s, int i) {
-  return s.sso.is_heap ? (int)n->sca[s.heap.off + i] : (int)((s.sso.bits >> i) & 1);
+Scope scope_nil(void) { return 0; }
+
+static int in_parallel;   /* a wave is running threaded: no interning there (see below) */
+
+/* ---------------- the level trie ----------------
+   A level is a position in the term: the sequence of branches taken from the root.  Interning
+   that sequence as a trie node makes four operations cheap and exact:
+     equality   -> the same id
+     meet       -> the lowest common ancestor (LCA)
+     nesting    -> walk up from the deeper level
+     extension  -> intern (parent, branch)
+   and it makes representation free: one int per node, one edge per distinct path, whether the
+   path is 3 steps or 300.  The bit-word/heap-table union this replaces spilled long gauges to a
+   side table -- 444,380 entries, 97% of a built artifact, for one test program. */
+static void lv_ensure(Net *n, int need) {
+  if (need <= n->lvcap) return;
+  int nc = n->lvcap ? n->lvcap * 2 : 256;
+  while (nc < need) nc *= 2;
+  n->lv_parent = realloc(n->lv_parent, (size_t)nc * sizeof(int));
+  n->lv_depth = realloc(n->lv_depth, (size_t)nc * sizeof(int));
+  n->lv_bit = realloc(n->lv_bit, (size_t)nc);
+  n->lvcap = nc;
 }
-Scope scope_nil(void) { Scope s; s.raw = 0; return s; }
-
-#define MAX_SC_CAP (1 << 28)
-
-static int in_parallel;
-static void sc_ensure_cap(Net *n, int need) {
-  if (need <= n->sccap) return;
-  int nc = n->sccap ? n->sccap * 2 : 256;
-  while (nc < need && nc > 0 && nc < MAX_SC_CAP) nc *= 2;
-  if (nc <= 0 || nc > MAX_SC_CAP) nc = (need > MAX_SC_CAP) ? need : MAX_SC_CAP;
-  uint64_t *new_sca = realloc(n->sca, (size_t)nc * sizeof(uint64_t));
-  if (!new_sca) {
-    fprintf(stderr, "error: scope gauge capacity limit exceeded\n");
-    exit(1);
+/* the table must stay at most half full, or the probe below never finds an empty slot */
+static int lv_hcap_for(int entries) {
+  int cap = 1024;
+  while (cap < (entries + 1) * 2) { if (cap > (1 << 30)) break; cap *= 2; }
+  return cap;
+}
+static void lv_rehash(Net *n, int cap) {
+  n->lv_hcap = cap;
+  n->lv_hash = realloc(n->lv_hash, (size_t)cap * sizeof(int));
+  memset(n->lv_hash, 0, (size_t)cap * sizeof(int));
+  for (int l = 1; l < n->nlv; l++) {
+    unsigned h = ((unsigned)n->lv_parent[l] * 2654435761u + (unsigned)n->lv_bit[l]) & (unsigned)(cap - 1);
+    while (n->lv_hash[h]) h = (h + 1) & (unsigned)(cap - 1);
+    n->lv_hash[h] = l;
   }
-  n->sca = new_sca; n->sccap = nc;
 }
-
-static int sc_alloc(Net *n, int len) {
-  if (len < 0 || n->scn > 0x7fffffff - len) return 0;
-  if (!in_parallel) sc_ensure_cap(n, n->scn + len);
-  return __atomic_fetch_add(&n->scn, len, __ATOMIC_RELAXED);
-}
-
-/* The meet of two gauges: their longest common prefix, i.e. the level the two sharing
-   points genuinely share.  Gauge words are paths built root-first (scope_app), so this is a
-   real common ancestor rather than a longest common prefix of two arbitrary markers. */
-static Scope scope_meet(Net *n, Scope a, Scope b) {
-  int la = scope_len(a), lb = scope_len(b), l = la < lb ? la : lb, k = 0;
-  while (k < l && scope_bit(n, a, k) == scope_bit(n, b, k)) k++;
-  if (k == 0) return scope_nil();
-  if (k <= 57) {
-    Scope r; r.raw = 0; r.sso.len = (uint64_t)k; r.sso.bits = 0;
-    for (int i = 0; i < k; i++) r.sso.bits |= (uint64_t)scope_bit(n, a, i) << i;
-    return r;
+static int lv_intern(Net *n, int parent, int bit) {
+  if (!n->lv_hcap) lv_rehash(n, lv_hcap_for(n->nlv));
+  if ((n->nlv + 1) * 2 > n->lv_hcap) lv_rehash(n, n->lv_hcap * 2);
+  unsigned h = ((unsigned)parent * 2654435761u + (unsigned)bit) & (unsigned)(n->lv_hcap - 1);
+  while (n->lv_hash[h]) {
+    int l = n->lv_hash[h];
+    if (n->lv_parent[l] == parent && n->lv_bit[l] == (unsigned char)bit) return l;
+    h = (h + 1) & (unsigned)(n->lv_hcap - 1);
   }
-  int off = sc_alloc(n, k);
-  for (int i = 0; i < k; i++) n->sca[off + i] = (uint64_t)scope_bit(n, a, i);
-  Scope r; r.raw = 0; r.heap.is_heap = 1; r.heap.len = (uint64_t)k; r.heap.off = (uint64_t)off;
-  return r;
+  if (n->nlv + 1 > n->lvcap) lv_ensure(n, n->nlv + 1);
+  int l = ++n->nlv;                    /* ids start at 1; 0 is the root */
+  n->lv_parent[l] = parent; n->lv_bit[l] = (unsigned char)bit;
+  n->lv_depth[l] = parent ? n->lv_depth[parent] + 1 : 1;
+  n->lv_hash[h] = l;
+  return l;
+}
+static int lv_depth(Net *n, int l) { return l ? n->lv_depth[l] : 0; }
+static int lv_up(Net *n, int l) { return l ? n->lv_parent[l] : 0; }
+
+Scope scope_app(Net *n, Scope s, int bit) { return (Scope)lv_intern(n, (int)s, bit & 1); }
+#define MAX_SCOPE_STEPS (1 << 16)
+
+Scope scope_meet(Net *n, Scope a, Scope b) {
+  int guard = n->nlv + 2;
+  while (lv_depth(n, a) > lv_depth(n, b)) { a = (Scope)lv_up(n, a); if (--guard < 0) goto bad; }
+  while (lv_depth(n, b) > lv_depth(n, a)) { b = (Scope)lv_up(n, b); if (--guard < 0) goto bad; }
+  while (a != b) { a = (Scope)lv_up(n, a); b = (Scope)lv_up(n, b); if (--guard < 0) goto bad; }
+  return a;
+bad:
+  return 0;
 }
 
-/* Build a scope from a bit array in ONE allocation (SSO when short).  The
-   per-bit scope_ext loop it replaces allocated once per bit for words past the
-   SSO limit, which dominated compile time on long gauge words. */
-Scope scope_from_bits(Net *n, const uint64_t *bits, int len) {
-  if (len <= 57) {
-    Scope r; r.raw = 0; r.sso.len = (uint64_t)len;
-    for (int i = 0; i < len; i++) r.sso.bits |= (uint64_t)(bits[i] & 1) << i;
-    return r;
+int scope_within(Net *n, Scope a, Scope b) {
+  if (!a || a == b) return 0;
+  int d = lv_depth(n, b) - lv_depth(n, a);
+  if (d <= 0) return 0;
+  int x = (int)b;
+  while (d-- > 0) x = lv_up(n, x);
+  return (Scope)x == a;
+}
+
+int scope_eq(Net *n, Scope a, Scope b) { (void)n; return a == b; }
+
+/* a grow-only path buffer: the steps from the root down to a level */
+static unsigned char *lv_path; static int lv_pathcap;
+static unsigned char *lv_path_reserve(int d) {
+  if (d > lv_pathcap) { lv_pathcap = d * 2 + 16; lv_path = realloc(lv_path, (size_t)lv_pathcap); }
+  return lv_path;
+}
+
+Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s) {
+  /* A level id is local to its net's trie, so a clone's levels must always be re-interned into
+     the target -- even when the clone sits at the root level.  (Bit-words could be copied
+     across nets verbatim; ids cannot, and doing so silently produced ids that do not exist in
+     the target trie.)  result = lvl ++ path_of(s) */
+  int cur = (int)lvl;
+  if (!s) return (Scope)cur;
+  int d = src->lv_depth[s];
+  unsigned char *p = lv_path_reserve(d);
+  int l = (int)s;
+  for (int i = d - 1; i >= 0; i--) { p[i] = src->lv_bit[l]; l = src->lv_parent[l]; }
+  for (int i = 0; i < d; i++) cur = lv_intern(n, cur, p[i]);
+  return (Scope)cur;
+}
+
+/* the container hands the trie back in id order (parents precede children) */
+void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit) {
+  if (nlv <= 0) return;
+  lv_ensure(n, nlv + 1);
+  n->nlv = nlv;
+  n->lv_parent[0] = 0; n->lv_bit[0] = 0; n->lv_depth[0] = 0;
+  for (int l = 1; l <= nlv; l++) {
+    n->lv_parent[l] = parent[l - 1]; n->lv_bit[l] = bit[l - 1];
+    n->lv_depth[l] = n->lv_parent[l] ? n->lv_depth[n->lv_parent[l]] + 1 : 1;
   }
-  int off = sc_alloc(n, len);
-  for (int i = 0; i < len; i++) n->sca[off + i] = bits[i] & 1;
-  Scope r; r.raw = 0; r.heap.is_heap = 1; r.heap.len = (uint64_t)len; r.heap.off = (uint64_t)off;
-  return r;
+  lv_rehash(n, lv_hcap_for(nlv));
 }
 
-/* s ++ [bit]: one step deeper along a gauge path.  A gauge is a LEVEL -- the path of branch
-   choices from the term root to the sharing point, stored root-first -- so an enclosing
-   point's word is a prefix of everything nested inside it and scope_meet is a real ancestor. */
-Scope scope_app(Net *n, Scope s, int bit) {
-  int ls = scope_len(s);
-  if (ls + 1 <= 57 && !s.sso.is_heap) {
-    Scope r; r.raw = 0; r.sso.len = (uint64_t)(ls + 1);
-    r.sso.bits = s.sso.bits | ((uint64_t)(bit & 1) << ls);
-    return r;
-  }
-  int off = sc_alloc(n, ls + 1);
-  for (int i = 0; i < ls; i++) n->sca[off + i] = (uint64_t)scope_bit(n, s, i);
-  n->sca[off + ls] = (uint64_t)(bit & 1);
-  Scope r; r.raw = 0; r.heap.is_heap = 1; r.heap.len = (uint64_t)(ls + 1); r.heap.off = (uint64_t)off;
-  return r;
-}
-
-/* a ++ b */
-static Scope scope_concat(Net *n, Scope a, Scope b) {
-  int la = scope_len(a), lb = scope_len(b), total = la + lb;
-  if (!lb) return a;
-  if (!la) return b;
-  if (total <= 57 && !a.sso.is_heap && !b.sso.is_heap) {
-    Scope r; r.raw = 0; r.sso.len = (uint64_t)total;
-    r.sso.bits = a.sso.bits | (b.sso.bits << la);
-    return r;
-  }
-  int off = sc_alloc(n, total);
-  for (int i = 0; i < la; i++) n->sca[off + i] = (uint64_t)scope_bit(n, a, i);
-  for (int i = 0; i < lb; i++) n->sca[off + la + i] = (uint64_t)scope_bit(n, b, i);
-  Scope r; r.raw = 0; r.heap.is_heap = 1; r.heap.len = (uint64_t)total; r.heap.off = (uint64_t)off;
-  return r;
-}
-
-/* lvl ++ s: place a cloned body's gauge under the level of the site that cloned it, so two
-   clones of one define sit at different paths.  A nil level leaves `s` untouched. */
-Scope scope_prefix(Net *n, Scope lvl, Scope s) {
-  return scope_concat(n, lvl, s);
-}
-
-/* 1 if `a` is a proper prefix of `b`: `a` is the shallower level and `b` is nested inside it.
-   Gauge words are stored root-first, so this is plain prefix order on paths, i.e. "one sharing
-   point encloses the other". */
-static int scope_within(Net *n, Scope a, Scope b) {
-  int la = scope_len(a), lb = scope_len(b);
-  if (la >= lb) return 0;
-  for (int i = 0; i < la; i++) if (scope_bit(n, a, i) != scope_bit(n, b, i)) return 0;
-  return 1;
-}
-
-int scope_eq(Net *n, Scope a, Scope b) {
-  if (a.raw == b.raw) return 1;
-  if (!a.sso.is_heap && !b.sso.is_heap) return 0;
-  int la = scope_len(a), lb = scope_len(b);
-  if (la != lb) return 0;
-  if (!la) return 1;
-  for (int i = 0; i < la; i++) if (scope_bit(n, a, i) != scope_bit(n, b, i)) return 0;
-  return 1;
-}
+int net_level_count(const Net *n) { return n->nlv; }
 
 void net_init(Net *n, int cap) {
   n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
   n->scope = malloc(cap * sizeof(Scope)); n->name = calloc(cap, sizeof(char *));
   n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
-  n->sca = NULL; n->sccap = 0; n->scn = 0; n->nn = 0; n->steps = 0; n->driver_pending = 0;
+  n->lv_parent = NULL; n->lv_depth = NULL; n->lv_bit = NULL; n->lv_hash = NULL;
+  n->nlv = 0; n->lvcap = 0; n->lv_hcap = 0;
+  lv_ensure(n, 1);                      /* the root level always exists */
+  n->lv_parent[0] = 0; n->lv_bit[0] = 0; n->lv_depth[0] = 0;
+  n->nn = 0; n->steps = 0; n->driver_pending = 0;
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
 void net_free(Net *n) {
-  free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->sca);
+  free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead);
+  free(n->lv_parent); free(n->lv_depth); free(n->lv_bit); free(n->lv_hash);
   if (n->name) { for (int i = 0; i < n->nn; i++) free(n->name[i]); free(n->name); }
 }
 
@@ -349,46 +352,6 @@ int net_interact(Net *n, Port p1, Port p2) {
    ~2x LARGER than the un-evaluated one (474 KB vs 224 KB) despite being a value. */
 static void net_compact(Net *n, const unsigned char *reach);   /* fwd */
 
-/* Drop gauge-table entries no live node references.
-   The `.line` container serialises the WHOLE gauge table, and an AOT evaluation leaves it
-   enormous: a program that merely *references* a recursive def at depth 0 -- never
-   recursing at all -- compacted to 3 nodes and still shipped a 423,502-byte artifact, of
-   which 423,360 bytes (52,920 entries) was dead gauge data against 66 bytes of actual net.
-   Those gauges are the k-unrolled recursion levels' levels: the reduction erased the nodes,
-   and `net_gc` drops the nodes, but nothing ever dropped their gauges.
-   Ranges are copied in order, so a referenced range stays contiguous and remapping its
-   start is enough. */
-void net_trim_scopes(Net *n) {
-  if (n->scn <= 0 || !n->sca) return;
-  unsigned char *used = calloc((size_t)n->scn, 1);
-  int *remap = malloc((size_t)n->scn * sizeof(int));
-  if (!used || !remap) { free(used); free(remap); return; }
-  /* Mark for EVERY node, dead ones included: a node left holding a stale offset would
-     point past the trimmed table.  (The AOT path compacts first, so there are no dead
-     nodes left to pay for this by then.) */
-  for (int i = 0; i < n->nn; i++) {
-    Scope s = n->scope[i];
-    if (!s.sso.is_heap) continue;                       /* lives in the inline 57 bits */
-    int off = (int)s.heap.off, len = (int)s.heap.len;
-    if (off < 0 || len <= 0 || off + len > n->scn) { n->scope[i] = scope_nil(); continue; }
-    memset(used + off, 1, (size_t)len);
-  }
-  int w = 0;
-  for (int i = 0; i < n->scn; i++) {
-    if (used[i]) { remap[i] = w; n->sca[w++] = n->sca[i]; }
-    else remap[i] = -1;
-  }
-  for (int i = 0; i < n->nn; i++) {
-    Scope s = n->scope[i];
-    if (!s.sso.is_heap) continue;
-    int off = (int)s.heap.off;
-    if (off < 0 || off >= n->scn || remap[off] < 0) { n->scope[i] = scope_nil(); continue; }
-    n->scope[i].heap.off = (uint64_t)remap[off];
-  }
-  n->scn = w;
-  free(used); free(remap);
-}
-
 void net_gc(Net *n) {
   if (n->nn <= 1) return;
   unsigned char *reach = malloc((size_t)n->nn + 1);
@@ -485,7 +448,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       inter = realloc(inter, (size_t)np * sizeof(Pair));
       bound = realloc(bound, (size_t)np * sizeof(Pair));
     }
-    int n_int = 0, n_bnd = 0, sc_need = 0;
+    int n_int = 0, n_bnd = 0;
     for (int i = 0; i < wave_cnt; i += 2) {
       Port p1 = curr[i], p2 = curr[i + 1];
       if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) continue;
@@ -497,9 +460,12 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
                      WIRE(n, ((Port){v, 1})).node, WIRE(n, ((Port){v, 2})).node };
         for (int k = 0; k < 4; k++) if (c[k] >= 0 && (c[k] >> 6) != su) { ok = 0; break; }
       }
+      /* gamma-delta allocates level ids, and interning writes the net's shared trie, so those
+         pairs run in the serial phase (they were the reason the old code reserved gauge space
+         up front); the rest of the batch stays parallel. */
+      if (ok && n->tag[u] == DUP && n->tag[v] != DUP) ok = 0;
+      if (ok && n->tag[v] == DUP && n->tag[u] != DUP) ok = 0;
       if (ok) inter[n_int++] = (Pair){p1, p2}; else bound[n_bnd++] = (Pair){p1, p2};
-      int lu = scope_len(n->scope[u]), lv = scope_len(n->scope[v]);
-      if (1 + lu + lv > 57 || n->scope[u].sso.is_heap || n->scope[v].sso.is_heap) sc_need += 2 * (1 + lu + lv);
     }
     if (n_int > 0) {
       /* Work-efficient frontier.  The previous form allocated and memset a sector table
@@ -532,7 +498,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
         if (fw_slot[h] < 0) { fw_slot[h] = i; fw_next[i] = -1; fw_occ[n_occ++] = (int)h; }
         else { fw_next[i] = fw_slot[h]; fw_slot[h] = i; }
       }
-      net_ensure_cap(n, n->nn + n_int * 4); sc_ensure_cap(n, n->scn + sc_need);
+      net_ensure_cap(n, n->nn + n_int * 4);
       in_parallel = 1; int batch_changed = 0;
       #pragma omp parallel for reduction(+:batch_changed) schedule(dynamic)
       for (int oi = 0; oi < n_occ; oi++) {
@@ -656,8 +622,14 @@ Net *net_copy(const Net *n) {
   c->name = calloc(c->cap, sizeof(char *));
   for (int i = 0; i < n->nn; i++) if (n->name[i]) c->name[i] = strdup(n->name[i]);
   c->dead = malloc(c->cap); memcpy(c->dead, n->dead, c->cap);
-  c->sca = n->scn ? malloc((size_t)n->scn * sizeof(uint64_t)) : NULL;
-  if (n->scn) memcpy(c->sca, n->sca, (size_t)n->scn * sizeof(uint64_t));
+  c->nlv = n->nlv; c->lvcap = n->nlv + 1; c->lv_hcap = 0; c->lv_hash = NULL;
+  c->lv_parent = malloc((size_t)(n->nlv + 1) * sizeof(int));
+  c->lv_depth = malloc((size_t)(n->nlv + 1) * sizeof(int));
+  c->lv_bit = malloc((size_t)(n->nlv + 1));
+  memcpy(c->lv_parent, n->lv_parent, (size_t)(n->nlv + 1) * sizeof(int));
+  memcpy(c->lv_depth, n->lv_depth, (size_t)(n->nlv + 1) * sizeof(int));
+  memcpy(c->lv_bit, n->lv_bit, (size_t)(n->nlv + 1));
+  lv_rehash(c, lv_hcap_for(c->nlv));
   c->act = NULL; c->actcap = c->atop = 0; c->steps = 0; c->driver_pending = 0;
   return c;
 }

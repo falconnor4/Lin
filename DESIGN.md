@@ -33,7 +33,7 @@ across threads. Confluence makes the *answer* independent of the schedule, so a 
 can only ever be a performance choice, never a semantic one.
 
 **G3 — A small, auditable, portable core.** The core is the interaction calculus and
-nothing else: 2,932 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
+nothing else: 2,903 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
 no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
 the layering claim of §2 checkable by reading it.
 
@@ -96,33 +96,36 @@ the value domains Lin supports are recognized by carrier name through one regist
 
 ### 3.2 Gauges: scopes as levels
 
-Every fan carries a **scope**: a bit word over ⟨1,2⟩* giving the *level* of the sharing point
-it belongs to. Words are stored root-first, so an enclosing sharing point's word is a
-**prefix** of everything nested inside it and `scope_meet` (longest common prefix) is the
-level the two sharing points genuinely have in common. Two fans annihilate only when their
-scopes are equal; when they differ they commute.
+Every fan carries a **scope**: the *level* of the sharing point it belongs to, held as an id
+into the net's **level trie**. A level is a position in the term — the sequence of branches
+taken from the root — and interning that sequence as a trie node makes the four operations the
+calculus needs exact and cheap:
 
-Operations: `scope_app` (one step deeper), `scope_prefix` (concatenation, for a spliced
-clone), `scope_meet` (LCP), `scope_eq`, `scope_from_bits`.
+| operation | meaning | cost |
+|---|---|---|
+| `scope_eq` | the same sharing point | one integer comparison |
+| `scope_meet` | the level two sharing points genuinely share | lowest common ancestor |
+| `scope_within` | one sharing point encloses the other | walk up from the deeper level |
+| `scope_app` / `scope_rebase` | one step deeper / a clone's levels under a new site | one intern |
 
-A gauge must be a **path**, not a bare binder depth: siblings at equal depth would get
-equal labels, their fans would annihilate, and independent values would merge. Depth labels
-are measurably unsound (5 oracle mismatches); path words are not. Paths also mean equal
-scopes *are* "the same sharing point" — two sharing points sit at different positions, so
-they never share a path, and no per-fan counter or fixed-width argument is needed for
-soundness. The unique markers this replaced built their words newest-first, so `scope_meet`
-compared counter bits and carried no ancestry at all.
+Representation is therefore free of the word-length problem: one id per node and one edge per
+*distinct path*, whether a path is 3 steps or 300. The previous representation was a bit word
+inline (57 bits) spilling into a per-net table beyond that, and it cost the artifact dearly: a
+built container was 3,659,765 bytes of which **97.1%** was 444,380 spilled gauge entries, where
+the trie form ships 136,953 bytes with 9,508 levels. Level ids are **net-local**, which matters
+at a splice — a clone's levels must be re-interned under the site that cloned it
+(`scope_rebase`), where a bit word could simply be copied.
 
-The representation is a union: 57 bits inline, or an offset/length into a per-net heap
-table when a word is longer. The inline case is not an optimisation detail — every scope
-operation on a spilled word allocates, and that dominated compile time until long words
-were made to converge (below).
+A gauge must be a **path**, not a bare binder depth: siblings at equal depth would get equal
+labels, their fans would annihilate, and independent values would merge. Depth labels are
+measurably unsound (5 oracle mismatches); paths are not. Paths also mean equal scopes *are*
+"the same sharing point" — two sharing points sit at different positions, so they never share a
+path, and no per-fan counter or fixed-width argument is needed for soundness.
 
-The naive paper modulation concatenates (`s₁ = 1·s_node·s_dup`), so words grow without bound
-and every later scope operation pays for the longer word. γ⋈δ extends the **meet** instead,
-which keeps copies converging toward the level the two histories genuinely share — measured
-on the suite with the oracle green: `modules.lin` 17.3 s → 2.3 s, `numbers.lin` 14.4 s →
-4.9 s.
+Two fans annihilate only when their scopes are equal; when they differ they commute, and the
+nested case is handled as §3.3 describes. The naive paper modulation concatenates
+(`s₁ = 1·s_node·s_dup`), so a copy's name grows with every crossing; γ⋈δ **extends the meet**
+instead, which keeps copies converging toward the level the two histories genuinely share.
 
 ### 3.3 The four rules
 
@@ -181,11 +184,13 @@ The compiler (`src/compile.c`) turns a binder used N times into a `DUP` fan tree
 choices from the term root, built with `scope_app`. LAM and APP nodes carry their own path as
 their scope too, so a fan crossing one of them meets at a real common level.
 
-- A spliced precompiled define body (`ct_splice`) is **re-gauged** as it is cloned: the
-  occurrence's path is prepended to every path inside the clone (`scope_prefix`). The body's
-  fans were labelled during its own precompile reduction, so cloning it verbatim would give
-  every reference's copies identical labels — two independent sharing points would annihilate
-  into each other, and clones at different sites would not be distinguishable.
+- A spliced precompiled define body (`ct_splice`) is **re-gauged** as it is cloned: each level
+  inside the clone is re-interned under the level of the site that cloned it (`scope_rebase`).
+  The body's fans were labelled during its own precompile reduction, so cloning it verbatim
+  would give every reference's copies identical labels — two independent sharing points would
+  annihilate into each other, and clones at different sites would not be distinguishable.
+  Because level ids are net-local this rebasing is required even at the root level, where the
+  old bit words happened to be copyable verbatim.
 
 A path identifies a sharing point *and* its level, which is what the acyclic case needs for
 soundness (verified) and what cyclic sharing needs to close a fan on its own copies (§11.2).
@@ -225,7 +230,9 @@ structural and cheap: a pair's two principal nodes *and* the far ends of their f
 auxiliary ports must all lie in the same 64-node sector (`node >> 6`). Pairs that pass are
 grouped by sector and executed under `omp parallel for` with dynamic scheduling; pairs that
 fail go to a serial fallback within the same wave. All dispatch buffers are grow-only
-statics, so a wave allocates nothing and dispatch is O(pairs).
+statics, so a wave allocates nothing and dispatch is O(pairs). γ⋈δ pairs are also routed to
+the serial fallback: allocating a copy interns a level, and interning writes the net's shared
+trie, which a threaded wave must not do concurrently.
 
 **Policy: serial by default.** Threads are used only when asked (`-t`, `LIN_THREADS`,
 `OMP_NUM_THREADS`), and parallelism engages only for waves of at least 512 port entries (256
@@ -253,11 +260,12 @@ node count has doubled past a high-water mark (`net_gc`). There is no incrementa
 and no stop-the-world pause in the usual sense: dead nodes are a by-product of the rules,
 and the compact step is O(live net).
 
-Because the `.line` container stores *every* node and *every* gauge, the AOT path compacts
-and trims before serialising (`net_gc`, then `net_trim_scopes`). Both are load-bearing for
-artifact size rather than cosmetic: a program that merely *referenced* a recursive define at
-depth 0 — never recursing — compacted to 3 live nodes and still shipped a 423,502-byte
-artifact, 99.98% of it gauge entries belonging to erased nodes. With trimming it is 142 B.
+Because the `.line` container stores *every* node and *every* level, the AOT path compacts
+before serialising (`net_gc`). Compaction is load-bearing for artifact size rather than
+cosmetic: a program that merely *referenced* a recursive define at depth 0 — never recursing —
+compacted to 3 live nodes and still shipped a 423,502-byte artifact, 99.98% of it gauge data
+belonging to erased nodes. Levels cost one id per node and one trie edge per distinct path, so
+what survives compaction is what the residual actually uses.
 
 ### 4.4 Accounting and livelock guards
 
@@ -427,7 +435,7 @@ shares the identical front end.
 | e-graph saturate + extract | β/η rewrites by equality saturation, then cheapest form | `egraph_optimize` |
 | compile | term → interaction net; each multi-use variable becomes a `DUP` fan tree | `compile`, `ct`, `dup_tree` |
 | **AOT evaluation** | reduce the net at build time, stopping at effects | `do_build`, `net_reduce` |
-| compact + trim | drop reduction intermediates and dead gauges before serialising | `net_gc`, `net_trim_scopes` |
+| compact | drop reduction intermediates before serialising | `net_gc` |
 
 The last three steps are what make this AOT rather than merely optimising. Partial
 evaluation folds and β-reduces everything that does not need the runtime, and is *stuck*
@@ -495,10 +503,12 @@ replayed. Output is byte-identical either way.
 ### 9.3 The `.line` container
 
 A `.line` file is a shebang line (re-invoking the engine that produced it) followed by a
-`LINE` magic, a versioned header `{version, nn, scn, nnamed}`, the node arrays (`tag`,
-`dead`, `wire`, `scope`), the named nodes, and the gauge table. Loading reconstructs the
-active-redex queue from live principal pairs — the queue is not serialised, so without that
-a loaded container would sit inert.
+`LINE` magic, a versioned header `{version, nn, nlevels, nnamed}`, the node arrays (`tag`,
+`dead`, `wire`, `scope` — the scope being a level id), the named nodes, and the level trie as
+`(parent, branch)` edges in id order. Loading rebuilds the trie and its interning table (a
+loaded net still reduces, so it must be able to intern new levels), and reconstructs the
+active-redex queue from live principal pairs — the queue is not serialised, so without that a
+loaded container would sit inert.
 
 ---
 
@@ -557,7 +567,7 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 53 suites / 978 assertions, oracle green, core 2,932 lines.
+- Gate: 53 suites / 978 assertions, oracle green, core 2,903 lines.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -646,6 +656,7 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
   spine (so it never collides with integer numerals), but `std/float.lin`'s operations are
   declared `num`-typed and route through `_ffi` closures to libm. A distinct, checked float
   type is a type-system task, not a net-level one.
+- **A shared float inside a spine does not read back.** `(let ((x (fmul (float "6") (float "7")))) (fadd x (float "1")))` folds to `43`, but the same shared float nested in a pair spine (`(pair x …)`) renders as the closure structure instead of a numeral: the readback decoders peel a fan at the top of a value, not one buried in a spine. Measured identical at `ddd1cd7`, i.e. pre-existing rather than a regression from the level representation, and `test/float_share.lin` leaves the shape unasserted until it is fixed.
 - **Driver net-side decoding** is not fully consolidated: drivers reuse the shared
   `net_spine_args`/`net_ffi_args`/`net_dhop` walkers, but `simd.c` still parallels parts of
   the `_ffi` argument walk. A fuller consolidation would reclaim headroom against the LOC
@@ -687,6 +698,6 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,932 lines** against a 3,000-line gate.
+**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,903 lines** against a 3,000-line gate.
 The three `src/runtime_*.inc` files (349 lines) are std code and are excluded; `stdio`-level
 readback, IO, and the container format do not count against the calculus.
