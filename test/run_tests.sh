@@ -123,7 +123,7 @@ for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egr
 done
 
 printf "[Tier 4: Non-Trivial Workloads & Confluence Invariants]\n"
-for f in test/graph.lin test/map.lin test/set.lin test/queue.lin test/stream.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin test/trees.lin test/lists.lin test/algorithms.lin test/recursion.lin test/selfrecursion.lin test/maybe_either.lin; do
+for f in test/graph.lin test/map.lin test/set.lin test/queue.lin test/stream.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin test/trees.lin test/lists.lin test/algorithms.lin test/recursion.lin test/recursion_share.lin test/selfrecursion.lin test/maybe_either.lin; do
   run_test "$f"
 done
 

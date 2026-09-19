@@ -92,9 +92,13 @@ static inline Port dup_hop(Net *n, Port p) {
 
 /* Follow principal-to-principal through any chain of fans.  `dup_hop` is the crossing walk (it
    reads whichever auxiliary the arriving port implies); this is the plain one readback uses when a
-   shared subterm stands for one value. */
+   shared subterm stands for one value.  Bounded exactly as `dup_hop` is: a fan chain may be *cyclic*
+   (two fans whose principals face each other are an un-contracted DUPxDUP redex), and an unguarded
+   walk then spins forever with no step count advancing.  On overflow it returns the DUP port it
+   stopped on, and callers check the tag they need, so it degrades to "not a value". */
 static inline Port skip_dup(Net *n, Port p) {
-  while (p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP) p = wire((Port){p.node, 0});
+  for (int step = 0; step < n->nn && p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP; step++)
+    p = wire((Port){p.node, 0});
   return p;
 }
 

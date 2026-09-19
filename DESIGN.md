@@ -569,11 +569,28 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   live in `arith.so` as a pre-emptor.
 - Arithmetic is pure Lin with a single shared scalar table behind it.
 - Sharing is verified Lévy-optimal **for acyclic values**, with measured marginal cost.
+- **The unravelling-sentinel test is demand-aware, not reachability-based.** `eval_form` decides
+  whether the bound was exceeded by asking whether the `_rec` sentinel is reachable from ROOT, and
+  the *plain* graph walk answered yes for nets whose value was already correct: an unravelled define
+  leaves the sentinel in copies the program never took, wired to the used copies through the shared
+  argument fans, so a walk over every port crosses out of a used copy into an unused one. The
+  trigger is two *nested* recursive defines, i.e. a recursive define that passes a closure whose
+  body calls another recursive define as an argument — which is what `num.eq` (over `num._peq`)
+  passed to `std/list.lin`'s `list_eq` is. Measured: `(list_eq eq nil nil)`, recursion depth 1
+  against a bound of 6, read the sentinel as reachable on *every* round, so widening doubled k to
+  196608 over 16 rounds of a net growing as k² and never converged — `lin build` on the two-line
+  program timed out, and `examples/run_verifier.sh` hung on `scott_lists.lin` and never printed its
+  summary, so the examples sweep had stopped reporting. The fix follows what readback follows
+  (cross a fan the one way `dup_hop` does, never into both copies at once), which is sound whenever
+  the sentinel is observable. `test/recursion_share.lin` pins both directions: the base cases now
+  return, and `(down 20)` against a bound of 6 still widens, so the test cannot be narrowed into
+  silent under-reduction. `scott_lists.lin` completes all 18 outputs and the examples sweep reports
+  **14 pass / 0 fail / 5 interactive**.
 - Fan–fan commutation and the gauge/meet discipline are in, and every sharing witness in the
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 55 suites / 991 assertions, oracle green, 3,462 lines across `src/`.
+- Gate: 57 suites / 1,004 assertions, oracle green, `src/` at 3,507 lines.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -677,6 +694,17 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
 > destructive: modulating γ⋈δ's fresh fans at all collapses every value to `_`, so the fresh fans'
 > verbatim `sd` is load-bearing in a way the prototype does not yet model — the next attempt should
 > be built on an argument, not another variant.
+
+**Correction, measured after the prototype: the sentinel test is not lazy-specific.** The prototype
+README concluded that `net_has_reachable` "is not demand-aware" *under needed-order reduction*, and
+that this is "why the unrolling has to go *before* laziness can be evaluated, not after". Both halves
+are narrower than the measurement. The shipped **eager** engine has the same defect, for the same
+reason, on programs whose value is already correct: the reachability walk crosses the shared argument
+fans into unravelled copies the program never took (§11.1). It was never only a laziness interaction
+— laziness made it fail *silently* (sixteen rounds, no output), where eagerness fails *slowly* (k²
+growth until the timeout). So the demand-aware sentinel test lands on its own, ahead of the knot, and
+does not need the unrolling deleted first. That is the useful part: it removes the loudest
+recursion-hang class while the knot stays open, and it is the same demand relation the knot will need.
 
 Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
 **bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k copies of
@@ -887,14 +915,17 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** `src/` is **3,462 lines** — every file counted, no `*.inc` anywhere, and every file
-ending in a newline so `wc -l` cannot undercount it (four files did, which is the direction that
-flatters the number, so it is fixed) — against a 3,500-line gate, met. Of those lines 3,015 are code,
-193 are comment-only and 254 are blank: the comments are rule semantics and hazard records (why a guard exists, what a measured
-alternative cost), which is what makes the core auditable rather than merely small. Earlier revisions
-excluded `runtime_*.inc` files from the count; that was an accounting trick and it is gone — everything
-that ships is counted. What the gate protects is the calculus — four rules and nothing else — and the
-honest way to protect it is to count everything that ships.
+**Line budget.** `src/` is **3,507 lines** against a 3,500-line gate — **7 over, recorded rather than
+hidden.** Every file is counted, no `*.inc` anywhere, and every file ends in a newline so `wc -l`
+cannot undercount it. The overage is the demand-aware sentinel test (§11.1): it replaces a
+13-line reachability walk with a ~16-line one plus its hazard record, and §11.4's census says the
+rest of the tree is live capability, not slack — there are still no dead functions and the last
+duplicate mechanism was deleted. Trimming the difference out of the comments would defeat what the
+gate exists for, since the comments are the rule semantics and hazard records, so the honest options
+are a raised gate or the §11.4 product decision about the interpreter surface. Earlier revisions
+excluded `runtime_*.inc` files from the count; that was an accounting trick and it is gone —
+everything that ships is counted. What the gate protects is the calculus — four rules and nothing
+else — and the honest way to protect it is to count everything that ships.
 
 The stretch target is **under 3,000**. A census of the tree says the remaining ~450 lines are live
 capability, not slack: there are no dead functions (every `static` has a caller) and the last

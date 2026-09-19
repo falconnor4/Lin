@@ -1,0 +1,49 @@
+; Recursion over a *shared closure*, and the demand-aware unravelling-sentinel test.
+;
+; The defect this pins, measured before the fix: `(list_eq eq nil nil)` -- recursion depth 1
+; against an unravelling bound of 6 -- never returned.  `eval_form` decides whether the bound
+; was exceeded by asking whether the `_rec` sentinel is reachable from ROOT, and the *plain*
+; graph walk answered yes on every round: an unravelled define leaves the sentinel in copies
+; the program never took, wired to the used copies through the shared argument fans.  So
+; widening doubled k to 196608 over 16 rounds of a net growing as k^2 and never converged,
+; while the value had been correct at round 0 -- `lin build` on the two-line program timed out
+; and `examples/run_verifier.sh` hung here, so the whole examples sweep stopped reporting.
+;
+; The tell is that `list_eq`'s recursion passes a closure as an argument, and that closure
+; (`num.eq`) routes through a *second* recursive define (`num._peq`).  Two nested recursive
+; defines is what makes the sentinel reachable through copies rather than through the result.
+; Requiring demand instead of reachability fixes it; these cases hold that line.
+(load "std/std.lin")
+
+; --- the standard library's higher-order list equality, base case first ---
+(list_eq eq nil nil)
+; expect => true
+(list_eq eq (list1 1) (list1 1))
+; expect => true
+(list_eq eq (list1 1) (list1 2))
+; expect => false
+
+; --- deeper spines: the recursion actually runs, so a real terminal is needed ---
+(list_eq eq (list3 1 2 3) (list3 1 2 3))
+; expect => true
+(list_eq eq (list3 1 2 3) (list3 1 2 4))
+; expect => false
+
+; --- the shape without the library: a recursive define whose parameter is a closure that
+;     itself calls a recursive define, applied in the selected branch and passed to the
+;     recursive call.  `(\a (\b (eq a b)))` is what made this hang; `is_zero` did not. ---
+(define _p4 (\elem_eq (\l1 (\l2 (bool.ifl (is_empty l1)
+                                           (\_ (elem_eq 1 2))
+                                           (\_ (((_p4 elem_eq) (tail l1)) (tail l2))))))))
+(_p4 (\a (\b (eq a b))) nil nil)
+; expect => false
+
+; --- and the other direction: a run that genuinely *does* exceed the bound must still widen.
+;     Depth 20 against a bound of 6 is only correct if widening still fires, so this is the
+;     guard against the demand test being narrowed into under-reduction (which would silently
+;     return the base case, 0, for any depth). ---
+(define down (\n (bool.ifl (is_zero n) (\_ 0) (\_ (down (pred n))))))
+(down 20)
+; expect => 0
+(down 1)
+; expect => 0

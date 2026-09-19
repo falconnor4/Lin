@@ -180,18 +180,27 @@ static const char REC_SENTINEL[];
 static int lam_arity(Term *t);
 static Term *build_bound_rec(const char *name, Term *body, int k);
 
-/* Is a node named `nm` alive and reachable from ROOT?  Detects the `_rec` recursion sentinel surviving a truncated run (depth exceeded the bound). */
-static int net_has_reachable(Net *net, const char *nm) {
-  if (!nm) return 0;
-  unsigned char *reach = malloc((size_t)(net->nn + 1));
-  memset(reach, 0, (size_t)(net->nn + 1));
-  int *q = malloc((size_t)(net->nn + 1) * sizeof(int)); int qh = 0, qt = 1; q[0] = 0; reach[0] = 1;
-  int found = 0;
-  while (qh < qt) { int u = q[qh++];
-    if (net->name[u] && !strcmp(net->name[u], nm)) { found = 1; break; }
-    for (int p = 0; p < 3; p++) { Port w = net->wire[u*3+p];
-      if (w.node >= 0 && w.node < net->nn && !net->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; } } }
-  free(reach); free(q); return found;
+/* Did the run actually reach the `_rec` sentinel, i.e. is the unravelling bound exceeded?  Plain
+   graph reachability is the wrong question: an unravelled define leaves the sentinel in copies the
+   program never took, wired to the used copies through the *shared* argument fans.  Measured on
+   `(list_eq eq nil nil)` (depth 1, bound 6) it read as reachable on every round, doubling k to
+   196608 without converging, while the value was already correct at round 0.  So mirror readback,
+   which is what turns a sentinel into an observable: cross a fan the one way `dup_hop` does. */
+static int rec_sentinel_demanded(Net *net) {
+  unsigned char *seen = calloc((size_t)net->nn + 1, 1);
+  Port *st = malloc(((size_t)net->nn * 2 + 8) * sizeof(Port)); int top = 1, found = 0;
+  for (st[0] = (Port){0, 0}; top && !found;) {
+    Port p = st[--top]; int t;
+    if (p.node < 0 || p.node >= net->nn || net->dead[p.node] || seen[p.node]) continue;
+    seen[p.node] = 1;
+    if (net->name[p.node] && !strcmp(net->name[p.node], REC_SENTINEL)) { found = 1; break; }
+    if ((t = net->tag[p.node]) == ERA) continue;
+    if (t == APP) { st[top++] = net_wire(net, (Port){p.node, 0}); st[top++] = net_wire(net, (Port){p.node, 2}); }
+    else if (t == ROOT) st[top++] = net_wire(net, p);
+    else if (t == DUP) st[top++] = net_wire(net, (Port){p.node, p.port == 0});
+    else st[top++] = p.port == 0 ? net_wire(net, (Port){p.node, 2}) : net_wire(net, p);
+  }
+  free(seen); free(st); return found;
 }
 
 /* Double every recursive def's unravelling bound and clear its expansion so the next attempt compiles a deeper chain (O(log depth) re-evaluations). */
@@ -203,20 +212,14 @@ static int widen_recursion(void) {
     defs[i].term = build_bound_rec(defs[i].rec_name, defs[i].rec_body, defs[i].rec_k);
     wid = 1;
   }
-  /* EVERY def's cached expansion may have inlined a recursive body's unrolling, not just
-     the recursive defs themselves: `num.eq` merely *calls* `num._peq`, so clearing only
-     `defs[i].rec` left its expansion pinned to the old depth.  The net then came out
-     byte-identical on every round, the `_rec` sentinel never cleared, and widening doubled
-     the bound forever -- re-expanding a larger chain each time (96ms, 192ms, 372ms ...
-     21.8s) for no change in the result.  Clearing all of them is what makes the wider
-     bound actually reach the compiled graph. */
+  /* EVERY def's cached expansion may have inlined a recursive body's unrolling, not just the
+     recursive defs themselves: `num.eq` merely *calls* `num._peq`.  Clearing only the recursive ones
+     left the net byte-identical every round, so the sentinel never cleared and widening doubled the
+     bound forever for no change in the result (DESIGN 11.2). */
   if (wid) for (int i = 0; i < ndefs; i++) {
     term_free(defs[i].expanded); defs[i].expanded = NULL;
-    /* A precompiled net is the other place the old depth can hide, and it is the one that
-       matters when NO driver is loaded: with nothing to report the body un-materialised,
-       a def like `num.eq` IS baked, at whatever k was current, and clearing only the term
-       expansion then leaves widening with nothing to widen.  Baking is a cache, so drop
-       it and let the next use bake again at the new depth. */
+    /* A precompiled net is the other place the old depth hides, and the one that matters with no
+       driver loaded.  Baking is a cache, so drop it and let the next use bake at the new depth. */
     if (defs[i].compiled) { net_free(defs[i].compiled); free(defs[i].compiled); defs[i].compiled = NULL; }
     defs[i].comp_tried = 0;
   }
@@ -235,7 +238,7 @@ void eval_form(Term *t) {
     if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
     net_reduce(&net, STEP_LIMIT);
     if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
-    if (net_has_reachable(&net, REC_SENTINEL)) {   /* self-recursion exceeded k */
+    if (rec_sentinel_demanded(&net)) {   /* self-recursion exceeded k */
       net_free(&net); term_free(ex);
       if (!widen_recursion()) { printf("error: recursion depth exceeded unravelling bound\n"); return; }
       continue;
@@ -577,7 +580,7 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   for (int round = 0; round < 16; round++) {
     baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
     if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
-    if (!net_has_reachable(&net, REC_SENTINEL)) break;
+    if (!rec_sentinel_demanded(&net)) break;
     net_free(&net); net_init(&net, 1 << 16);
     if (!widen_recursion()) { fprintf(stderr, "error: recursion depth exceeded unravelling bound\n"); net_free(&net); return 0; }
   }
