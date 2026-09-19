@@ -6,6 +6,12 @@ answer is a value read back out of the normal form. There is no intermediate abs
 machine, no runtime graph rewriting a heap of closures, and no garbage collector in the
 usual sense — allocation and reclamation are consequences of the reduction rules.
 
+Lin is an **AOT-compiled language**: `lin build` is the compilation model and the artifact is the
+deliverable — a residual net plus the runtime that reduces it. The same runtime can evaluate a term
+directly (`lin prog.lin`), which is that architecture driven without the build step: a development
+convenience, not a second implementation. Every cost this document talks about is therefore measured
+on the artifact — how many bytes ship, and how much work is left for the runtime.
+
 That choice is what makes the two headline goals achievable at all:
 
 - **Inherently optimal.** Sharing is a first-class net structure (fan nodes with a gauge
@@ -33,7 +39,7 @@ across threads. Confluence makes the *answer* independent of the schedule, so a 
 can only ever be a performance choice, never a semantic one.
 
 **G3 — A small, auditable, portable core.** The core is the interaction calculus and
-nothing else: 2,781 lines (`src/*.c` + `src/lin.h`), under a hard 3,000-line gate. It has
+nothing else: **3,505 lines** across `src/` — core and runtime counted together, under one gate. It has
 no knowledge of arithmetic, hardware, effects, or filesystem formats. That is what makes
 the layering claim of §2 checkable by reading it.
 
@@ -567,7 +573,7 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 55 suites / 991 assertions, oracle green, core 2,781 lines.
+- Gate: 55 suites / 991 assertions, oracle green, 3,505 lines across `src/`.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -623,6 +629,19 @@ Cyclic sharing is therefore no longer divergent, but it is not yet correct: `(pe
 `(peel 4)` reach a normal form (72 steps / 195 nodes) whose value does not read back (the
 printer emits `?`), so the sharing over-merges at deeper re-entries. Until that is fixed the
 knot is not landed and the unravelling below stays.
+
+**Sharing at the net level is blocked by the fold driver, measured.** The e-graph's sharing was
+expressed as a `let`, which is lexical and so has to be placed inside the binders its value depends
+on; two attempts at that placement failed (11.3). A fan has no such problem -- it is a graph node
+whose auxiliaries are consumers wherever they sit -- so sharing was tried in the compiler instead:
+every compiled subterm of 8 nodes or more is wrapped in a fan whose auxiliaries are its uses, keyed
+structurally with the *binder identity* of each variable, so only genuinely equal computations merge
+and no scope question arises. It is sound and catastrophic on the AOT metric: `line_ffi` went from
+119,854 B / 3,397 residual nodes to **8.9 MB / 427,348 nodes**, i.e. the build-time reduction stops
+finishing and nearly all the work lands in the artifact. Reverted. The likely cause is the one already
+in 4.4 -- a fold driver that parks a redex whose operands sit behind a fan and never releases it --
+so **driver deferral comes before sharing**, not after.
+
 
 **The unravelling bound is a hazard, not a tuning knob.** The AOT candidate search (§8) measured
 k = 4 as the byte winner on every program it tried (`selfrecursion.lin` 21,608 B against 55,899 B at
@@ -745,6 +764,10 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** Core = `src/*.c` + `src/lin.h` = **2,903 lines** against a 3,000-line gate.
-The three `src/runtime_*.inc` files (349 lines) are std code and are excluded; `stdio`-level
-readback, IO, and the container format do not count against the calculus.
+**Line budget.** `src/` is **3,505 lines** — every file counted — against a 3,500-line gate (we are
+five over, so the next change has to pay for itself by deletion). The split between `.c` files and
+`runtime_*.inc` included into them is a *technical* one: those files need the core's statics (the
+container, readback and IO, the e-graph, the build driver). It is deliberately not an accounting
+trick, and earlier revisions that excluded them from the count were: the runtime grew while the
+"core" number stayed flat. What the gate protects is the calculus — four rules and nothing else — and
+the honest way to protect it is to count everything that ships.

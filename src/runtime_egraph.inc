@@ -232,154 +232,12 @@ static Term *eg_extract(EGraph *g, int c, int d) {
   return NULL;
 }
 
-/* ---------------- extraction that keeps the sharing the graph found ----------------
-   A class referenced by more than one e-node used to be emitted once per parent, so the CSE the
-   e-graph performs was thrown away before the net was built.  It is now bound with a `let`,
-   which the compiler compiles into the same DUP fan a multi-use binder gets: one computation,
-   N consumers.  A class currently being extracted is never shared with itself (an equality the
-   rules introduced inside it must not make the binding refer to its own value).
-
-   Bindings are wrapped in *discovery* order, which puts the deeper ones outermost -- a binding's
-   value is evaluated outside its own binder, so anything that value references has to be in
-   scope before it. */
-typedef struct { int cls; char name[NAME]; Term *body; } EgBind;
-static EgBind *eg_binds; static int eg_nbinds, eg_bcap;
-static int *eg_state, *eg_bindof;      /* per class: 0 untouched, 1 in progress, 2 bound */
-static int eg_share = 1;
-/* A binding's value is evaluated outside its own binder, so a body that references another
-   binding needs that one *outside* it -- in a flat nesting that is a dependency order, and the
-   discovery order does not provide one (a later-discovered binding can be referenced by an
-   earlier one and vice versa).  These record the references so the bindings can be ordered. */
-static int (*eg_dep)[2]; static int eg_ndep, eg_depcap;   /* (body i references binding j) */
-static int *eg_cur, eg_ncur;
-static void eg_dep_add(int i, int j) {
-  for (int k = 0; k < eg_ndep; k++) if (eg_dep[k][0] == i && eg_dep[k][1] == j) return;
-  if (eg_ndep >= eg_depcap) {
-    eg_depcap = eg_depcap ? eg_depcap * 2 : 64;
-    eg_dep = realloc(eg_dep, (size_t)eg_depcap * sizeof(*eg_dep));
-  }
-  eg_dep[eg_ndep][0] = i; eg_dep[eg_ndep][1] = j; eg_ndep++;
-}
-static Term *eg_x(EGraph *g, int c, int d) {
-  if (d > 1024) return NULL;
-  c = eg_find(g, c);
-  if (eg_state[c] == 1) return NULL;                       /* a cycle the rules created: bail */
-  if (eg_state[c] == 2) {
-    int j = eg_bindof[c];
-    if (eg_ncur > 0) eg_dep_add(eg_cur[eg_ncur - 1], j);
-    return term_new(TVAR, eg_binds[j].name, NULL, NULL);
-  }
-  ENode n = g->nodes[g->classes[c].best_node];
-  int structural = (n.type == TLAM || n.type == TAPP);
-  int share = eg_share && structural && g->uses[c] >= 2;
-  int slot = -1;
-  if (share) {
-    if (eg_nbinds >= eg_bcap) { eg_bcap = eg_bcap ? eg_bcap * 2 : 64; eg_binds = realloc(eg_binds, (size_t)eg_bcap * sizeof(EgBind)); }
-    slot = eg_nbinds++;
-    snprintf(eg_binds[slot].name, NAME, "_eg%d", slot);
-    eg_binds[slot].cls = c; eg_binds[slot].body = NULL;
-    eg_bindof[c] = slot;
-  }
-  if (structural) eg_state[c] = 1;
-  if (share) {
-    eg_cur = realloc(eg_cur, (size_t)(eg_ncur + 1) * sizeof(int));
-    eg_cur[eg_ncur++] = slot;
-  }
-  Term *me = NULL;
-  if (n.type == TVAR) me = term_new(TVAR, n.name, NULL, NULL);
-  else if (eg_opaque(n.type)) me = term_new(n.type, n.name, NULL, NULL);
-  else if (n.type == TLAM) { Term *l = eg_x(g, n.l, d + 1); if (l) me = term_new(TLAM, n.name, l, NULL); }
-  else if (n.type == TAPP) {
-    Term *l = eg_x(g, n.l, d + 1), *r = eg_x(g, n.r, d + 1);
-    if (l && r) me = term_new(TAPP, "", l, r); else { term_free(l); term_free(r); }
-  }
-  if (share) {
-    eg_ncur--;                                    /* this binding's body is done */
-    eg_binds[slot].body = me;
-    eg_state[c] = me ? 2 : 1;
-    /* the reference to this binding sits inside the enclosing binding's body (if any), so the
-       enclosing one has to be ordered outside it */
-    if (me && eg_ncur > 0) eg_dep_add(eg_cur[eg_ncur - 1], slot);
-    return me ? term_new(TVAR, eg_binds[slot].name, NULL, NULL) : NULL;
-  }
-  if (structural) eg_state[c] = 0;
-  return me;
-}
-
-/* emit `i` after everything its body references (a depth-first order over eg_dep) */
-static void eg_wrap_order(int i, int *state, int *order, int *norder, int *cyc) {
-  if (i < 0 || i >= eg_nbinds || state[i] == 2) return;
-  if (state[i] == 1) { *cyc = 1; return; }
-  state[i] = 1;
-  for (int k = 0; k < eg_ndep; k++) if (eg_dep[k][0] == i) eg_wrap_order(eg_dep[k][1], state, order, norder, cyc);
-  state[i] = 2;
-  order[(*norder)++] = i;
-}
-
-/* 1 if every generated name in `t` occurs inside its own binder.  Extraction orders the bindings
-   by dependency, and a mistake in that order would ship a program with a free variable, so the
-   result is checked, and the plain tree extraction used instead when the check fails. */
-static int eg_closed_rec(Term *t, unsigned char *bound, int depth) {
-  if (!t || depth > 4096) return 1;
-  if (t->type == TVAR) {
-    for (int i = 0; i < eg_nbinds; i++) if (!strcmp(eg_binds[i].name, t->name)) return bound[i];
-    return 1;                                        /* a name the program itself uses */
-  }
-  if (t->type == TLAM) {
-    for (int i = 0; i < eg_nbinds; i++)
-      if (!strcmp(eg_binds[i].name, t->name)) {
-        if (bound[i]) return eg_closed_rec(t->l, bound, depth + 1);
-        bound[i] = 1; int ok = eg_closed_rec(t->l, bound, depth + 1); bound[i] = 0; return ok;
-      }
-    return eg_closed_rec(t->l, bound, depth + 1);
-  }
-  if (t->type == TAPP) return eg_closed_rec(t->l, bound, depth + 1) && eg_closed_rec(t->r, bound, depth + 1);
-  return 1;
-}
-static int eg_closed(Term *t) {
-  unsigned char *bound = calloc((size_t)eg_nbinds + 1, 1);
-  int ok = bound ? eg_closed_rec(t, bound, 0) : 1;
-  free(bound);
-  return ok;
-}
-
-static Term *eg_extract_shared(EGraph *g, int root) {
-  Term *res = NULL;
-  eg_nbinds = 0;
-  free(eg_state); free(eg_bindof);
-  eg_state = calloc((size_t)g->nc + 1, sizeof(int));
-  eg_bindof = malloc(((size_t)g->nc + 1) * sizeof(int));
-  if (!eg_state || !eg_bindof) { free(eg_state); free(eg_bindof); eg_state = eg_bindof = NULL; return NULL; }
-  eg_ncur = 0;
-  res = (root < 0) ? NULL : eg_x(g, root, 0);
-  if (res) {
-    int *state = calloc((size_t)eg_nbinds + 1, sizeof(int));
-    int *order = malloc(((size_t)eg_nbinds + 1) * sizeof(int));
-    int norder = 0, cyc = 0;
-    for (int i = 0; i < eg_nbinds && !cyc; i++) eg_wrap_order(i, state, order, &norder, &cyc);
-    if (cyc) { term_free(res); res = NULL; }         /* mutually recursive sharing: no plain let */
-    else
-      for (int k = norder - 1; k >= 0; k--) {        /* deps wrapped last, so they end up outside */
-        int i = order[k];
-        if (!eg_binds[i].body) { term_free(res); res = NULL; break; }
-        char nm[NAME]; snprintf(nm, NAME, "%s", eg_binds[i].name);
-        res = term_new(TAPP, "", term_new(TLAM, nm, res, NULL), eg_binds[i].body);
-      }
-    free(state); free(order);
-    if (res && !getenv("LIN_EGNOCHECK") && !eg_closed(res)) { term_free(res); res = NULL; }
-  }
-  free(eg_state); free(eg_bindof); eg_state = eg_bindof = NULL;
-  return res;
-}
-
 Term *egraph_optimize(Term *t) {
   if (!t) return NULL;
   if (getenv("LIN_NO_EGRAPH")) return term_copy(t);
-  static int share_env = -1, cost_env = -1;
+  static int cost_env = -1;
   if (cost_env < 0) { const char *e = getenv("LIN_EGCOST"); cost_env = (e && !strcmp(e, "dag")) ? 1 : 0; }
   eg_cost_dag = cost_env;
-  if (share_env < 0) share_env = getenv("LIN_EGSHARE") ? atoi(getenv("LIN_EGSHARE")) : 1;
-  eg_share = share_env;
   EGraph g = {0}; int root = eg_add_term(&g, t); eg_saturate(&g);
   /* how much sharing did saturation expose?  an e-node field pointing at a class is a parent,
      so a class with several parents is a value the program computes more than once */
@@ -392,30 +250,13 @@ Term *egraph_optimize(Term *t) {
     }
     for (int c = 0; c < g.nc; c++) if (g.uses[c] >= 2) shared++;
   }
-  Term *res = eg_share ? eg_extract_shared(&g, root)
-                       : ((root < 0) ? NULL : eg_extract(&g, root, 0));
+  Term *res = (root < 0) ? NULL : eg_extract(&g, root, 0);
   if (getenv("LIN_PASSES")) {
-    fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, cost %s, extract %s, rules:",
-            g.nc, g.nn, shared, eg_cost_dag ? "sharing-aware" : "tree",
-            eg_share ? "shared (lets)" : "tree (sharing discarded)");
+    fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, cost %s, rules:",
+            g.nc, g.nn, shared, eg_cost_dag ? "sharing-aware" : "tree");
     for (int r = 0; r < EG_NRULES; r++)
       fprintf(stderr, " %s=%s/%ld", eg_rules[r].name, eg_rules[r].on ? "on" : "off", eg_rules[r].fires);
     fprintf(stderr, "\n");
-  }
-  if (res && res != t) {
-    /* A binding is wrapped around the whole term, which is only valid if the shared subterm did
-       not need the lambda binders it sat under -- a subterm mentioning a variable that is bound
-       above it becomes free.  The compiler is the authority on that: compile a scratch copy and
-       keep the sharing only if it compiles. */
-    char cerr[256];
-    Net probe; net_init(&probe, 64);
-    int ok = compile(res, &probe, cerr, sizeof cerr);
-    net_free(&probe);
-    if (!ok) {
-      if (getenv("LIN_PASSES")) fprintf(stderr, "[egraph] shared extraction rejected (%s): using tree\n", cerr);
-      term_free(res);
-      res = (root < 0) ? NULL : eg_extract(&g, root, 0);
-    }
   }
   free(g.nodes); free(g.classes); free(g.node_cls); free(g.slot); free(g.uses);
   return res ? res : term_copy(t);
