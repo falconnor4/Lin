@@ -1,4 +1,5 @@
 lin
+lin_*
 lin_debug
 __pycache__/
 *.pyc

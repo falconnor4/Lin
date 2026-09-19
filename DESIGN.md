@@ -577,28 +577,55 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
-> **Update (measured, prototype in `scratch/lazy-reduction/`).** The analysis below treats the knot
-> as blocked on *duplication control* — a gauge arithmetic for δ⋈δ. That is not the binding
-> constraint. The binding constraint is that **this engine is eager**: it contracts every facing
-> principal pair the moment the pair exists, so the `(x x)` of *any* fixpoint encoding is fired
-> whether or not the term ever reaches for it, and no gauge discipline can fix that — it is a
-> reduction-order question, not a naming one.
+> **Update (measured; prototype in `scratch/lazy-reduction/`, which is gitignored — this block is
+> the durable record).** The analysis below treats the knot as blocked on *duplication control*, a
+> gauge arithmetic for δ⋈δ. That is not the binding constraint. The binding constraint is that
+> **this engine is eager**: it contracts every facing principal pair the moment the pair exists, so
+> the `(x x)` of *any* fixpoint encoding is fired whether or not the term ever reaches for it. No
+> gauge discipline fixes that; it is a reduction-order question, not a naming one.
 >
-> Under **needed-order reduction** the plain, unmodified `Y` works, with the four rules untouched
-> and no new agent: `(x x)` sits in the *argument* of `h`, off the demand walk until the body
-> actually reaches for `f`. Measured on a prototype: `peel 20` costs **1,585 steps / 4,336 nodes**
-> against a `sumto 10` that costs 46,674 steps under unrolling, and `(add 2 3)` runs in 74 ms
-> against 41 ms eager. The unravelling is not a knob with a bad value — every one of those 33,870
-> steps for `sumto 2` is k=6 copies compiled in regardless of actual depth.
+> Under **needed-order reduction** the plain, unmodified `Y` works with the four rules untouched and
+> no new agent — `(x x)` sits in the *argument* of `h`, off the demand walk until the body actually
+> reaches for `f`. The k-unravelling is then not a knob with a bad value: it is the price of
+> eagerness. Measured on the prototype, `peel 20` costs **1,585 steps / 4,336 nodes** where `sumto 10`
+> costs 46,674 under unrolling, and **44 of 51 runnable suites pass at or below eager speed**
+> (`map` 261 ms against 903 ms, `set` 159 ms against 248 ms, `booleans` 78 ms against 177 ms).
 >
-> So the ordering is: **needed-order reduction first, knot second.** The prototype gets 51 of 56
-> suites green at roughly eager speed and stops on one case — an `_op` fold whose operand is a
-> recursive call (`(fact 1)` = `mul 1 (fact 0)`), where the demand a driver must place on its
-> strict operand also chases the knot behind it. The fix is per-decoder demand (force exactly the
-> ports `scott_peel`/`decode_spine` are about to inspect) rather than a generic deep walk; that is
-> bounded by the value and never by the knot. `scratch/lazy-reduction/README.md` has the design,
-> the two hazards (driver `.so` files carry the `Net` layout; `net_has_reachable` is not
-> demand-aware) and the exact failure signature.
+> The design, in one paragraph. `demand(n, p, deep)` walks from a port: at `deep == 0` (from ROOT) it
+> follows only the positions whose value must be known to produce the result — an application's
+> function, a fan's principal, a lambda's binder — and **stops at LAM**, which is already a value.
+> That stop is the whole mechanism. A `deep` walk is what a decoder or a fold driver asks for, and
+> its one rule is the carrier registry: **a walk that exists to materialise a value may enter a value
+> constructor and nothing else.** A carrier lambda's body is value structure; any other lambda is a
+> program lambda, i.e. a suspension, and `\x. h (x x)` — the abstraction the compiler introduces to
+> share a recursive definition — is a thunk. Breaking that rule is what makes a forced operand unfold
+> the knot behind it: measured, `(fact 1)` ran to the step limit (16.7M steps, 807k nodes).
+> `lin_demand` registers a root without reducing, so a driver may place a strict-operand demand from
+> `claim` (which the ABI requires to be pure) and from `reduce`; `net_force` is readback's force and
+> degrades to registration inside a wave, because `net_reduce` is not re-entrant over one active list.
+>
+> Two hazards the prototype paid for. **Driver plugins encode the `Net` layout** — adding fields and
+> rebuilding only `src/*.c` leaves `std/drivers/*.so` reading stale offsets, and the symptom is not a
+> crash but wrong answers and 30-second hangs (`scott_arith`); rebuild the plugins whenever `lin.h`
+> changes, before believing any measurement. And **`def_precompile` must run under the same
+> discipline**: eager "so it bakes a normal form" bakes a divergence instead, because `Y (\f M)`
+> unfolds forever when nothing holds it back.
+>
+> **What is left is one reproducible core bug.** A recursive definition whose parameter is both
+> threaded through the recursive call *and* returned at the base case loses the base at depth ≥ 4:
+>
+> ```scheme
+> (define! h (num -> num -> num)
+>   (\a (\b (ifl (is_zero a) (\_ b) (\_ (succ (h (pred a) b)))))))
+> (h 3 3)   ; => 6   correct
+> (h 4 4)   ; => 8 expected, yields (\_sz (\_ss (_ss (\_sz ... (_ss _)))))) -- base erased
+> ```
+>
+> It is not the nested-scope δ⋈δ rule (disabling it changes nothing), not `b` being ignored
+> (`h a b = ... (succ (h (pred a) 0))` is correct at depth 5), and not basic sharing of a threaded
+> value (hand-unrolled `(let ((b 4)) (succ (succ (succ (succ b)))))` is correct at every depth). It
+> needs `b` to flow through *every* level. That is the next thing to chase, and it is what the
+> `numbers` and `selfrecursion` suites are waiting on.
 
 Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
 **bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k copies of
