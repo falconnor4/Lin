@@ -846,6 +846,17 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
 
 ### 11.4 Open: smaller items
 
+- **`nix flake check` — the documented CI path — is red, and it was red before the demand-aware
+  sentinel test (§11.1).** Measured at both `c360237` and its child: **2 failed, 44 passed (866
+  assertions)**, the same two failures each time — Tier 5's `test/line_binary.line` ("missing lin
+  shebang", then the engine reading `#!/nix/store/…-lin-0.1.0/bin/lin` as a Lin variable) and Tier
+  6's `test/test_cli_flags.sh`. Both pass in the working tree (`make test`, `LIN_BIN=./lin`), so the
+  trigger is the Nix `wrapProgram` shebang path, not the engine. Two defects hide in that one red
+  line: the flake's `testRunner` is a **second copy** of the suite logic carrying its own tier lists,
+  so it runs 46 suites / 866 assertions where `test/run_tests.sh` runs 57 / 1,004 — a test added to
+  `test/run_tests.sh` alone is invisible to CI, which `test/recursion_share.lin` is today — and
+  shebang handling assumes the binary is unwrapped. The honest fix is one suite definition serving
+  both runners, plus shebang handling that does not depend on how the binary was packaged.
 - **Float typing is nominal but not enforced.** `float` is a registered nominal annotation
   and a float is a Scott numeral carrying an IEEE-754 bit pattern under the `_fsz`/`_fss`
   spine (so it never collides with integer numerals), but `std/float.lin`'s operations are
