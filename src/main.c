@@ -520,11 +520,28 @@ static int do_build(const char *in_f, const char *out_f) {
   /* A value's dead intermediates are pure overhead in the container: the format stores
      every node, so compact to what is reachable from ROOT before serialising. */
   net_gc(&net);
-  if (getenv("LIN_PASSES"))
-    fprintf(stderr, "[aot] expand=%d defs, compile=%d nodes, reduce=%ld steps (%s), nodes %d -> compact %d\n",
-            ndefs, nn_compiled, aot_steps, aot_steps >= AOT_STEP_LIMIT ? "TRUNCATED" : "complete",
-            nn_reduced, net.nn);
   if (!net_save_line(&net, out_f)) { fprintf(stderr, "error: cannot write '%s'\n", out_f); return 1; }
+  /* The artifact is the deliverable, so report the two numbers an optimization decision has to
+     move: how many bytes ship, and how much work is left for the runtime to do.  The residual's
+     work is measured by loading the container back and reducing it once -- the same path a user's
+     `./prog` takes -- which is effect-free (net_reduce never runs an effect), and it is the one
+     number that says whether a build-time decision moved work out of the artifact or into it. */
+  if (getenv("LIN_PASSES")) {
+    long bytes = 0, rsteps = -1; int rnodes = 0;
+    FILE *f = fopen(out_f, "rb");
+    if (f) { fseek(f, 0, SEEK_END); bytes = ftell(f); fclose(f); }
+    Net run;
+    if (net_load_line(&run, out_f)) {
+      rsteps = net_reduce(&run, AOT_STEP_LIMIT);
+      rnodes = run.nn;
+      net_free(&run);
+    }
+    fprintf(stderr, "[aot] expand=%d defs, compile=%d nodes, reduce=%ld steps (%s), nodes %d -> compact %d | "
+                    "artifact=%ld B, residual=%d nodes, runtime=%ld reduce steps%s (effects excluded)\n",
+            ndefs, nn_compiled, aot_steps, aot_steps >= AOT_STEP_LIMIT ? "TRUNCATED" : "complete",
+            nn_reduced, net.nn, bytes, rnodes, rsteps,
+            rsteps >= AOT_STEP_LIMIT ? " (TRUNCATED)" : "");
+  }
   net_free(&net); term_free(opt); term_free(ex); term_free(build_term);
   building = 0; build_term = NULL;
   return 0;
