@@ -172,31 +172,6 @@ static int ffi_header(Net *n, int lam, Port *fnp, Port *argp) {
   return 1;
 }
 
-/* Number of operand slots on the `_cl`-spine at `argp` (the shared decoder's walk),
-   or -1 when the port is not a cons spine at all (empty arg list / free variable /
-   not formed yet).  Used only to detect a spine cell whose operand did not decode:
-   the decoder SKIPS such a slot, so `argc < slots` means "not saturated yet". */
-static int spine_slot_count(Net *n, Port argp) {
-  Port cur = net_dhop(n, argp);
-  if (!IN_NET(n, cur.node) || n->dead[cur.node] || n->tag[cur.node] != LAM ||
-      ctor_tag(nmof(n, cur.node)) != DT_STR) return -1;          /* arg list is a cons spine */
-  Port bn = net_dhop(n, wire_at(n, cur.node, 2));
-  if (!IN_NET(n, bn.node) || bn.port != 0 || n->tag[bn.node] != LAM) return -1;
-  int slots = 0;
-  for (int step = 0; step < n->nn; step++) {
-    cur = net_dhop(n, cur);
-    if (!IN_NET(n, cur.node) || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
-    Port inner = net_dhop(n, wire_at(n, cur.node, 2));
-    if (!IN_NET(n, inner.node) || inner.port != 0 || n->tag[inner.node] != LAM) break;
-    Port body = net_dhop(n, wire_at(n, inner.node, 2));
-    if (!IN_NET(n, body.node) || n->tag[body.node] != APP) break;
-    Port ia = net_dhop(n, wire_at(n, body.node, 0));
-    if (!IN_NET(n, ia.node) || n->tag[ia.node] != APP) break;
-    slots++;
-    cur = wire_at(n, body.node, 2);
-  }
-  return slots;
-}
 
 /* Compute the concrete value of a saturated pure-Lin `_op` redex (DT_OP LAM `lam`
    applied to its redex APP `app`, whose port 2 carries the raw operand `_cl`-spine).
@@ -208,7 +183,7 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
   if (!op_fn_from_tag(nmof(n, lam), fn, sizeof fn)) return EV_NO;
   if (!IN_NET(n, app) || n->dead[app] || n->tag[app] != APP) return EV_NO;
   Port argp = wire_at(n, app, 2);
-  int slots = spine_slot_count(n, argp);
+  int slots = net_spine_slots(n, argp);
   Val fargs[8]; memset(fargs, 0, sizeof fargs);
   int argc = net_spine_args(n, argp, fargs, 8);
   if (slots < 1 || slots > 8 || argc < slots) return EV_WAIT;   /* operand spine not readably concrete */
@@ -243,7 +218,7 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
 
   Val vals[8]; memset(vals, 0, sizeof vals);
   int na = net_ffi_args(n, (Port){lam, 0}, vals, 8);
-  int slots = spine_slot_count(n, argp);
+  int slots = net_spine_slots(n, argp);
   if (slots < 0) { if (na != 0) return EV_WAIT; slots = 0; }   /* not a cons spine: only the empty arg list is concrete */
   else if (slots > 8) return EV_WAIT;
   if (na < slots) return EV_WAIT;                              /* a present operand is not concrete yet */

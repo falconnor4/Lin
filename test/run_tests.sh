@@ -79,6 +79,10 @@ for f in test/float_share.lin test/ffi.lin test/ffi_advanced.lin test/ffi_system
   run_test "$f"
 done
 
+# Operands that only exist at RUN time (via getenv), so the folds they feed cannot be resolved at
+# compile time.  N is what the program reads; it is fixed so the assertions can state values.
+N=6 run_test test/runtime_ffi.lin
+
 # ----------------------------------------------------------------------------
 # Tier 2.5: Canonical cross-driver selftest
 #   Runs std/selftest.lin under the base CPU engine (golden) and under every

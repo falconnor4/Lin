@@ -170,6 +170,7 @@ Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) ch
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_args(Net *n, Port lam, Val *vals, int max); /* decode arg spine into Vals */
 int  net_spine_args(Net *n, Port argp, Val *vals, int max); /* decode a `_cl`-spine at a port */
+int  net_spine_slots(Net *n, Port argp); /* operand count of a `_cl` arg list (-1: not a cons spine) */
 /* !=0 while def_precompile reduces an open body: a driver must not fold there, since the operands are free vars
    that never become concrete and a baked closure would capture a stale value */
 extern int lin_precompile_depth;

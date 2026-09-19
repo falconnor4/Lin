@@ -133,6 +133,10 @@
               run_test "$f"
             done
 
+            # Operands that exist only at RUN time (getenv), so their folds cannot resolve at
+            # compile time.  N is the value the program reads.
+            N=6 run_test test/runtime_ffi.lin
+
             printf "\n''${C_TIER}[Tier 2.5: Canonical Cross-Driver Selftest]''${C_RESET}\n"
             if bash test/driver_selftest.sh "$LIN_BIN" "$LIN_STD_DIR" >/dev/null 2>&1; then
               pass=$((pass + 1))

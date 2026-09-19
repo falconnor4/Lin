@@ -99,6 +99,8 @@ static inline Port skip_dup(Net *n, Port p) {
 }
 
 static Val run_ffi(Net *n, Port p); /* fwd */
+static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped); /* fwd: the one arg-spine walk */
+int net_spine_slots(Net *n, Port argp); /* fwd: the one operand-shape authority */
 
 /* Scott-spine walk: count succ layers (optional `peek` folds embedded `_ffi` closures per layer); 1 at zero-terminal (count set) or 0 malformed. */
 static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), long *count) {
@@ -249,7 +251,14 @@ static Val run_ffi(Net *n, Port p) {
   char fn[256];
   if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return v;
   Val fargs[8] = {{0}};
-  int argc = net_ffi_args(n, (Port){p.node, 0}, fargs, 8);
+  Port argp;
+  if (!ffi_header(n, (Port){p.node, 0}, 0, &argp)) return v;
+  int argc = decode_spine(n, argp, fargs, 8, 0);
+  /* Never call a symbol unless every operand is there: guessing the arity called libc `getenv()` with
+     no arguments at all and segfaulted (a three-deep `_ffi` nest inside a precompiled define).  Fewer
+     decoded values than slots = not foldable yet, so decline and let the redex be retried. */
+  int slots = net_spine_slots(n, argp);
+  if (slots < 0 ? argc != 0 : (slots > 8 || argc < slots)) return v;
   long c_args[8] = {0}; char sbufs[8][4096];
   for (int i = 0; i < argc; i++)
     if (fargs[i].kind == 2) { snprintf(sbufs[i], 4096, "%s", fargs[i].sv); c_args[i] = (long)(intptr_t)sbufs[i]; }
@@ -551,6 +560,32 @@ int net_ffi_fn(Net *n, Port p, char *fn, int fnmax) {
   if (!ffi_header(n, p, &a1, 0)) return 0;
   if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
   return net_read_string(n, wire((Port){a1.node, 2}), fn, (size_t)fnmax) >= 0;
+}
+
+/* Operand count of a `_cl` argument list; -1 means it is not a cons spine, so only an empty list reads
+   as concrete.  The ONE authority on whether a spine is fully present: fewer decoded values than slots
+   means an operand is not concrete YET, and the fold must be declined rather than guessed. */
+int net_spine_slots(Net *n, Port argp) {
+  N = n;
+  Port cur = net_dhop(n, argp);
+  if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM ||
+      ctor_tag(NNM(n, cur.node)) != DT_STR) return -1;
+  Port bn = net_dhop(n, wire((Port){cur.node, 2}));
+  if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) return -1;
+  int slots = 0;
+  for (int step = 0; step < n->nn; step++) {
+    cur = net_dhop(n, cur);
+    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
+    Port inner = net_dhop(n, wire((Port){cur.node, 2}));
+    if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
+    Port body = net_dhop(n, wire((Port){inner.node, 2}));
+    if (body.node < 0 || n->tag[body.node] != APP) break;
+    Port ia = net_dhop(n, wire((Port){body.node, 0}));
+    if (ia.node < 0 || n->tag[ia.node] != APP) break;
+    slots++;
+    cur = wire((Port){body.node, 2});
+  }
+  return slots;
 }
 
 /* decode a single argument port into a Val (int/bool/float/string directly; a nested `_ffi` closure folds first); 1 on success */

@@ -1,0 +1,29 @@
+; Runtime (non-constant) operands through nested FFI.  Everything here folds at COMPILE time when
+; its operands are literals; the crash these assert against needed the operand to exist only at
+; run time, so each value comes from the environment via `getenv` and the nest is 3 deep
+; (ffloor(parse_float(getenv "N"))).  At depth 3 the innermost closure's argument spine is not
+; concrete yet while an outer fold is being attempted; guessing its arity called libc getenv() with
+; no arguments at all and segfaulted.  The fold must decline instead and be retried.
+(load "std/std.lin")
+
+; 2-deep nest: a runtime string parsed to a float
+(ccall1 "lin_parse_float" (ffi.getenv "N"))
+; expect => 6
+
+; 3-deep nest, as an expression
+(ccall1 "lin_ffloor" (float.float (ffi.getenv "N")))
+; expect => 6
+
+; 3-deep nest inside a define (the precompile path that crashed)
+(define rt (ccall1 "lin_ffloor" (float.float (ffi.getenv "N"))))
+rt
+; expect => 6
+
+; the runtime value feeds a recursive def
+(define! sumto (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))
+(sumto rt)
+; expect => 21
+
+; and a fold whose operand is the runtime value
+(add rt 1)
+; expect => 7
