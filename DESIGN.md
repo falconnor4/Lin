@@ -648,8 +648,26 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
   therefore verifies its own output (no free generated name) and `egraph_optimize` compile-checks
   the result, falling back to the plain tree extraction when the check fails — which is what
   happens on `line_ffi` today (`shared extraction rejected (unbound variable 'a')`). The next step
-  is **scope-aware placement**: bind each shared class at the innermost λ that encloses all of its
-  uses, which is what makes sharing pay on real programs rather than only on closed subterms.
+  is **scope-aware placement**: bind each shared class in the *frame* (a λ body, or the root) that
+  encloses all of its uses, which is what makes sharing pay on real programs rather than only on
+  closed subterms.  An attempt at it is recorded here because its failure mode is instructive:
+
+  - Design: one traversal for both planning and emission (so a plan cannot disagree with what is
+    emitted), a frame per λ body, a binding hosted by the frame of its *first* use, and a class
+    used outside its host frame simply not shared.  A frame emits `let v1 = .. in let v2 = .. in
+    body`, values ordered so a value referencing another binding is evaluated inside it; a
+    within-frame binding cycle vetoes that one class and the pass retries, so one awkward value
+    does not cost every other binding in the program.
+  - Two bugs cost the attempt.  The frame's binding list was filled only by the planning pass, so
+    emission wrapped nothing and every generated name came out free (the compile probe caught it,
+    which is why the result was safe rather than wrong, but useless).  And a value emitted at a
+    frame close can register *more* bindings in that same frame, so the list has to be drained to a
+    fixpoint -- iterating it as it grows does not terminate.
+  - With both fixed the emitted term still had out-of-scope names and then stopped terminating, so
+    the work was reverted rather than landed half-debugged.  What made it expensive is that the two
+    passes can silently disagree: the next attempt should assert that planning and emission visit
+    the same class, binding and frame sequence, and should be tested on a shared value that
+    mentions a λ-bound variable -- the shape flat root hoisting cannot express.
 - **Parallelise definitions, not waves.** Defs are independent units of type checking and
   compilation, they are 66% of wall clock, and order-independent generalization is now in
   place — that is where the cores are. Parallel *reduction* measurements (a precise
