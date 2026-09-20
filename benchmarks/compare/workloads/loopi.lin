@@ -1,5 +1,0 @@
-; Tail-recursive accumulation over FFI-folded arithmetic.
-(load "std/std.lin")
-(define! loopi (num -> num -> num)
-  (\i (\acc (ifl (is_zero i) (\_ acc) (\_ ((loopi (pred i)) (add acc i)))))))
-((loopi 60) 0)

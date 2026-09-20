@@ -1,5 +1,0 @@
-; Sum 1..N by non-tail recursion -- the ordinary recursive-function shape in both languages.
-(load "std/std.lin")
-(define! sumto (num -> num)
-  (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))
-(sumto 25)
