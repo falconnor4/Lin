@@ -11,8 +11,25 @@ static Net *N;
 #define NNM(n, i) ((i) >= 0 && (i) < (n)->nn && (n)->name[i] ? (n)->name[i] : "")
 static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 
-/* float box: a `_fsz`-spine Scott numeral indexes a global double table (no IEEE bits in the numeral). */
+/* float box: a `_fsz`-spine Scott numeral indexes a global double table (no IEEE bits in the
+   numeral).  The table stays process-global on purpose: a box's index is baked into its spine
+   structure, and ct_splice copies a precompiled define's net into the caller's net node by node,
+   so a per-net table would leave the spliced boxes indexing the wrong one.  What was missing is
+   that the table is never SERIALIZED, which made every float-valued .line artifact unreadable:
+   the build wrote only the index, a plain `./prog.line` never calls compile() so its table was
+   empty, `net_read_float`'s `idx < nflt` gate then rejected every float, and readback fell back
+   to printing the raw `_ffi`/`_fsz` spine -- measured, `2.0` and `144.0` built byte-identical
+   artifacts, and running one under an interpreter that had compiled the other printed the WRONG
+   number instead of failing.  net_save_line/net_load_line now carry the table (v4). */
 static double *fltbox; static int nfltbox, cfltbox;
+int lin_flt_count(void) { return nfltbox; }
+const double *lin_flt_data(void) { return fltbox; }
+void lin_flt_set(const double *d, int n) {
+  free(fltbox); fltbox = NULL; cfltbox = nfltbox = 0;
+  if (n > 0 && (fltbox = malloc((size_t)n * sizeof(double)))) {
+    memcpy(fltbox, d, (size_t)n * sizeof(double)); cfltbox = nfltbox = n;
+  }
+}
 
 static Port alloc_scott_named(Net *n, long k, const char *szn, const char *ssn) {
   Scope sc = scope_nil(); Port cur = (Port){-1, 0};
@@ -144,7 +161,7 @@ long net_read_int(Net *n, Port p) {
   return scott_peel(n, p, DT_NUM, read_int_peek, &count) ? count : -1;
 }
 
-/* Extract a float box (`_fsz` spine whose value is a fltbox index). */
+/* Extract a float box (`_fsz` spine whose value is an index into the fltbox table). */
 int net_read_float(Net *n, Port p, double *out) {
   N = n; long count = 0;
   if (!scott_peel(n, p, DT_FLOAT, 0, &count)) return 0;
@@ -367,6 +384,42 @@ static size_t vis_cap = 0;
 static char *ob_buf = NULL; static size_t ob_len, ob_cap;
 static char **viz_txt = NULL;      /* memo: node*3+port -> rendered text */
 static long qmarks = 0;            /* '?' (cycle/over-depth) marks emitted so far */
+static long renames = 0;           /* shadowed binders rendered under a disambiguated name */
+
+/* The binders currently being printed, innermost last.  An occurrence carries no name of its
+   own -- print_port renders it from the binder node its wire leads to -- so a shadowing binder
+   printed under its stored name made the text denote a DIFFERENT term than the value:
+
+     (\y ((\x (\y x)) y))    value \y.\y'.y (constant), but both binders stored `y`,
+                             so it printed (\y (\y y)), which re-reads as \y.id
+
+   Measured by applying the result: the value answers 42, the printed text answers 7.  So each
+   binder is given the name it is PRINTED under, and occurrences follow the binding rather than
+   the spelling.  Every binder visible at one point must print under a distinct name, or an
+   occurrence cannot say which one it means, so a name already in scope takes a prime. */
+static struct { int node; char printed[NAME]; } *pp_stack;
+static int pp_top = 0, pp_cap = 0;
+static long pp_renames = 0;        /* binders printed under a variant of their stored name */
+
+static const char *pp_binder_name(int node, const char *fallback) {
+  for (int i = pp_top - 1; i >= 0; i--) if (pp_stack[i].node == node) return pp_stack[i].printed;
+  return fallback;
+}
+static int pp_name_active(const char *nm) {
+  for (int i = 0; i < pp_top; i++) if (!strcmp(pp_stack[i].printed, nm)) return 1;
+  return 0;
+}
+static const char *pp_push(int node, const char *nm) {
+  if (pp_top >= pp_cap) pp_stack = realloc(pp_stack, (size_t)(pp_cap = pp_cap ? pp_cap * 2 : 32) * sizeof *pp_stack);
+  char pn[NAME];
+  snprintf(pn, NAME, "%s", nm);
+  size_t k = strlen(pn);
+  while (pp_name_active(pn) && k + 1 < NAME) { pn[k++] = '\''; pn[k] = 0; }
+  if (strcmp(pn, nm)) pp_renames++;
+  pp_stack[pp_top].node = node;
+  snprintf(pp_stack[pp_top].printed, NAME, "%s", pn);
+  return pp_stack[pp_top++].printed;
+}
 
 static void ob_need(size_t k) {
   if (ob_len + k + 1 > ob_cap) {
@@ -387,13 +440,16 @@ static void ob_printf(const char *f, ...) {
 static void print_port(Port p, int depth) {
   if (depth > N->nn || p.node < 0 || p.node >= N->nn) { ob_putc('?'); qmarks++; return; }
   if (N->dead[p.node]) { ob_putc('_'); return; }
-  if (N->tag[p.node] == LAM && p.port == 1) { ob_puts(NNM(N, p.node)); return; }
+  if (N->tag[p.node] == LAM && p.port == 1) {
+    ob_puts(pp_binder_name(p.node, NNM(N, p.node)));
+    return;
+  }
   size_t key = (size_t)p.node * 3 + (size_t)p.port;
   int in_vis = (size_t)p.node < vis_cap, in_txt = key < vis_cap * 3;
   if (viz_txt && in_txt && viz_txt[key]) { ob_puts(viz_txt[key]); return; }
   if (vis_print && in_vis && vis_print[p.node]) { ob_putc('?'); qmarks++; return; }
   if (vis_print && in_vis) vis_print[p.node] = 1;
-  long q0 = qmarks; size_t o0 = ob_len;
+  long q0 = qmarks, r0 = pp_renames; size_t o0 = ob_len;
   switch (N->tag[p.node]) {
   case ROOT: print_port(wire(p), depth + 1); break;
   case ERA: ob_putc('_'); break;
@@ -406,14 +462,17 @@ static void print_port(Port p, int depth) {
       double d; if (net_read_float(N, p, &d)) { ob_printf("%g", d); break; }
       long v = net_read_int(N, p); if (v >= 0) { ob_printf("%ld", v); break; }
       int b = net_read_bool(N, p); if (b >= 0) { ob_puts(b ? "true" : "false"); break; }
-      ob_printf("(\\%s ", NNM(N, p.node)); print_port(wire((Port){p.node, 2}), depth + 1); ob_putc(')'); break;
+      ob_printf("(\\%s ", pp_push(p.node, NNM(N, p.node)));
+      print_port(wire((Port){p.node, 2}), depth + 1); ob_putc(')'); pp_top--; break;
     }
     print_port(wire(p), depth + 1); break;
   }
   if (vis_print && in_vis) vis_print[p.node] = 0;
-  /* memoise only context-free renders: a '?' on the way in means this text was
-     shaped by an in-progress ancestor (a real cycle), so it must not be replayed. */
-  if (viz_txt && in_txt && qmarks == q0) {
+  /* Memoise only context-free renders: a '?' on the way in means this text was shaped by an
+     in-progress ancestor (a real cycle), so it must not be replayed.  A rename inside the
+     subtree is a second reason -- the text then contains a name chosen for the scope it was
+     rendered in, and replaying it elsewhere could attach that name to a different binder. */
+  if (viz_txt && in_txt && qmarks == q0 && pp_renames == r0) {
     size_t k = ob_len - o0;
     char *t = malloc(k + 1);
     if (t) { memcpy(t, ob_buf + o0, k); t[k] = 0; viz_txt[key] = t; }

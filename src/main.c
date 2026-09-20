@@ -238,6 +238,16 @@ void eval_form(Term *t) {
     if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
     long steps = net_reduce(&net, STEP_LIMIT);
     if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
+    /* A stalled reduction must be reported BEFORE the recursion-sentinel branch, because that
+       branch `continue`s into another round: the driver is not making progress, so no deeper
+       unravelling can clear the sentinel, and the 16-round widening loop (each round doubling the
+       bound and re-expanding every def) turns a stall into what looks like a hang.  Measured with a
+       probe driver whose drain re-enqueues without progress: the guard trips, `stalled` is set, and
+       the run used to widen forever instead of saying so. */
+    if (net.stalled) {
+      printf("error: reduction stalled (driver made no progress); result is not a value\n");
+      net_free(&net); term_free(ex); return;
+    }
     if (rec_sentinel_demanded(&net)) {   /* self-recursion exceeded k */
       net_free(&net); term_free(ex);
       if (!widen_recursion()) { printf("error: recursion depth exceeded unravelling bound\n"); return; }
@@ -249,8 +259,9 @@ void eval_form(Term *t) {
        `(fib 12)` printed 0 where the answer is 144 and `(fib 14)` printed 0 where it is 377.  A
        truncated net is not a value, and the sentinel is not demanded precisely *because* the
        reduction never got far enough to reach it. */
-    if (steps >= STEP_LIMIT) {
-      printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
+    if (steps >= STEP_LIMIT || net.stalled) {
+      if (net.stalled) printf("error: reduction stalled (driver made no progress); result is not a value\n");
+      else printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
       net_free(&net); term_free(ex); return;
     }
     run_and_report(&net); net_free(&net); term_free(ex); return;
@@ -780,7 +791,18 @@ int main(int argc, char **argv) {
     load_std();
     if (argc < 3) { fprintf(stderr, "usage: lin build <file.lin> [-o <file.line>]\n"); return 1; }
     const char *in_f = argv[2], *out_f = NULL;
-    for (int i = 3; i < argc; i++) if (!strcmp(argv[i], "-o") && i + 1 < argc) out_f = argv[++i];
+    /* `-t` is documented as "number of OpenMP worker threads" with no mode restriction, and a build
+       reduces heavily (every def_precompile, then the AOT build-time reduction), so ignoring it
+       here silently made a documented flag a no-op.  LIN_THREADS already reached this path. */
+    for (int i = 3; i < argc; i++) {
+      if (!strcmp(argv[i], "-o") && i + 1 < argc) out_f = argv[++i];
+      else if (!strcmp(argv[i], "-t") && i + 1 < argc) {
+        lin_threads = atoi(argv[++i]);
+#ifdef _OPENMP
+        omp_set_num_threads(lin_threads);
+#endif
+      }
+    }
     char auto_out[PATH_MAX];
     if (!out_f) {
       snprintf(auto_out, sizeof auto_out, "%s", in_f);

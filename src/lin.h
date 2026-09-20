@@ -31,8 +31,10 @@ typedef uint32_t Scope;
 typedef struct {
   int cap, nn; unsigned char *tag; Port *wire; Scope *scope; char **name;
   Port *act; int atop, actcap; unsigned char *dead;
-  /* level trie: lv_parent[l]/lv_bit[l] are the trie edge into level l (1 and 2 are term
-     branches, 0 is the knot namespace, which no term path can occupy); nlv is its size */
+  /* level trie: lv_parent[l]/lv_bit[l] are the trie edge into level l; nlv is its size.  Branches
+     are {1, 0}: scope_app masks `bit & 1` (net.c), and the compiler passes 1 for a function
+     position / lambda body and 2 for an argument, so branch 2 folds onto branch 0.  There is no
+     separate "knot namespace" — node dumps put argument-position nodes at paths like `0` and `01`. */
   int *lv_parent, *lv_depth, *lv_hash, nlv, lvcap, lv_hcap;
   unsigned char *lv_bit;
   long steps;
@@ -40,6 +42,11 @@ typedef struct {
      reports it here.  The core never interprets the reason — it only uses it to know the net is not a value, so
      def_precompile must not bake it.  The policy is entirely the driver's. */
   unsigned char driver_pending;
+  /* `stalled` is set when net_reduce's livelock guard drops the active list before a normal form.
+     It used to be silent, and a truncated net is indistinguishable from a value to every caller
+     (eval_form only recognises truncation by `steps >= STEP_LIMIT`), so a guard trip could be
+     printed and even baked into a .line as if it were the answer. */
+  unsigned char stalled;
 } Net;
 
 /* wire of a port (drivers read the graph directly) */
@@ -92,7 +99,12 @@ typedef struct LinDriver {
   /* ---- ABI 2 optional hooks (NULL = not implemented) ---- */
   /* Pre-empt a sub-term sitting in a β *argument* position (e.g. the saturated `(mul 2 2)` of `succ (mul 2 2)`).
      A driver never sees that shape as a principal×principal redex, so the core offers it explicitly: return 1 if
-     `arg` was materialised as a value at `target`, 0 to let plain β substitute it. */
+     `arg` was materialised as a value at `target`, 0 to let plain β substitute it.
+     ALLOCATION BUDGET: β runs inside the parallel wave, so this hook can be called from a worker thread, where
+     net_alloc cannot grow the net (a realloc would move the arrays every worker is holding).  The wave reserves
+     4 nodes per interaction, which is exactly what the core rules use; a hook that allocates more than that
+     aborts the process with a message rather than corrupting the heap.  Materialise a value with a bounded
+     footprint (a Scott numeral's size is its value, so an unbounded `net_alloc_scott(n, k)` is not safe here). */
   int (*arg_fold)(Net *n, Port arg, Port target);
   /* Readback pre-pass: materialise a sub-term the reducer left as a driver-foldable closure (e.g. a saturated
      `_ffi` closure embedded in a numeral spine) into `*out`; return 0 to leave `p` alone. */
@@ -183,6 +195,8 @@ int  ctor_register(const char *name, int tag, const char *c1, const char *c2);
 void ctor_init_builtins(void);
 Port net_alloc_scott(Net *n, long k); Port net_alloc_bool(Net *n, int v);
 Port net_alloc_float(Net *n, double d);
+/* The float box table: boxes carry an INDEX, so the .line container has to carry the table. */
+int lin_flt_count(void); const double *lin_flt_data(void); void lin_flt_set(const double *d, int n);
 
 /* ---------------- goi ---------------- */
 long long goi_det(Net *n);

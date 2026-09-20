@@ -14,7 +14,7 @@ Lin uses [Nix](https://nixos.org/) for reproducible, hermetic builds and testing
 # Build the lin compiler/runtime
 nix build
 
-# Run the test suite (all 18 test suites + .line verification)
+# Run the full test suite (61 suites, incl. .line containers and the Python oracles)
 nix flake check
 
 # Interactively run the test runner
@@ -38,7 +38,7 @@ make build
 # Run tests via Nix (committed tree only - see note below)
 make nix-test
 
-# Trusted working-tree build + full suite (41+ suites, incl. .line containers)
+# Trusted working-tree build + full suite (61 suites, incl. .line containers)
 make test
 
 # Or compile directly with gcc/clang

@@ -186,6 +186,7 @@ typedef struct {
   int *node_cls;
   int *slot, hcap;        /* (type,name,children) -> e-node, so insertion is not quadratic */
   int *uses;              /* how many e-nodes reference each class: the sharing the pass found */
+  int capture;            /* set by eg_subst when a rewrite would capture: the rule then declines */
 } EGraph;
 
 static int eg_find(EGraph *g, int c) {
@@ -213,14 +214,14 @@ static void eg_union(EGraph *g, int c1, int c2) {
 /* The rewrite rules are data: a row per optimization, with whether it is on and how often it
    fired, so a new optimization is a row rather than another arm in the saturation loop.  `eta`
    is kept as a row but is off by default: it fired zero times on every program measured, and the
-   whole measured win of this pass is `beta` (`line_ffi` 8,166 -> 7,802 compiled nodes, 122,149 ->
-   119,854 bytes, 13 unionations).  LIN_EGRULES=beta,eta turns it on. */
+   whole measured win of this pass is `beta` (`line_ffi` 8,166 -> 7,802 compiled nodes, 122,143 ->
+   119,843 bytes, 13 unionations; bytes move with the container format).  LIN_EGRULES=beta,eta turns it on. */
 enum { EG_BETA = 1, EG_ETA };
-typedef struct { const char *name; int kind; int param; int on; long fires; } EgRule;
+typedef struct { const char *name; int kind; int param; int on; long fires, declines; } EgRule;
 static EgRule eg_rules[] = {
-  /* name   kind      param  on  fires */
-  { "beta", EG_BETA,  64,    1,  0 },
-  { "eta",  EG_ETA,   0,     0,  0 },
+  /* name   kind      param  on  fires declines */
+  { "beta", EG_BETA,  64,    1,  0,    0 },
+  { "eta",  EG_ETA,   0,     0,  0,    0 },
 };
 #define EG_NRULES ((int)(sizeof eg_rules / sizeof eg_rules[0]))
 static int eg_beta_only = 1;
@@ -229,7 +230,7 @@ static void eg_rules_init(void) {
   eg_beta_only = !(sel && strstr(sel, "eta"));
   eg_rules[0].on = 1;
   eg_rules[1].on = !eg_beta_only;
-  for (int i = 0; i < EG_NRULES; i++) eg_rules[i].fires = 0;
+  for (int i = 0; i < EG_NRULES; i++) { eg_rules[i].fires = 0; eg_rules[i].declines = 0; }
 }
 
 /* Cost of a form: what the extracted term will weigh. */
@@ -311,12 +312,27 @@ static int eg_has_var(EGraph *g, int c, const char *name) {
   return 0;
 }
 
+/* Substitute `arg` for `name` in class `c`.  Beta is only sound if this is CAPTURE-AVOIDING: the
+   argument lands under whatever binders the body has, so a binder whose name occurs free in the
+   argument would capture those occurrences and silently change the meaning.  Measured on
+   `((\y (((\x (\y x)) y) 5)) 99)`: the correct answer is 99, but substituting under the inner `\y`
+   captured the argument's `y`, so the pass rewrote the term to `(\y y)`, extraction preferred that
+   form (cost 3 against 9), and `lin build` shipped an artifact printing 5 while the interpreter
+   printed 99 -- on the DEFAULT candidate, not just under LIN_AOT_SEARCH.
+
+   Alpha-renaming the binder also fixes the meaning, and was measured: it keeps the rewrite, but
+   Lin PRINTS binder names, so the invented name is observable -- the same program came out as
+   `(\y%0 y)` from the artifact where the interpreter prints `(\y y)`.  A pass that only ever
+   removes work should not be able to alter what a program prints, so a capture-risk rewrite is
+   DECLINED instead (`g->capture`), and extraction can then only return a term the compiler would
+   have produced anyway.  Every name in the graph survives verbatim. */
 static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
-  if (d > 1024) return c;
+  if (d > 1024) { g->capture = 1; return c; }
   c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
   if (n.type == TVAR) return !strcmp(n.name, name) ? arg : c;
   if (n.type == TLAM) {
     if (!strcmp(n.name, name)) return c;
+    if (eg_has_var(g, arg, n.name)) { g->capture = 1; return c; }
     return eg_add(g, TLAM, n.name, eg_subst(g, n.l, name, arg, d + 1), -1);
   }
   if (n.type == TAPP)
@@ -341,7 +357,11 @@ static void eg_saturate(EGraph *g) {
             if (g->classes[bl].cost <= eg_rules[r].param) {
               char vn[NAME]; snprintf(vn, NAME, "%s", g->nodes[bn].name);
               int before = eg_find(g, cls);
-              eg_union(g, cls, eg_subst(g, g->nodes[bn].l, vn, n.r, 0));
+              g->capture = 0;
+              int sub = eg_subst(g, g->nodes[bn].l, vn, n.r, 0);
+              /* a rewrite that would capture is not applied at all -- see eg_subst */
+              if (g->capture) { eg_rules[r].declines++; continue; }
+              eg_union(g, cls, sub);
               if (eg_find(g, cls) != before) eg_rules[r].fires++;
             }
           }
@@ -401,8 +421,10 @@ Term *egraph_optimize(Term *t) {
   if (getenv("LIN_PASSES")) {
     fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, rules:",
             g.nc, g.nn, shared);
-    for (int r = 0; r < EG_NRULES; r++)
+    for (int r = 0; r < EG_NRULES; r++) {
       fprintf(stderr, " %s=%s/%ld", eg_rules[r].name, eg_rules[r].on ? "on" : "off", eg_rules[r].fires);
+      if (eg_rules[r].declines) fprintf(stderr, "(+%ld capture-declined)", eg_rules[r].declines);
+    }
     fprintf(stderr, "\n");
   }
   free(g.nodes); free(g.classes); free(g.node_cls); free(g.slot); free(g.uses);
@@ -424,7 +446,7 @@ int net_save_line(Net *n, const char *path) {
   FILE *f = fopen(path, "wb"); if (!f) return 0;
   fprintf(f, "#!%s\n", self_path); fwrite("LINE", 1, 4, f);
   uint32_t nnamed = 0; for (int i = 0; i < n->nn; i++) if (n->name[i] && n->name[i][0]) nnamed++;
-  uint32_t meta[4] = { 3, (uint32_t)n->nn, (uint32_t)n->nlv, nnamed };
+  uint32_t meta[4] = { 4, (uint32_t)n->nn, (uint32_t)n->nlv, nnamed };
   fwrite(meta, sizeof(uint32_t), 4, f);
   fwrite(n->tag, 1, (size_t)n->nn, f); fwrite(n->dead, 1, (size_t)n->nn, f);
   fwrite(n->wire, sizeof(Port) * 3, (size_t)n->nn, f);
@@ -436,6 +458,14 @@ int net_save_line(Net *n, const char *path) {
   /* the level trie: parents come before children by construction, so ids reload directly */
   if (n->nlv > 0) { fwrite(n->lv_parent + 1, sizeof(int), (size_t)n->nlv, f);
                     fwrite(n->lv_bit + 1, 1, (size_t)n->nlv, f); }
+  /* v4: the net's float table.  A float box is only an INDEX into it, so without this the value
+     is simply absent from the artifact -- measured: `2.0` and `144.0` built byte-identical files,
+     `2.0`'s artifact printed a `_fsz` spine, and running one under an interpreter that had
+     compiled `144.0` first printed 144.  The indices in the net are net-local, so what is written
+     is exactly what the boxes being saved refer to. */
+  uint32_t nf = (uint32_t)lin_flt_count();
+  fwrite(&nf, sizeof(uint32_t), 1, f);
+  if (nf) fwrite(lin_flt_data(), sizeof(double), nf, f);
   fclose(f); chmod(path, 0755); return 1;
 }
 
@@ -452,9 +482,12 @@ int net_load_line(Net *n, const char *path) {
   if (c1 == '#' && c2 == '!') { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} }
   else fseek(f, 0, SEEK_SET);
   char magic[4]; uint32_t meta[4];
-  if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "LINE", 4) || fread(meta, 4, 4, f) != 4 || meta[0] != 3) {
+  /* v3 files predate the float table and are still readable; a v3 file simply has no floats. */
+  if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "LINE", 4) || fread(meta, 4, 4, f) != 4 ||
+      (meta[0] != 3 && meta[0] != 4)) {
     fclose(f); return 0;
   }
+  int ver = (int)meta[0];
   int nn = (int)meta[1], nlv = (int)meta[2]; uint32_t nnamed = meta[3];
   net_init(n, nn + 16); n->nn = nn;
 
@@ -475,6 +508,15 @@ int net_load_line(Net *n, const char *path) {
         fread(bit, 1, (size_t)nlv, f) != (size_t)nlv) { free(par); free(bit); fclose(f); net_free(n); return 0; }
     net_level_set(n, nlv, par, bit);
     free(par); free(bit);
+  }
+  if (ver >= 4) {
+    uint32_t nf = 0;
+    if (fread(&nf, sizeof(uint32_t), 1, f) != 1) { fclose(f); net_free(n); return 0; }
+    if (nf > 0) {
+      double *d = malloc((size_t)nf * sizeof(double));
+      if (!d || fread(d, sizeof(double), nf, f) != (size_t)nf) { free(d); fclose(f); net_free(n); return 0; }
+      lin_flt_set(d, (int)nf); free(d);
+    } else lin_flt_set(NULL, 0);
   }
   fclose(f);
   /* seed the self-collecting activation queue: the active-redex list is not serialized, so a freshly loaded net has an empty queue; reconstruct all live principal pairs (including ROOT) so it actually reduces */

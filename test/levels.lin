@@ -24,9 +24,12 @@
 (let ((g (add 2))) (pair (g 3) (g 4)))
 ; expect => (\f ((f 5) 6))
 
-; sharing inside a shared value (nested levels: the inner point is not re-duplicated per copy)
+; sharing inside a shared value.  Measured, this is the INCOMPARABLE case, not the nested one: a
+; census of every DUPxDUP interaction over the suite, 400 random closed terms and 49 shapes built to
+; nest levels finds zero nested pairs, so net.c's nested branch is unexercised and this line does
+; not cover it.
 (let ((x (let ((y (add 2 3))) (pair y y)))) (pair x x))
-; expect => (\f ((f (\f ((f 5) 5))) (\f ((f 5) 5))))
+; expect => (\f ((f (\f' ((f' 5) 5))) (\f' ((f' 5) 5))))
 
 ; sharing a recursive result (a knot of levels around a clone)
 (define! sumto (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))

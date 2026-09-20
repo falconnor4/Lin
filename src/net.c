@@ -12,6 +12,7 @@
 Scope scope_nil(void) { return 0; }
 
 static int in_parallel;   /* a wave is running threaded: no interning there (see below) */
+static long nested_fan_hits;   /* tripwire for the unverified DUPxDUP nested-level branch */
 
 /* ---------------- the level trie ----------------
    A level is a position in the term: the sequence of branches taken from the root.  Interning
@@ -140,7 +141,7 @@ void net_init(Net *n, int cap) {
   n->nlv = 0; n->lvcap = 0; n->lv_hcap = 0;
   lv_ensure(n, 1);                      /* the root level always exists */
   n->lv_parent[0] = 0; n->lv_bit[0] = 0; n->lv_depth[0] = 0;
-  n->nn = 0; n->steps = 0; n->driver_pending = 0;
+  n->nn = 0; n->steps = 0; n->driver_pending = 0; n->stalled = 0;
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
@@ -164,6 +165,19 @@ static void net_ensure_cap(Net *n, int need) {
 Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
   if (!in_parallel) net_ensure_cap(n, n->nn + 1);
   int id = __atomic_fetch_add(&n->nn, 1, __ATOMIC_RELAXED);
+  /* While a wave is threaded, growth is skipped: `realloc` would move the arrays out from under
+     every worker, which holds raw pointers into them.  The wave therefore reserves up front
+     (lin_reduce_wave_parallel: 4 nodes per parallel interaction, which is tight for the core
+     rules).  A driver hook can allocate more than that -- `arg_fold` runs inside the region and
+     its bound is the driver's -- and the old code wrote past the arrays, corrupting the heap.
+     The reservation is the driver's contract; this is the check that makes breaking it loud. */
+  if (id >= n->cap) {
+    fprintf(stderr, "lin: fatal: allocation past the wave's reservation (node %d, cap %d).\n"
+                    "     A driver's arg_fold hook allocated inside a parallel wave; see lin.h.\n",
+            id, n->cap);
+    fflush(stderr);
+    abort();
+  }
   n->tag[id] = tag; n->dead[id] = 0; n->scope[id] = sc;
   if (n->name[id]) { free(n->name[id]); n->name[id] = NULL; }
   if (name && name[0]) n->name[id] = strdup(name);
@@ -287,19 +301,37 @@ int net_interact(Net *n, Port p1, Port p2) {
          gamma x delta rule below -- because the only alternatives are annihilating two
          unrelated fans (wrong value) or stranding the pair (no reduction).
 
-         What differs is the LEVEL the copies carry, and it is what bounds duplication:
+         What differs is the LEVEL the copies carry.  A fan's label names the sharing point it
+         implements, and labels are only ever compared for EQUALITY, so a wrong label cannot
+         re-duplicate work -- it can only make two distinct sharing points annihilate (a wrong
+         value).  Read the wiring below to see which new fan implements which point: d1,d2 sit on
+         n1's auxiliaries and feed m1,m2, whose principals feed n2's auxiliaries, so d1,d2 split
+         n1's value between n2's two uses -- they implement n2's point and must carry sb; m1,m2
+         implement n1's point and must carry sa.  The default (`qa = sa, qb = sb`) is exactly that
+         cross-labelling.
 
-         - NESTED levels (one gauge a proper prefix of the other: the two sharing points
-           enclose one another) are related, not independent.  The deeper fan's copies take
-           the SHALLOWER level, so the inner sharing point is *shared* between the outer
-           copies instead of being re-duplicated once per copy.  Without this, a fan that
-           meets its own copies around a cycle duplicates the structure it came from forever
-           (measured on a knot: 2,000,000+ steps without a normal form against 33,200 steps /
-           1,122 nodes with it, and the whole suite stays oracle-green).
-         - INCOMPARABLE levels are genuinely independent sharing points, and their copies
-           keep their own names so the two points stay distinct. */
+         The NESTED branch (one gauge a proper prefix of the other) then overrides it, relabelling
+         the fans implementing the INNER point with the OUTER level -- the one thing the
+         equality-only comparison cannot absorb, since it merges two distinct sharing points.  It
+         is also unexercised: a census of every DUPxDUP interaction over 99 programs (799,469
+         annihilations, 4,182 incomparable), 400 random closed lambda terms and 49 shapes built to
+         nest levels found ZERO nested cases, and test/levels.lin's "nested levels" case is in fact
+         incomparable.  The comment this replaces ("the inner sharing point is shared between the
+         outer copies") described an effect relabelling cannot have, and credited this branch with
+         a knot fix (2,000,000+ steps -> 33,200) that reproduces today with no distinct-level
+         DUPxDUP interaction at all.  Kept rather than deleted because its anti-hang role is
+         unverified either way: treat it as unproven, and do not extend it without a program that
+         fires it. */
       Scope sa = n->scope[n1], sb = n->scope[n2];
       Scope qa = sa, qb = sb;
+      /* Tripwire: this path is unreachable in every corpus measured (see above), and if it ever
+         does fire the labelling it applies is the one that can merge two sharing points, so a
+         first occurrence must be visible rather than silent.  It can run on a worker thread, hence
+         the atomic. */
+      if (scope_within(n, sa, sb) || scope_within(n, sb, sa)) {
+        if (__atomic_fetch_add(&nested_fan_hits, 1, __ATOMIC_RELAXED) == 0)
+          fprintf(stderr, "lin: DUPxDUP nested-level branch fired (unverified path; see net.c)\n");
+      }
       if (scope_within(n, sa, sb)) { qa = sa; qb = sa; }        /* a encloses b: share the inner */
       else if (scope_within(n, sb, sa)) { qa = sb; qb = sb; }   /* b encloses a */
       Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
@@ -516,7 +548,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       for (int oi = 0; oi < n_occ; oi++) {
         int h = fw_occ[oi];
         for (int i = fw_slot[h]; i >= 0; i = fw_next[i])
-          if (WIRE(n, inter[i].p1).node == inter[i].p2.node && !n->dead[inter[i].p1.node] && !n->dead[inter[i].p2.node])
+          if (redex_live(n, inter[i].p1, inter[i].p2))
             if (net_interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
       }
       in_parallel = 0; n->steps += n_int; *changed += batch_changed;
@@ -599,7 +631,14 @@ long net_reduce(Net *n, long limit) {
       int re = 0;
       for (int di = 0; di < ndrv; di++) if (drv[di]->drain) re += drv[di]->drain(n);
       if (re > 0) {
-        if (n->steps == last_drain_steps) { if (++stalled_drains > 4096) { n->atop = 0; break; } }
+        /* Giving up on a livelock DROPS the remaining active list, so the net is truncated rather
+           than reduced to a value.  That has to be reportable: every caller decides "is this a
+           value?" without a normal-form test, so a silent trip used to let a half-reduced net be
+           printed as the answer and baked into a .line by def_precompile.  `stalled` and
+           `driver_pending` are the two signals those callers already consult. */
+        if (n->steps == last_drain_steps) {
+          if (++stalled_drains > 4096) { n->atop = 0; n->stalled = 1; n->driver_pending = 1; break; }
+        }
         else stalled_drains = 0;
         last_drain_steps = n->steps;
         continue;
@@ -633,6 +672,6 @@ Net *net_copy(const Net *n) {
   c->nlv = 0; c->lvcap = 0; c->lv_hcap = 0; c->lv_hash = NULL;
   c->lv_parent = NULL; c->lv_depth = NULL; c->lv_bit = NULL;
   net_level_set(c, n->nlv, n->lv_parent + 1, n->lv_bit + 1);   /* rebuild the trie: parents precede children, ids reload directly */
-  c->act = NULL; c->actcap = c->atop = 0; c->steps = 0; c->driver_pending = 0;
+  c->act = NULL; c->actcap = c->atop = 0; c->steps = 0; c->driver_pending = 0; c->stalled = 0;
   return c;
 }

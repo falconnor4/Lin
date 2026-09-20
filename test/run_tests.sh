@@ -67,6 +67,19 @@ else
   fail=$((fail+1)); echo "FAIL test/driver_selftest.sh"; cat "$DS_LOG"; rm -f "$DS_LOG"
 fi
 
+# The driver ABI's other half: what happens when a hook misbehaves.  A parallel wave cannot grow the
+# net, so an arg_fold that allocates past the wave's reservation used to write past the arrays
+# (measured: SIGSEGV, ASan heap-buffer-overflow, `free(): invalid pointer`).  It is now diagnosed.
+PG_LOG=$(mktemp)
+if ! command -v python3 >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL test/parallel_guard.py (python3 not found)"
+elif python3 test/parallel_guard.py "$LIN_BIN" "$STD_DIR" >"$PG_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 2)); echo "PASS test/parallel_guard.py ($(tail -1 "$PG_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/parallel_guard.py"; cat "$PG_LOG"
+fi
+rm -f "$PG_LOG"
+
 # ----------------------------------------------------------------------------
 # Tier 2.6: Independent soundness oracle
 #   The sharing-sensitive files (sat / sat_verify / tseitin) are checked against
@@ -87,6 +100,21 @@ else
   fail=$((fail+1)); echo "FAIL test/soundness_enum.py"; cat "$SO_LOG"; rm -f "$SO_LOG"
 fi
 
+# ----------------------------------------------------------------------------
+# Tier 2.75: Lévy optimality -- the engine's actual headline claim.
+#   A value-based test cannot see a re-reduced shared redex: the answer is still right, only the
+#   work is wrong.  test/optimality.py measures the work instead (see its docstring).
+# ----------------------------------------------------------------------------
+OPT_LOG=$(mktemp)
+if ! command -v python3 >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL test/optimality.py (python3 not found)"
+elif python3 test/optimality.py "$LIN_BIN" "$STD_DIR" >"$OPT_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 12)); echo "PASS test/optimality.py ($(tail -1 "$OPT_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/optimality.py"; cat "$OPT_LOG"
+fi
+rm -f "$OPT_LOG"
+
 printf "[Tier 3: Constraint Satisfaction & Term Rewriting]\n"
 for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do
   run_test "$f"
@@ -106,6 +134,21 @@ done
 t0=$(date +%s%3N 2>/dev/null || date +%s)
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+# The loop below asserts one hard-coded string for two programs, which left the whole AOT
+# pipeline (e-graph saturation, precompile/splice, net_gc, the serializer) nearly unchecked.
+# test/aot_equiv.py asks the general form of the same question -- does the artifact print what
+# the interpreter prints -- over a curated case set; its docstring records the miscompile that
+# motivated it.  It belongs to this tier because it is a container invariant, not a language one.
+AE_LOG="$TMP_DIR/aot_equiv.log"
+if ! command -v python3 >/dev/null 2>&1; then
+  fail=$((fail+1)); echo "FAIL test/aot_equiv.py (python3 not found)"
+elif python3 test/aot_equiv.py "$LIN_BIN" "$STD_DIR" >"$AE_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 28)); echo "PASS test/aot_equiv.py ($(tail -1 "$AE_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/aot_equiv.py"; cat "$AE_LOG"
+fi
+
 line_total=0; line_fail=0
 for spec in "test/line_binary.lin:LINE_BINARY_OK: 43" "test/line_ffi.lin:FFI_LINE_OK: 144"; do
   src="${spec%%:*}"; want="${spec#*:}"; name="$(basename "$src" .lin)"
@@ -139,12 +182,23 @@ total_checks=$((total_checks + line_total))
 t1=$(date +%s%3N 2>/dev/null || date +%s)
 
 # ----------------------------------------------------------------------------
-# Tier 6: Command Line Interface & Flag Invariants
+# Tier 6: Budget, Command Line Interface & Flag Invariants
 # ----------------------------------------------------------------------------
 if bash test/test_cli_flags.sh "$LIN_BIN" >/dev/null 2>&1; then
   pass=$((pass+1)); total_checks=$((total_checks + 7)); echo "PASS test/test_cli_flags.sh (7 checks)"
 else
   fail=$((fail+1)); echo "FAIL test/test_cli_flags.sh"; bash test/test_cli_flags.sh "$LIN_BIN"
+fi
+
+# The core is deliberately small enough to read in one sitting, and that budget is the only
+# thing keeping the engine from accreting passes.  It has to be a test: the claim in the
+# Makefile ("<= 3000 lines") had silently drifted past 3500, and a number in a comment
+# cannot fail a build.
+LOC=$(cat src/*.c src/*.h | wc -l)
+if [ "$LOC" -lt 4000 ]; then
+  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS src/ line budget ($LOC / 4000)"
+else
+  fail=$((fail+1)); echo "FAIL src/ line budget: $LOC lines, budget 4000 (move a pass out to std/ or delete code)"
 fi
 
 t_end=$(date +%s%3N 2>/dev/null || date +%s)
