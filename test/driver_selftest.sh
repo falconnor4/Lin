@@ -23,20 +23,8 @@
 # ================================================================================
 
 set -e
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
-
-LIN_BIN="${LIN_BIN:-$1}"
-LIN_BIN="${LIN_BIN:-./lin}"
-STD_DIR="${STD_DIR:-$2}"
-STD_DIR="${STD_DIR:-$ROOT/std}"
-export LIN_STD="${LIN_STD:-$STD_DIR/std.lin}"
-export LIN_STD_DIR="$STD_DIR"
-
-if [ ! -x "$LIN_BIN" ]; then
-  echo "Error: Lin binary '$LIN_BIN' not executable (run 'make lin' first)" >&2
-  exit 1
-fi
+. "$(dirname "$0")/common.sh"     # ROOT / LIN_BIN / STD_DIR resolution, shared (see test/common.sh)
+lin_test_env "${1:-}" "${2:-}" || exit 1
 
 # ----------------------------------------------------------------------------
 # Registry of drivers to validate against the CPU golden.  Each entry is the

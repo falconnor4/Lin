@@ -1,0 +1,5 @@
+; Naive Fibonacci -- branching recursion, the classic call-overhead benchmark.
+(load "std/std.lin")
+(define! fib (num -> num)
+  (\n (ifl (leq n 1) (\_ n) (\_ (add (fib (sub n 1)) (fib (sub n 2)))))))
+(fib 14)

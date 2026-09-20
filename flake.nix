@@ -12,237 +12,27 @@
     in {
       packages = forAllSystems (system: pkgs:
         let
-          lin = pkgs.stdenv.mkDerivation {
-            pname = "lin";
-            version = "0.1.0";
-            src = ./.;
+          # One build recipe, shared with shell.nix and `nix-build default.nix`.  It used to be a
+          # second copy here, and the copies had drifted (this one built the Vulkan shader, that one
+          # set NIX_CFLAGS_COMPILE); see the comment in default.nix.
+          lin = import ./default.nix { inherit pkgs; };
 
-            nativeBuildInputs = [ pkgs.makeWrapper pkgs.vulkan-headers pkgs.vulkan-loader pkgs.glslang ];
-
-            buildPhase = ''
-              runHook preBuild
-              $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl -lm
-              for d in std/drivers/*.c; do
-                $CC -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared \
-                  -I${pkgs.vulkan-headers}/include \
-                  -o "''${d%.c}.so" "$d" -ldl -lm -L${pkgs.vulkan-loader}/lib
-              done
-              # Build the Vulkan compute shader (reduce.spv is a build artifact
-              # and gitignored, so it must be regenerated here rather than staged).
-              ${pkgs.glslang}/bin/glslangValidator -V std/drivers/reduce.comp -o std/drivers/reduce.spv
-              runHook postBuild
-            '';
-
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/bin $out/share/lin/std
-              cp lin $out/bin/
-              cp -r std/* $out/share/lin/std/
-              wrapProgram $out/bin/lin \
-                --set-default LIN_STD "$out/share/lin/std/std.lin" \
-                --set-default LIN_STD_DIR "$out/share/lin/std"
-              runHook postInstall
-            '';
-
-            meta = {
-              description = "Lin programming language runtime and compiler";
-              homepage = "https://github.com/falconnor4/Lin";
-            };
-          };
-
+          # The suite definition lives in test/run_tests.sh, which is the single source of truth
+          # for this CI path, for `make test` and for the examples sweep.  It used to be
+          # copy-pasted here, and the copy had drifted in two ways that mattered: it ran 46 suites
+          # where test/run_tests.sh ran 57, so a test added to run_tests.sh alone never reached CI;
+          # and it asserted a container shebang (`#!/usr/bin/env lin`) that the engine does not
+          # write -- it writes `#!<realpath argv[0]>` -- which turned a real container bug into an
+          # apparently cosmetic test failure.  Delegating makes the two paths measure the same
+          # thing by construction instead of by discipline.
           testRunner = pkgs.writeShellScriptBin "lin-test" ''
             set -e
-            LIN_BIN="${lin}/bin/lin"
+            export LIN_BIN="${lin}/bin/lin"
             export LIN_STD="${lin}/share/lin/std/std.lin"
             export LIN_STD_DIR="${lin}/share/lin/std"
-
-            # Terminal styling
-            if [ -t 1 ]; then
-              C_PASS="\033[1;32m"
-              C_FAIL="\033[1;31m"
-              C_TIER="\033[1;34m"
-              C_BOLD="\033[1m"
-              C_DIM="\033[2m"
-              C_RESET="\033[0m"
-            else
-              C_PASS=""
-              C_FAIL=""
-              C_TIER=""
-              C_BOLD=""
-              C_DIM=""
-              C_RESET=""
-            fi
-
-            pass=0
-            fail=0
-            total_checks=0
-            t_start=$(date +%s%3N 2>/dev/null || date +%s)
-
-            run_test() {
-              f="$1"
-              t0=$(date +%s%3N 2>/dev/null || date +%s)
-              got=$($LIN_BIN "$f" 2>/dev/null || true)
-              want=$(grep '^; expect ' "$f" | sed 's/^; expect //')
-              gn=$(printf '%s\n' "$got" | grep -c . || true)
-              wn=$(printf '%s\n' "$want" | grep -c . || true)
-              ok=1
-              [ "$gn" = "$wn" ] || ok=0
-              if [ "$ok" = 1 ] && [ "$wn" -gt 0 ]; then
-                i=1
-                while [ "$i" -le "$wn" ]; do
-                  w=$(printf '%s\n' "$want" | sed -n "''${i}p")
-                  g=$(printf '%s\n' "$got" | sed -n "''${i}p")
-                  case "$w" in
-                    *...)
-                      pfx="''${w%...}"
-                      case "$g" in "$pfx"*) ;; *) ok=0 ;; esac
-                      ;;
-                    *)
-                      [ "$w" = "$g" ] || ok=0
-                      ;;
-                  esac
-                  i=$((i + 1))
-                done
-              fi
-              t1=$(date +%s%3N 2>/dev/null || date +%s)
-              dur=$((t1 - t0))
-              total_checks=$((total_checks + wn))
-
-              if [ "$ok" = 1 ]; then
-                pass=$((pass + 1))
-                printf "  ''${C_PASS}PASS''${C_RESET} %-32s ''${C_DIM}(%2d checks, %3dms)''${C_RESET}\n" "$f" "$wn" "$dur"
-              else
-                fail=$((fail + 1))
-                printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s ''${C_DIM}(got %d lines, want %d lines)''${C_RESET}\n" "$f" "$gn" "$wn"
-                echo "--- want ---"
-                printf '%s\n' "$want"
-                echo "--- got ---"
-                printf '%s\n' "$got"
-              fi
-            }
-
-            printf "\n''${C_BOLD}Running Lin Confluence & Stability Test Suite''${C_RESET}\n"
-
-            printf "\n''${C_TIER}[Tier 1: Core Interaction Calculus & Primitives]''${C_RESET}\n"
-            for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/test_escapes_utf8.lin test/types.lin; do
-              run_test "$f"
-            done
-
-            printf "\n''${C_TIER}[Tier 2: Foreign Function Interface & System Drivers]''${C_RESET}\n"
-            for f in test/float_share.lin test/ffi.lin test/ffi_advanced.lin test/ffi_systems.lin test/driver_gpu.lin; do
-              run_test "$f"
-            done
-
-            # Operands that exist only at RUN time (getenv), so their folds cannot resolve at
-            # compile time.  N is the value the program reads.
-            N=6 run_test test/runtime_ffi.lin
-
-            printf "\n''${C_TIER}[Tier 2.5: Canonical Cross-Driver Selftest]''${C_RESET}\n"
-            if bash test/driver_selftest.sh "$LIN_BIN" "$LIN_STD_DIR" >/dev/null 2>&1; then
-              pass=$((pass + 1))
-              total_checks=$((total_checks + 46))
-              printf "  ''${C_PASS}PASS''${C_RESET} %-32s\n" "test/driver_selftest.sh (2 drivers x 23 probes)"
-            else
-              fail=$((fail + 1))
-              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/driver_selftest.sh"
-              bash test/driver_selftest.sh "$LIN_BIN" "$LIN_STD_DIR" || true
-            fi
-
-            printf "\n''${C_TIER}[Tier 2.6: Independent Soundness Oracle]''${C_RESET}\n"
-            # The sharing-sensitive files are checked against an independent
-            # evaluation of their boolean formulas, not against their ; expect
-            # comments (which previously asserted the unsound sharing's values).
-            if ${pkgs.python3}/bin/python3 test/soundness_enum.py "$LIN_BIN" "$LIN_STD_DIR" \
-                 test/sat.lin test/sat_verify.lin test/tseitin.lin >/dev/null 2>&1; then
-              pass=$((pass + 1))
-              total_checks=$((total_checks + 35))
-              printf "  ''${C_PASS}PASS''${C_RESET} %-32s\n" "test/soundness_enum.py (35 evaluations)"
-            else
-              fail=$((fail + 1))
-              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/soundness_enum.py"
-              ${pkgs.python3}/bin/python3 test/soundness_enum.py "$LIN_BIN" "$LIN_STD_DIR" \
-                 test/sat.lin test/sat_verify.lin test/tseitin.lin || true
-            fi
-
-            printf "\n''${C_TIER}[Tier 3: Constraint Satisfaction & Term Rewriting]''${C_RESET}\n"
-            for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do
-              run_test "$f"
-            done
-
-            printf "\n''${C_TIER}[Tier 4: Non-Trivial Workloads & Confluence Invariants]''${C_RESET}\n"
-            for f in test/graph.lin test/map.lin test/set.lin test/queue.lin test/stream.lin test/stress_wavefront.lin test/nqueens.lin test/sudoku.lin test/trees.lin test/lists.lin test/algorithms.lin test/recursion.lin test/maybe_either.lin; do
-              run_test "$f"
-            done
-
-            printf "\n''${C_TIER}[Tier 5: Container Compilation & Execution Invariants]''${C_RESET}\n"
-            t0=$(date +%s%3N 2>/dev/null || date +%s)
-            TMP_DIR=$(mktemp -d)
-            trap 'rm -rf "$TMP_DIR"' EXIT
-            $LIN_BIN build test/line_binary.lin -o "$TMP_DIR/line_binary.line"
-
-            line_ok=1
-            if [ ! -x "$TMP_DIR/line_binary.line" ]; then
-              echo "FAIL: line_binary.line is not executable"
-              line_ok=0
-            fi
-
-            if ! head -n 1 "$TMP_DIR/line_binary.line" | grep -q '^#!/usr/bin/env lin'; then
-              echo "FAIL: line_binary.line missing lin shebang"
-              line_ok=0
-            fi
-
-            out1=$($LIN_BIN "$TMP_DIR/line_binary.line")
-            if [ "$out1" != "LINE_BINARY_OK: 43" ]; then
-              echo "FAIL: unexpected engine output: $out1"
-              line_ok=0
-            fi
-
-            if [ -x /usr/bin/env ]; then
-              PATH="${lin}/bin:$PATH" "$TMP_DIR/line_binary.line" > "$TMP_DIR/out2"
-              out2=$(cat "$TMP_DIR/out2")
-              if [ "$out2" != "LINE_BINARY_OK: 43" ]; then
-                echo "FAIL: unexpected direct binary output: $out2"
-                line_ok=0
-              fi
-            fi
-
-            t1=$(date +%s%3N 2>/dev/null || date +%s)
-            dur=$((t1 - t0))
-            total_checks=$((total_checks + 4))
-
-            if [ "$line_ok" = 1 ]; then
-              pass=$((pass + 1))
-              printf "  ''${C_PASS}PASS''${C_RESET} %-32s ''${C_DIM}( 4 checks, %3dms)''${C_RESET}\n" "test/line_binary.line" "$dur"
-            else
-              fail=$((fail + 1))
-              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/line_binary.line"
-            fi
-
-            printf "\n''${C_TIER}[Tier 6: Command Line Interface & Flag Invariants]''${C_RESET}\n"
-            t0=$(date +%s%3N 2>/dev/null || date +%s)
-            if bash test/test_cli_flags.sh "$LIN_BIN" >/dev/null 2>&1; then
-              pass=$((pass + 1))
-              total_checks=$((total_checks + 7))
-              t1=$(date +%s%3N 2>/dev/null || date +%s)
-              dur=$((t1 - t0))
-              printf "  ''${C_PASS}PASS''${C_RESET} %-32s ''${C_DIM}( 7 checks, %3dms)''${C_RESET}\n" "test/test_cli_flags.sh" "$dur"
-            else
-              fail=$((fail + 1))
-              printf "  ''${C_FAIL}FAIL''${C_RESET} %-32s\n" "test/test_cli_flags.sh"
-            fi
-
-            t_end=$(date +%s%3N 2>/dev/null || date +%s)
-            total_dur=$((t_end - t_start))
-
-            printf "\n''${C_BOLD}======================================================================''${C_RESET}\n"
-            if [ "$fail" -eq 0 ]; then
-              printf "''${C_PASS}''${C_BOLD}SUCCESS: All %d test suites passed (%d assertions checked in %dms)''${C_RESET}\n" "$pass" "$total_checks" "$total_dur"
-            else
-              printf "''${C_FAIL}''${C_BOLD}FAILURE: %d failed, %d passed (%d total assertions)''${C_RESET}\n" "$fail" "$pass" "$total_checks"
-            fi
-            printf "''${C_BOLD}======================================================================''${C_RESET}\n\n"
-
-            [ "$fail" -eq 0 ]
+            # Both are passed through: the packaged std is where the driver plugins live, and
+            # run_tests.sh needs the directory rather than just the prelude path.
+            exec bash test/run_tests.sh "$LIN_BIN" "$LIN_STD_DIR"
           '';
 
           testCheck = pkgs.stdenv.mkDerivation {
@@ -250,7 +40,7 @@
             version = "0.1.0";
             src = ./.;
 
-            buildInputs = [ lin ];
+            buildInputs = [ lin pkgs.python3 ];   # test/soundness_enum.py is invoked as `python3`
 
             buildPhase = ''
               ${testRunner}/bin/lin-test

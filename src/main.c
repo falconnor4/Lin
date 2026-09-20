@@ -236,15 +236,28 @@ void eval_form(Term *t) {
     struct timespec b0, b1;
     bench_measured = bench_mode;
     if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
-    net_reduce(&net, STEP_LIMIT);
+    long steps = net_reduce(&net, STEP_LIMIT);
     if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
     if (rec_sentinel_demanded(&net)) {   /* self-recursion exceeded k */
       net_free(&net); term_free(ex);
       if (!widen_recursion()) { printf("error: recursion depth exceeded unravelling bound\n"); return; }
       continue;
     }
+    /* `steps >= STEP_LIMIT` means the reduction stopped because it ran out of budget, not because it
+       reached a value -- the same signal `def_precompile` already declines a cache on.  Printing the
+       net regardless is how a *partial* graph becomes the answer with exit status 0: measured,
+       `(fib 12)` printed 0 where the answer is 144 and `(fib 14)` printed 0 where it is 377.  A
+       truncated net is not a value, and the sentinel is not demanded precisely *because* the
+       reduction never got far enough to reach it. */
+    if (steps >= STEP_LIMIT) {
+      printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
+      net_free(&net); term_free(ex); return;
+    }
     run_and_report(&net); net_free(&net); term_free(ex); return;
   }
+  /* Falling out of the loop means all sixteen rounds widened and none converged.  Returning silently
+     here is the other half of the same failure: the program printed nothing at all and exited 0. */
+  printf("error: recursion did not converge within the unravelling bound\n");
 }
 
 /* Count the arity (leading \x binders) of a function body so the bounded self-unravelling base term gets the right number of slots. */

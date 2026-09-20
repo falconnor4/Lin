@@ -441,8 +441,16 @@ int net_save_line(Net *n, const char *path) {
 
 int net_load_line(Net *n, const char *path) {
   FILE *f = fopen(path, "rb"); if (!f) return 0;
-  char buf[64];
-  if (fgets(buf, sizeof buf, f) && buf[0] == '#' && buf[1] == '!') {} else fseek(f, 0, SEEK_SET);
+  /* Skip the shebang, which `net_save_line` writes as `#!<realpath(argv[0])>` -- so its length is the
+     *install path's* and cannot be assumed.  A fixed-size `fgets` buffer silently fails here when the
+     line is at least as long as the buffer: it stops mid-line, the newline stays in the stream, the
+     magic read then yields "\nLIN" instead of "LINE", the load fails, and `run_line_file` returns 0 --
+     after which main falls through to `load_file` and parses the *binary container* as Lin source.
+     Measured: a 31-char dev path works (33-char shebang) and a 61-char Nix store path does not
+     (63-char shebang, exactly the old limit), which is why `nix flake check` was red (DESIGN 11.4). */
+  int c1 = fgetc(f), c2 = fgetc(f);
+  if (c1 == '#' && c2 == '!') { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} }
+  else fseek(f, 0, SEEK_SET);
   char magic[4]; uint32_t meta[4];
   if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "LINE", 4) || fread(meta, 4, 4, f) != 4 || meta[0] != 3) {
     fclose(f); return 0;

@@ -16,54 +16,24 @@
 # ================================================================================
 
 set -e
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
-
-LIN_BIN="${LIN_BIN:-$1}"
-LIN_BIN="${LIN_BIN:-./lin}"
-STD_DIR="${STD_DIR:-$2}"
-STD_DIR="${STD_DIR:-$ROOT/std}"
-export LIN_STD="${LIN_STD:-$STD_DIR/std.lin}"
-export LIN_STD_DIR="$STD_DIR"
-
-if [ ! -x "$LIN_BIN" ]; then
-  echo "Error: Lin binary '$LIN_BIN' not executable (run 'make lin' first)" >&2
-  exit 1
-fi
+. "$(dirname "$0")/common.sh"     # ROOT / LIN_BIN / STD_DIR resolution, shared (see test/common.sh)
+lin_test_env "${1:-}" "${2:-}" || exit 1
 
 pass=0; fail=0; total_checks=0
 t_start=$(date +%s%3N 2>/dev/null || date +%s)
 
+. "$ROOT/test/expect.sh"          # the shared `; expect` matcher (see test/expect.sh)
+
 run_test() {
   f="$1"
   t0=$(date +%s%3N 2>/dev/null || date +%s)
-  # Capture stdout only: diagnostics (e.g. driver fallback warnings) go to
-  # stderr and must not be merged into the readback stream — `2>&1` interleaves
-  # them onto stdout data lines at the pipe level, breaking line-for-line
-  # equality when a warning fires mid-expression (see gpu_warn / unison.lin).
-  got=$("$LIN_BIN" "$f" 2>/dev/null || true)
-  want=$(grep '^; expect ' "$f" | sed 's/^; expect //')
-  gn=$(printf '%s\n' "$got"  | grep -c . || true)
-  wn=$(printf '%s\n' "$want" | grep -c . || true)
-  ok=1; [ "$gn" = "$wn" ] || ok=0
-  if [ "$ok" = 1 ] && [ "$wn" -gt 0 ]; then
-    i=1
-    while [ "$i" -le "$wn" ]; do
-      w=$(printf '%s\n' "$want" | sed -n "${i}p")
-      g=$(printf '%s\n' "$got"  | sed -n "${i}p")
-      case "$w" in
-        *...) pfx="${w%...}"; case "$g" in "$pfx"*) ;; *) ok=0 ;; esac ;;
-        *)    [ "$w" = "$g" ] || ok=0 ;;
-      esac
-      i=$((i + 1))
-    done
-  fi
+  lin_expect_check "$LIN_BIN" "$f"
   t1=$(date +%s%3N 2>/dev/null || date +%s)
-  dur=$((t1 - t0)); total_checks=$((total_checks + wn))
-  if [ "$ok" = 1 ]; then pass=$((pass+1)); printf "PASS %-32s (%2d checks, %3dms)\n" "$f" "$wn" "$dur"
-  else fail=$((fail+1)); printf "FAIL %-32s (got %d want %d)\n" "$f" "$gn" "$wn"
-    echo "--- want ---"; printf '%s\n' "$want"
-    echo "--- got  ---"; printf '%s\n' "$got"
+  dur=$((t1 - t0)); total_checks=$((total_checks + EXP_N))
+  if [ "$EXP_OK" = 1 ]; then pass=$((pass+1)); printf "PASS %-32s (%2d checks, %3dms)\n" "$f" "$EXP_N" "$dur"
+  else fail=$((fail+1)); printf "FAIL %-32s (got %d want %d)\n" "$f" "$(printf '%s\n' "$EXP_GOT" | grep -c . || true)" "$EXP_N"
+    echo "--- want ---"; printf '%s\n' "$EXP_WANT"
+    echo "--- got  ---"; printf '%s\n' "$EXP_GOT"
   fi
 }
 
@@ -151,7 +121,12 @@ for spec in "test/line_binary.lin:LINE_BINARY_OK: 43" "test/line_ffi.lin:FFI_LIN
   head -n 1 "$TMP_DIR/$name.line" | grep -q '^#!' || { echo "FAIL: $name.line missing shebang"; lok=0; }
   out1=$("$LIN_BIN" "$TMP_DIR/$name.line")
   [ "$out1" = "$want" ] || { echo "FAIL: $name engine output '$out1' (want '$want')"; lok=0; }
-  if [ -x /usr/bin/env ]; then
+  # The container's shebang is `#!<realpath argv[0]>`, i.e. absolute, so executing it directly does
+  # not depend on PATH; `env` is only a proxy for "this sandbox can exec a script at all", and the
+  # check is skipped where it cannot.  Testing `-x /usr/bin/env` rather than `command -v env` made
+  # the check silently vanish under Nix, where there is no /usr/bin -- so the one environment that
+  # needed it most was the one that skipped it.
+  if command -v env >/dev/null 2>&1; then
     PATH="$(dirname "$LIN_BIN"):$PATH" "$TMP_DIR/$name.line" > "$TMP_DIR/out2"
     out2=$(cat "$TMP_DIR/out2")
     [ "$out2" = "$want" ] || { echo "FAIL: $name direct output '$out2' (want '$want')"; lok=0; }

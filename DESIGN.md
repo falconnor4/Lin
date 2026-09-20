@@ -590,7 +590,23 @@ rule trace), `LIN_STEPS` (step limit), `LIN_THREADS`/`-t`, `LIN_GPU_SELFTEST`.
   SAT/Tseitin suites agrees with the oracle.
 - `lin build` runs the pipeline end to end and bakes a compacted residual.
 - Definition types are order-independent.
-- Gate: 57 suites / 1,004 assertions, oracle green, `src/` at 3,507 lines.
+- **The `.line` container no longer depends on the install path's length.** `net_load_line` skipped the
+  shebang with `fgets(buf, 64, f)`, and `net_save_line` writes `#!<realpath(argv[0])>` — so the line's
+  length *is* the install path's. At 61 characters of path, `#!`+path is exactly the 63 characters
+  `fgets` will read, the newline stays in the stream, the magic read yields `"\nLIN"`, the load fails,
+  and `run_line_file` returns 0 — after which `main` falls through to `load_file` and parses the
+  **binary container as Lin source**. A 31-character dev path works; every Nix store path does not.
+  The skip now reads to the newline whatever its length. Measured: a 108-character install path
+  round-trips `LINE_BINARY_OK: 43` where the old bound was 63. This, not the test that reported it, is
+  what kept `nix flake check` red (§11.4).
+- **A truncated reduction is no longer printed as an answer.** `eval_form` ignored `net_reduce`'s
+  return, so when the reduction stopped at `STEP_LIMIT` (2²⁴) with work left the *partial* net went
+  through readback and was printed with exit status 0 — and the sentinel is not demanded precisely
+  *because* the reduction never got far enough to reach it, so widening could not fire either.
+  `def_precompile` already declines a cache on exactly this signal. It now reports
+  `no value within N reduction steps`, and exhausting all sixteen widening rounds reports
+  `recursion did not converge` instead of returning silently with no output at all.
+- Gate: 57 suites / 1,004 assertions, oracle green, `src/` at 3,528 lines.
 
 ### 11.2 Open: cyclic sharing — the Lévy gap and the largest compiler cost
 
@@ -705,6 +721,36 @@ fans into unravelled copies the program never took (§11.1). It was never only a
 growth until the timeout). So the demand-aware sentinel test lands on its own, ahead of the knot, and
 does not need the unrolling deleted first. That is the useful part: it removes the loudest
 recursion-hang class while the knot stays open, and it is the same demand relation the knot will need.
+
+**Measured next: the sentinel cannot detect the worst failure, because branching recursion erases it.**
+`(fib 12)` returns `0` where the answer is 144 and `(fib 14)` returns `0` where it is 377 — exit status
+0, no diagnostic. `(fib 8)` prints nothing at all. This is *not* the demand test being too narrow:
+instrumented, the accepted round reports `nn=293406, steps=141922/16777216, demanded=0, plain_reach=0`
+— the reduction **completes**, and the sentinel is absent from the net, so neither a demand walk nor a
+plain graph walk can find it. The shape of the failure is what hides it:
+
+- `build_bound_rec` builds `(\fib. body) ((\fib. body) (… base))`, and `body` mentions `fib` *twice*,
+  so the fan duplicates the next copy per branch: the net is 2^k at depth k, which is why `fib 8`
+  reaches 207,186 nodes at k = 6 and ~55M at k = 24, and why the widening loop cannot converge.
+- At depth k the leaf is `base` = `\_r0 (… (\_rec (\_rec _rec)))`, which is not a numeral.
+- **Arithmetic does not reject it.** Measured: `(add (\a (\b b)) (\a (\b b)))` is **`0`**,
+  `(eq 1 (\a (\b b)))` is `0`, `(is_zero (\a (\b b)))` is not a boolean, and
+  `(add 1 (\a (\b b)))` is `succ(succ(\a (\b b)))` — garbage carried along rather than refused. So the
+  leaves of an out-of-bound `fib` sum to a plausible `0`, with the sentinels consumed on the way.
+
+What would distinguish them is whether the erased base *contributed to the value*, and after reduction
+that is not visible: `(list_eq eq nil nil)` (§11.1) legitimately erases its sentinel and is correct,
+while `(fib 12)` erases it and is wrong. Separating those needs the demand the reduction actually made
+— the needed-order work below — so this is not a bug in the sentinel test, to be fixed by narrowing or
+widening it. It is the strongest evidence yet for the knot: with the body compiled once and shared
+there is no k, no leaf, and no plausible zero to be deceived by.
+
+Two things stay true regardless. `sumto` (non-branching, depth 25) is correct in 2.40 ms, so the
+unravelling does work where the recursion is linear. And the honest floor is that Lin must never
+*return* a wrong answer: §11.1 closes the two silent exits reachable from the compiler, and the
+arithmetic-on-garbage path above is the remaining one — which no test in the suite covers, because
+every recursion in `test/` is shallower than the bound. `benchmarks/compare/` found it on its first run
+by flagging `fib` as a MISMATCH against its C twin rather than averaging it in.
 
 Recursion is the one place where Lin is not what it claims. A recursive define is compiled by
 **bounded self-unravelling**: `build_bound_rec` emits `f (f (… (f base) …))` with k copies of
@@ -846,17 +892,22 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
 
 ### 11.4 Open: smaller items
 
-- **`nix flake check` — the documented CI path — is red, and it was red before the demand-aware
-  sentinel test (§11.1).** Measured at both `c360237` and its child: **2 failed, 44 passed (866
-  assertions)**, the same two failures each time — Tier 5's `test/line_binary.line` ("missing lin
-  shebang", then the engine reading `#!/nix/store/…-lin-0.1.0/bin/lin` as a Lin variable) and Tier
-  6's `test/test_cli_flags.sh`. Both pass in the working tree (`make test`, `LIN_BIN=./lin`), so the
-  trigger is the Nix `wrapProgram` shebang path, not the engine. Two defects hide in that one red
-  line: the flake's `testRunner` is a **second copy** of the suite logic carrying its own tier lists,
-  so it runs 46 suites / 866 assertions where `test/run_tests.sh` runs 57 / 1,004 — a test added to
-  `test/run_tests.sh` alone is invisible to CI, which `test/recursion_share.lin` is today — and
-  shebang handling assumes the binary is unwrapped. The honest fix is one suite definition serving
-  both runners, plus shebang handling that does not depend on how the binary was packaged.
+- **Consolidation: three duplicated implementations collapsed to one each, and CI went green.**
+  `nix flake check` was red — 2 failed / 44 passed / 866 assertions — and had been red before the
+  demand-aware sentinel test. Part of that was the container shebang bug of §11.1 masquerading as a
+  cosmetic test failure, but the structural half was that the flake's `testRunner` was a **second
+  copy** of the suite logic carrying its own tier lists: it ran 46 suites where `test/run_tests.sh`
+  ran 57, so a test added to one was invisible to the other. Now `flake.nix` delegates to
+  `test/run_tests.sh`; `test/common.sh` holds the single engine/std resolution (both copies of it had
+  the same bug — silently discarding an inherited `LIN_STD_DIR`, which is what made the packaged
+  driver plugins unreachable and produced `error: unbound variable 'num._padd'` rather than a
+  missing-plugin warning); `test/expect.sh` holds the single `; expect` matcher; and `default.nix`
+  holds the single build recipe, which `flake.nix` now imports. `nix flake check` is green and runs
+  the real 57-suite definition.
+  What remains is coverage rather than duplication: the C core contains no duplicated 4-line window
+  (checked mechanically, `src/` and `examples/` both clean), and `std/map.lin`'s similar-looking
+  `map_get` / `map_lookup_sub` are a helper pair with genuinely different semantics, so merging them
+  would change behaviour rather than remove a copy.
 - **Float typing is nominal but not enforced.** `float` is a registered nominal annotation
   and a float is a Scott numeral carrying an IEEE-754 bit pattern under the `_fsz`/`_fss`
   spine (so it never collides with integer numerals), but `std/float.lin`'s operations are
@@ -926,12 +977,13 @@ day-to-day work and treat Nix as the CI/reproducibility path.
 | `test/` | suite, driver selftest, soundness oracle |
 | `examples/`, `benchmarks/` | curated self-verifying programs, benchmark harness |
 
-**Line budget.** `src/` is **3,507 lines** against a 3,500-line gate — **7 over, recorded rather than
+**Line budget.** `src/` is **3,528 lines** against a 3,500-line gate — **28 over, recorded rather than
 hidden.** Every file is counted, no `*.inc` anywhere, and every file ends in a newline so `wc -l`
-cannot undercount it. The overage is the demand-aware sentinel test (§11.1): it replaces a
-13-line reachability walk with a ~16-line one plus its hazard record, and §11.4's census says the
-rest of the tree is live capability, not slack — there are still no dead functions and the last
-duplicate mechanism was deleted. Trimming the difference out of the comments would defeat what the
+cannot undercount it. The overage is the correctness work in §11.1: a demand-aware
+sentinel test replacing a 13-line reachability walk, a bounded `skip_dup`, a shebang skip that reads
+to the newline, and the truncation/round-exhaustion diagnostics. §11.4's census says the rest of the
+tree is live capability, not slack — there are still no dead functions, the last duplicate mechanism
+was deleted, and a mechanical scan finds no duplicated 4-line window in `src/`. Trimming the difference out of the comments would defeat what the
 gate exists for, since the comments are the rule semantics and hazard records, so the honest options
 are a raised gate or the §11.4 product decision about the interpreter surface. Earlier revisions
 excluded `runtime_*.inc` files from the count; that was an accounting trick and it is gone —
