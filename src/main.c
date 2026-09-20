@@ -128,7 +128,8 @@ static Term *expand(Term *t, Guard *g) {
     return term_copy(d->expanded);
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
-  int bound = (t->type == TLAM || t->type == TDEF);
+  /* TLET binds in both children: the value may refer to itself, which is the recursion. */
+  int bound = (t->type == TLAM || t->type == TDEF || t->type == TLET);
   if (bound) guard_push(g, t->name);
   c->l = expand(t->l, g); if (bound) g->count--;
   c->r = expand(t->r, g); return c;

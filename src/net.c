@@ -10,9 +10,7 @@
 #define NONE ((Port){-1, 0})
 
 Scope scope_nil(void) { return 0; }
-
 static int in_parallel;   /* a wave is running threaded: no interning there (see below) */
-static long nested_fan_hits;   /* tripwire for the unverified DUPxDUP nested-level branch */
 
 /* ---------------- the level trie ----------------
    A level is a position in the term: the sequence of branches taken from the root.  Interning
@@ -72,8 +70,28 @@ static int lv_depth(Net *n, int l) { return l ? n->lv_depth[l] : 0; }
 static int lv_up(Net *n, int l) { return l ? n->lv_parent[l] : 0; }
 
 Scope scope_app(Net *n, Scope s, int bit) { return (Scope)lv_intern(n, (int)s, bit & 1); }
+/* is `a` a proper ancestor of `b`?  Used only for the nested-level case below. */
+static int scope_within(Net *n, Scope a, Scope b) {
+  if (!a || a == b) return 0;
+  int d = lv_depth(n, b) - lv_depth(n, a);
+  if (d <= 0) return 0;
+  int x = (int)b;
+  while (d-- > 0) x = lv_up(n, x);
+  return (Scope)x == a;
+}
 #define MAX_SCOPE_STEPS (1 << 16)
 
+/* What the reference does NOT answer.  `wave-opt-reduction`'s terms are only TVar/TLam/TApp -- it
+   has no `let`, no recursion, no cycle -- so a recursive sharing point has nothing to be ported from;
+   it has to be designed here.  Its gauge rule IS relevant though, and it was tried: main.hs labels a
+   commuting copy `sigma = g : (s1 ++ s2)` ("Non-Abelian Path Prefix Injection"), i.e. the two paths
+   CONCATENATED, where this trie takes their lowest common ancestor and appends one branch.  Porting
+   the concatenation changed the recursion results not at all, and it inflated the level trie until the
+   .line artifacts went to 656 KB and 1.76 MB against their 300 KB bound -- concatenated paths grow
+   with every commutation, which is the bracket/croissant explosion the reference's README sets out to
+   avoid and which only reappears once terms can nest without bound (recursion).  The compact trie is
+   therefore a deliberate divergence: it keeps paths short, and the displacement it discards is not
+   what recursion is missing. */
 Scope scope_meet(Net *n, Scope a, Scope b) {
   int guard = n->nlv + 2;
   while (lv_depth(n, a) > lv_depth(n, b)) { a = (Scope)lv_up(n, a); if (--guard < 0) goto bad; }
@@ -82,15 +100,6 @@ Scope scope_meet(Net *n, Scope a, Scope b) {
   return a;
 bad:
   return 0;
-}
-
-int scope_within(Net *n, Scope a, Scope b) {
-  if (!a || a == b) return 0;
-  int d = lv_depth(n, b) - lv_depth(n, a);
-  if (d <= 0) return 0;
-  int x = (int)b;
-  while (d-- > 0) x = lv_up(n, x);
-  return (Scope)x == a;
 }
 
 int scope_eq(Net *n, Scope a, Scope b) { (void)n; return a == b; }
@@ -231,6 +240,68 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
   }
 }
 
+/* The external boundary of an interacting pair.
+
+   A rule rewires the two nodes it consumes by pairing their auxiliary wires up again.  Written for
+   the case where every auxiliary leads OUT of the pair, that needs a hand-written branch for each way
+   the net can instead wire one back INTO it -- the compiler links a binder to its own body for
+   `\x.x`, and a fan can sit between a binder and the argument that uses it -- and each such branch had
+   to spot the shape and skip it, which is what left a port pointing at a node the rule had just
+   killed (`((\x (x x)) c2)` read back as `_`).
+
+   The general statement needs no cases: union the pair's six ports, {n1.0,n1.1,n1.2,n2.0,n2.1,n2.2}
+   as 0..5, along every wire that stays inside the pair and along the rule's correspondence
+   `ca[k]~cb[k]`; each class then presents the ports it leads to OUTSIDE the pair, and presents
+   exactly two -- join them.  A class presenting none is a wire closed inside the pair and needs
+   nothing (beta on `\x.x`, where binder and body are one port, so the argument goes straight to the
+   result).  A class whose two outside ports belong to one node is already represented BY that node
+   (the fan sitting between a binder and its argument).  Both fall out of the one rule. */
+static int pfind(int *u, int x) { while (u[x] != x) { u[x] = u[u[x]]; x = u[x]; } return x; }
+static void punion(int *u, int a, int b) { a = pfind(u, a); b = pfind(u, b); if (a != b) u[b] = a; }
+static void pair_boundary(Net *n, int n1, int n2, const int *ca, const int *cb, int ncor, int link, Port *tgt) {
+  Port p[6]; int u[6];
+  for (int i = 0; i < 6; i++) {
+    p[i] = (Port){i < 3 ? n1 : n2, i % 3}; u[i] = i;
+    if (tgt) tgt[i] = (Port){-1, 0};
+  }
+  for (int i = 0; i < 6; i++) {
+    Port w = WIRE(n, p[i]);
+    if (w.node == n1) punion(u, i, w.port);
+    else if (w.node == n2) punion(u, i, 3 + w.port);
+  }
+  for (int k = 0; k < ncor; k++) punion(u, ca[k], cb[k]);
+  for (int i = 0; i < 6; i++) {
+    if (pfind(u, i) != i) continue;
+    Port e[2]; int ne = 0, ix[2] = {-1, -1};
+    for (int j = 0; j < 6; j++) {
+      if (pfind(u, j) != i) continue;
+      Port w = WIRE(n, p[j]);
+      if (w.node == n1 || w.node == n2) continue;   /* the wire stays inside the pair */
+      if (ne < 2) { e[ne] = w; ix[ne] = j; }
+      ne++;
+    }
+    if (ne != 2) continue;                          /* closed inside, or not a two-ended class */
+    /* Join them, with no case for the two ports belonging to one node.  Skipping that case (which
+       this did, on the grounds that a fan two of whose ports meet is "already represented by that
+       fan") is what left a port pointing at a node the rule had just killed: measured on
+       `((\x (x x)) c2)`, which then read back as `_` -- a DISCARDED node, not a value -- where the
+       general join reads back as a knot whose value applying it recovers.  It is also what the
+       reference does: its beta is exactly the two linkings, with no case analysis at all. */
+    if (tgt) { tgt[ix[0]] = e[1]; tgt[ix[1]] = e[0]; }
+    if (link && ix[0] < ix[1]) net_link(n, e[0], e[1], 1);
+  }
+}
+
+/* The 2x2 split both duplication rules perform: two copies of each interacting node, cross-connected
+   so copy i of the first meets copy j of the second.  One description, so the two cannot drift. */
+static void split2(Net *n, int t1, Scope s1a, Scope s1b, const char *nm1,
+                   int t2, Scope s2, const char *nm2, int *m1, int *m2, int *d1, int *d2) {
+  *m1 = net_alloc(n, t1, s1a, nm1).node; *m2 = net_alloc(n, t1, s1b, nm1).node;
+  *d1 = net_alloc(n, t2, s2, nm2).node; *d2 = net_alloc(n, t2, s2, nm2).node;
+  net_link(n, (Port){*d1, 1}, (Port){*m1, 1}, 0); net_link(n, (Port){*d1, 2}, (Port){*m2, 1}, 0);
+  net_link(n, (Port){*d2, 1}, (Port){*m1, 2}, 0); net_link(n, (Port){*d2, 2}, (Port){*m2, 2}, 0);
+}
+
 /* four rules of the scope-gauge calculus (wave-opt-reduction main.hs); ERA is inert (era pairs dropped) */
 static int lin_trace = -1; /* cached LIN_TRACE */
 
@@ -265,31 +336,22 @@ int net_interact(Net *n, Port p1, Port p2) {
     Port lv = WIRE(n, ((Port){n1, 1})), lb = WIRE(n, ((Port){n1, 2}));
     Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;
-    if (lv.node == n1 && lv.port == 2 && lb.node == n1 && lb.port == 1) {
-      /* degenerate binder: for `\x.x` the compiler cross-links the binder and body ports, so there is no
-         separate substitution to make — connect argument to result.  This is β itself, not fold machinery:
-         without it `((\x x) V)` strands V on a dead node and readback yields nothing. */
-      if (lin_argfold(n, aa, ar)) return 1;
-      net_link(n, aa, ar, 1); return 1;
-    }
-    /* Two of beta's four wires can be ports of the SAME fan -- the fan sits between the binder
-       and the argument, or between the body and the result, and already relates them (its
-       auxiliary carries the value to one side, its principal receives it from the other).
-       Linking them would wire a fan's principal to its own auxiliary: a pair no rule fires on,
-       which leaves a "normal form" whose value cannot be read back (measured on a knot: the
-       printer emitted `?` and the answer was lost).  So substitute on the other pair only, and
-       when both pairs are the fan's own ports there is nothing left to link. */
-    {
-      int fan_ba = (lv.node == aa.node && n->tag[lv.node] == DUP);
-      int fan_br = (lb.node == ar.node && n->tag[lb.node] == DUP);
-      if (fan_ba && fan_br) return 1;
-      if (fan_ba) { net_link(n, lb, ar, 1); return 1; }
-      if (fan_br) { net_link(n, lv, aa, 1); return 1; }
-    }
+    /* β IS the correspondence {binder's wire ~ argument's wire, body's wire ~ result's wire}
+       (n1.1~n2.2 = 1~5, n1.2~n2.1 = 2~4); pair_boundary turns it into the external rewire, which
+       covers the shapes where one of those wires leads back into the pair, so no port-shape test is
+       left here. */
+    const int cor_a[2] = {1, 2}, cor_b[2] = {5, 4}, half_a[1] = {2}, half_b[1] = {4};
+    Port tgt[6];
+    pair_boundary(n, n1, n2, cor_a, cor_b, 2, 0, tgt);
     /* A driver may pre-empt the argument before it is substituted: a saturated closure passed as data (e.g. the
-       `(mul 2 2)` of `succ (mul 2 2)`) would otherwise be β-duplicated without ever being materialised. */
-    if (lin_argfold(n, aa, lv)) { net_link(n, lb, ar, 1); return 1; }
-    net_link(n, lv, aa, 1); net_link(n, lb, ar, 1);
+       `(mul 2 2)` of `succ (mul 2 2)`) would otherwise be β-duplicated without ever being materialised.  It is
+       handed `tgt[5]`, where the argument belongs, read off the boundary -- which is exactly what the
+       hand-written degenerate-binder test used to compute for itself.  A driver that succeeds has placed the
+       value, so only the body->result half is left. */
+    if (tgt[5].node >= 0 && lin_argfold(n, aa, tgt[5])) {
+      pair_boundary(n, n1, n2, half_a, half_b, 1, 1, NULL); return 1;
+    }
+    pair_boundary(n, n1, n2, cor_a, cor_b, 2, 1, NULL);
     return 1;
   }
 
@@ -302,59 +364,40 @@ int net_interact(Net *n, Port p1, Port p2) {
          unrelated fans (wrong value) or stranding the pair (no reduction).
 
          What differs is the LEVEL the copies carry.  A fan's label names the sharing point it
-         implements, and labels are only ever compared for EQUALITY, so a wrong label cannot
-         re-duplicate work -- it can only make two distinct sharing points annihilate (a wrong
-         value).  Read the wiring below to see which new fan implements which point: d1,d2 sit on
-         n1's auxiliaries and feed m1,m2, whose principals feed n2's auxiliaries, so d1,d2 split
-         n1's value between n2's two uses -- they implement n2's point and must carry sb; m1,m2
-         implement n1's point and must carry sa.  The default (`qa = sa, qb = sb`) is exactly that
-         cross-labelling.
-
-         The NESTED branch (one gauge a proper prefix of the other) then overrides it, relabelling
-         the fans implementing the INNER point with the OUTER level -- the one thing the
-         equality-only comparison cannot absorb, since it merges two distinct sharing points.  It
-         is also unexercised: a census of every DUPxDUP interaction over 99 programs (799,469
-         annihilations, 4,182 incomparable), 400 random closed lambda terms and 49 shapes built to
-         nest levels found ZERO nested cases, and test/levels.lin's "nested levels" case is in fact
-         incomparable.  The comment this replaces ("the inner sharing point is shared between the
-         outer copies") described an effect relabelling cannot have, and credited this branch with
-         a knot fix (2,000,000+ steps -> 33,200) that reproduces today with no distinct-level
-         DUPxDUP interaction at all.  Kept rather than deleted because its anti-hang role is
-         unverified either way: treat it as unproven, and do not extend it without a program that
-         fires it. */
+         implements, and labels are compared only for EQUALITY, so a wrong label cannot re-duplicate
+         work -- it can only merge two distinct sharing points (a wrong value).  The wiring below
+         shows which new fan implements which point: d1,d2 split n1's value between n2's two uses and
+         carry sb, while m1,m2 carry sa; that cross-labelling is the invariant-preserving one. */
       Scope sa = n->scope[n1], sb = n->scope[n2];
       Scope qa = sa, qb = sb;
-      /* Tripwire: this path is unreachable in every corpus measured (see above), and if it ever
-         does fire the labelling it applies is the one that can merge two sharing points, so a
-         first occurrence must be visible rather than silent.  It can run on a worker thread, hence
-         the atomic. */
-      if (scope_within(n, sa, sb) || scope_within(n, sb, sa)) {
-        if (__atomic_fetch_add(&nested_fan_hits, 1, __ATOMIC_RELAXED) == 0)
-          fprintf(stderr, "lin: DUPxDUP nested-level branch fired (unverified path; see net.c)\n");
-      }
-      if (scope_within(n, sa, sb)) { qa = sa; qb = sa; }        /* a encloses b: share the inner */
-      else if (scope_within(n, sb, sa)) { qa = sb; qb = sb; }   /* b encloses a */
+      /* NESTED levels -- one gauge a proper prefix of the other -- are the RECURSIVE sharing point,
+         and take the ANCESTOR's level.  Measured on a recursive binding (a `let` whose value refers
+         to itself, sharing point gauged at the value's level): with this case,
+         `(let ((f (\n (ifl (is_zero n) (\_ 0) (\_ (f (pred n))))))) (f k))` is 0 for k = 0, 1 and 2;
+         without it the same program does not reach a value in 16M steps -- the fan duplicates the
+         structure it came from forever, which is exactly what the comment here always claimed this
+         case prevented.  It was removed once as dead code, and that was wrong: it is dead only while
+         nothing is recursive (zero firings across this tree's corpus), and it is the mechanism by
+         which a self-referential sharing point SHARES instead of unrolling.  Depths past 2 still
+         lose the value, so the recursion itself is refused in compile.c and this case stays
+         unexercised by the suite until that is fixed. */
+      if (scope_within(n, sa, sb)) { qa = qb = sa; }
+      else if (scope_within(n, sb, sa)) { qa = qb = sb; }
       Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
       Port b1 = WIRE(n, ((Port){n2, 1})), b2 = WIRE(n, ((Port){n2, 2}));
       const char *nm = n->name[n1] ? n->name[n1] : "";
-      int m1 = net_alloc(n, DUP, qa, nm).node;
-      int m2 = net_alloc(n, DUP, qa, nm).node;
-      int d1 = net_alloc(n, DUP, qb, nm).node, d2 = net_alloc(n, DUP, qb, nm).node;
+      int m1, m2, d1, d2;
+      split2(n, DUP, qa, qa, nm, DUP, qb, nm, &m1, &m2, &d1, &d2);
       n->dead[n1] = 1; n->dead[n2] = 1;
-      net_link(n, (Port){d1, 1}, (Port){m1, 1}, 0); net_link(n, (Port){d1, 2}, (Port){m2, 1}, 0);
-      net_link(n, (Port){d2, 1}, (Port){m1, 2}, 0); net_link(n, (Port){d2, 2}, (Port){m2, 2}, 0);
       net_link(n, (Port){d1, 0}, a1, 1); net_link(n, (Port){d2, 0}, a2, 1);
       net_link(n, (Port){m1, 0}, b1, 1); net_link(n, (Port){m2, 0}, b2, 1);
       return 1;
     }
-    Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
-    Port b1 = WIRE(n, ((Port){n2, 1})), b2 = WIRE(n, ((Port){n2, 2}));
+    /* Annihilation is the correspondence {a1~b1, a2~b2} (1~4, 2~5) -- the same rewire, so the four
+       branches that used to special-case two fans wired to each other are gone. */
+    const int cor_a[2] = {1, 2}, cor_b[2] = {4, 5};
     n->dead[n1] = 1; n->dead[n2] = 1;
-    if (a1.node == n2 && a1.port == 1) net_link(n, a2, b2, 1);
-    else if (a2.node == n2 && a2.port == 2) net_link(n, a1, b1, 1);
-    else if (a1.node == n2 && a1.port == 2) net_link(n, a2, b1, 1);
-    else if (a2.node == n2 && a2.port == 1) net_link(n, a1, b2, 1);
-    else { net_link(n, a1, b1, 1); net_link(n, a2, b2, 1); }
+    pair_boundary(n, n1, n2, cor_a, cor_b, 2, 1, NULL);
     return 1;
   }
 
@@ -364,16 +407,21 @@ int net_interact(Net *n, Port p1, Port p2) {
     Port nv = WIRE(n, ((Port){n1, 1})), nb = WIRE(n, ((Port){n1, 2}));
     Port da = WIRE(n, ((Port){n2, 1})), db = WIRE(n, ((Port){n2, 2}));
     const char *nm = n->name[n1] ? n->name[n1] : "";
-    int m1 = net_alloc(n, t1, scope_app(n, sm, 1), nm).node;
-    int m2 = net_alloc(n, t1, scope_app(n, sm, 2), nm).node;
-    int d1 = net_alloc(n, DUP, sd, "").node, d2 = net_alloc(n, DUP, sd, "").node;
+    int m1, m2, d1, d2;
+    split2(n, t1, scope_app(n, sm, 1), scope_app(n, sm, 2), nm, DUP, sd, "", &m1, &m2, &d1, &d2);
     n->dead[n1] = 1; n->dead[n2] = 1;
-    net_link(n, (Port){d1, 1}, (Port){m1, 1}, 0); net_link(n, (Port){d1, 2}, (Port){m2, 1}, 0);
-    net_link(n, (Port){d2, 1}, (Port){m1, 2}, 0); net_link(n, (Port){d2, 2}, (Port){m2, 2}, 0);
-    if (t1 == LAM && nv.node == n1 && nv.port == 2 && nb.node == n1 && nb.port == 1) {
-      net_link(n, (Port){d1, 0}, (Port){d2, 0}, 1);
-    } else {
-      net_link(n, (Port){d1, 0}, nv, 1); net_link(n, (Port){d2, 0}, nb, 1);
+    /* The two copies attach to n1's external boundary; where n1's auxiliaries are shorted to each
+       other it presents none, and the two principals destined for them join each other.  Same
+       boundary rule as pair_boundary, so the port-identity test that stood here (and its `t1 == LAM`
+       restriction, an artefact of how the compiler writes `\x.x`) is gone.  Measured over this
+       tree's whole corpus, the only coincidence that occurs at all is that short. */
+    {
+      int nvi = (nv.node == n1 || nv.node == n2), nbi = (nb.node == n1 || nb.node == n2);
+      if (nvi && nbi) net_link(n, (Port){d1, 0}, (Port){d2, 0}, 1);
+      else {
+        if (!nvi) net_link(n, (Port){d1, 0}, nv, 1);
+        if (!nbi) net_link(n, (Port){d2, 0}, nb, 1);
+      }
     }
     net_link(n, (Port){m1, 0}, da, 1); net_link(n, (Port){m2, 0}, db, 1);
     return 1;

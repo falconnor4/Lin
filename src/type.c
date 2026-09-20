@@ -222,6 +222,25 @@ static Type *infer(Term *t) {
     Type *f = infer(t->l), *x = infer(t->r), *r = tvar();
     unify(f, tarrow(x, r)); return r;
   }
+  case TLET: {
+    /* The compiler's scope rule, so the two agree: an already-bound name means the value still sees
+       the OUTER binding (checked before the new one exists); a new name is in scope for its own
+       value -- recursion -- checked monomorphically, which is what keeps that rule sound, and
+       generalised for the body. */
+    if (env_find(t->name)) {
+      Type *v = infer(t->l);
+      env_push(t->name, generalize(v));
+      Type *b = infer(t->r);
+      envn--; return b;
+    }
+    Type *a = tvar();
+    env_push(t->name, (Scheme){.nq = 0, .t = a});
+    unify(a, infer(t->l));
+    envn--;
+    env_push(t->name, generalize(a));
+    Type *b = infer(t->r);
+    envn--; return b;
+  }
   case TDEFX: return infer(t->l);
   case TFLOAT: return tvar();   /* float literal: fresh polymorphic type */
   }

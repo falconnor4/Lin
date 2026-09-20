@@ -93,6 +93,19 @@ static Port ct_splice(Def *d, Scope sc) {
   return r;
 }
 
+/* Where a binder's uses went: the first is whatever the bind port leads to (none, when the body IS
+   that use), the rest are the ERA placeholders `ct` made, which are spent either way. */
+static Port *use_ports(CVar *e, Port bind) {
+  Port *ts = malloc(sizeof(Port) * (long)e->count);
+  ts[0] = N->wire[bind.node * 3 + bind.port];
+  for (int i = 0; i < e->nextra; i++) {
+    ts[i + 1] = N->wire[e->extra[i].node * 3 + 1];
+    N->dead[e->extra[i].node] = 1;
+    N->wire[e->extra[i].node * 3 + 1] = (Port){-1, 0};
+  }
+  return ts;
+}
+
 static Port ct(Term *t, Scope sc) {
   switch (t->type) {
   case TFLOAT: return net_alloc_float(N, strtod(t->name, NULL));
@@ -121,18 +134,11 @@ static Port ct(Term *t, Scope sc) {
     cur_lvl = save;
     net_link(N, (Port){self.node, 2}, body, 0);
     CVar *e = &cstack[my];
-    if (e->count == 0) {
-      /* unused binder: leave port1 dangling (erasure, as in the reference) */
-    } else if (e->count > 1) {
-      Port *ts = malloc(sizeof(Port) * (long)e->count);
-      ts[0] = N->wire[self.node * 3 + 1];
-      for (int i = 0; i < e->nextra; i++) {
-        ts[i + 1] = N->wire[e->extra[i].node * 3 + 1];
-        N->dead[e->extra[i].node] = 1;
-        N->wire[e->extra[i].node * 3 + 1] = (Port){-1, 0};
-      }
-      Port root = dup_tree(ts, e->count, lvl);
-      net_link(N, (Port){self.node, 1}, root, 0);
+    /* an unused binder leaves port1 dangling (erasure, as in the reference); one with several uses
+       gets the sharing fan */
+    if (e->count > 1) {
+      Port *ts = use_ports(e, (Port){self.node, 1});
+      net_link(N, (Port){self.node, 1}, dup_tree(ts, e->count, lvl), 0);
       free(ts);
     }
     free(e->extra);
@@ -150,6 +156,88 @@ static Port ct(Term *t, Scope sc) {
     net_link(N, (Port){a.node, 2}, ct(t->r, sc), 1);
     cur_lvl = save;
     return (Port){a.node, 1};
+  }
+  case TLET: {
+    /* A binding is ONE net shared by every use of the name -- the sharing a multi-use binder already
+       gets -- so a value used twice is still evaluated once; one use needs no fan, and no uses leave
+       the value unreachable.
+
+       SCOPE decides whether this is recursion: an already-bound name means the value still sees the
+       OUTER binding (Lin's `let` keeps that meaning -- test/let.lin's nested `x (add x 1)` is 9), so
+       the value is compiled before the new binding exists; a new name is in scope for its own value.
+
+       RECURSION IS NOT WORKING YET and is refused rather than mis-compiled, but it is now close: a
+       fan whose principal faces the value's and whose auxes are the uses is the right knot, provided
+       the sharing point is gauged at the VALUE's level -- `fan_lvl_at(2)` below, the position the
+       value is compiled at -- so that the recursive occurrence (which is inside the value, hence
+       deeper) meets it as a NESTED pair.  With that gauge and the nested-level case of the fan rule
+       (see net.c), `(let ((f (\n (ifl (is_zero n) (\_ 0) (\_ (f (pred n))))))) (f k))` returns 0 for
+       k = 0, 1, 2.  What remains is not the shape but the DISCIPLINE, and both obvious poles fail.
+       Without the nested case the net re-duplicates the sharing point and never stops (16M+ steps,
+       every rule growing linearly for ever).  With it, adjacent unrollings MERGE:
+       `(let ((s (\n (ifl (is_zero n) (\_ 0) (\_ (add n (s (pred n)))))))) (s 2))` is 2 where the answer
+       is 3 -- one level's contribution is gone, which is exactly the merge the nested case was warned
+       about, and `(s 3)` does not stop at all.  So a recursive sharing point has to distinguish its
+       own unrollings -- share the fixpoint while keeping each unfolding's work -- rather than either
+       collapsing them or copying them.  That is the oracle/bracket question of optimal reduction, not
+       a gauge choice: the nested case fires exactly ONCE for k = 2 and for k = 3 alike, so the gauges
+       never express more than one level of that distinction.
+
+       The GAUGES ARE NOT THE REMAINING LEVER -- that much is settled.  More than twenty combinations
+       were swept: the knot fan's level, both children's levels, the level of the two copies
+       gamma-delta makes, the level of the fan copies it makes, and every labelling of the nested
+       case.  All of them give the SAME results (0, 1, 2, then no value for `s`), and several diverge
+       identically.  So the remaining problem is structural, not a gauge choice: that first
+       gamma-delta CONSUMES the fan, and the recursive demand inside the now-shared body is satisfied
+       by a lambda copy which beta then consumes, so the demand has a supplier for a bounded number of
+       unrollings.  Renewing it is the open question -- a fan supplies two uses, and what has to
+       happen for a self-referential sharing point to supply the next one is not something this file
+       can answer by itself.
+
+       The pure-lambda route was tried as well, since it needs no rule at all: the fixpoint
+       `Y = \f.(\x.f (x x))(\x.f (x x))` applied to the generator.  It works for a body that never
+       mentions its own function and diverges for one that does -- `(Y (\f (\n (ifl (is_zero n)
+       (\_ 0) (\_ (f (pred n))))))) 0` does not reach a value, though the base case it takes discards
+       the recursive branch -- so what fails there is the sharing of the fixpoint itself.  That is the
+       failure this tree's history already records as the "fixpoint-sharing bug", and recursion through
+       a plain `let` reaches it too, so the two cannot be separated: a fixpoint that is shared without
+       re-instantiating the body does not terminate, and one re-instantiated without sharing the
+       fixpoint unrolls for ever. */
+    Scope save = cur_lvl;
+    int outer = 0;
+    for (int i = 0; i < csp; i++) if (!strcmp(cstack[i].name, t->name)) { outer = 1; break; }
+    Port val = (Port){-1, 0};
+    if (outer) { cur_lvl = scope_app(N, save, 2); val = ct(t->l, sc); }
+    Port ph = net_alloc(N, ERA, scope_nil(), "");
+    push_var(t->name, (Port){ph.node, 1});
+    int my = csp - 1;
+    if (!outer) {
+      if (term_refs(t->l, t->name))
+        cfail("recursive 'let' is not supported yet: '%s' refers to itself in its own value "
+              "(see the TLET case in compile.c)", t->name);
+      cur_lvl = scope_app(N, save, 2);
+      val = ct(t->l, sc);
+    }
+    cur_lvl = scope_app(N, save, 1);
+    Port body = ct(t->r, sc);
+    cur_lvl = save;
+    CVar *e = &cstack[my];
+    Port result = body;
+    if (e->count == 1) {
+      if (body.node == ph.node && body.port == 1) result = val;      /* the body IS the single use */
+      else {
+        Port use0 = N->wire[ph.node * 3 + 1];
+        if (use0.node >= 0 && (use0.node != val.node || use0.port != val.port)) net_link(N, use0, val, 1);
+      }
+    } else if (e->count > 1) {
+      Port *ts = use_ports(e, (Port){ph.node, 1});
+      net_link(N, dup_tree(ts, e->count, fan_lvl_at(2)), val, 1);
+      free(ts);
+    }
+    free(e->extra);
+    N->dead[ph.node] = 1; N->wire[ph.node * 3 + 1] = (Port){-1, 0};
+    csp--;
+    return result;
   }
   case TDEF: {
     Def *dd = def_find(t->name);
@@ -300,6 +388,8 @@ static int eg_add_term(EGraph *g, Term *t) {
   if (t->type == TVAR) return eg_add(g, TVAR, t->name, -1, -1);
   if (t->type == TLAM) return eg_add(g, TLAM, t->name, eg_add_term(g, t->l), -1);
   if (t->type == TAPP) return eg_add(g, TAPP, "", eg_add_term(g, t->l), eg_add_term(g, t->r));
+  /* TLET is structural, like TAPP: it must keep both children, since they are the whole binding. */
+  if (t->type == TLET) return eg_add(g, TLET, t->name, eg_add_term(g, t->l), eg_add_term(g, t->r));
   if (eg_opaque(t->type)) return eg_add(g, t->type, t->name, -1, -1);
   return eg_add_term(g, t->l);
 }
@@ -309,6 +399,8 @@ static int eg_has_var(EGraph *g, int c, const char *name) {
   if (n.type == TVAR) return !strcmp(n.name, name);
   if (n.type == TLAM) return strcmp(n.name, name) && eg_has_var(g, n.l, name);
   if (n.type == TAPP) return eg_has_var(g, n.l, name) || eg_has_var(g, n.r, name);
+  /* Conservative for a binding: its value may refer to the name, and declining costs only rewrites. */
+  if (n.type == TLET) return 1;
   return 0;
 }
 
@@ -337,6 +429,9 @@ static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
   }
   if (n.type == TAPP)
     return eg_add(g, TAPP, "", eg_subst(g, n.l, name, arg, d + 1), eg_subst(g, n.r, name, arg, d + 1));
+  /* A binding is cyclic by construction, so substituting into it is declined rather than guessed at
+     (the same signal a capture uses); `eg_has_var` above is conservative for the same reason. */
+  if (n.type == TLET) { g->capture = 1; return c; }
   return c;
 }
 
@@ -398,6 +493,11 @@ static Term *eg_extract(EGraph *g, int c, int d) {
     Term *l = eg_extract(g, n.l, d + 1), *r = eg_extract(g, n.r, d + 1);
     if (!l || !r) { term_free(l); term_free(r); return NULL; }
     return term_new(TAPP, "", l, r);
+  }
+  if (n.type == TLET) {
+    Term *l = eg_extract(g, n.l, d + 1), *r = eg_extract(g, n.r, d + 1);
+    if (!l || !r) { term_free(l); term_free(r); return NULL; }
+    return term_new(TLET, n.name, l, r);
   }
   return NULL;
 }

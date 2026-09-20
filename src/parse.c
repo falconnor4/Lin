@@ -34,6 +34,7 @@ int term_refs(Term *t, const char *name) {
   switch (t->type) {
   case TVAR: return !strcmp(t->name, name);
   case TLAM: return strcmp(t->name, name) && term_refs(t->l, name);
+  case TLET: return strcmp(t->name, name) && (term_refs(t->l, name) || term_refs(t->r, name));
   default: return term_refs(t->l, name) || term_refs(t->r, name);
   }
 }
@@ -326,8 +327,11 @@ static Term *parse_term(void) {
         snprintf(names[nb], NAME, "%s", vn); vals[nb++] = v;
       }
       Term *body = parse_tail(parse_term());
+      /* A binding is a TLET, not `((\x body) value)`: same scope (each binding is visible in the
+         next value and in the body, and now also to itself), but the net is SHARED rather than
+         substituted, which is what lets the value refer to the name -- recursion. */
       for (int i = nb - 1; i >= 0; i--)
-        body = term_new(TAPP, "", term_new(TLAM, names[i], body, NULL), vals[i]);
+        body = term_new(TLET, names[i], vals[i], body);
       free(names); free(vals);
       return body;
     }

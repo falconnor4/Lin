@@ -171,6 +171,32 @@ def main():
             bad.append("forcing the value with `count` did not cost more than the bare normal form "
                        "(%r vs %r); the readback accounting is suspicious" % (fold[3], unfold[3]))
 
+    # 6. readback must never mislead silently.
+    #    A shared normal form cannot always be written as a tree, and a readback that ends on a
+    #    discarded node is not a value at all.  The invariant below survives a future
+    #    sharing-preserving readback, which would simply stop emitting the marks: IF stdout carries
+    #    a mark, stderr must say what it means.  What must never happen -- and did, for both cases
+    #    -- is a mark reaching stdout alone with exit status 0, looking like the answer.
+    rb = os.path.join(tmp, "rb.lin")
+    with open(rb, "w") as fh:
+        fh.write(HEAD + "(cmul c2 c2)\n" + "((\\x (x x)) c2)\n" + "(count (cmul c2 c2))\n")
+    rc, rvals, rerr = run([lin, rb])
+    lines = [l for l in rvals.split("\n") if l.startswith("=> ")]
+    if len(lines) != 3:
+        bad.append("readback probe produced %d results, want 3" % len(lines))
+    else:
+        shared, lost, forced = lines[0], lines[1], lines[2]
+        if "?" in shared and "shared normal form" not in rerr:
+            bad.append("a '?'-bearing readback (%r) was printed without saying what the marker "
+                       "means" % shared)
+        if "?" not in shared and "shared normal form" in rerr:
+            bad.append("stderr claims a shared-normal-form note for a clean readback (%r)" % shared)
+        if "_" in lost and "not a value" not in rerr:
+            bad.append("a discarded-node readback (%r) was printed without reporting that the "
+                       "result is not a value" % lost)
+        if forced != "=> 4":
+            bad.append("forcing the shared product gave %r, want '=> 4'" % forced)
+
     if bad:
         for b in bad:
             print("FAIL " + b)

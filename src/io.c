@@ -383,7 +383,8 @@ static size_t vis_cap = 0;
    of sharing points (bench_combinators: 62 s of printing for 1.1 s of reduction). */
 static char *ob_buf = NULL; static size_t ob_len, ob_cap;
 static char **viz_txt = NULL;      /* memo: node*3+port -> rendered text */
-static long qmarks = 0;            /* '?' (cycle/over-depth) marks emitted so far */
+static long qmarks = 0;            /* '?' (unexpressible sharing / over-depth) marks emitted so far */
+static long dmarks = 0;            /* '_' marks emitted for a node the reduction DISCARDED */
 static long renames = 0;           /* shadowed binders rendered under a disambiguated name */
 
 /* The binders currently being printed, innermost last.  An occurrence carries no name of its
@@ -436,10 +437,30 @@ static void ob_printf(const char *f, ...) {
   if (k > 0) ob_puts(tmp);
 }
 
-/* Render a port representation into the output buffer. */
+/* Render a port representation into the output buffer.
+
+   SHARED NORMAL FORMS, AND WHY THE MARKER BELOW IS NOT A BUG TO BE "FIXED" BY UNFOLDING.
+
+   Optimal sharing leaves normal forms that are not trees: `(cmul c2 c2)` (value 4) is a small knot of
+   cross-wired fans, and this walk, arriving back at a node already on its print stack, emits the
+   marker.  The VALUE is unaffected -- applying the knot to `num.succ 0` gives exactly 4, as does
+   `(count ...)`, which is how test/optimality.py pins these terms.
+
+   Unfolding was measured and is WRONG, not merely costly: following the other fan branch UNDER-counts
+   (prints Church 2 for the value 4) and letting the walk re-enter OVER-counts (19 applications for
+   the value 4, 15 for the value 9).  No local fan-traversal rule recovers the finite term, because a
+   knot is genuinely recursive and its finite observable appears only under application.  It would
+   also be the wrong canonical form for Lin: `sq^4 c2` is 65536 after 90 interactions and 244 nodes,
+   so unfolding it is a 65536-application text -- the blow-up optimal sharing exists to avoid, and the
+   reason the memo below was added ("exponential in the number of sharing points:
+   bench_combinators, 62 s of printing for 1.1 s of reduction").
+
+   Readback therefore prints the SHARING, and the blocker is that Lin cannot write one down: `let` is
+   not recursive and there is no `letrec`, so no term denotes a cyclic value.  The marker stays until
+   that exists, and is reported on stderr so it can never pass for an answer. */
 static void print_port(Port p, int depth) {
   if (depth > N->nn || p.node < 0 || p.node >= N->nn) { ob_putc('?'); qmarks++; return; }
-  if (N->dead[p.node]) { ob_putc('_'); return; }
+  if (N->dead[p.node]) { ob_putc('_'); dmarks++; return; }
   if (N->tag[p.node] == LAM && p.port == 1) {
     ob_puts(pp_binder_name(p.node, NNM(N, p.node)));
     return;
@@ -491,9 +512,31 @@ int net_print(Net *n) {
   vis_cap = (size_t)(n->nn + 1);
   vis_print = calloc(vis_cap, 1);
   viz_txt = calloc(vis_cap * 3, sizeof *viz_txt);
-  ob_len = 0; qmarks = 0;
+  ob_len = 0; qmarks = 0; dmarks = 0;
   print_port(r, 0);
   fwrite(ob_buf, 1, ob_len, stdout);
+  /* Neither mark is an answer, and both used to be emitted silently with exit status 0.  They mean
+     different things, so they are reported differently -- on STDERR, so a test that compares stdout
+     (test/expect.sh) is unaffected, and so the value on stdout stays exactly what it was.
+       '_' -- the readback walked into a node the reduction had already discarded.  That is a
+              malformed normal form, not sharing: a live wire points at a dead node, so the result
+              is NOT a value.  Reported as an error because it is one.
+       '?' -- the walk re-entered a node on its own stack.  The value is still correct (forcing it
+              with `count` or applying it gives the exact answer -- see test/optimality.py), but the
+              kernel/shared form cannot be written as a tree, and readback prints the sharing rather
+              than unfolding it on purpose: unfolding is the blow-up optimal reduction avoids.  Two
+              different shared values can print the same text, so a '?'-bearing result must not be
+              treated as an answer by anything downstream.  See print_port for the decision. */
+  if (dmarks) {
+    fprintf(stderr, "lin: readback reached a node the reduction had discarded (%ld mark(s)); "
+                    "the result is not a value\n", dmarks);
+    fflush(stderr);
+  } else if (qmarks) {
+    fprintf(stderr, "lin: note: readback of a shared normal form (%ld mark(s)); the value is "
+                    "correct but the printed text is not unique -- force it with `count` or by "
+                    "applying it\n", qmarks);
+    fflush(stderr);
+  }
   if (viz_txt) { for (size_t i = 0; i < vis_cap * 3; i++) free(viz_txt[i]); free(viz_txt); viz_txt = NULL; }
   free(vis_print); vis_print = NULL; vis_cap = 0;
   return 0;

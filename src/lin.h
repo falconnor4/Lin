@@ -7,7 +7,10 @@
 #define NAME 256
 
 /* ---------------- core terms (pure untyped lambda) ---------------- */
-enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT, TEXPORT };
+enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT, TEXPORT,
+       /* (let ((n v)) b): ONE net shared by every use of `n`, value included, so a use of
+          `n` inside `v` closes a cycle.  That is recursion, and it needs no unrolling. */
+       TLET };
 typedef struct Type { int kind, id; struct Type *a, *b; const char *name; } Type;
 /* type-kinds (shared: type.c and the datatype processor in main.c use these) */
 enum { TVR, TARROW, TLINK, TNOM, TARG, TPARAM };
@@ -63,7 +66,6 @@ void net_gc(Net *n);
 int scope_eq(Net *n, Scope a, Scope b);
 Scope scope_app(Net *n, Scope s, int bit);   /* one step deeper */
 Scope scope_meet(Net *n, Scope a, Scope b);   /* lowest common ancestor */
-int scope_within(Net *n, Scope a, Scope b);   /* a is a proper ancestor of b */
 /* place `s` (a level in `src`) under `lvl` in `n`: what a spliced clone's gauges need */
 Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s);
 int net_level_count(const Net *n);
