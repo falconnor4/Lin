@@ -908,6 +908,15 @@ Both headline goals now pay *here*, not in the reducer (§4.2):
   (checked mechanically, `src/` and `examples/` both clean), and `std/map.lin`'s similar-looking
   `map_get` / `map_lookup_sub` are a helper pair with genuinely different semantics, so merging them
   would change behaviour rather than remove a copy.
+- **Reverted: delegating `default.nix`'s build to the Makefile.** The Makefile spells out the same
+  compile commands, so `buildPhase = "make lin plugins"` looks like the obvious fourth consolidation,
+  and it was tried and reverted *on a measurement*: the resulting binary links libgomp but leaves
+  `libgomp.so.1` out of the derivation's closure, so it dies at startup with
+  `error while loading shared libraries: libgomp.so.1` and every suite reports 0 of N assertions
+  (0/27, 0/8, 0/10, 0/28 on the recursion suites). Invoking `$CC` directly is what makes the Nix gcc
+  wrapper register the OpenMP runtime as a runtime dependency. Two copies of a flag list are not worth
+  a binary that cannot start, so the recipe stays spelled out and the reason is recorded in
+  `default.nix` itself; a future attempt has to solve the closure question first.
 - **Float typing is nominal but not enforced.** `float` is a registered nominal annotation
   and a float is a Scott numeral carrying an IEEE-754 bit pattern under the `_fsz`/`_fss`
   spine (so it never collides with integer numerals), but `std/float.lin`'s operations are

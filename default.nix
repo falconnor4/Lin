@@ -17,6 +17,13 @@ pkgs.stdenv.mkDerivation {
   # compile against the real ABI rather than hand-rolled structs.
   NIX_CFLAGS_COMPILE = "-I${pkgs.vulkan-headers}/include";
 
+  # NOTE: this recipe is deliberately NOT delegated to the Makefile, which spells the same commands
+  # out for `make all` / `make test`.  It was tried and reverted on a measurement: `make lin plugins`
+  # builds a binary that links libgomp but leaves libgomp.so.1 out of the derivation's closure, so the
+  # artifact dies at startup with "error while loading shared libraries: libgomp.so.1" and every suite
+  # reports 0 of N assertions.  Invoking $CC directly is what makes the Nix gcc wrapper register the
+  # OpenMP runtime as a runtime dependency.  Deduplicating two copies of a flag list is not worth a
+  # binary that cannot start; a future attempt has to solve the closure question first.
   buildPhase = ''
     runHook preBuild
     $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl -lm
