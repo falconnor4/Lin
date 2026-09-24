@@ -40,16 +40,12 @@ typedef struct {
      separate "knot namespace" — node dumps put argument-position nodes at paths like `0` and `01`. */
   int *lv_parent, *lv_depth, *lv_hash, nlv, lvcap, lv_hcap;
   unsigned char *lv_bit;
+  /* Needed order: demand roots are the ports a value is observed at.  ROOT is always one; net_force
+     and lin_demand add the rest.  `dem[i] == dem_stamp` means node i is on a demand path, so marks
+     are invalidated by bumping the stamp (no O(nn) clear, and compaction needs no remap). */
+  Port *root; int nroot, rootcap;
+  unsigned int *dem, dem_stamp; unsigned char *vport;
   long steps;
-  /* A driver claims a redex it cannot materialise yet (operands not concrete, or an open precompile body) and
-     reports it here.  The core never interprets the reason — it only uses it to know the net is not a value, so
-     def_precompile must not bake it.  The policy is entirely the driver's. */
-  unsigned char driver_pending;
-  /* `stalled` is set when net_reduce's livelock guard drops the active list before a normal form.
-     It used to be silent, and a truncated net is indistinguishable from a value to every caller
-     (eval_form only recognises truncation by `steps >= STEP_LIMIT`), so a guard trip could be
-     printed and even baked into a .line as if it were the answer. */
-  unsigned char stalled;
 } Net;
 
 /* wire of a port (drivers read the graph directly) */
@@ -59,11 +55,16 @@ Port net_alloc(Net *n, int tag, Scope sc, const char *name);
 void net_link(Net *n, Port a, Port b, int enqueue);
 void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, Port a, Port b);
 long net_reduce(Net *n, long limit);
+/* Evaluate the spine from `p` to a weak head normal form (or the step budget), by registering `p`
+   as a demand root and running the needed-order reducer.  Re-entrant and local. */
+long net_force(Net *n, Port p);
+/* Register an extra demand root: a port whose weak head normal form the caller is about to observe. */
+void lin_demand(Net *n, Port p);
 Net *net_copy(const Net *n); Scope scope_nil(void);
 /* reclaim every node not reachable from ROOT (identity-preserving; safe at any point a
    net is a value or a residual -- the AOT build compacts before serialising) */
 void net_gc(Net *n);
-int scope_eq(Net *n, Scope a, Scope b);
+int scope_eq(const Net *n, Scope a, Scope b);
 Scope scope_app(Net *n, Scope s, int bit);   /* one step deeper */
 Scope scope_meet(Net *n, Scope a, Scope b);   /* lowest common ancestor */
 /* place `s` (a level in `src`) under `lvl` in `n`: what a spliced clone's gauges need */
@@ -72,22 +73,11 @@ int net_level_count(const Net *n);
 void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit);
 
 /* ---------------- driver ABI ---------------- */
-/* Drivers reduce a redex *class*; core waves fan out to each in priority order, each claiming the redexes it handles.
-   The core owns the four correctness rules (β, δ⋈δ, γ⋈δ, ε) and is complete with no driver loaded: a driver can only
-   *pre-empt* a redex class before the core reaches it, never replace a rule.  Deep optimisation strategies (native
-   scalar folding, thread/GPU wave policy, Lévy bracketing) live entirely in drivers. */
 #define LIN_DRIVER_MAGIC 0x4C494E44u            /* 'LIND' */
-/* ABI 2 appends arg_fold/materialize/drain/pending and adds LIN_CAP_PREEMPT.  The append itself is
-   designated-initialiser safe, but a .so built against ABI 1 is *smaller* than this struct, so reading the new
-   fields would run past its end: the bump makes the core reject such a driver loudly instead.  Rebuild plugins. */
-#define LIN_DRIVER_ABI   2u
+#define LIN_DRIVER_ABI   3u
 #define LIN_CAP_NATIVE_NUM 0x01u                 /* satur `_ffi` arithmetic */
 #define LIN_CAP_FIXED      0x02u                 /* beta / annihilate / erase */
 #define LIN_CAP_COMMUTE    0x04u                 /* LAM|APP x DUP (allocating) */
-/* A pre-emptor is a reduction *pre-pass*, not a strategy: it claims redex classes the core would otherwise handle
-   (native folds, guarded deferral) and composes with whichever strategy is selected.  `lin_driver_clear` — what
-   `(set_driver ...)` calls — drops strategies but KEEPS pre-emptors, so selecting "cpu"/"simd"/"gpu" never silently
-   disables the fold pre-pass. */
 #define LIN_CAP_PREEMPT    0x08u
 
 typedef struct LinDriver {
@@ -98,45 +88,16 @@ typedef struct LinDriver {
   int priority;                                  /* lower runs earlier        */
   int (*claim)(const Net *n, Port p1, Port p2);  /* pure: can this driver handle this redex? */
   int (*reduce)(Net *n, Port *redexes, int nred, long limit, int *changed); /* consume claimed slice */
-  /* ---- ABI 2 optional hooks (NULL = not implemented) ---- */
-  /* Pre-empt a sub-term sitting in a β *argument* position (e.g. the saturated `(mul 2 2)` of `succ (mul 2 2)`).
-     A driver never sees that shape as a principal×principal redex, so the core offers it explicitly: return 1 if
-     `arg` was materialised as a value at `target`, 0 to let plain β substitute it.
-     ALLOCATION BUDGET: β runs inside the parallel wave, so this hook can be called from a worker thread, where
-     net_alloc cannot grow the net (a realloc would move the arrays every worker is holding).  The wave reserves
-     4 nodes per interaction, which is exactly what the core rules use; a hook that allocates more than that
-     aborts the process with a message rather than corrupting the heap.  Materialise a value with a bounded
-     footprint (a Scott numeral's size is its value, so an unbounded `net_alloc_scott(n, k)` is not safe here). */
-  int (*arg_fold)(Net *n, Port arg, Port target);
-  /* Readback pre-pass: materialise a sub-term the reducer left as a driver-foldable closure (e.g. a saturated
-     `_ffi` closure embedded in a numeral spine) into `*out`; return 0 to leave `p` alone. */
-  int (*materialize)(Net *n, Port p, Port *out);
-  /* The active wave drained.  Retry whatever this driver parked because its operands were not concrete yet,
-     re-enqueueing via lin_enqueue(); return the number of pairs re-enqueued (0 = nothing left to wait for).  The
-     waiting policy — how long to wait, when to give up and let the core β it — belongs to the driver. */
-  int (*drain)(Net *n);
-  /* 1 if this driver still holds un-materialised work for `n` (a parked redex it never folded).  A reduction that
-     ends with a driver pending has not reached a value, so its result must not be baked into a precompiled def. */
-  int (*pending)(const Net *n);
 } LinDriver;
 
 void lin_driver_add(LinDriver *d); void lin_driver_clear(void); LinDriver *lin_get_driver(void);
-/* 1 if any loaded driver still holds un-materialised work for `n` (Net.driver_pending or LinDriver.pending) */
-int lin_any_pending(const Net *n);
-/* a driver reports that it claimed a redex it could not materialise (see Net.driver_pending) */
-void lin_pending_bump(Net *n);
-/* readback pre-pass: 1 and `*out` set when a driver materialised a foldable closure at `p` (see LinDriver.materialize) */
-int lin_materialize(Net *n, Port p, Port *out);
 int wave_snapshot(Net *n, Port **out, int *cap);
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
-/* ---- General native scalar-op extension hook: plugins register a ScalarOpFn provider for a class of ops (arith.so first); run_ffi tries providers in order ---- */
 typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
 void lin_scalar_ops_add(ScalarOpFn f);
-/* dlopen std/drivers/<sym>.so (idempotent) so its constructor registers ops */
 void lin_scalar_ops_load(const char *sym);
-/* Canonical shared scalar-op table (std/drivers/arith.so): the single arithmetic authority any reduction strategy may call */
 int lin_arith_scalar(const char *fn, int argc, const long *args, long *out, int *outkind);
 
 /* ---------------- parser ---------------- */
@@ -144,6 +105,7 @@ typedef void (*FormFn)(Term *, const char *, void *);
 void parse_forms(const char *src, FormFn fn, void *ud);
 Term *term_new(int type, const char *name, Term *l, Term *r); Term *term_copy(Term *t);
 void term_free(Term *t); int term_refs(Term *t, const char *name);
+Term *term_fix(const char *name, Term *body);
 
 /* ---------------- types ---------------- */
 typedef struct { int nq, q[256]; Type *t; } Scheme;
@@ -174,11 +136,14 @@ long net_read_int(Net *n, Port p); int net_read_bool(Net *n, Port p);
 int net_read_float(Net *n, Port p, double *out);
 int net_read_string(Net *n, Port p, char *buf, size_t max); int net_run_io(Net *n, long step_limit);
 int net_print(Net *n);
-/* ---- Fold machinery does NOT live here: the `_ffi`/`_op` native fold, its saturation guards, its deferral policy
-   and the "this def is not materialised" decline all belong to std/drivers/arith.so (a LIN_CAP_PREEMPT driver),
-   reached through LinDriver.{claim,reduce,arg_fold,materialize,drain,pending}.  What the core keeps is the four
-   correct rules and the mechanisms a driver needs to pre-empt them; with no driver loaded the same programs still
-   reduce exactly, by plain β of the pure-Lin fallback bodies. ---- */
+/* where readback writes; NULL = stdout.  A prelude load points it at a sink so that the effects its
+   top-level forms perform still run (FFI dispatch happens in readback) without joining the output. */
+extern FILE *lin_out;
+/* ---- Fold machinery does NOT live here: the `_ffi`/`_op` native fold, its saturation guards and its
+   deferral policy all belong to std/drivers/arith.so (a LIN_CAP_PREEMPT driver), reached through
+   LinDriver.{claim,reduce}.  A driver that needs a concrete operand forces it with net_force.  The core keeps
+   the four correct rules and the mechanisms a driver needs to pre-empt them; with no driver loaded the same
+   programs still reduce exactly, by plain β of the pure-Lin fallback bodies. ---- */
 /* ---- Shared on-net FFI decoder (std/runtime/decoder.c): driver plugins reuse the one arg-spine / DUP-hop walker for the `_ffi` `_cl`-spine decode ---- */
 Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
@@ -205,8 +170,6 @@ long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
 typedef struct { char name[NAME]; Term *term, *expanded; Scheme sch; int typed, rec;
-                 int rec_k; Term *rec_body;   /* widening self-recursion bound + original body */
-                 char rec_name[NAME];         /* binder name the recursive self-refs use (see widen_recursion) */
                  Net *compiled; int comp_tried; } Def;
 extern Def *defs;
 extern int ndefs, lin_threads;

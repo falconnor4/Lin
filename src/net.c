@@ -13,15 +13,9 @@ Scope scope_nil(void) { return 0; }
 static int in_parallel;   /* a wave is running threaded: no interning there (see below) */
 
 /* ---------------- the level trie ----------------
-   A level is a position in the term: the sequence of branches taken from the root.  Interning
-   that sequence as a trie node makes four operations cheap and exact:
-     equality   -> the same id
-     meet       -> the lowest common ancestor (LCA)
-     nesting    -> walk up from the deeper level
-     extension  -> intern (parent, branch)
-   and it makes representation free: one int per node, one edge per distinct path, whether the
-   path is 3 steps or 300.  The bit-word/heap-table union this replaces spilled long gauges to a
-   side table -- 444,380 entries, 97% of a built artifact, for one test program. */
+   A level is a position in the term: the branches taken from the root.  Interning that sequence
+   makes equality an int compare, the meet the lowest common ancestor, nesting a walk up, and
+   extension an intern -- and representation free: one int per node, one edge per distinct path. */
 static void lv_ensure(Net *n, int need) {
   if (need <= n->lvcap) return;
   int nc = n->lvcap ? n->lvcap * 2 : 256;
@@ -81,17 +75,10 @@ static int scope_within(Net *n, Scope a, Scope b) {
 }
 #define MAX_SCOPE_STEPS (1 << 16)
 
-/* What the reference does NOT answer.  `wave-opt-reduction`'s terms are only TVar/TLam/TApp -- it
-   has no `let`, no recursion, no cycle -- so a recursive sharing point has nothing to be ported from;
-   it has to be designed here.  Its gauge rule IS relevant though, and it was tried: main.hs labels a
-   commuting copy `sigma = g : (s1 ++ s2)` ("Non-Abelian Path Prefix Injection"), i.e. the two paths
-   CONCATENATED, where this trie takes their lowest common ancestor and appends one branch.  Porting
-   the concatenation changed the recursion results not at all, and it inflated the level trie until the
-   .line artifacts went to 656 KB and 1.76 MB against their 300 KB bound -- concatenated paths grow
-   with every commutation, which is the bracket/croissant explosion the reference's README sets out to
-   avoid and which only reappears once terms can nest without bound (recursion).  The compact trie is
-   therefore a deliberate divergence: it keeps paths short, and the displacement it discards is not
-   what recursion is missing. */
+/* A deliberate divergence from `wave-opt-reduction`: main.hs labels a commuting copy with the two
+   paths CONCATENATED, where this trie takes their lowest common ancestor.  Porting the concatenation
+   changed no result and inflated the .line artifacts to 656 KB and 1.76 MB against their 300 KB bound
+   -- concatenated paths grow with every commutation.  The compact trie keeps paths short. */
 Scope scope_meet(Net *n, Scope a, Scope b) {
   int guard = n->nlv + 2;
   while (lv_depth(n, a) > lv_depth(n, b)) { a = (Scope)lv_up(n, a); if (--guard < 0) goto bad; }
@@ -102,7 +89,7 @@ bad:
   return 0;
 }
 
-int scope_eq(Net *n, Scope a, Scope b) { (void)n; return a == b; }
+int scope_eq(const Net *n, Scope a, Scope b) { (void)n; return a == b; }
 
 /* a grow-only path buffer: the steps from the root down to a level */
 static unsigned char *lv_path; static int lv_pathcap;
@@ -126,9 +113,8 @@ Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s) {
   return (Scope)cur;
 }
 
-/* Install a level trie: level 0 is the root, levels 1..nlv come in id order (parents precede children,
-   the lv_intern invariant), so depths follow from parents.  Total: nlv == 0 is a valid net, which is
-   what a fresh copy is -- net_copy rebuilds through this, not by mirroring the trie's arrays. */
+/* Install a level trie: level 0 is the root, levels 1..nlv come in id order (parents precede
+   children), so depths follow from parents.  nlv == 0 is a valid net. */
 void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit) {
   lv_ensure(n, nlv + 1);
   n->nlv = nlv;
@@ -150,14 +136,28 @@ void net_init(Net *n, int cap) {
   n->nlv = 0; n->lvcap = 0; n->lv_hcap = 0;
   lv_ensure(n, 1);                      /* the root level always exists */
   n->lv_parent[0] = 0; n->lv_bit[0] = 0; n->lv_depth[0] = 0;
-  n->nn = 0; n->steps = 0; n->driver_pending = 0; n->stalled = 0;
+  n->nn = 0; n->steps = 0;
+  n->root = NULL; n->nroot = 0; n->rootcap = 0;
+  n->dem = calloc((size_t)cap, sizeof(unsigned int)); n->dem_stamp = 0;
+  n->vport = calloc((size_t)cap, 1);
   net_alloc(n, ROOT, scope_nil(), "");
 }
 
 void net_free(Net *n) {
-  free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead);
+  free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->dem); free(n->vport);
   free(n->lv_parent); free(n->lv_depth); free(n->lv_bit); free(n->lv_hash);
+  free(n->root);
   if (n->name) { for (int i = 0; i < n->nn; i++) free(n->name[i]); free(n->name); }
+}
+
+void lin_demand(Net *n, Port p) {
+  if (p.node < 0 || p.node >= n->nn) return;
+  for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) return;
+  if (n->nroot >= n->rootcap) {
+    n->rootcap = n->rootcap ? n->rootcap * 2 : 8;
+    n->root = realloc(n->root, (size_t)n->rootcap * sizeof(Port));
+  }
+  n->root[n->nroot++] = p;
 }
 
 static void net_ensure_cap(Net *n, int need) {
@@ -168,21 +168,23 @@ static void net_ensure_cap(Net *n, int need) {
   n->tag = realloc(n->tag, (size_t)nc); n->wire = realloc(n->wire, (size_t)nc * 3 * sizeof(Port));
   n->scope = realloc(n->scope, (size_t)nc * sizeof(Scope)); n->name = realloc(n->name, (size_t)nc * sizeof(char *));
   memset(n->name + n->cap, 0, (size_t)(nc - n->cap) * sizeof(char *));
-  n->dead = realloc(n->dead, (size_t)nc); memset(n->dead + n->cap, 0, (size_t)(nc - n->cap)); n->cap = nc;
+  n->dead = realloc(n->dead, (size_t)nc); memset(n->dead + n->cap, 0, (size_t)(nc - n->cap));
+  n->dem = realloc(n->dem, (size_t)nc * sizeof(unsigned int));
+  memset(n->dem + n->cap, 0, (size_t)(nc - n->cap) * sizeof(unsigned int));   /* 0 = never marked */
+  n->vport = realloc(n->vport, (size_t)nc); memset(n->vport + n->cap, 0, (size_t)(nc - n->cap));
+  n->cap = nc;
 }
 
 Port net_alloc(Net *n, int tag, Scope sc, const char *name) {
   if (!in_parallel) net_ensure_cap(n, n->nn + 1);
   int id = __atomic_fetch_add(&n->nn, 1, __ATOMIC_RELAXED);
   /* While a wave is threaded, growth is skipped: `realloc` would move the arrays out from under
-     every worker, which holds raw pointers into them.  The wave therefore reserves up front
-     (lin_reduce_wave_parallel: 4 nodes per parallel interaction, which is tight for the core
-     rules).  A driver hook can allocate more than that -- `arg_fold` runs inside the region and
-     its bound is the driver's -- and the old code wrote past the arrays, corrupting the heap.
-     The reservation is the driver's contract; this is the check that makes breaking it loud. */
+     every worker, which holds raw pointers into them.  The wave reserves up front (4 nodes per
+     parallel interaction, which is what the core rules use); this is the check that makes breaking
+     that reservation loud instead of writing past the arrays.  Drivers never run in that region --
+     claim/reduce are called between waves -- so the reservation is the core's own. */
   if (id >= n->cap) {
-    fprintf(stderr, "lin: fatal: allocation past the wave's reservation (node %d, cap %d).\n"
-                    "     A driver's arg_fold hook allocated inside a parallel wave; see lin.h.\n",
+    fprintf(stderr, "lin: fatal: allocation past the wave's reservation (node %d, cap %d).\n",
             id, n->cap);
     fflush(stderr);
     abort();
@@ -242,20 +244,11 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
 
 /* The external boundary of an interacting pair.
 
-   A rule rewires the two nodes it consumes by pairing their auxiliary wires up again.  Written for
-   the case where every auxiliary leads OUT of the pair, that needs a hand-written branch for each way
-   the net can instead wire one back INTO it -- the compiler links a binder to its own body for
-   `\x.x`, and a fan can sit between a binder and the argument that uses it -- and each such branch had
-   to spot the shape and skip it, which is what left a port pointing at a node the rule had just
-   killed (`((\x (x x)) c2)` read back as `_`).
-
-   The general statement needs no cases: union the pair's six ports, {n1.0,n1.1,n1.2,n2.0,n2.1,n2.2}
-   as 0..5, along every wire that stays inside the pair and along the rule's correspondence
-   `ca[k]~cb[k]`; each class then presents the ports it leads to OUTSIDE the pair, and presents
-   exactly two -- join them.  A class presenting none is a wire closed inside the pair and needs
-   nothing (beta on `\x.x`, where binder and body are one port, so the argument goes straight to the
-   result).  A class whose two outside ports belong to one node is already represented BY that node
-   (the fan sitting between a binder and its argument).  Both fall out of the one rule. */
+   Union the pair's six ports, {n1.0,n1.1,n1.2,n2.0,n2.1,n2.2} as 0..5, along every wire that stays
+   inside the pair and along the rule's correspondence `ca[k]~cb[k]`; each class then presents the
+   ports it leads to OUTSIDE the pair, and presents exactly two -- join them.  A class presenting none
+   is a wire closed inside the pair (beta on `\x.x`) and needs nothing.  No case analysis at all,
+   which is what the hand-written per-shape branches used to get wrong. */
 static int pfind(int *u, int x) { while (u[x] != x) { u[x] = u[u[x]]; x = u[x]; } return x; }
 static void punion(int *u, int a, int b) { a = pfind(u, a); b = pfind(u, b); if (a != b) u[b] = a; }
 static void pair_boundary(Net *n, int n1, int n2, const int *ca, const int *cb, int ncor, int link, Port *tgt) {
@@ -302,22 +295,32 @@ static void split2(Net *n, int t1, Scope s1a, Scope s1b, const char *nm1,
   net_link(n, (Port){*d2, 1}, (Port){*m1, 2}, 0); net_link(n, (Port){*d2, 2}, (Port){*m2, 2}, 0);
 }
 
-/* four rules of the scope-gauge calculus (wave-opt-reduction main.hs); ERA is inert (era pairs dropped) */
+/* Hand the pair's four auxiliaries to the four copies a duplication rule just made.  Each copy takes
+   the place of one auxiliary -- UNLESS two of them are shorted to EACH OTHER, i.e. their class is
+   closed inside the pair.  There the two copies must be joined to each other; wiring one onto a port
+   of a node the rule has already killed leaves a live node pointing at a discarded one, which is
+   exactly what readback reports as `_` (measured on a nested Y-knot: a DUP's aux2 wired to its
+   partner's aux2, and the copy for it landed on the dead node's port).
+   `t[k]` is what auxiliary k leads to; `cp[k]` is the copy that takes it over. */
+static void link_copies(Net *n, int n1, int n2, const Port *t, const int *cp) {
+  int inside[4] = {0, 0, 0, 0};
+  for (int k = 0; k < 4; k++) {
+    int m = t[k].node == n1 ? (t[k].port == 1 ? 0 : 1)
+          : t[k].node == n2 ? (t[k].port == 1 ? 2 : 3) : -1;
+    if (m < 0 || m <= k || inside[k]) continue;
+    inside[k] = inside[m] = 1;
+    net_link(n, (Port){cp[k], 0}, (Port){cp[m], 0}, 1);
+  }
+  for (int k = 0; k < 4; k++) if (!inside[k]) net_link(n, (Port){cp[k], 0}, t[k], 1);
+}
+
+/* the four rules of the scope-gauge calculus; ERA is inert (era pairs are dropped) */
 static int lin_trace = -1; /* cached LIN_TRACE */
 
-/* Driver pipeline: sorted by priority (ascending); core waves fan out to each in priority order, each *claiming*
-   the redexes it handles, so drivers compose.  Declared up here because β consults it (lin_argfold). */
+/* Driver pipeline: sorted by priority (ascending); core waves fan out to each in priority order, each
+   *claiming* the redexes it handles, so drivers compose.  A driver only ever pre-empts a redex class;
+   every rule the core keeps (β, δ⋈δ, γ⋈δ, ε) is complete without one. */
 static LinDriver *drv[16]; static int ndrv;
-
-/* Ask each driver, in priority order, to pre-empt a sub-term β is about to substitute.  A saturated closure in an
-   *argument* position is never a principal×principal redex, so a driver can only reach it through this hook.  The
-   first driver that materialises `arg` at `target` wins; otherwise β substitutes the term unchanged and the
-   pure-Lin fallback body computes it (slower, but exactly). */
-static int lin_argfold(Net *n, Port arg, Port target) {
-  for (int di = 0; di < ndrv; di++)
-    if (drv[di]->arg_fold && drv[di]->arg_fold(n, arg, target)) return 1;
-  return 0;
-}
 
 int net_interact(Net *n, Port p1, Port p2) {
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
@@ -328,69 +331,35 @@ int net_interact(Net *n, Port p1, Port p2) {
     fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
 
   if (t1 == LAM && t2 == APP) {
-    /* β, and nothing else.  Native folding of `_op`/`_ffi` closures, its saturation guard and its deferral
-       policy all live in a driver (std/drivers/arith.so, LIN_CAP_PREEMPT): such a closure is claimed as a redex
-       *before* it ever reaches here, so this rule sees only closures no driver wanted and β-reduces their
-       pure-Lin fallback body.  That keeps the core a complete calculus on its own — a driver can pre-empt a
-       redex class, never replace this rule. */
-    Port lv = WIRE(n, ((Port){n1, 1})), lb = WIRE(n, ((Port){n1, 2}));
-    Port ar = WIRE(n, ((Port){n2, 1})), aa = WIRE(n, ((Port){n2, 2}));
     n->dead[n1] = 1; n->dead[n2] = 1;
-    /* β IS the correspondence {binder's wire ~ argument's wire, body's wire ~ result's wire}
-       (n1.1~n2.2 = 1~5, n1.2~n2.1 = 2~4); pair_boundary turns it into the external rewire, which
-       covers the shapes where one of those wires leads back into the pair, so no port-shape test is
-       left here. */
-    const int cor_a[2] = {1, 2}, cor_b[2] = {5, 4}, half_a[1] = {2}, half_b[1] = {4};
-    Port tgt[6];
-    pair_boundary(n, n1, n2, cor_a, cor_b, 2, 0, tgt);
-    /* A driver may pre-empt the argument before it is substituted: a saturated closure passed as data (e.g. the
-       `(mul 2 2)` of `succ (mul 2 2)`) would otherwise be β-duplicated without ever being materialised.  It is
-       handed `tgt[5]`, where the argument belongs, read off the boundary -- which is exactly what the
-       hand-written degenerate-binder test used to compute for itself.  A driver that succeeds has placed the
-       value, so only the body->result half is left. */
-    if (tgt[5].node >= 0 && lin_argfold(n, aa, tgt[5])) {
-      pair_boundary(n, n1, n2, half_a, half_b, 1, 1, NULL); return 1;
-    }
+    const int cor_a[2] = {1, 2}, cor_b[2] = {5, 4};
     pair_boundary(n, n1, n2, cor_a, cor_b, 2, 1, NULL);
     return 1;
   }
 
   if (t1 == DUP && t2 == DUP) {
     if (!scope_eq(n, n->scope[n1], n->scope[n2])) {
-      /* Two fans with distinct levels meet, and the case analysis is the duplication
-         discipline.  Fans are copied by each other -- delta_a's auxiliaries each get a
-         delta_b, delta_b's each get a delta_a, cross-connected, the same shape as the
-         gamma x delta rule below -- because the only alternatives are annihilating two
-         unrelated fans (wrong value) or stranding the pair (no reduction).
-
-         What differs is the LEVEL the copies carry.  A fan's label names the sharing point it
-         implements, and labels are compared only for EQUALITY, so a wrong label cannot re-duplicate
-         work -- it can only merge two distinct sharing points (a wrong value).  The wiring below
-         shows which new fan implements which point: d1,d2 split n1's value between n2's two uses and
-         carry sb, while m1,m2 carry sa; that cross-labelling is the invariant-preserving one. */
+      /* Two fans with distinct levels meet: fans are copied by each other (the only alternatives
+         are annihilating two unrelated fans -- a wrong value -- or stranding the pair).  What differs
+         is the LEVEL the copies carry: d1,d2 split n1's value between n2's two uses and carry sb,
+         while m1,m2 carry sa.  Labels are compared only for equality, so a wrong one cannot
+         re-duplicate work -- but it can merge two distinct sharing points. */
       Scope sa = n->scope[n1], sb = n->scope[n2];
       Scope qa = sa, qb = sb;
-      /* NESTED levels -- one gauge a proper prefix of the other -- are the RECURSIVE sharing point,
-         and take the ANCESTOR's level.  Measured on a recursive binding (a `let` whose value refers
-         to itself, sharing point gauged at the value's level): with this case,
-         `(let ((f (\n (ifl (is_zero n) (\_ 0) (\_ (f (pred n))))))) (f k))` is 0 for k = 0, 1 and 2;
-         without it the same program does not reach a value in 16M steps -- the fan duplicates the
-         structure it came from forever, which is exactly what the comment here always claimed this
-         case prevented.  It was removed once as dead code, and that was wrong: it is dead only while
-         nothing is recursive (zero firings across this tree's corpus), and it is the mechanism by
-         which a self-referential sharing point SHARES instead of unrolling.  Depths past 2 still
-         lose the value, so the recursion itself is refused in compile.c and this case stays
-         unexercised by the suite until that is fixed. */
+      /* NESTED levels -- one gauge a proper prefix of the other -- are the RECURSIVE sharing point
+         and take the ANCESTOR's level.  Without this case the fan duplicates the structure it came
+         from for ever (measured: no value in 16M steps), because it is the mechanism by which a
+         self-referential sharing point SHARES instead of unrolling. */
       if (scope_within(n, sa, sb)) { qa = qb = sa; }
       else if (scope_within(n, sb, sa)) { qa = qb = sb; }
-      Port a1 = WIRE(n, ((Port){n1, 1})), a2 = WIRE(n, ((Port){n1, 2}));
-      Port b1 = WIRE(n, ((Port){n2, 1})), b2 = WIRE(n, ((Port){n2, 2}));
+      Port t[4] = { WIRE(n, ((Port){n1, 1})), WIRE(n, ((Port){n1, 2})),
+                    WIRE(n, ((Port){n2, 1})), WIRE(n, ((Port){n2, 2})) };
       const char *nm = n->name[n1] ? n->name[n1] : "";
       int m1, m2, d1, d2;
       split2(n, DUP, qa, qa, nm, DUP, qb, nm, &m1, &m2, &d1, &d2);
       n->dead[n1] = 1; n->dead[n2] = 1;
-      net_link(n, (Port){d1, 0}, a1, 1); net_link(n, (Port){d2, 0}, a2, 1);
-      net_link(n, (Port){m1, 0}, b1, 1); net_link(n, (Port){m2, 0}, b2, 1);
+      const int cp[4] = {d1, d2, m1, m2};
+      link_copies(n, n1, n2, t, cp);
       return 1;
     }
     /* Annihilation is the correspondence {a1~b1, a2~b2} (1~4, 2~5) -- the same rewire, so the four
@@ -404,36 +373,22 @@ int net_interact(Net *n, Port p1, Port p2) {
   if ((t1 == LAM || t1 == APP) && t2 == DUP) {
     Scope sn = n->scope[n1], sd = n->scope[n2];
     Scope sm = scope_meet(n, sn, sd);        /* the level the two histories share */
-    Port nv = WIRE(n, ((Port){n1, 1})), nb = WIRE(n, ((Port){n1, 2}));
-    Port da = WIRE(n, ((Port){n2, 1})), db = WIRE(n, ((Port){n2, 2}));
+    Port t[4] = { WIRE(n, ((Port){n1, 1})), WIRE(n, ((Port){n1, 2})),
+                  WIRE(n, ((Port){n2, 1})), WIRE(n, ((Port){n2, 2})) };
     const char *nm = n->name[n1] ? n->name[n1] : "";
     int m1, m2, d1, d2;
     split2(n, t1, scope_app(n, sm, 1), scope_app(n, sm, 2), nm, DUP, sd, "", &m1, &m2, &d1, &d2);
     n->dead[n1] = 1; n->dead[n2] = 1;
-    /* The two copies attach to n1's external boundary; where n1's auxiliaries are shorted to each
-       other it presents none, and the two principals destined for them join each other.  Same
-       boundary rule as pair_boundary, so the port-identity test that stood here (and its `t1 == LAM`
-       restriction, an artefact of how the compiler writes `\x.x`) is gone.  Measured over this
-       tree's whole corpus, the only coincidence that occurs at all is that short. */
-    {
-      int nvi = (nv.node == n1 || nv.node == n2), nbi = (nb.node == n1 || nb.node == n2);
-      if (nvi && nbi) net_link(n, (Port){d1, 0}, (Port){d2, 0}, 1);
-      else {
-        if (!nvi) net_link(n, (Port){d1, 0}, nv, 1);
-        if (!nbi) net_link(n, (Port){d2, 0}, nb, 1);
-      }
-    }
-    net_link(n, (Port){m1, 0}, da, 1); net_link(n, (Port){m2, 0}, db, 1);
+    const int cp[4] = {d1, d2, m1, m2};
+    link_copies(n, n1, n2, t, cp);
     return 1;
   }
   return 0; /* era or stuck gauge pair: dropped, as in the reference */
 }
 
-/* Reclaim every node not reachable from ROOT.  The reduce loop calls this
-   opportunistically, and the AOT build calls it before serialising: the `.line`
-   container stores ALL nodes, and an actual evaluation leaves far more dead
-   intermediates behind than live nodes -- without this the baked artifact came out
-   ~2x LARGER than the un-evaluated one (474 KB vs 224 KB) despite being a value. */
+/* Reclaim every node not reachable from ROOT.  The `.line` container stores ALL nodes and an actual
+   evaluation leaves far more dead intermediates than live ones: without this the baked artifact came
+   out ~2x LARGER than the un-evaluated one (474 KB vs 224 KB) despite being a value. */
 static void net_compact(Net *n, const unsigned char *reach);   /* fwd */
 
 void net_gc(Net *n) {
@@ -482,9 +437,11 @@ void lin_driver_add(LinDriver *d) {
   while (i > 0 && drv[i-1]->priority > d->priority) { drv[i] = drv[i-1]; i--; }
   drv[i] = d; ndrv++;
 }
-/* `(set_driver ...)`/`driver_clear` selects a *strategy*; pre-emptors are a reduction pre-pass that composes with
-   whichever strategy is chosen, so clearing must not silently disable native folding (or, once Move 2/3 land, the
-   AOT sharing decisions that ride the same hook).  Compacting in place keeps the priority order intact. */
+/* `(set_driver ...)`/`driver_clear` selects a *strategy*; pre-emptors are a reduction pre-pass that
+   composes with whichever strategy is chosen, so clearing must not silently disable native folding.
+   Compacting in place keeps the priority order intact.  Idempotent, because a plugin's constructor
+   registers its driver when the .so is dlopen'd and `(set_driver "<its own name>")` would add it
+   again, leaving the same reducer to claim every wave twice. */
 void lin_driver_clear(void) {
   int w = 0;
   for (int i = 0; i < ndrv; i++) if (drv[i]->caps & LIN_CAP_PREEMPT) drv[w++] = drv[i];
@@ -495,21 +452,87 @@ LinDriver *lin_get_driver(void) {
   for (int i = ndrv - 1; i >= 0; i--) if (!(drv[i]->caps & LIN_CAP_PREEMPT)) return drv[i];
   return NULL;
 }
-/* A driver reports that it claimed a redex it could not materialise (Net.driver_pending), or answers directly
-   through its own `pending` hook.  The core only asks *whether* the net is a value; the reason stays the driver's. */
-void lin_pending_bump(Net *n) { n->driver_pending = 1; }
-int lin_any_pending(const Net *n) {
-  if (n->driver_pending) return 1;
-  for (int i = 0; i < ndrv; i++) if (drv[i]->pending && drv[i]->pending(n)) return 1;
-  return 0;
+
+/* ---------------- needed order ----------------
+   A redex is reduced only when the value the caller observes needs it.  `net_mark_demand` walks from
+   the demand roots -- ROOT (the program's result) plus every port lin_demand/net_force registered --
+   along the paths a weak head normal form of those ports actually runs through:
+
+     ROOT          -> its wire (the result)
+     APP   port 1  -> port 0 (a demanded result demands its function)
+     APP   port 2  -> its wire (a demanded application's argument)
+     DUP   port 1/2-> port 0 (a use of a shared value demands the sharing point)
+     LAM   port 0  -> WHNF: stop, UNLESS a principal faces it, which is the redex to fire
+     APP/DUP p. 0  -> same: a facing principal is a redex, otherwise stop
+     LAM   port 2  -> stop: a lambda's body is a thunk until the lambda is applied
+
+   Every rule of the calculus is untouched; the filter only decides WHICH active pairs are in a wave.
+   A pair off the demand path stays queued in `act` and is picked up by a later wave, which is what
+   makes a cycle (a Y-knot) reduce when the recursive call is demanded instead of unrolling for ever. */
+static void net_mark_demand(Net *n) {
+  unsigned int stamp = ++n->dem_stamp;
+  if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; }
+  int cap = n->nroot + 8, top = 0;
+  Port *st = malloc((size_t)cap * sizeof(Port));
+  st[top++] = (Port){0, 0};
+  for (int i = 0; i < n->nroot; i++) st[top++] = n->root[i];
+  while (top > 0) {
+    Port p = st[--top];
+    for (;;) {
+      int u = p.node;
+      if (u < 0 || u >= n->nn || n->dead[u]) break;
+      /* Visited PER PORT, not per node: an APP reached at its result and at its argument continues
+         differently, so a node-level mark would cut the second path off and leave the redexes it
+         leads to permanently un-demanded (measured: a Y-knot that stops reducing at depth 4). */
+      unsigned char bit = (unsigned char)(1u << p.port);
+      if (n->dem[u] == stamp) { if (n->vport[u] & bit) break; n->vport[u] |= bit; }
+      else { n->dem[u] = stamp; n->vport[u] = bit; }
+      int t = n->tag[u];
+      if (t == ROOT) { p = WIRE(n, p); continue; }
+      if (t == ERA) break;
+      if (t == LAM && p.port != 0) break;               /* binder / body: a thunk until applied */
+      if (t == APP && p.port != 0) { p = WIRE(n, ((Port){u, 0})); continue; }  /* result -> function */
+      if (t == DUP && p.port != 0) { p = WIRE(n, ((Port){u, 0})); continue; }  /* aux -> sharing point */
+      /* At a principal port: WHNF if nothing faces it, a redex pair if a principal does.  Marking
+         the facing node is enough -- the wave fires the pair, and the next walk continues past it. */
+      Port q = WIRE(n, p);
+      if (q.node >= 0 && q.node < n->nn && q.port == 0 && !n->dead[q.node]) {
+        int qt = n->tag[q.node];
+        if ((t == LAM && (qt == APP || qt == DUP)) || (t != LAM && (qt == LAM || qt == DUP))) {
+          if (n->dem[q.node] != stamp) n->vport[q.node] = 0;
+          n->dem[q.node] = stamp;
+        }
+      }
+      break;
+    }
+  }
+  free(st);
 }
-/* Readback pre-pass: let a driver turn a sub-term the reducer left as a foldable closure (e.g. a saturated `_ffi`
-   closure embedded in a numeral spine, which no β redex ever reached) into a concrete value node.  Returns 1 and
-   sets `*out` when a driver materialised it; otherwise the caller decodes `p` as it stands. */
-int lin_materialize(Net *n, Port p, Port *out) {
-  for (int i = 0; i < ndrv; i++)
-    if (drv[i]->materialize && drv[i]->materialize(n, p, out)) return 1;
-  return 0;
+
+static inline int demanded(const Net *n, Port p) {
+  return p.node >= 0 && p.node < n->nn && n->dem[p.node] == n->dem_stamp;
+}
+
+/* Is `p` a bare, unreducible lambda -- a value already?  This is the ONE cheap case, and it is the
+   common one: readback forces once per port it prints, and most ports of a reduced value ARE such
+   lambdas.  Anything else gets a real (wave-wide) reduction: guessing "already in WHNF" more
+   aggressively than this is what silently skipped the reductions readback needed. */
+static int port_whnf(Net *n, Port p) {
+  int u = p.node;
+  if (u < 0 || u >= n->nn || n->dead[u]) return 1;
+  if (n->tag[u] != LAM || p.port != 0) return 0;      /* not a bare lambda: let the reducer decide */
+  Port q = WIRE(n, p);
+  return !(q.node >= 0 && q.node < n->nn && q.port == 0 && !n->dead[q.node] &&
+           (n->tag[q.node] == APP || n->tag[q.node] == DUP));
+}
+
+long net_force(Net *n, Port p) {
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || port_whnf(n, p)) return n->steps;
+  int save = n->nroot;
+  lin_demand(n, p);
+  long s = net_reduce(n, n->steps + (1L << 22));
+  n->nroot = save;
+  return s;
 }
 
 /* Is (p1,p2) still one live redex?  A pair is a redex only while both ends are alive and still
@@ -522,13 +545,13 @@ static inline int redex_live(Net *n, Port p1, Port p2) {
          WIRE(n, p2).node == p1.node && WIRE(n, p2).port == p1.port;
 }
 
-/* Work-efficient frontier scratch: grown, never freed per wave (a driver may hold the
-   wave for a long time, so these are file-scope and reused across waves). */
+/* Frontier scratch: grown, never freed per wave (a driver may hold a wave for a long time). */
 static Pair *inter, *bound;
 static int *fw_next, *fw_slot, *fw_occ;
 static int fw_cap, fw_pair_cap, fw_slot_cap;
 
-/* Reduce one interacting wave (`curr[0..wave_cnt)` holds `act`-form pairs, an even count): spatial-disjoint pairs run concurrently via OpenMP, the rest serially; exposed so driver reducers fan out a real wave in parallel — the base correctness rules all live here */
+/* Reduce one wave of `act`-form pairs (an even count): spatially disjoint pairs run concurrently via
+   OpenMP, the rest serially; exposed so a driver's reducer fans out a real wave. */
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
 #ifdef _OPENMP
   ensure_tact();
@@ -560,16 +583,10 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       if (ok) inter[n_int++] = (Pair){p1, p2}; else bound[n_bnd++] = (Pair){p1, p2};
     }
     if (n_int > 0) {
-      /* Work-efficient frontier.  The previous form allocated and memset a sector table
-         of `nn/64` entries on EVERY wave and then swept all of it, so its cost was
-         proportional to the NET rather than to the wave: a 512-pair wave on a 100k-node
-         net walked ~1.5k empty sectors, and every wave also paid four mallocs.  Measured,
-         8 threads came out 2x SLOWER than serial (2115ms vs 1041ms) over identical
-         5,165,799 steps -- all overhead, no speedup.
-         Now the pairs are bucketed by sector in a table sized to the WAVE, only the
-         occupied buckets are iterated (collected in `occ`), and all buffers are
-         grow-only statics, so a wave allocates nothing and its dispatch costs O(pairs).
-         The buckets are cleared by walking `occ`, so there is no per-wave memset either. */
+      /* Work-efficient frontier: pairs are bucketed by sector in a table sized to the WAVE, only
+         occupied buckets are iterated, and every buffer is a grow-only static -- so a wave allocates
+         nothing and its dispatch costs O(pairs).  (The previous form memset a sector table sized to
+         the NET on every wave: measured, 8 threads came out 2x SLOWER than serial.) */
       int need = 8; while (need < n_int * 2) need *= 2;
       if (need > fw_slot_cap) {
         fw_slot = realloc(fw_slot, (size_t)need * sizeof(int));
@@ -631,25 +648,31 @@ int wave_snapshot(Net *n, Port **out, int *cap) {
 }
 
 long net_reduce(Net *n, long limit) {
-  /* Self-collecting nets reduce by the active list; BFS+compact reclaims memory after it doubles; waves fan out to every driver in priority order, base engine takes the remainder */
+  /* Self-collecting nets reduce by the active list; BFS+compact reclaims memory after it doubles.
+     Each wave re-marks demand and fires only the active pairs the demand walk reached; a pair off
+     the demand path is pushed back, so it is still there when something needs it.  A wave in which
+     nothing on the demand path could fire means the observed ports are already in WHNF: stop,
+     rather than spin on the queued pairs. */
   Port *curr = NULL; int curr_cap = 0;
+  Port *base_rx = NULL; int base_cap = 0;
   long gcmark = 1L << 20;
-  /* per-driver slice buckets (rebuilt each wave) */
   Port *slices[16] = {0}; int scaps[16] = {0}, scnts[16] = {0};
-  long last_drain_steps = -1; int stalled_drains = 0;   /* livelock guard for driver drain loops */
   while (n->steps < limit) {
     int changed = 0;
     while (n->atop > 0 && n->steps < limit) {
+      int before = changed;
       int cnt = wave_snapshot(n, &curr, &curr_cap);
       if (cnt <= 0) break;
-      int np = cnt / 2;
+      net_mark_demand(n);
+      int np = cnt / 2, base_cnt = 0;
 
-      /* partition the wave up-front by driver claim (priority order) */
+      /* partition the wave by demand, then by driver claim (priority order) */
       for (int di = 0; di < ndrv; di++) scnts[di] = 0;
-      int base_cnt = 0;
-      static Port *base_rx = NULL; static int base_cap = 0;
       for (int i = 0; i < np; i++) {
         Port p1 = curr[i*2], p2 = curr[i*2+1];
+        /* Off the demand path: keep it queued for when something needs it -- but only while it is
+           still a live redex, or a long reduction accumulates pairs no rule can ever fire. */
+        if (!demanded(n, p1) || !demanded(n, p2)) { if (redex_live(n, p1, p2)) act_push(n, p1, p2); continue; }
         int assigned = 0;
         for (int di = 0; di < ndrv && !assigned; di++) {
           if (!drv[di]->claim || !drv[di]->claim(n, p1, p2)) continue;
@@ -670,32 +693,11 @@ long net_reduce(Net *n, long limit) {
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
+      if (changed == before) break;
     }
-    /* The active wave is fully drained.  Give every driver its drain point: a driver that parked a redex because
-       its operands were not concrete yet retries it here and re-enqueues what it still expects to materialise.
-       The *policy* (how long to wait, when to give up) is the driver's; the core only supplies the point and a
-       livelock guard, since a driver that re-enqueues without anything progressing would otherwise spin forever. */
-    {
-      int re = 0;
-      for (int di = 0; di < ndrv; di++) if (drv[di]->drain) re += drv[di]->drain(n);
-      if (re > 0) {
-        /* Giving up on a livelock DROPS the remaining active list, so the net is truncated rather
-           than reduced to a value.  That has to be reportable: every caller decides "is this a
-           value?" without a normal-form test, so a silent trip used to let a half-reduced net be
-           printed as the answer and baked into a .line by def_precompile.  `stalled` and
-           `driver_pending` are the two signals those callers already consult. */
-        if (n->steps == last_drain_steps) {
-          if (++stalled_drains > 4096) { n->atop = 0; n->stalled = 1; n->driver_pending = 1; break; }
-        }
-        else stalled_drains = 0;
-        last_drain_steps = n->steps;
-        continue;
-      }
-      stalled_drains = 0;
-    }
-    if (changed == 0 && n->atop == 0) break;
-    if (n->atop == 0 && (long)n->nn > gcmark) {
+    if ((long)n->nn > gcmark) {
       net_gc(n);
+      n->dem_stamp++;               /* compaction renumbers nodes, so every mark is stale */
       gcmark = (long)n->nn * 2 + 64;
       /* Resume-seed: every live principal pair EXCEPT ROOT's.  A fresh load seeds ROOT's pair too
          (that is what starts the machine); here reduction is already under way and re-adding ROOT
@@ -703,8 +705,9 @@ long net_reduce(Net *n, long limit) {
       for (int i = 1; i < n->nn; i++) if (n->wire[i * 3].port == 0 && n->wire[i * 3].node > i)
         act_push(n, (Port){i, 0}, n->wire[i * 3]);
     }
+    if (changed == 0) break;
   }
-  free(curr);
+  free(curr); free(base_rx);
   for (int di = 0; di < ndrv; di++) free(slices[di]);
   return n->steps;
 }
@@ -717,9 +720,12 @@ Net *net_copy(const Net *n) {
   c->name = calloc(c->cap, sizeof(char *));
   for (int i = 0; i < n->nn; i++) if (n->name[i]) c->name[i] = strdup(n->name[i]);
   c->dead = malloc(c->cap); memcpy(c->dead, n->dead, c->cap);
+  c->dem = calloc(c->cap, sizeof(unsigned int)); c->dem_stamp = 0;
+  c->vport = calloc(c->cap, 1);
   c->nlv = 0; c->lvcap = 0; c->lv_hcap = 0; c->lv_hash = NULL;
   c->lv_parent = NULL; c->lv_depth = NULL; c->lv_bit = NULL;
   net_level_set(c, n->nlv, n->lv_parent + 1, n->lv_bit + 1);   /* rebuild the trie: parents precede children, ids reload directly */
-  c->act = NULL; c->actcap = c->atop = 0; c->steps = 0; c->driver_pending = 0; c->stalled = 0;
+  c->act = NULL; c->actcap = c->atop = 0; c->steps = 0;
+  c->root = NULL; c->nroot = 0; c->rootcap = 0;
   return c;
 }

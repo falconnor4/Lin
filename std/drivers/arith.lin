@@ -1,0 +1,6 @@
+; lin standard library: native scalar arithmetic provider + `_op`/`_ffi` fold pre-emptor.
+; The core loads NO driver by default, so this is what puts std/drivers/arith.so into the
+; process: dlopen'ing it registers the shared scalar-op table (lin_add, lin_fadd, ...) that
+; run_ffi and every reduction strategy call, plus the fold pre-emptor itself.
+(load "std/drivers/driver.lin")
+(set_driver "arith")

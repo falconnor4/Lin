@@ -28,6 +28,14 @@ Term *term_new(int type, const char *name, Term *l, Term *r) {
 }
 void term_free(Term *t) { if (t) { term_free(t->l); term_free(t->r); free(t); } }
 Term *term_copy(Term *t) { return t ? term_new(t->type, t->name, term_copy(t->l), term_copy(t->r)) : NULL; }
+Term *term_fix(const char *name, Term *body) {
+  const char *H = "_fix_h", *X = "_fix_x";
+  Term *xx = term_new(TAPP, "", term_new(TVAR, X, 0, 0), term_new(TVAR, X, 0, 0));
+  Term *lam = term_new(TLAM, X, term_new(TAPP, "", term_new(TVAR, H, 0, 0), xx), 0);
+  Term *y = term_new(TLAM, H, term_new(TAPP, "", term_copy(lam), term_copy(lam)), 0);
+  term_free(lam);
+  return term_new(TAPP, "", y, term_new(TLAM, name, term_copy(body), 0));
+}
 
 int term_refs(Term *t, const char *name) {
   if (!t) return 0;

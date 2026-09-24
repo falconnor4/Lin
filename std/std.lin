@@ -27,6 +27,11 @@
 ;   - sat     : Propositional logic, quantifiers, self-reducible witness extraction
 ; ==============================================================================
 
+; The core loads NO driver by default (pure Lin).  This is where the native scalar table and the
+; `_op`/`_ffi` fold pre-emptor come from; without it the same programs still reduce exactly, by
+; plain beta of the pure-Scott fallback bodies num.lin carries beside every op.
+(load "std/drivers/arith.lin")
+
 (load "bool.lin")
 (load "num.lin")
 (load "float.lin")

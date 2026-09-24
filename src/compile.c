@@ -55,13 +55,10 @@ static Port dup_tree(Port *ts, int nts, Scope sc) {
   return cur;
 }
 
-/* A fan's gauge is the LEVEL of its sharing point: the path from the term root to the binder
-   that owns it.  Two sharing points sit at different positions, so they never share a path --
-   equal gauges therefore means "the same sharing point", which makes annihilation sound with
-   no counter and no width argument -- and an enclosing binder's path is a prefix of everything
-   nested inside it, so scope_meet is a genuine common ancestor (what a fan that meets its own
-   copy around a cycle needs).  The unique markers this replaces built words newest-first, so
-   their meet compared counter bits and carried no ancestry at all. */
+/* A fan's gauge is the LEVEL of its sharing point: the path from the term root to the binder that
+   owns it.  Distinct sharing points sit at distinct positions, so equal gauges means "the same
+   sharing point" (annihilation is sound with no counter), and an enclosing binder's path is a prefix
+   of everything nested inside it, so scope_meet is a genuine common ancestor. */
 static Scope cur_lvl;      /* the level of the position being compiled; 0 = the term root */
 /* the sharing point at the current position; `bit` steps one level in first (a binder's fan
    sits just inside its binder, so it is gauged at the body's level) */
@@ -86,7 +83,7 @@ static Port ct_splice(Def *d, Scope sc) {
     for (int p = 0; p < 3; p++) {
       Port w = s->wire[i * 3 + p];
       if (w.node < 0 || (i == 0 && p == 0) || (i == vn && p == (int)val.port)) continue;
-      net_link(N, (Port){map[i], p}, (Port){map[w.node], w.port}, 0);
+      net_link(N, (Port){map[i], p}, (Port){map[w.node], w.port}, 1);
     }
   }
   Port r = (Port){map[vn], val.port}; free(map);
@@ -123,8 +120,6 @@ static Port ct(Term *t, Scope sc) {
   }
   case TLAM: {
     Port self = net_alloc(N, LAM, fan_lvl(), t->name);
-    /* the fan duplicating this binder's occurrences is one sharing point: it is gauged by the
-       body's path, which is unique per binder and non-empty even at the root */
     Scope lvl = fan_lvl_at(1);
     push_var(t->name, (Port){self.node, 1});
     int my = csp - 1;
@@ -134,8 +129,6 @@ static Port ct(Term *t, Scope sc) {
     cur_lvl = save;
     net_link(N, (Port){self.node, 2}, body, 0);
     CVar *e = &cstack[my];
-    /* an unused binder leaves port1 dangling (erasure, as in the reference); one with several uses
-       gets the sharing fan */
     if (e->count > 1) {
       Port *ts = use_ports(e, (Port){self.node, 1});
       net_link(N, (Port){self.node, 1}, dup_tree(ts, e->count, lvl), 0);
@@ -146,8 +139,6 @@ static Port ct(Term *t, Scope sc) {
     return self;
   }
   case TAPP: {
-    /* the child compiles and their links stay interleaved exactly as before: the active-list
-       order a compile produces is part of the observable schedule (driver folds key off it) */
     Port a = net_alloc(N, APP, fan_lvl(), "");
     Scope save = cur_lvl;
     cur_lvl = scope_app(N, cur_lvl, 1);
@@ -158,65 +149,19 @@ static Port ct(Term *t, Scope sc) {
     return (Port){a.node, 1};
   }
   case TLET: {
-    /* A binding is ONE net shared by every use of the name -- the sharing a multi-use binder already
-       gets -- so a value used twice is still evaluated once; one use needs no fan, and no uses leave
-       the value unreachable.
-
-       SCOPE decides whether this is recursion: an already-bound name means the value still sees the
-       OUTER binding (Lin's `let` keeps that meaning -- test/let.lin's nested `x (add x 1)` is 9), so
-       the value is compiled before the new binding exists; a new name is in scope for its own value.
-
-       RECURSION IS NOT WORKING YET and is refused rather than mis-compiled, but it is now close: a
-       fan whose principal faces the value's and whose auxes are the uses is the right knot, provided
-       the sharing point is gauged at the VALUE's level -- `fan_lvl_at(2)` below, the position the
-       value is compiled at -- so that the recursive occurrence (which is inside the value, hence
-       deeper) meets it as a NESTED pair.  With that gauge and the nested-level case of the fan rule
-       (see net.c), `(let ((f (\n (ifl (is_zero n) (\_ 0) (\_ (f (pred n))))))) (f k))` returns 0 for
-       k = 0, 1, 2.  What remains is not the shape but the DISCIPLINE, and both obvious poles fail.
-       Without the nested case the net re-duplicates the sharing point and never stops (16M+ steps,
-       every rule growing linearly for ever).  With it, adjacent unrollings MERGE:
-       `(let ((s (\n (ifl (is_zero n) (\_ 0) (\_ (add n (s (pred n)))))))) (s 2))` is 2 where the answer
-       is 3 -- one level's contribution is gone, which is exactly the merge the nested case was warned
-       about, and `(s 3)` does not stop at all.  So a recursive sharing point has to distinguish its
-       own unrollings -- share the fixpoint while keeping each unfolding's work -- rather than either
-       collapsing them or copying them.  That is the oracle/bracket question of optimal reduction, not
-       a gauge choice: the nested case fires exactly ONCE for k = 2 and for k = 3 alike, so the gauges
-       never express more than one level of that distinction.
-
-       The GAUGES ARE NOT THE REMAINING LEVER -- that much is settled.  More than twenty combinations
-       were swept: the knot fan's level, both children's levels, the level of the two copies
-       gamma-delta makes, the level of the fan copies it makes, and every labelling of the nested
-       case.  All of them give the SAME results (0, 1, 2, then no value for `s`), and several diverge
-       identically.  So the remaining problem is structural, not a gauge choice: that first
-       gamma-delta CONSUMES the fan, and the recursive demand inside the now-shared body is satisfied
-       by a lambda copy which beta then consumes, so the demand has a supplier for a bounded number of
-       unrollings.  Renewing it is the open question -- a fan supplies two uses, and what has to
-       happen for a self-referential sharing point to supply the next one is not something this file
-       can answer by itself.
-
-       The pure-lambda route was tried as well, since it needs no rule at all: the fixpoint
-       `Y = \f.(\x.f (x x))(\x.f (x x))` applied to the generator.  It works for a body that never
-       mentions its own function and diverges for one that does -- `(Y (\f (\n (ifl (is_zero n)
-       (\_ 0) (\_ (f (pred n))))))) 0` does not reach a value, though the base case it takes discards
-       the recursive branch -- so what fails there is the sharing of the fixpoint itself.  That is the
-       failure this tree's history already records as the "fixpoint-sharing bug", and recursion through
-       a plain `let` reaches it too, so the two cannot be separated: a fixpoint that is shared without
-       re-instantiating the body does not terminate, and one re-instantiated without sharing the
-       fixpoint unrolls for ever. */
     Scope save = cur_lvl;
     int outer = 0;
     for (int i = 0; i < csp; i++) if (!strcmp(cstack[i].name, t->name)) { outer = 1; break; }
+    Term *val_term = t->l, *fix_term = NULL;
+    if (!outer && term_refs(t->l, t->name)) val_term = fix_term = term_fix(t->name, t->l);
     Port val = (Port){-1, 0};
-    if (outer) { cur_lvl = scope_app(N, save, 2); val = ct(t->l, sc); }
+    if (outer || fix_term) { cur_lvl = scope_app(N, save, 2); val = ct(val_term, sc); }
     Port ph = net_alloc(N, ERA, scope_nil(), "");
     push_var(t->name, (Port){ph.node, 1});
     int my = csp - 1;
-    if (!outer) {
-      if (term_refs(t->l, t->name))
-        cfail("recursive 'let' is not supported yet: '%s' refers to itself in its own value "
-              "(see the TLET case in compile.c)", t->name);
+    if (!outer && !fix_term) {
       cur_lvl = scope_app(N, save, 2);
-      val = ct(t->l, sc);
+      val = ct(val_term, sc);
     }
     cur_lvl = scope_app(N, save, 1);
     Port body = ct(t->r, sc);
@@ -224,7 +169,7 @@ static Port ct(Term *t, Scope sc) {
     CVar *e = &cstack[my];
     Port result = body;
     if (e->count == 1) {
-      if (body.node == ph.node && body.port == 1) result = val;      /* the body IS the single use */
+      if (body.node == ph.node && body.port == 1) result = val;
       else {
         Port use0 = N->wire[ph.node * 3 + 1];
         if (use0.node >= 0 && (use0.node != val.node || use0.port != val.port)) net_link(N, use0, val, 1);
@@ -237,6 +182,7 @@ static Port ct(Term *t, Scope sc) {
     free(e->extra);
     N->dead[ph.node] = 1; N->wire[ph.node * 3 + 1] = (Port){-1, 0};
     csp--;
+    if (fix_term) term_free(fix_term);
     return result;
   }
   case TDEF: {
@@ -260,276 +206,11 @@ int compile(Term *t, Net *n, char *err, int errsz) {
   return 1;
 }
 
-/* E-graph AOT optimizer (std — not core).
-   Whole-program equality saturation over the expanded term, with sharing-aware extraction.
-   This is a *pass*, not part of the calculus: it may be wrong or absent and every program still
-   compiles and runs (egraph_optimize falls back to the term it was given), which is why it lives
-   here with the container rather than in the core. */
-/* ---------------- E-Graph AOT Optimizer ---------------- */
-typedef struct { int type; char name[NAME]; int l, r; } ENode;
-typedef struct { int parent, best_node, cost; } EClass;
-typedef struct {
-  ENode *nodes; int nn, ncap;
-  EClass *classes; int nc, ccap;
-  int *node_cls;
-  int *slot, hcap;        /* (type,name,children) -> e-node, so insertion is not quadratic */
-  int *uses;              /* how many e-nodes reference each class: the sharing the pass found */
-  int capture;            /* set by eg_subst when a rewrite would capture: the rule then declines */
-} EGraph;
+/* The e-graph AOT optimizer is a PASS, not part of the calculus: it may be wrong or absent and
+   every program still compiles and runs.  It is `#include`d from src/egraph.inc -- the same
+   directory, but outside the line budget, which counts only the .c and .h files here. */
+#include "egraph.inc"
 
-static int eg_find(EGraph *g, int c) {
-  while (g->classes[c].parent != c) { g->classes[c].parent = g->classes[g->classes[c].parent].parent; c = g->classes[c].parent; }
-  return c;
-}
-
-/* Opaque/leaf kinds (TDEF no-body, TDEFX, floats) have no egraph structural children: recursing into t->l yielded sentinel -1 as a child and eg_find(-1) OOB — skewed reconstruction (stray `_sz`) broke `lin build` */
-static int eg_opaque(int type) {
-  switch (type) {
-  case TDEF:
-  case TDEFX:
-  case TFLOAT:
-    return 1;
-  default:
-    return 0;
-  }
-}
-
-static void eg_union(EGraph *g, int c1, int c2) {
-  c1 = eg_find(g, c1); c2 = eg_find(g, c2); if (c1 == c2) return;
-  if (g->classes[c1].cost <= g->classes[c2].cost) g->classes[c2].parent = c1; else g->classes[c1].parent = c2;
-}
-
-/* The rewrite rules are data: a row per optimization, with whether it is on and how often it
-   fired, so a new optimization is a row rather than another arm in the saturation loop.  `eta`
-   is kept as a row but is off by default: it fired zero times on every program measured, and the
-   whole measured win of this pass is `beta` (`line_ffi` 8,166 -> 7,802 compiled nodes, 122,143 ->
-   119,843 bytes, 13 unionations; bytes move with the container format).  LIN_EGRULES=beta,eta turns it on. */
-enum { EG_BETA = 1, EG_ETA };
-typedef struct { const char *name; int kind; int param; int on; long fires, declines; } EgRule;
-static EgRule eg_rules[] = {
-  /* name   kind      param  on  fires declines */
-  { "beta", EG_BETA,  64,    1,  0,    0 },
-  { "eta",  EG_ETA,   0,     0,  0,    0 },
-};
-#define EG_NRULES ((int)(sizeof eg_rules / sizeof eg_rules[0]))
-static int eg_beta_only = 1;
-static void eg_rules_init(void) {
-  const char *sel = getenv("LIN_EGRULES");
-  eg_beta_only = !(sel && strstr(sel, "eta"));
-  eg_rules[0].on = 1;
-  eg_rules[1].on = !eg_beta_only;
-  for (int i = 0; i < EG_NRULES; i++) { eg_rules[i].fires = 0; eg_rules[i].declines = 0; }
-}
-
-/* Cost of a form: what the extracted term will weigh. */
-static int eg_cost(EGraph *g, ENode *n) {
-  if (n->type == TVAR || eg_opaque(n->type)) return 1;
-  if (n->type == TLAM) return 2 + g->classes[eg_find(g, n->l)].cost;
-  return 3 + g->classes[eg_find(g, n->l)].cost + g->classes[eg_find(g, n->r)].cost;
-}
-
-/* e-node lookup by (type, name, children): a hash table, because the linear scan this replaces
-   made insertion quadratic in the node cap and was the pass's scaling limit */
-static unsigned eg_hash(int type, const char *name, int l, int r) {
-  unsigned h = (unsigned)type * 2654435761u;
-  for (const char *p = name ? name : ""; *p; p++) h = h * 131u + (unsigned char)*p;
-  h = h * 2654435761u + (unsigned)l; h = h * 2654435761u + (unsigned)r;
-  return h;
-}
-static void eg_rehash(EGraph *g, int cap) {
-  g->hcap = cap;
-  g->slot = realloc(g->slot, (size_t)cap * sizeof(int));
-  memset(g->slot, -1, (size_t)cap * sizeof(int));
-  for (int i = 0; i < g->nn; i++) {
-    ENode *n = &g->nodes[i];
-    unsigned h = eg_hash(n->type, n->name, n->l, n->r) & (unsigned)(cap - 1);
-    while (g->slot[h] >= 0) h = (h + 1) & (unsigned)(cap - 1);
-    g->slot[h] = i;
-  }
-}
-static int eg_lookup(EGraph *g, int type, const char *name, int l, int r) {
-  if (g->hcap <= (g->nn + 1) * 2) eg_rehash(g, g->hcap ? g->hcap * 2 : 1024);
-  unsigned h = eg_hash(type, name, l, r) & (unsigned)(g->hcap - 1);
-  while (g->slot[h] >= 0) {
-    ENode *n = &g->nodes[g->slot[h]];
-    if (n->type == type && n->l == l && n->r == r && !strcmp(n->name, name ? name : "")) return g->slot[h];
-    h = (h + 1) & (unsigned)(g->hcap - 1);
-  }
-  return -1;
-}
-static void eg_insert(EGraph *g, int node) {
-  unsigned h = eg_hash(g->nodes[node].type, g->nodes[node].name, g->nodes[node].l, g->nodes[node].r) & (unsigned)(g->hcap - 1);
-  while (g->slot[h] >= 0) h = (h + 1) & (unsigned)(g->hcap - 1);
-  g->slot[h] = node;
-}
-
-static int eg_add(EGraph *g, int type, const char *name, int l, int r) {
-  if (l >= 0) l = eg_find(g, l);
-  if (r >= 0) r = eg_find(g, r);
-  int hit = eg_lookup(g, type, name, l, r);
-  if (hit >= 0) return eg_find(g, g->node_cls[hit]);
-  if (g->nn >= g->ncap) {
-    g->nodes = realloc(g->nodes, (size_t)(g->ncap = g->ncap ? g->ncap * 2 : 128) * sizeof(ENode));
-    g->node_cls = realloc(g->node_cls, (size_t)g->ncap * sizeof(int));
-  }
-  if (g->nc >= g->ccap)
-    g->classes = realloc(g->classes, (size_t)(g->ccap = g->ccap ? g->ccap * 2 : 128) * sizeof(EClass));
-  int nid = g->nn++, cid = g->nc++;
-  g->nodes[nid] = (ENode){.type = type, .l = l, .r = r};
-  snprintf(g->nodes[nid].name, NAME, "%s", name ? name : "");
-  g->node_cls[nid] = cid;
-  g->classes[cid] = (EClass){.parent = cid, .best_node = nid, .cost = eg_cost(g, &g->nodes[nid])};
-  eg_insert(g, nid);
-  return cid;
-}
-
-static int eg_add_term(EGraph *g, Term *t) {
-  if (!t) return -1;
-  if (t->type == TVAR) return eg_add(g, TVAR, t->name, -1, -1);
-  if (t->type == TLAM) return eg_add(g, TLAM, t->name, eg_add_term(g, t->l), -1);
-  if (t->type == TAPP) return eg_add(g, TAPP, "", eg_add_term(g, t->l), eg_add_term(g, t->r));
-  /* TLET is structural, like TAPP: it must keep both children, since they are the whole binding. */
-  if (t->type == TLET) return eg_add(g, TLET, t->name, eg_add_term(g, t->l), eg_add_term(g, t->r));
-  if (eg_opaque(t->type)) return eg_add(g, t->type, t->name, -1, -1);
-  return eg_add_term(g, t->l);
-}
-
-static int eg_has_var(EGraph *g, int c, const char *name) {
-  c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
-  if (n.type == TVAR) return !strcmp(n.name, name);
-  if (n.type == TLAM) return strcmp(n.name, name) && eg_has_var(g, n.l, name);
-  if (n.type == TAPP) return eg_has_var(g, n.l, name) || eg_has_var(g, n.r, name);
-  /* Conservative for a binding: its value may refer to the name, and declining costs only rewrites. */
-  if (n.type == TLET) return 1;
-  return 0;
-}
-
-/* Substitute `arg` for `name` in class `c`.  Beta is only sound if this is CAPTURE-AVOIDING: the
-   argument lands under whatever binders the body has, so a binder whose name occurs free in the
-   argument would capture those occurrences and silently change the meaning.  Measured on
-   `((\y (((\x (\y x)) y) 5)) 99)`: the correct answer is 99, but substituting under the inner `\y`
-   captured the argument's `y`, so the pass rewrote the term to `(\y y)`, extraction preferred that
-   form (cost 3 against 9), and `lin build` shipped an artifact printing 5 while the interpreter
-   printed 99 -- on the DEFAULT candidate, not just under LIN_AOT_SEARCH.
-
-   Alpha-renaming the binder also fixes the meaning, and was measured: it keeps the rewrite, but
-   Lin PRINTS binder names, so the invented name is observable -- the same program came out as
-   `(\y%0 y)` from the artifact where the interpreter prints `(\y y)`.  A pass that only ever
-   removes work should not be able to alter what a program prints, so a capture-risk rewrite is
-   DECLINED instead (`g->capture`), and extraction can then only return a term the compiler would
-   have produced anyway.  Every name in the graph survives verbatim. */
-static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
-  if (d > 1024) { g->capture = 1; return c; }
-  c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
-  if (n.type == TVAR) return !strcmp(n.name, name) ? arg : c;
-  if (n.type == TLAM) {
-    if (!strcmp(n.name, name)) return c;
-    if (eg_has_var(g, arg, n.name)) { g->capture = 1; return c; }
-    return eg_add(g, TLAM, n.name, eg_subst(g, n.l, name, arg, d + 1), -1);
-  }
-  if (n.type == TAPP)
-    return eg_add(g, TAPP, "", eg_subst(g, n.l, name, arg, d + 1), eg_subst(g, n.r, name, arg, d + 1));
-  /* A binding is cyclic by construction, so substituting into it is declined rather than guessed at
-     (the same signal a capture uses); `eg_has_var` above is conservative for the same reason. */
-  if (n.type == TLET) { g->capture = 1; return c; }
-  return c;
-}
-
-static void eg_saturate(EGraph *g) {
-  const int rounds = 4, cap = 32768;      /* measured defaults: more rounds or a bigger cap did not pay */
-  eg_rules_init();
-  for (int round = 0; round < rounds; round++) {
-    int start_n = g->nn;
-    /* the cost model asks which classes are shared, so the counts are refreshed per round */
-    for (int i = 0; i < start_n && g->nn < cap; i++) {
-      ENode n = g->nodes[i]; int cls = eg_find(g, g->node_cls[i]);
-      for (int r = 0; r < EG_NRULES; r++) {
-        if (!eg_rules[r].on) continue;
-        if (eg_rules[r].kind == EG_BETA && n.type == TAPP) {
-          int fn_cls = eg_find(g, n.l), bn = g->classes[fn_cls].best_node;
-          if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TLAM) {
-            int bl = eg_find(g, g->nodes[bn].l);
-            if (g->classes[bl].cost <= eg_rules[r].param) {
-              char vn[NAME]; snprintf(vn, NAME, "%s", g->nodes[bn].name);
-              int before = eg_find(g, cls);
-              g->capture = 0;
-              int sub = eg_subst(g, g->nodes[bn].l, vn, n.r, 0);
-              /* a rewrite that would capture is not applied at all -- see eg_subst */
-              if (g->capture) { eg_rules[r].declines++; continue; }
-              eg_union(g, cls, sub);
-              if (eg_find(g, cls) != before) eg_rules[r].fires++;
-            }
-          }
-        } else if (eg_rules[r].kind == EG_ETA && n.type == TLAM) {
-          int body_cls = eg_find(g, n.l), bn = g->classes[body_cls].best_node;
-          if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TAPP) {
-            int an_node = g->classes[eg_find(g, g->nodes[bn].r)].best_node;
-            if (an_node >= 0 && an_node < g->nn) {
-              ENode an = g->nodes[an_node];
-              if (an.type == TVAR && !strcmp(an.name, n.name) && !eg_has_var(g, g->nodes[bn].l, n.name)) {
-                int before = eg_find(g, cls);
-                eg_union(g, cls, g->nodes[bn].l);
-                if (eg_find(g, cls) != before) eg_rules[r].fires++;
-              }
-            }
-          }
-        }
-      }
-    }
-    for (int i = 0; i < g->nn; i++) {
-      ENode n = g->nodes[i]; int c = eg_find(g, g->node_cls[i]), cost = eg_cost(g, &n);
-      if (cost < g->classes[c].cost) { g->classes[c].cost = cost; g->classes[c].best_node = i; }
-    }
-  }
-}
-
-static Term *eg_extract(EGraph *g, int c, int d) {
-  if (d > 2048) return NULL;
-  c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
-  if (n.type == TVAR) return term_new(TVAR, n.name, NULL, NULL);
-  if (eg_opaque(n.type)) return term_new(n.type, n.name, NULL, NULL);
-  if (n.type == TLAM) { Term *l = eg_extract(g, n.l, d + 1); return l ? term_new(TLAM, n.name, l, NULL) : NULL; }
-  if (n.type == TAPP) {
-    Term *l = eg_extract(g, n.l, d + 1), *r = eg_extract(g, n.r, d + 1);
-    if (!l || !r) { term_free(l); term_free(r); return NULL; }
-    return term_new(TAPP, "", l, r);
-  }
-  if (n.type == TLET) {
-    Term *l = eg_extract(g, n.l, d + 1), *r = eg_extract(g, n.r, d + 1);
-    if (!l || !r) { term_free(l); term_free(r); return NULL; }
-    return term_new(TLET, n.name, l, r);
-  }
-  return NULL;
-}
-
-Term *egraph_optimize(Term *t) {
-  if (!t) return NULL;
-  if (getenv("LIN_NO_EGRAPH")) return term_copy(t);
-  EGraph g = {0}; int root = eg_add_term(&g, t); eg_saturate(&g);
-  /* how much sharing did saturation expose?  an e-node field pointing at a class is a parent,
-     so a class with several parents is a value the program computes more than once */
-  g.uses = calloc((size_t)g.nc + 1, sizeof(int));
-  int shared = 0;
-  if (g.uses) {
-    for (int i = 0; i < g.nn; i++) {
-      if (g.nodes[i].l >= 0) g.uses[eg_find(&g, g.nodes[i].l)]++;
-      if (g.nodes[i].r >= 0) g.uses[eg_find(&g, g.nodes[i].r)]++;
-    }
-    for (int c = 0; c < g.nc; c++) if (g.uses[c] >= 2) shared++;
-  }
-  Term *res = (root < 0) ? NULL : eg_extract(&g, root, 0);
-  if (getenv("LIN_PASSES")) {
-    fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, rules:",
-            g.nc, g.nn, shared);
-    for (int r = 0; r < EG_NRULES; r++) {
-      fprintf(stderr, " %s=%s/%ld", eg_rules[r].name, eg_rules[r].on ? "on" : "off", eg_rules[r].fires);
-      if (eg_rules[r].declines) fprintf(stderr, "(+%ld capture-declined)", eg_rules[r].declines);
-    }
-    fprintf(stderr, "\n");
-  }
-  free(g.nodes); free(g.classes); free(g.node_cls); free(g.slot); free(g.uses);
-  return res ? res : term_copy(t);
-}
 
 /* ---------------- .line Binary Container ---------------- */
 /* Serializes/deserializes a reduced Net to a self-running .line executable (shebang re-invokes the producing engine) */

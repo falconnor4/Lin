@@ -26,6 +26,9 @@ pkgs.stdenv.mkDerivation {
   # binary that cannot start; a future attempt has to solve the closure question first.
   buildPhase = ''
     runHook preBuild
+    # src/*.c is the core.  src/egraph.inc is the e-graph AOT pass, `#include`d by compile.c: it
+    # is part of that translation unit, and -- being neither .c nor .h -- outside the core line
+    # budget test/run_tests.sh enforces.
     $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl -lm
     for d in std/drivers/*.c; do
       $CC -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared \

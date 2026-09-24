@@ -8,19 +8,20 @@
 #include <math.h>
 
 static Net *N;
+/* Where readback's VALUE is written.  Loading the prelude must still EVALUATE its top-level forms
+   -- FFI dispatch happens in readback, so `(set_driver "arith")` in std/drivers/arith.lin only runs
+   when the value is observed -- but it must not land in the program's own output, which a `; expect`
+   line would then be one line off from.  The prelude therefore points this at a sink. */
+FILE *lin_out = NULL;
+#define OUT (lin_out ? lin_out : stdout)
 #define NNM(n, i) ((i) >= 0 && (i) < (n)->nn && (n)->name[i] ? (n)->name[i] : "")
 static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 
-/* float box: a `_fsz`-spine Scott numeral indexes a global double table (no IEEE bits in the
-   numeral).  The table stays process-global on purpose: a box's index is baked into its spine
-   structure, and ct_splice copies a precompiled define's net into the caller's net node by node,
-   so a per-net table would leave the spliced boxes indexing the wrong one.  What was missing is
-   that the table is never SERIALIZED, which made every float-valued .line artifact unreadable:
-   the build wrote only the index, a plain `./prog.line` never calls compile() so its table was
-   empty, `net_read_float`'s `idx < nflt` gate then rejected every float, and readback fell back
-   to printing the raw `_ffi`/`_fsz` spine -- measured, `2.0` and `144.0` built byte-identical
-   artifacts, and running one under an interpreter that had compiled the other printed the WRONG
-   number instead of failing.  net_save_line/net_load_line now carry the table (v4). */
+/* float box: a `_fsz`-spine Scott numeral indexes a process-global double table (no IEEE bits in the
+   numeral).  Global on purpose -- a box's index is baked into its spine and ct_splice copies a
+   precompiled net node by node, so a per-net table would leave spliced boxes indexing the wrong one.
+   The table is SERIALIZED by net_save_line/net_load_line (v4): without that, `2.0` and `144.0` built
+   byte-identical artifacts and readback printed the wrong number instead of failing. */
 static double *fltbox; static int nfltbox, cfltbox;
 int lin_flt_count(void) { return nfltbox; }
 const double *lin_flt_data(void) { return fltbox; }
@@ -123,21 +124,53 @@ static Val run_ffi(Net *n, Port p); /* fwd */
 static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped); /* fwd: the one arg-spine walk */
 int net_spine_slots(Net *n, Port argp); /* fwd: the one operand-shape authority */
 
-/* Scott-spine walk: count succ layers (optional `peek` folds embedded `_ffi` closures per layer); 1 at zero-terminal (count set) or 0 malformed. */
-static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), long *count) {
+/* Force the value at `p` and return a port that still names it.
+
+   Readback holds the VALUE end of a wire, and forcing fires the redex that end may itself name --
+   `p` is the function port of an unfinished application, say.  β then consumes BOTH nodes of the
+   pair, and `p` dies with them; every later read of it sees a discarded node and the value prints
+   as `_`.  pair_boundary joins the pair's body port to the port the pair's RESULT was wired to, so
+   the value the reduction produced is one hop past the consumer's end -- which the rule never
+   touches -- and that is where the port is re-aimed.  This is what makes needed order usable from
+   readback at all: without it, forcing during readback destroyed the thing it was forcing. */
+static Port force_val(Net *n, Port p) {
+  N = n;
+  for (int i = 0; i < 32; i++) {
+    if (p.node < 0 || p.node >= n->nn) return p;
+    Port s = wire(p);
+    if (!n->dead[p.node]) net_force(n, p);
+    if (!n->dead[p.node]) return p;
+    if (s.node < 0 || s.node >= n->nn || n->dead[s.node]) return p;
+    Port v = n->wire[s.node * 3 + s.port];
+    if (v.node < 0 || v.node >= n->nn || n->dead[v.node]) return p;
+    if (v.node == p.node && v.port == p.port) return p;
+    p = v;
+  }
+  return p;
+}
+
+/* Scott-spine walk: count succ layers; 1 at zero-terminal (count set) or 0 malformed.  Each layer is
+   forced first: under needed order a spine cell can still hold an unreduced thunk (a saturated `_op`
+   or `_ffi` closure the reducer never had a reason to reach), and forcing is what turns it into the
+   numeral the walk expects.  Readback is the consumer, so readback is what forces. */
+static int scott_peel(Net *n, Port p, int carrier, long *count) {
   for (int step = 0; step < n->nn; step++) {
-    p = dup_hop(n, p);
-    if (peek && !peek(n, &p)) return 0;
+    /* EVERY layer is forced, not just the outermost: a shared numeral is reached through a spine of
+       thunks, so `\_sz. X` can be in WHNF while X is still an unreduced application.  Reading a
+       layer is what demands it. */
+    p = dup_hop(n, force_val(n, p));
     if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM ||
         ctor_tag(NNM(n, p.node)) != carrier) return 0;
-    int sz = p.node; Port ss_p = dup_hop(n, wire((Port){sz, 2}));
+    int sz = p.node;
+    Port ss_p = dup_hop(n, force_val(n, wire((Port){sz, 2})));
     if (ss_p.node < 0 || ss_p.node >= n->nn || n->dead[ss_p.node] || n->tag[ss_p.node] != LAM ||
         ctor_tag(NNM(n, ss_p.node)) != carrier) return 0;
-    int ss = ss_p.node; Port body = dup_hop(n, wire((Port){ss, 2}));
+    int ss = ss_p.node;
+    Port body = dup_hop(n, force_val(n, wire((Port){ss, 2})));
     if (body.node < 0 || body.node >= n->nn || n->dead[body.node]) return 0;
     if (body.node == sz && body.port == 1) return 1;              /* zero terminal */
     if (n->tag[body.node] == APP) {
-      Port fn = dup_hop(n, wire((Port){body.node, 0}));
+      Port fn = dup_hop(n, force_val(n, wire((Port){body.node, 0})));
       if (fn.node == ss && fn.port == 1) { (*count)++; p = wire((Port){body.node, 2}); continue; }
     }
     return 0;
@@ -145,26 +178,15 @@ static int scott_peel(Net *n, Port p, int carrier, int (*peek)(Net *, Port *), l
   return 0;
 }
 
-/* On read, give a driver the chance to materialise a closure the reducer left embedded (e.g. the `n` of
-   `\_sz \_ss (_ss (mul 2 2))`, which no β redex ever reached) so the numeral decodes.  The core has no opinion
-   about which closures those are — that is the driver's fold policy. */
-static int read_int_peek(Net *n, Port *cur) {
-  Port out;
-  if ((*cur).node >= 0 && (*cur).node < n->nn && !n->dead[(*cur).node] && n->tag[(*cur).node] == LAM &&
-      lin_materialize(n, *cur, &out))
-    *cur = out;
-  return 1;
-}
-
 long net_read_int(Net *n, Port p) {
   N = n; long count = 0;
-  return scott_peel(n, p, DT_NUM, read_int_peek, &count) ? count : -1;
+  return scott_peel(n, p, DT_NUM, &count) ? count : -1;
 }
 
 /* Extract a float box (`_fsz` spine whose value is an index into the fltbox table). */
 int net_read_float(Net *n, Port p, double *out) {
   N = n; long count = 0;
-  if (!scott_peel(n, p, DT_FLOAT, 0, &count)) return 0;
+  if (!scott_peel(n, p, DT_FLOAT, &count)) return 0;
   if (count < nfltbox) { *out = fltbox[count]; return 1; }
   return 0;
 }
@@ -172,10 +194,11 @@ int net_read_float(Net *n, Port p, double *out) {
 /* Extract Church boolean: _bt / _bf */
 int net_read_bool(Net *n, Port p) {
   N = n;
+  p = force_val(n, p);
   if (p.node < 0 || p.node >= n->nn || n->tag[p.node] != LAM || ctor_tag(NNM(n, p.node)) != DT_BOOL) return -1;
-  Port bf = wire((Port){p.node, 2});
+  Port bf = force_val(n, wire((Port){p.node, 2}));
   if (bf.node < 0 || bf.port != 0 || n->tag[bf.node] != LAM || ctor_tag(NNM(n, bf.node)) != DT_BOOL) return -1;
-  Port cur = skip_dup(n, wire((Port){bf.node, 2}));
+  Port cur = skip_dup(n, force_val(n, wire((Port){bf.node, 2})));
   if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node]) return -1;
   if (cur.node == p.node && cur.port == 1) return 1;
   if (cur.node == bf.node && cur.port == 1) return 0;
@@ -184,9 +207,15 @@ int net_read_bool(Net *n, Port p) {
 
 /* dig the `_ffi`-closure header at LAM `lam` (shape \_ffi. \_ret. ((_ffi <fn>) <args>)) into `*a1` (fn APP) and `*argp` (`_cl`-spine) */
 static int ffi_header(Net *n, Port lam, Port *a1, Port *argp) {
-  Port r = wire((Port){lam.node, 2});
+  N = n;
+  /* Through `dup_hop`: a closure the reduction SHARED is reached through a fan, so its body wire
+     leads to a DUP auxiliary whose principal is the body -- the copy and the original do not have
+     separate bodies.  Reading the wire plainly finds the fan and reports "the header is not formed
+     yet", which is how a runtime `_ffi` value used twice stopped folding and was β-squashed. */
+  Port r = dup_hop(n, wire((Port){lam.node, 2}));
+  net_force(n, r);
   if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
-  Port a2 = wire((Port){r.node, 2});
+  Port a2 = dup_hop(n, wire((Port){r.node, 2}));
   if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return 0;
   if (a1) *a1 = wire((Port){a2.node, 0});
   if (argp) *argp = wire((Port){a2.node, 2});
@@ -198,19 +227,19 @@ int net_read_string(Net *n, Port p, char *buf, size_t max) {
   size_t len = 0;
   Port cur = p;
   for (int step = 0; step < n->nn && len + 1 < max; step++) {
-    cur = skip_dup(n, cur);
+    cur = skip_dup(n, force_val(n, cur));
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
     if (ctor_tag(NNM(n, cur.node)) != DT_STR) break;
 
-    Port bn = skip_dup(n, wire((Port){cur.node, 2}));
+    Port bn = skip_dup(n, force_val(n, wire((Port){cur.node, 2})));
     if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) break;
     if (ctor_tag(NNM(n, bn.node)) != DT_STR) break;
 
-    Port body = skip_dup(n, wire((Port){bn.node, 2}));
+    Port body = skip_dup(n, force_val(n, wire((Port){bn.node, 2})));
     if (body.node < 0) break;
     if (n->tag[body.node] == LAM) { buf[len] = 0; return (int)len; }
     if (n->tag[body.node] == APP) {
-      Port inner = skip_dup(n, wire((Port){body.node, 0}));
+      Port inner = skip_dup(n, force_val(n, wire((Port){body.node, 0})));
       if (inner.node >= 0 && n->tag[inner.node] == APP) {
         long ch = net_read_int(n, wire((Port){inner.node, 2}));
         if (ch >= 0 && ch < 256) buf[len++] = (char)ch;
@@ -263,11 +292,12 @@ void lin_scalar_ops_load(const char *sym) {
 
 static Val run_ffi(Net *n, Port p) {
   Val v = {0};
-  p = skip_dup(n, p);
+  N = n;
+  p = skip_dup(n, force_val(n, p));
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM || ctor_tag(NNM(n, p.node)) != DT_FFI) return v;
-  Port r = skip_dup(n, wire((Port){p.node, 2})); if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || ctor_tag(NNM(n, r.node)) != DT_FFI) return v;
-  Port a2 = skip_dup(n, wire((Port){r.node, 2})); if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return v;
-  Port a1 = skip_dup(n, wire((Port){a2.node, 0})); if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return v;
+  Port r = skip_dup(n, force_val(n, wire((Port){p.node, 2}))); if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM || ctor_tag(NNM(n, r.node)) != DT_FFI) return v;
+  Port a2 = skip_dup(n, force_val(n, wire((Port){r.node, 2}))); if (a2.node < 0 || a2.port != 1 || n->tag[a2.node] != APP) return v;
+  Port a1 = skip_dup(n, force_val(n, wire((Port){a2.node, 0}))); if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return v;
 
   char fn[256];
   if (net_read_string(n, wire((Port){a1.node, 2}), fn, sizeof(fn)) < 0) return v;
@@ -296,6 +326,11 @@ static Val run_ffi(Net *n, Port p) {
     if (s) lin_driver_add((LinDriver *)s);
     v.kind = 1; v.iv = 1; return v;
   }
+  /* No driver is loaded at startup: the core runs pure Lin.  The native scalar ops the std's float
+     and ffi modules reach for (`lin_fadd`, `lin_ffloor`, ...) come from std/drivers/arith.so, so the
+     first program that asks for one pulls the plugin in -- a program that never does never loads
+     anything.  Explicit `(set_driver "arith")` does the same thing up front. */
+  if (n_scalar_ops == 0) lin_scalar_ops_load("arith");
   /* Delegate to registered native scalar-op providers (e.g. arith.so); first provider that owns `fn` supplies it. */
   if (n_scalar_ops > 0) {
     long out; int okind = 0;
@@ -367,7 +402,7 @@ static Val decode(Net *n, Port p) {
 }
 
 static int net_try_ffi(Net *n, Port p) {
-  return render_val(stdout, run_ffi(n, p));
+  return render_val(OUT, run_ffi(n, p));
 }
 
 static unsigned char *vis_print = NULL;
@@ -385,19 +420,13 @@ static char *ob_buf = NULL; static size_t ob_len, ob_cap;
 static char **viz_txt = NULL;      /* memo: node*3+port -> rendered text */
 static long qmarks = 0;            /* '?' (unexpressible sharing / over-depth) marks emitted so far */
 static long dmarks = 0;            /* '_' marks emitted for a node the reduction DISCARDED */
-static long renames = 0;           /* shadowed binders rendered under a disambiguated name */
 
-/* The binders currently being printed, innermost last.  An occurrence carries no name of its
-   own -- print_port renders it from the binder node its wire leads to -- so a shadowing binder
-   printed under its stored name made the text denote a DIFFERENT term than the value:
-
-     (\y ((\x (\y x)) y))    value \y.\y'.y (constant), but both binders stored `y`,
-                             so it printed (\y (\y y)), which re-reads as \y.id
-
-   Measured by applying the result: the value answers 42, the printed text answers 7.  So each
-   binder is given the name it is PRINTED under, and occurrences follow the binding rather than
-   the spelling.  Every binder visible at one point must print under a distinct name, or an
-   occurrence cannot say which one it means, so a name already in scope takes a prime. */
+/* The binders currently being printed, innermost last.  An occurrence carries no name of its own --
+   print_port renders it from the binder node its wire leads to -- so a SHADOWED binder printed under
+   its stored name made the text denote a different term than the value: `(\y ((\x (\y x)) y))` is
+   the constant function, but printed `(\y (\y y))` = identity, and applying each gave 42 against 7.
+   Each binder is therefore given the name it is PRINTED under, a name already in scope taking a
+   prime so an occurrence can still say which binder it means. */
 static struct { int node; char printed[NAME]; } *pp_stack;
 static int pp_top = 0, pp_cap = 0;
 static long pp_renames = 0;        /* binders printed under a variant of their stored name */
@@ -439,27 +468,20 @@ static void ob_printf(const char *f, ...) {
 
 /* Render a port representation into the output buffer.
 
-   SHARED NORMAL FORMS, AND WHY THE MARKER BELOW IS NOT A BUG TO BE "FIXED" BY UNFOLDING.
-
-   Optimal sharing leaves normal forms that are not trees: `(cmul c2 c2)` (value 4) is a small knot of
-   cross-wired fans, and this walk, arriving back at a node already on its print stack, emits the
-   marker.  The VALUE is unaffected -- applying the knot to `num.succ 0` gives exactly 4, as does
-   `(count ...)`, which is how test/optimality.py pins these terms.
-
-   Unfolding was measured and is WRONG, not merely costly: following the other fan branch UNDER-counts
-   (prints Church 2 for the value 4) and letting the walk re-enter OVER-counts (19 applications for
-   the value 4, 15 for the value 9).  No local fan-traversal rule recovers the finite term, because a
-   knot is genuinely recursive and its finite observable appears only under application.  It would
-   also be the wrong canonical form for Lin: `sq^4 c2` is 65536 after 90 interactions and 244 nodes,
-   so unfolding it is a 65536-application text -- the blow-up optimal sharing exists to avoid, and the
-   reason the memo below was added ("exponential in the number of sharing points:
-   bench_combinators, 62 s of printing for 1.1 s of reduction").
-
-   Readback therefore prints the SHARING, and the blocker is that Lin cannot write one down: `let` is
-   not recursive and there is no `letrec`, so no term denotes a cyclic value.  The marker stays until
-   that exists, and is reported on stderr so it can never pass for an answer. */
+   SHARED NORMAL FORMS -- the marker below is not a bug to "fix" by unfolding.  Optimal sharing leaves
+   normal forms that are not trees, and arriving back at a node already on the print stack emits `?`.
+   The VALUE is unaffected (applying the knot gives the exact answer).  Unfolding was measured and is
+   WRONG as well as costly: it under-counts on one fan branch and over-counts on re-entry, because a
+   knot is genuinely recursive.  Readback prints the sharing and reports the marker on stderr so it can
+   never pass for an answer. */
 static void print_port(Port p, int depth) {
+  if (p.node < 0 || p.node >= N->nn) { ob_putc('?'); qmarks++; return; }
+  /* Everything the printer is about to render is observed, so it is forced first: under needed
+     order a sub-term the program never demanded is still an unreduced thunk, and printing it as
+     written would report the term instead of its value. */
+  p = force_val(N, p);
   if (depth > N->nn || p.node < 0 || p.node >= N->nn) { ob_putc('?'); qmarks++; return; }
+  if (depth > N->nn) { ob_putc('?'); qmarks++; return; }
   if (N->dead[p.node]) { ob_putc('_'); dmarks++; return; }
   if (N->tag[p.node] == LAM && p.port == 1) {
     ob_puts(pp_binder_name(p.node, NNM(N, p.node)));
@@ -502,19 +524,19 @@ static void print_port(Port p, int depth) {
 
 int net_print(Net *n) {
   N = n;
-  Port r = dup_hop(n, wire((Port){0, 0}));
+  Port r = dup_hop(n, force_val(n, wire((Port){0, 0})));   /* the result is observed here */
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
-    if (net_try_ffi(n, r)) return 0;
+    if (render_val(OUT, run_ffi(n, r))) return 0;
     Val v = decode(n, r);
-    if (v.kind == 2) { printf("\"%s\"", v.sv); return 0; }
-    if (render_val(stdout, v)) return 0;
+    if (v.kind == 2) { fprintf(OUT, "\"%s\"", v.sv); return 0; }
+    if (render_val(OUT, v)) return 0;
   }
   vis_cap = (size_t)(n->nn + 1);
   vis_print = calloc(vis_cap, 1);
   viz_txt = calloc(vis_cap * 3, sizeof *viz_txt);
   ob_len = 0; qmarks = 0; dmarks = 0;
   print_port(r, 0);
-  fwrite(ob_buf, 1, ob_len, stdout);
+  fwrite(ob_buf, 1, ob_len, OUT);
   /* Neither mark is an answer, and both used to be emitted silently with exit status 0.  They mean
      different things, so they are reported differently -- on STDERR, so a test that compares stdout
      (test/expect.sh) is unaffected, and so the value on stdout stays exactly what it was.
@@ -585,7 +607,7 @@ int net_run_io(Net *n, long step_limit) {
   N = n;
   int did_io = 0;
   for (;;) {
-    Port r = dup_hop(n, wire((Port){0, 0}));
+    Port r = dup_hop(n, force_val(n, wire((Port){0, 0})));  /* an effect is only visible once reached */
     if (r.node < 0 || r.node >= n->nn || n->dead[r.node] || n->tag[r.node] != LAM) break;
     if (!strcmp(NNM(n, r.node), "_iod")) return 1;
     if (!strcmp(NNM(n, r.node), "_iop")) {
@@ -673,14 +695,14 @@ int net_ffi_fn(Net *n, Port p, char *fn, int fnmax) {
    means an operand is not concrete YET, and the fold must be declined rather than guessed. */
 int net_spine_slots(Net *n, Port argp) {
   N = n;
-  Port cur = net_dhop(n, argp);
+  Port cur = net_dhop(n, force_val(n, argp));
   if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM ||
       ctor_tag(NNM(n, cur.node)) != DT_STR) return -1;
   Port bn = net_dhop(n, wire((Port){cur.node, 2}));
   if (bn.node < 0 || bn.port != 0 || n->tag[bn.node] != LAM) return -1;
   int slots = 0;
   for (int step = 0; step < n->nn; step++) {
-    cur = net_dhop(n, cur);
+    cur = net_dhop(n, force_val(n, cur));
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
     Port inner = net_dhop(n, wire((Port){cur.node, 2}));
     if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;
@@ -697,7 +719,7 @@ int net_spine_slots(Net *n, Port argp) {
 /* decode a single argument port into a Val (int/bool/float/string directly; a nested `_ffi` closure folds first); 1 on success */
 static int dec_arg(Net *n, Port p, Val *v) {
   N = n;
-  p = skip_dup(n, p);
+  p = skip_dup(n, force_val(n, p));
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || n->tag[p.node] != LAM) return 0;
   if (ctor_tag(NNM(n, p.node)) == DT_FFI) { *v = run_ffi(n, (Port){p.node, 0}); return v->kind != 0; }
   if (ctor_tag(NNM(n, p.node)) == DT_FLOAT) { double d; if (!net_read_float(n, p, &d)) return 0; memcpy(&v->iv, &d, 8); v->kind = 4; return 1; }
@@ -709,13 +731,14 @@ static int dec_arg(Net *n, Port p, Val *v) {
 /* decode a `_cl`-spine arg list at port `argp` into up to `max` Vals — the single spine walk shared by `_ffi` (net_ffi_args) and `_op` fold (net_spine_args); sets `*skipped` when a PRESENT slot isn't decodable (nested `_op`/closure yet to fold), which net_reduce uses to defer the outer fold; a single non-spine arg is decoded too */
 static int decode_spine(Net *n, Port argp, Val *vals, int max, int *skipped) {
   if (skipped) *skipped = 0;
-  int argc = 0; Port cur = skip_dup(n, argp);
+  N = n;
+  int argc = 0; Port cur = skip_dup(n, force_val(n, argp));
   if (cur.node >= 0 && cur.node < n->nn && n->tag[cur.node] == LAM &&
       ctor_tag(NNM(n, cur.node)) == DT_STR) {
     Port bn = skip_dup(n, wire((Port){cur.node, 2}));
     if (bn.node >= 0 && bn.port == 0 && n->tag[bn.node] == LAM) {
       for (int step = 0; step < n->nn && argc < max; step++) {
-        cur = skip_dup(n, cur);
+        cur = skip_dup(n, force_val(n, cur));
         if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || n->tag[cur.node] != LAM) break;
         Port inner = skip_dup(n, wire((Port){cur.node, 2}));
         if (inner.node < 0 || inner.port != 0 || n->tag[inner.node] != LAM) break;

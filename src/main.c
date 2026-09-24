@@ -90,13 +90,18 @@ static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, 
   if (depth == DEPTH_PRECOMPILE) lin_precompile_depth++;
   else if (depth == DEPTH_BUILD) lin_build_depth++;
   long steps = net_reduce(net, limit);
+  /* Needed order leaves a term's un-demanded thunks alone, which is exactly right at RUN time and
+     useless to a build: what a build wants to bake is the VALUE, so it observes the root itself. */
+  if (depth != DEPTH_RUN) net_force(net, (Port){0, 0});
   if (depth == DEPTH_PRECOMPILE) lin_precompile_depth--;
   else if (depth == DEPTH_BUILD) lin_build_depth--;
   term_free(ex);
   return steps;
 }
 
-/* Non-recursive define: evaluate once and cache the reduced net so each reference clones it; recursive/too-big bodies keep the textual path. */
+/* Non-recursive define: evaluate once and cache the reduced net so each reference clones it.  A
+   recursive def is a Y-knot and is spliced textually: its net IS a cycle, so baking a copy would
+   only duplicate the knot. */
 static void def_precompile(Def *d) {
   /* A build-time decision, not a rule: a candidate may ask for every define to stay textual. */
   if (getenv("LIN_PRECOMPILE") && !strcmp(getenv("LIN_PRECOMPILE"), "0")) return;
@@ -105,11 +110,12 @@ static void def_precompile(Def *d) {
   if (d->rec) return;
   char err[512]; Net src; net_init(&src, 1 << 14);
   long full = reduce_term(d->term, &src, 0, DEPTH_PRECOMPILE, STEP_LIMIT, NULL, err, sizeof err);
-  /* A driver that claimed a redex it could not materialise here leaves the body not-a-value: β went on to destroy
-     a closure the driver would have folded, so the baked net is broken for composed use.  Decline the cache and
-     keep the def textual.  Once Move 3 chooses precompile-vs-textual AOT this try-and-decline becomes a decision
-     made up front; the *signal* stays the same generic one, so no driver policy leaks into the core either way. */
-  if (full < 0 || full >= STEP_LIMIT || lin_any_pending(&src)) { net_free(&src); return; }
+  /* `act` is what net_reduce could NOT fire because nothing demanded it, and only live pairs go back
+     in -- so a non-empty list means the body still has unreduced work.  Under needed order that is
+     the normal case (and `(fact 5)` bakes no value at all until something asks for it), so caching
+     would store the term, not a value -- and it would ALSO hide the body from the e-graph pass,
+     which is measured on the expanded term (`test/aot_equiv.py`). */
+  if (full < 0 || full >= STEP_LIMIT || src.atop > 0) { net_free(&src); return; }
   d->compiled = net_copy(&src); net_free(&src);
 }
 
@@ -153,6 +159,12 @@ static double ms_since(struct timespec a, struct timespec b) {
   return (b.tv_sec - a.tv_sec) * 1000.0 + (b.tv_nsec - a.tv_nsec) / 1000000.0;
 }
 
+/* The prelude is infrastructure, not the program: a top-level expression in a std module is an
+   initialisation step (std/drivers/arith.lin activates the native scalar table that way), and
+   printing `=> ...` for it would land in the program's own output.  A `; expect` line cannot tell
+   the two apart, so a load of the prelude evaluates its forms quietly. */
+static int quiet_forms = 0;
+
 static void run_and_report(Net *net) {
   struct timespec t0, t1;
   if (!bench_measured) {                 /* nobody reduced this net yet: do it here */
@@ -168,7 +180,11 @@ static void run_and_report(Net *net) {
   clock_gettime(CLOCK_MONOTONIC, &t0);
   int no_io = !net_run_io(net, STEP_LIMIT);
   clock_gettime(CLOCK_MONOTONIC, &t1);
-  if (no_io) { printf("=> "); net_print(net); putchar('\n'); }
+  /* net_print is what OBSERVES the value -- FFI dispatch (and so a prelude's `(set_driver ...)`)
+     happens there -- so it always runs; only the `=> ` line is suppressed for the prelude. */
+  if (no_io && !quiet_forms) printf("=> ");
+  if (no_io) net_print(net);
+  if (no_io && !quiet_forms) putchar('\n');
   if (bench_mode) {
     fprintf(stderr, "[bench] %ld steps | %d nodes | %.2f ms | GoI det: %lld -> %lld\n",
             net->steps, net->nn, bench_ms + ms_since(t0, t1), bench_goi0, bench_goi1);
@@ -176,122 +192,25 @@ static void run_and_report(Net *net) {
   }
 }
 
-/* (recursion builders defined below eval_form; forward decls) */
-static const char REC_SENTINEL[];
-static int lam_arity(Term *t);
-static Term *build_bound_rec(const char *name, Term *body, int k);
-
-/* Did the run actually reach the `_rec` sentinel, i.e. is the unravelling bound exceeded?  Plain
-   graph reachability is the wrong question: an unravelled define leaves the sentinel in copies the
-   program never took, wired to the used copies through the *shared* argument fans.  Measured on
-   `(list_eq eq nil nil)` (depth 1, bound 6) it read as reachable on every round, doubling k to
-   196608 without converging, while the value was already correct at round 0.  So mirror readback,
-   which is what turns a sentinel into an observable: cross a fan the one way `dup_hop` does. */
-static int rec_sentinel_demanded(Net *net) {
-  unsigned char *seen = calloc((size_t)net->nn + 1, 1);
-  Port *st = malloc(((size_t)net->nn * 2 + 8) * sizeof(Port)); int top = 1, found = 0;
-  for (st[0] = (Port){0, 0}; top && !found;) {
-    Port p = st[--top]; int t;
-    if (p.node < 0 || p.node >= net->nn || net->dead[p.node] || seen[p.node]) continue;
-    seen[p.node] = 1;
-    if (net->name[p.node] && !strcmp(net->name[p.node], REC_SENTINEL)) { found = 1; break; }
-    if ((t = net->tag[p.node]) == ERA) continue;
-    if (t == APP) { st[top++] = net_wire(net, (Port){p.node, 0}); st[top++] = net_wire(net, (Port){p.node, 2}); }
-    else if (t == ROOT) st[top++] = net_wire(net, p);
-    else if (t == DUP) st[top++] = net_wire(net, (Port){p.node, p.port == 0});
-    else st[top++] = p.port == 0 ? net_wire(net, (Port){p.node, 2}) : net_wire(net, p);
-  }
-  free(seen); free(st); return found;
-}
-
-/* Double every recursive def's unravelling bound and clear its expansion so the next attempt compiles a deeper chain (O(log depth) re-evaluations). */
-static int widen_recursion(void) {
-  int wid = 0;
-  for (int i = 0; i < ndefs; i++) if (defs[i].rec && defs[i].rec_body) {
-    defs[i].rec_k = defs[i].rec_k < (1 << 22) ? defs[i].rec_k * 2 : defs[i].rec_k;
-    term_free(defs[i].term);
-    defs[i].term = build_bound_rec(defs[i].rec_name, defs[i].rec_body, defs[i].rec_k);
-    wid = 1;
-  }
-  /* EVERY def's cached expansion may have inlined a recursive body's unrolling, not just the
-     recursive defs themselves: `num.eq` merely *calls* `num._peq`.  Clearing only the recursive ones
-     left the net byte-identical every round, so the sentinel never cleared and widening doubled the
-     bound forever for no change in the result (DESIGN 11.2). */
-  if (wid) for (int i = 0; i < ndefs; i++) {
-    term_free(defs[i].expanded); defs[i].expanded = NULL;
-    /* A precompiled net is the other place the old depth hides, and the one that matters with no
-       driver loaded.  Baking is a cache, so drop it and let the next use bake at the new depth. */
-    if (defs[i].compiled) { net_free(defs[i].compiled); free(defs[i].compiled); defs[i].compiled = NULL; }
-    defs[i].comp_tried = 0;
-  }
-  return wid;
-}
+/* (recursion builders: term_fix in parse.c; the Y-knot needs no bound and no widening pass) */
 
 void eval_form(Term *t) {
   char err[512]; Scheme sch;
   if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
   if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); return; }
-  for (int round = 0; round < 16; round++) {
-    Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
-    if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
-    struct timespec b0, b1;
-    bench_measured = bench_mode;
-    if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
-    long steps = net_reduce(&net, STEP_LIMIT);
-    if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
-    /* A stalled reduction must be reported BEFORE the recursion-sentinel branch, because that
-       branch `continue`s into another round: the driver is not making progress, so no deeper
-       unravelling can clear the sentinel, and the 16-round widening loop (each round doubling the
-       bound and re-expanding every def) turns a stall into what looks like a hang.  Measured with a
-       probe driver whose drain re-enqueues without progress: the guard trips, `stalled` is set, and
-       the run used to widen forever instead of saying so. */
-    if (net.stalled) {
-      printf("error: reduction stalled (driver made no progress); result is not a value\n");
-      net_free(&net); term_free(ex); return;
-    }
-    if (rec_sentinel_demanded(&net)) {   /* self-recursion exceeded k */
-      net_free(&net); term_free(ex);
-      if (!widen_recursion()) { printf("error: recursion depth exceeded unravelling bound\n"); return; }
-      continue;
-    }
-    /* `steps >= STEP_LIMIT` means the reduction stopped because it ran out of budget, not because it
-       reached a value -- the same signal `def_precompile` already declines a cache on.  Printing the
-       net regardless is how a *partial* graph becomes the answer with exit status 0: measured,
-       `(fib 12)` printed 0 where the answer is 144 and `(fib 14)` printed 0 where it is 377.  A
-       truncated net is not a value, and the sentinel is not demanded precisely *because* the
-       reduction never got far enough to reach it. */
-    if (steps >= STEP_LIMIT || net.stalled) {
-      if (net.stalled) printf("error: reduction stalled (driver made no progress); result is not a value\n");
-      else printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
-      net_free(&net); term_free(ex); return;
-    }
-    run_and_report(&net); net_free(&net); term_free(ex); return;
-  }
-  /* Falling out of the loop means all sixteen rounds widened and none converged.  Returning silently
-     here is the other half of the same failure: the program printed nothing at all and exited 0. */
-  printf("error: recursion did not converge within the unravelling bound\n");
-}
-
-/* Count the arity (leading \x binders) of a function body so the bounded self-unravelling base term gets the right number of slots. */
-static int lam_arity(Term *t) {
-  int k = 0;
-  while (t && t->type == TLAM) { k++; t = t->l; }
-  return k;
-}
-
-static const char REC_SENTINEL[] = "_rec";
-/* Dynamic (widening) self-recursion: replace the stranding Y-fixpoint with a *finite* unravelling `Y_k f = f (... base ...)` (k apps) whose innermost `base` carries the reserved `_rec` sentinel; confluent for depth<=k, and if depth exceeds k the sentinel survives ROOT-reachable so eval_form re-drives with doubled k */
-static Term *build_bound_rec(const char *name, Term *body, int k) {
-  int ar = lam_arity(body);
-  Term *zero = term_new(TLAM, REC_SENTINEL, term_new(TLAM, REC_SENTINEL, term_new(TVAR, REC_SENTINEL, 0, 0), 0), 0);
-  Term *base = zero;
-  for (int i = 0; i < ar; i++) { char a[NAME]; snprintf(a, sizeof a, "_r%d", i); base = term_new(TLAM, a, base, NULL); }
-  Term *cur = base;
-  for (int i = 0; i < k; i++) {
-    Term *f = term_new(TLAM, name, term_copy(body), NULL);
-    cur = term_new(TAPP, "", f, cur);
-  }
-  return cur;
+  Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
+  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
+  struct timespec b0, b1;
+  bench_measured = bench_mode;
+  if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
+  long steps = net_reduce(&net, STEP_LIMIT);
+  if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
+  /* `steps >= STEP_LIMIT` means the reduction stopped because it ran out of budget, not because it
+     reached a value.  Printing the net regardless is how a *partial* graph becomes the answer with
+     exit status 0: measured, `(fib 12)` printed 0 where the answer is 144. */
+  if (steps >= STEP_LIMIT) printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
+  else run_and_report(&net);
+  net_free(&net); term_free(ex);
 }
 
 static void qualify_free(Term *t, Guard *b) {
@@ -377,32 +296,13 @@ static void process_def(Term *t) {
     strncpy(d->name, t->name, NAME - 1); d->name[NAME - 1] = 0;
   }
   d->sch = sch; d->typed = 1; d->rec = rec;
-  if (rec) {
-    /* Unravelling bound: nested recursive defines multiply k^depth, so k is the multiplier on
-       the whole front end.  Depth is unknowable statically but need not be guessed
-       pessimistically -- `widen_recursion` doubles k and recompiles if the `_rec` sentinel
-       survives, so a small k is correct and only programs that recurse deeper pay for it.
-       NOT a sound optimization axis below 6: the AOT candidate search (`LIN_AOT_SEARCH=1`) found
-       k = 4 the byte winner on every program tried (`selfrecursion.lin` 21,608 B against 55,899 B),
-       but at k = 4 `test/selfrecursion.lin` returns 0 for `(fact 3)` where the answer is 6 -- the
-       unravelling ran out and the `_rec` sentinel was not detected, so no widening fired and a
-       wrong value was returned silently.  A build-time search may not trade correctness for bytes,
-       so the bound stays 6 and DESIGN.md 11.2 records the hazard.  LIN_REC_K overrides. */
-    d->rec_k = getenv("LIN_REC_K") ? atoi(getenv("LIN_REC_K")) : 6;
-    if (d->rec_k < 1) d->rec_k = 1;
-    d->rec_body = t->l;                                /* keep body for widening */
-    /* The binder must carry the name the body's SELF-REFERENCES actually use, which is
-       `t->name` and NOT the namespace-qualified `d->name`: qualify_free ran before this
-       def existed, so `lookup_raw("num._peq")` was still NULL and the self-reference was
-       never rewritten.  Widening used to rebuild with the qualified name, producing a
-       chain whose binders no longer matched the body ("unbound variable '_peq'"). */
-    snprintf(d->rec_name, NAME, "%s", t->name);
-    d->term = build_bound_rec(d->rec_name, t->l, d->rec_k);
-  } else {
-    d->rec_k = 0; d->rec_body = NULL; d->rec_name[0] = 0; d->term = t->l;
-  }
-  d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;
+  /* A self-referential body becomes the standard fixpoint `Y (\name. body)`.  The binder carries
+     `t->name` and NOT the namespace-qualified `d->name`: qualify_free runs before this def exists,
+     so the body's self-references are still spelled the unqualified way. */
+  if (rec) { d->term = term_fix(t->name, t->l); term_free(t->l); }
+  else d->term = t->l;
   t->l = NULL;
+  d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;
 }
 
 #include <unistd.h>
@@ -463,7 +363,13 @@ static int resolve_path(const char *rel, char *out, size_t out_sz) {
 static int load_file(const char *path);
 static void load_std(void) {
   const char *std = getenv("LIN_STD") ? getenv("LIN_STD") : "std/std.lin";
-  if (!load_file(std)) fprintf(stderr, "warning: standard library not found at '%s'\n", std);
+  quiet_forms = 1;
+  lin_out = fopen("/dev/null", "w");
+  int ok = load_file(std);
+  if (lin_out) fclose(lin_out);
+  lin_out = NULL;
+  quiet_forms = 0;
+  if (!ok) fprintf(stderr, "warning: standard library not found at '%s'\n", std);
 }
 
 static int building = 0;
@@ -547,36 +453,31 @@ static int load_file(const char *path) {
  * candidate space is a row list, not a chain of ifs; default is the single measured-best row, and
  * `LIN_AOT_SEARCH=1` explores the table and ships the winner, reporting every candidate's numbers. */
 
-typedef struct { const char *name; const char *egraph; const char *rules; int precompile; int rec_k; } AotCand;
+typedef struct { const char *name; const char *egraph; const char *rules; int precompile; } AotCand;
 
-static const AotCand aot_default_cand = { "default", NULL, NULL, 1, 6 };
-/* The unravelling bound is deliberately NOT a search axis: lowering it made `(fact 3)` return 0
-   without the sentinel firing (DESIGN.md 11.2), i.e. a candidate can trade correctness for bytes.
-   A decision axis belongs here only when every candidate on it is correct. */
+/* Predcompiling a def means EVALUATING it the first time it is referenced.  Under needed order that
+   buys nothing -- the def's body is a thunk until something demands it, so what gets baked is the
+   term -- while it hides the body from the e-graph pass, which is measured on the expanded term.  The
+   default therefore stays textual, and the precompiling shape remains a searchable row. */
+static const AotCand aot_default_cand = { "default", NULL, NULL, 0 };
 static const AotCand aot_cands[] = {
-  /* name           e-graph   rules   precompile  rec_k */
-  { "default",      NULL,     NULL,   1,          6  },
-  { "textual-defs", NULL,     NULL,   0,          6  },
-  { "no-egraph",    "off",    NULL,   1,          6  },
-  { "rules=eta",    NULL,     "eta",  1,          6  },
+  /* name           e-graph   rules   precompile */
+  { "default",      NULL,     NULL,   0 },
+  { "precompiled",  NULL,     NULL,   1 },
+  { "no-egraph",    "off",    NULL,   0 },
+  { "rules=eta",    NULL,     "eta",  0 },
 };
 #define AOT_NCANDS ((int)(sizeof aot_cands / sizeof aot_cands[0]))
 
 typedef struct { long bytes, rsteps; int compiled, residual, aot_steps; int ok; } AotStats;
 
-/* forget everything a previous candidate baked: a define's expansion, its precompiled net, and the
-   unravelling its recursive term was built at (the same reset `widen_recursion` performs) */
-static void aot_reset_defs(int rec_k) {
+/* forget everything a previous candidate baked: a define's expansion and its precompiled net */
+static void aot_reset_defs(void) {
   for (int i = 0; i < ndefs; i++) {
     Def *d = &defs[i];
     term_free(d->expanded); d->expanded = NULL;
     if (d->compiled) { net_free(d->compiled); free(d->compiled); d->compiled = NULL; }
     d->comp_tried = 0;
-    if (d->rec && d->rec_body) {
-      d->rec_k = rec_k;
-      term_free(d->term);
-      d->term = build_bound_rec(d->rec_name, d->rec_body, rec_k);
-    }
   }
 }
 
@@ -594,21 +495,14 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   char err[512];
   memset(st, 0, sizeof *st);
   aot_apply_cand(c);
-  aot_reset_defs(c->rec_k);
+  aot_reset_defs();
   Net net; net_init(&net, 1 << 16);
-  /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  net_reduce
-     is stuck exactly at an IO effect or a non-pure FFI closure, so the artifact keeps only what
-     genuinely needs the runtime.  `eval_form` re-drives with a doubled unravelling bound when the
-     `_rec` sentinel survives; the build did not, so it baked the sentinel as a value -- `(sumto 10)`
-     shipped an artifact printing a `_rec` spine where the interpreter printed 55. */
-  long baked;
-  for (int round = 0; round < 16; round++) {
-    baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
-    if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
-    if (!rec_sentinel_demanded(&net)) break;
-    net_free(&net); net_init(&net, 1 << 16);
-    if (!widen_recursion()) { fprintf(stderr, "error: recursion depth exceeded unravelling bound\n"); net_free(&net); return 0; }
-  }
+  /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  Needed order
+     stops at the first effect or non-pure FFI closure, so the artifact keeps only what genuinely
+     needs the runtime -- and a Y-knot is left as the cycle it is instead of being unrolled to a
+     bound the build had to guess. */
+  long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
+  if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
   st->aot_steps = (int)baked; st->residual = net.nn;
   net_gc(&net);
   if (!net_save_line(&net, out_f)) { net_free(&net); return 0; }
@@ -780,7 +674,9 @@ static void print_usage(const char *prog) {
 int main(int argc, char **argv) {
   bump_stack();
   ctor_init_builtins();
-  lin_scalar_ops_load("arith"); /* register std/drivers/arith.so scalar-op providers for the base engine */
+  /* No driver is loaded by default: the core runs pure Lin, and a program asks for an accelerator
+     with `(set_driver "simd")` / `(load "std/drivers/...")`.  std/std.lin activates std/drivers/
+     arith.lin, which is where the shared scalar-op table comes from. */
   lin_set_self_path(argv[0]);
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
   if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
