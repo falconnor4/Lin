@@ -38,7 +38,7 @@
 
 (define res_cpu (wave_64 true))
 (fst (fst (fst res_cpu)))
-; expect => true
+; expect => (\a (\b a))
 
 ; --- 2. Execution on SIMD Vector Driver ---
 (load "std/drivers/simd.lin")
@@ -49,11 +49,11 @@
 
 (define res_simd (wave_64 true))
 (fst (fst (fst res_simd)))
-; expect => true
+; expect => (\a (\b a))
 
 (define res_simd_f (wave_64 false))
 (fst (fst (fst res_simd_f)))
-; expect => false
+; expect => (\a (\b b))
 
 ; --- 3. Execution on Vulkan GPU Accelerator Driver ---
 (load "std/drivers/gpu.lin")
@@ -64,11 +64,11 @@
 
 (define res_gpu (wave_64 true))
 (fst (fst (fst res_gpu)))
-; expect => true
+; expect => (\a (\b a))
 
 (define res_gpu_f (wave_64 false))
 (fst (fst (fst res_gpu_f)))
-; expect => false
+; expect => (\a (\b b))
 
 ; --- 4. Cross-Backend Confluence Verification ---
 ; Restore CPU driver and verify state
@@ -96,11 +96,11 @@
 ; Pipeline still reduces correctly with SIMD+GPU stacked ahead of cpu
 (define res_pipe (wave_64 true))
 (fst (fst (fst res_pipe)))
-; expect => true
+; expect => (\a (\b a))
 
 (define res_pipe_f (wave_64 false))
 (fst (fst (fst res_pipe_f)))
-; expect => false
+; expect => (\a (\b b))
 
 ; Reset to base cpu
 (clear_drivers)

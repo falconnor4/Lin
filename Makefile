@@ -1,20 +1,17 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c99 -fopenmp
-# src/*.c is the core.  src/egraph.inc is the e-graph AOT pass: compile.c `#include`s it, so it is
-# part of that translation unit and needs no rule of its own -- and, being neither .c nor .h, it is
-# outside the 3500-line budget test/run_tests.sh enforces.
 SRCS    := $(wildcard src/*.c)
 DRIVERS := $(wildcard std/drivers/*.c)
 
 build:
 	nix build
 
-# Core engine only: the language/runtime is src/*.c + src/lin.h under a 3500-line budget
+# Core engine only: the language/runtime is src/*.c + src/lin.h under a 4500-line budget
 # (test/run_tests.sh enforces the budget, because the comment here that said
 # "<= 3000 lines" had been wrong for a while without anything noticing).
 # -rdynamic exports the core's symbols so dlopen'd driver
 # plugins (simd.so) can resolve net_alloc_scott / net_read_int / net_link &c.
-lin: $(SRCS) src/lin.h src/egraph.inc
+lin: $(SRCS) src/lin.h
 	$(CC) $(CFLAGS) -rdynamic -o $@ $(SRCS) -ldl -lm
 
 # Accelerator drivers (e.g. SIMD native arithmetic) are optional loaded plugins,

@@ -1,4 +1,5 @@
 #include "../../src/lin.h"
+#include "../runtime/pattern.h"     /* the structural recognisers and the op vocabulary (LIN_OP_*) */
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -110,16 +111,66 @@ enum { EV_NO = 0, EV_READY = 1, EV_WAIT = 2 };
 static inline Port wire_at(const Net *n, int node, int port) { return n->wire[node * 3 + port]; }
 #define IN_NET(n, i) ((i) >= 0 && (i) < (n)->nn)
 
-static const char *nmof(const Net *n, int id) {
-  return (id >= 0 && id < n->nn && n->name[id]) ? n->name[id] : "";
+/* Which head is a redex's LAM?  An `_ffi` closure's body is the `_ret` binder that applies the head
+   to itself (the header SHAPE, std/runtime/pattern.h); an `_op` head's body is its pure fallback
+   BODY.  A net with no labels says exactly this much and no more -- `ctor_tag(nmof(n, lam))` is what
+   this used to read, and a carrier name is the one thing a raw net cannot offer.  PURE: the matcher
+   never forces and never allocates, which is what `claim` requires. */
+static int head_is_ffi(const Net *n, int lam) {
+  LinMatch m;
+  return lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
 }
 
-/* derive the shared-table scalar op name from a DT_OP carrier tag (`_add` -> "lin_add") */
-static int op_fn_from_tag(const char *tag, char *fn, int fnmax) {
-  if (!tag || tag[0] != '_' || !tag[1]) return 0;
-  snprintf(fn, (size_t)fnmax, "lin_%s", tag + 1);
-  return 1;
+/* The OPERATOR and its OPERANDS, read in ONE step.  Both live in the same cell -- the operator's
+   INDEX is its head (std/num.lin writes it; LIN_OP_* in pattern.h is the enumeration) and the
+   operands are its tail -- and reading that cell twice is NOT the same as reading it once: the first
+   read FORCES the list into being (it is a compiled application until something walks it) and a force
+   re-aims the port it fired on, so the second read can land on a different cell.  Measured: an `add`
+   whose operand list was read twice folded with the OPERATOR INDEX as its first operand (0+1 for
+   6+1).  FORCING, so this is `reduce`'s question, never `claim`'s. */
+static int op_head_of(Net *n, int app, const char **fn, Port *ops) {
+  Port head, tail;
+  *fn = NULL;
+  *ops = (Port){-1, 0};
+  if (!IN_NET(n, app) || n->dead[app] || n->tag[app] != APP) return 0;
+  if (!net_read_cell(n, wire_at(n, app, 2), &head, &tail)) return 0;
+  long code = net_read_int(n, head, LIN_ENC_NUM);
+  *fn = lin_op_fn((int)code);
+  *ops = tail;
+  return *fn != NULL;
 }
+
+/* IS THIS REDEX'S RESULT SHARED?  β joins the closure's body port to the APP's result port, so a live
+   fan on EITHER of those two ports says the body graph is shared -- and when the sharing came from
+   copying a closure (`(let ((f (\x BODY))) ...)`, the fan being the copy of f's body) that graph is
+   OPEN: its own argument fans are wired to the copies' binders, so each copy binds them to its OWN
+   operand and the copies do NOT compute the same value.
+   The fold computes the value ONCE, with whichever operand happened to be forced first, and writes it
+   into that shared port, so the fan hands that single value to BOTH copies.  Measured on
+   `(let ((f (\x (add x 5)))) (add (f 1) (f 2)))`: the first use's redex folds to 6 and the fan gives
+   the second use 6 as well -- 12 where 13 is right.  Handing the redex back to the core's β instead
+   gives 13 (and so does the whole suite with this pre-emptor disabled), which is what pins the FOLD,
+   and not the net, as the defect.
+   Declining costs one wave and no more: β lets the fan resolve, each copy becomes a fresh `_op` redex
+   whose result port is no longer shared, and the fold takes those.  PURE -- `claim` may call it. */
+static int result_shared(const Net *n, int lam, int app) {
+  const Port p[2] = { wire_at(n, lam, 2), wire_at(n, app, 1) };   /* the two ports β joins */
+  for (int i = 0; i < 2; i++) {
+    int f = p[i].node;
+    if (!IN_NET(n, f) || n->dead[f] || n->tag[f] != DUP) continue;
+    for (int a = 1; a <= 2; a++) {
+      Port w = wire_at(n, f, a);
+      if (!IN_NET(n, w.node) || n->dead[w.node]) continue;
+      if (n->tag[w.node] == DUP) return 1;                    /* the copy fans on to another copy */
+      if (n->tag[w.node] == LAM && w.port == 2) return 1;     /* the fan feeds another copy's BODY */
+    }
+  }
+  return 0;
+}
+
+/* every scalar operand of an `_op`/`_ffi` is a NUMBER: the language's arithmetic takes numbers, and
+   a slot in another domain is not this fold's */
+static const int DOMS_NUM[1] = { DT_NUM };
 
 /* Consume a node this redex *exclusively* owns.  `lam`/`app` are
    principal-connected to each other, so nothing else can be attached to them,
@@ -128,10 +179,27 @@ static int op_fn_from_tag(const char *tag, char *fn, int fnmax) {
    the fan (or a node behind it) dead would strand the sibling — the fold would
    then read a destroyed operand and one consumer's result would leak into
    another's.  Shared structure is left for the reachability GC instead. */
-static void fold_own(Net *n, Port p) {
-  if (p.node < 0 || p.node >= n->nn || n->dead[p.node]) return;
-  if (n->tag[p.node] == DUP) return;                 /* behind a fan: not ours alone */
-  n->dead[p.node] = 1;
+/* Dispose of a node the fold owns outright: kill it AND cut every wire that led to it.
+   Cutting is the part that was missing.  Marking a node dead leaves the wires that pointed at it in
+   place, so a live node is left pointing into a node that no longer exists -- measured, that was the
+   WHOLE of the remaining dangling-wire count (0 with this driver absent, 889 wires on test/map.lin
+   and 581 on sudoku with it), and it is what made moving reclamation unsound: compaction turns such
+   a wire into NONE, losing the connection, and renumbering can revive the freed index as a different
+   node.  Cut the subgraph loose instead and it is simply unreachable, and so reclaimable.
+   A fan on the port means the sub-net is SHARED -- a sibling reaches it too -- so it is not ours to
+   kill; the core's reachability reclaims it once the last user is gone. */
+static void fold_kill(Net *n, int v) {
+  if (v < 0 || v >= n->nn || n->dead[v]) return;
+  if (n->tag[v] == DUP) return;
+  /* SEVER, do not reap.  Reaping frees the node outright and clears its ports, which is only sound
+     for a node the caller owns EXCLUSIVELY -- and this driver cannot prove that: a closure reached
+     through a fan is still tagged LAM, so the tag test above does not see the sharing, and an
+     unconditional free took the other user's structure with it (measured: every FFI suite broke,
+     with the closures coming back unreduced because the copy `run_ffi` needs had been freed under it).
+     Severing is the conservative form and it reclaims the same way: each cut frees whatever reaches
+     zero live connections, and a shared node still has its other user, so it survives. */
+  for (int p = 0; p < 3; p++) net_sever(n, (Port){v, p});
+  n->dead[v] = 1;
 }
 
 /* alloc a concrete value node (int -> Scott numeral, bool -> Church bool, float -> `_fsz` box) */
@@ -172,13 +240,13 @@ static int ffi_header(Net *n, int lam, Port *fnp, Port *argp) {
             pure-Lin fallback body.
    EV_WAIT: our op, but an operand is not concrete yet -> also plain β. */
 static int op_eval(Net *n, int lam, int app, Val *v) {
-  char fn[256];
-  if (!op_fn_from_tag(nmof(n, lam), fn, sizeof fn)) return EV_NO;
-  if (!IN_NET(n, app) || n->dead[app] || n->tag[app] != APP) return EV_NO;
-  Port argp = wire_at(n, app, 2);
+  const char *fn;
+  Port argp;
+  if (result_shared(n, lam, app)) return EV_NO;      /* a shared result is the core's β to take */
+  if (!op_head_of(n, app, &fn, &argp)) return EV_NO;
   int slots = net_spine_slots(n, argp);
   Val fargs[8]; memset(fargs, 0, sizeof fargs);
-  int argc = net_spine_args(n, argp, fargs, 8);
+  int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, 8);
   if (slots < 1 || slots > 8 || argc < slots) return EV_WAIT;   /* operand spine not readably concrete */
   long c[8] = {0};
   for (int i = 0; i < slots; i++) {
@@ -204,13 +272,20 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   if (!ffi_header(n, lam, &a1, &argp)) return EV_WAIT;         /* closure header not formed yet */
   if (!IN_NET(n, a1.node) || a1.port != 1 || n->tag[a1.node] != APP) return EV_WAIT;
   char fn[256];
-  if (net_read_string(n, wire_at(n, a1.node, 2), fn, sizeof fn) < 0) return EV_WAIT;
+  if (net_read_string(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, fn, sizeof fn) < 0) return EV_WAIT;
   if (strncmp(fn, "lin_", 4)) return EV_NO;                    /* only pure lin_* builtins fold */
   if (!strncmp(fn, "lin_streq", 9)) return EV_NO;              /* needs C strings, keep readback */
   if (fnout && fnmax > 0) snprintf(fnout, (size_t)fnmax, "%s", fn);
 
   Val vals[8]; memset(vals, 0, sizeof vals);
-  int na = net_ffi_args(n, (Port){lam, 0}, vals, 8);
+  /* The operands of a pure `lin_*` builtin are numbers: the string-typed rows (lin_streq) are
+     declined above, and a closure operand is dispatched by the reader itself. */
+  /* THE SPINE THIS WALK ALREADY HAS, not a second header dig for it: `ffi_header` above just produced
+     `argp`, and asking `net_ffi_args` re-walks the closure through the core's (stricter) header test,
+     so the two can disagree about a SHARED closure and the arg list silently comes back empty --
+     measured on `(let ((x (float "2.5"))) (fadd x x))`, where the arity guard then read 2 slots and 0
+     decoded operands and the fold declined for ever.  One dig, one spine. */
+  int na = net_spine_args(n, argp, DOMS_NUM, 1, vals, 8);
   int slots = net_spine_slots(n, argp);
   if (slots < 0) { if (na != 0) return EV_WAIT; slots = 0; }   /* not a cons spine: only the empty arg list is concrete */
   else if (slots > 8) return EV_WAIT;
@@ -259,14 +334,23 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
 static void fold_op_head(Net *n, int lam, int app, const Val *v) {
   Port res = val_to_port(n, v);
   Port ar = wire_at(n, app, 1);
-  Port aa = wire_at(n, app, 2);
-  Port body = wire_at(n, lam, 2);               /* the pure-Lin β-body residual */
-  n->dead[lam] = 1; n->dead[app] = 1;
-  fold_own(n, body); fold_own(n, aa);                /* only what this redex owns outright */
+  /* ORDER MATTERS: the value takes the redex's place BEFORE anything is severed.  Severing `app`'s
+     result port removes `ar`'s connection, and with the cascade in net_sever a node that loses its
+     last live connection is reclaimed -- so linking afterwards would hand the value to a consumer
+     that had just been freed as garbage (measured: every FFI suite, whose closures came back
+     unreduced).  Connected first, `ar` is live and the sever leaves it alone. */
   if (ar.node >= 0 && ar.node < n->nn && !n->dead[ar.node])
     net_link(n, res, ar, 1);
   else
     net_link(n, res, (Port){app, 1}, 1);
+  fold_kill(n, lam); fold_kill(n, app);
+  /* The β-body and the operand spine are NOT ours to sever: `(\x BODY)` copied by a fan still reads as
+     a plain LAM, so a redex whose spine sits behind (or in front of) a copy of the SAME operand list
+     sees two redexes reaching one structure, and cutting it here destroyed the sibling's operands --
+     measured, that is the whole of `(let ((f (\x (add x 1)))) (add (f 1) (f 2)))` folding its second
+     application with the first one's value (4 for 5).  Cutting `app`'s operand port already detaches
+     the spine from the redex, and the reachability GC reclaims what nobody else reaches: the
+     conservative form, and the one this driver's own header documents. */
   lin_fold_bump();
 }
 
@@ -274,8 +358,8 @@ static void fold_op_head(Net *n, int lam, int app, const Val *v) {
    (same as the evicted fold_link). */
 static void fold_ffi_head(Net *n, int lam, int app, const Val *v) {
   Port res = val_to_port(n, v);
-  n->dead[lam] = 1;
-  net_link(n, res, (Port){app, 0}, 1);
+  net_link(n, res, (Port){app, 0}, 1);              /* the value takes the closure's place */
+  fold_kill(n, lam);                                /* and the closure, body included, is cut loose */
   lin_fold_bump();
 }
 
@@ -284,27 +368,25 @@ static void fold_ffi_head(Net *n, int lam, int app, const Val *v) {
    the `div` redex with its first operand still an unreduced `_op` closure.  Reads through the
    shared decoder, so the slot walk is the same one the fold itself uses. */
 static void force_spine(Net *n, Port argp) {
-  Val tmp;
   int slots = net_spine_slots(n, argp);
   for (int i = 0; i < slots && i < 8; i++) {
-    Port cur = net_dhop(n, argp);
+    Port cur = net_dhop(n, net_force_val(n, argp));
     for (int k = 0; k <= i; k++) {
-      if (!IN_NET(n, cur.node) || n->tag[cur.node] != LAM) return;
-      Port inner = net_dhop(n, wire_at(n, cur.node, 2));
-      if (!IN_NET(n, inner.node) || n->tag[inner.node] != LAM) return;
-      Port body = net_dhop(n, wire_at(n, inner.node, 2));
-      if (!IN_NET(n, body.node) || n->tag[body.node] != APP) return;
-      Port ia = net_dhop(n, wire_at(n, body.node, 0));
-      if (k == i) { if (IN_NET(n, ia.node) && n->tag[ia.node] == APP) { (void)tmp; net_force(n, wire_at(n, ia.node, 2)); } return; }
-      cur = wire_at(n, body.node, 2);
+      Port head, next;
+      if (!net_read_cell(n, cur, &head, &next)) break;
+      if (k == i) { net_force(n, head); break; }
+      cur = next;
     }
   }
 }
 
 /* ---- LinDriver hooks ---- */
 
-/* claim: a DT_OP/DT_FFI closure redex.  The core hands wave pairs in tag order, so normalise
-   LAM-first here.  `reduce` disposes of everything claimed, so claiming is always safe. */
+/* claim: an `_op` head or an `_ffi` closure redex, recognized BY SHAPE.  The core hands wave pairs in
+   tag order, so normalise LAM-first here.  `reduce` disposes of everything claimed (fold it, or hand
+   it back to the core's β), so claiming is always safe -- which is what lets this claim on the head's
+   shape alone and leave "is this an op the table has a row for" to `reduce`, where forcing the
+   operand list is legal. */
 static int arith_claim(const Net *ncn, Port p1, Port p2) {
   Net *n = (Net *)ncn;
   if (p1.port || p2.port) return 0;
@@ -316,9 +398,8 @@ static int arith_claim(const Net *ncn, Port p1, Port p2) {
   if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) lam = p1.node;
   else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) lam = p2.node;
   else return 0;
-  int c = ctor_tag(nmof(n, lam));
-  if (c == DT_OP) { char fn[256]; return op_fn_from_tag(nmof(n, lam), fn, sizeof fn); }
-  return c == DT_FFI;
+  if (head_is_ffi(n, lam)) return 1;
+  return lin_pat_op_head(n, (Port){lam, 0}, NULL);
 }
 
 /* reduce: fold each claimed redex.  The ABI hands a slice of PAIRS: `nred` counts pairs,
@@ -338,10 +419,20 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
     else if (n->tag[pb.node] == LAM && n->tag[pa.node] == APP) { lam = pb.node; app = pa.node; }
     else continue;
     if (net_wire(n, (Port){lam, 0}).node != app || net_wire(n, (Port){app, 0}).node != lam) continue;
-    int c = ctor_tag(nmof(n, lam));
+    int ffi = head_is_ffi(n, lam);
     Val v; int ev = EV_NO;
-    if (c == DT_OP) ev = op_eval(n, lam, app, &v);
-    else if (c == DT_FFI) ev = ffi_eval(n, lam, &v, NULL, 0);
+    /* FORCE FIRST, READ AFTER.  Reading a compiled operand list means walking structure that is still
+       a chain of applications, and every read forces the slot it reads -- which rebuilds the very
+       cells the walk is standing on.  One up-front pass (force_spine forces the list, its cells and
+       each slot, and never the slots' own structure) leaves a net that does not move under the walk.
+       Not while a def is being precompiled: its operands are FREE variables, and forcing those is
+       what walks a knot that never becomes a value. */
+    if (!ffi && lin_precompile_depth == 0 && lin_pat_op_head(n, (Port){lam, 0}, NULL)) {
+      Port list = wire_at(n, app, 2);
+      if (IN_NET(n, list.node)) force_spine(n, list);
+    }
+    if (!ffi && lin_pat_op_head(n, (Port){lam, 0}, NULL)) ev = op_eval(n, lam, app, &v);
+    else if (ffi) ev = ffi_eval(n, lam, &v, NULL, 0);
     /* A def is precompiled with its operands still FREE, so a foldable redex can never be ready here.
        Leaving it alone is what keeps the fold: β-ing it would replace the `_op`/`_ffi` head with the
        pure-Lin body, and every later use of the def -- and the baked net itself -- would have lost the
@@ -352,13 +443,13 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
     if (ev == EV_WAIT) {
       /* The operands are not concrete yet.  Under needed order that is the normal state -- nothing
          had a reason to reduce them -- so ask for them and try again. */
-      Port argp = (c == DT_OP) ? wire_at(n, app, 2) : (Port){-1, 0};
-      if (c == DT_FFI) ffi_header(n, lam, 0, &argp);
+      Port argp = ffi ? (Port){-1, 0} : wire_at(n, app, 2);
+      if (ffi) ffi_header(n, lam, 0, &argp);
       if (IN_NET(n, argp.node)) force_spine(n, argp);
-      ev = (c == DT_OP) ? op_eval(n, lam, app, &v) : ffi_eval(n, lam, &v, NULL, 0);
+      ev = ffi ? ffi_eval(n, lam, &v, NULL, 0) : op_eval(n, lam, app, &v);
     }
     if (ev == EV_READY) {
-      if (c == DT_OP) fold_op_head(n, lam, app, &v); else fold_ffi_head(n, lam, app, &v);
+      if (!ffi) fold_op_head(n, lam, app, &v); else fold_ffi_head(n, lam, app, &v);
       done++; (*changed)++; n->steps++;
       continue;
     }
@@ -388,7 +479,8 @@ static void __attribute__((constructor)) arith_load(void) {
 }
 
 LinDriver lin_arith_driver = {
-  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI,
+  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
+  .size = (uint32_t)sizeof(LinDriver),   /* the ABI-5 extension contract: the core reads only these fields */
   .name = "arith", .description = "native scalar arithmetic table + `_op`/`_ffi` fold pre-emptor",
   .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_PREEMPT, .priority = 5,   /* before simd(10): claim folds first */
   .claim = arith_claim, .reduce = arith_reduce,

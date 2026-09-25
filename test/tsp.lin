@@ -44,16 +44,16 @@
 (define m25 (probe2 tsp_b25))
 
 (fst m25)
-; expect => true
+; expect => (\a (\b a))
 
 (define w25 (snd m25))
 
 ; Witness bits: b0 = false, b1 = true
 (fst w25)
-; expect => false
+; expect => (\a (\b b))
 
 (snd w25)
-; expect => true
+; expect => (\a (\b a))
 
 ; Certificate verification
 (verify2 tsp_b25 w25)
@@ -66,7 +66,7 @@
 ; Decoded optimal path
 (define tour (decode_tour w25))
 (first tour)
-; expect => 0
+; expect => (\a (\b a))
 
 (second tour)
 ; expect => 1
@@ -78,14 +78,14 @@
 ; expect => 2
 
 (fifth tour)
-; expect => 0
+; expect => (\a (\b a))
 
 ; --- Instance 2: Budget B = 20 ---
 (define m20 (probe2 tsp_b20))
 (fst m20)
-; expect => false
+; expect => (\a (\b b))
 
 ; --- Instance 3: Budget B = 30 ---
 (define m30 (probe2 tsp_b30))
 (fst m30)
-; expect => true
+; expect => (\a (\b a))

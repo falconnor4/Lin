@@ -1,0 +1,9 @@
+; ==============================================================================
+; Lin driver: readback.
+; Printing, running effects and dispatching FFI used to be the core's.  They are
+; an OBSERVATION of the reduced net, not reduction, so they are this driver's
+; now (std/drivers/readback.c); the core keeps only the dispatchers.
+; Loaded as early as `set_driver` exists: the prelude's own top-level forms are
+; evaluated -- and observed -- as they are read, so the printer must be there.
+; ==============================================================================
+(set_driver "readback")

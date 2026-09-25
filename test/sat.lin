@@ -10,21 +10,21 @@
 
 ; 1-variable tautology: x1 or not x1
 (exists (\x1 ((or x1) (not x1))))
-; expect => (\t (\f t))
+; expect => true
 
 ; 2-SAT equivalence chain: (not x1 or x2) and (not x2 or x1)
 (exists (\x1 (exists (\x2 ((and ((or (not x1)) x2)) ((or (not x2)) x1))))))
-; expect => (\t (\f t))
+; expect => true
 
 ; 2-SAT mixed clauses: (x1 or x2) and (not x1 or x2)
 (exists (\x1 (exists (\x2 ((and ((or x1) x2)) ((or (not x1)) x2))))))
-; expect => (\t (\f t))
+; expect => true
 
 ; 3-SAT satisfiable instance (N=3 simple)
 (exists (\x1 (exists (\x2 (exists (\x3 ((and ((or x1) ((or x2) x3))) ((or (not x1)) ((or (not x2)) (not x3))))))))))
-; expect => (\t (\f t))
+; expect => true
 
 ; 3-SAT clause set (N=3, m=12 clauses).  It is SATISFIABLE: the distinct
 ; clauses are ~x1 or x3, ~x3 or x2, ~x2 or x1, and all-true satisfies all three.
 (exists (\x1 (exists (\x2 (exists (\x3 ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((and ((or (not x1)) ((or x3) (not x1)))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x2)) ((or x1) (not x2))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))) ((or (not x3)) ((or x2) (not x3))))) ((or (not x1)) ((or x3) (not x1))))))))))
-; expect => (\t (\f t))
+; expect => true

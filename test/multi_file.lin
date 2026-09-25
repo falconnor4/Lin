@@ -25,23 +25,23 @@
 
 ; Verify witness extraction from std/sat.lin
 (fst (probe1 (\x ((or x) (not x)))))
-; expect => true
+; expect => (\a (\b a))
 
 (snd (probe1 (\x ((or x) (not x)))))
-; expect => true
+; expect => (\a (\b a))
 
 (snd (probe1 (\x (not x))))
-; expect => false
+; expect => (\a (\b b))
 
 ; Verify 2-variable witness extraction
 (define p_sat (\x1 (\x2 ((and x1) (not x2)))))
 (define w2 (probe2 p_sat))
 
 (fst w2)
-; expect => true
+; expect => (\a (\b a))
 
 (fst (snd w2))
-; expect => true
+; expect => (\a (\b a))
 
 (snd (snd w2))
-; expect => false
+; expect => (\a (\b b))

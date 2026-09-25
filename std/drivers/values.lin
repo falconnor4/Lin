@@ -1,0 +1,6 @@
+; ==============================================================================
+; Lin driver: value storage.
+; The DT_FLOAT box table used to live in the core (and the container used to
+; hardcode it).  It is a driver's now: this file loads it.
+; ==============================================================================
+(set_driver "values")

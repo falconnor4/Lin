@@ -31,6 +31,11 @@
 ; `_op`/`_ffi` fold pre-emptor come from; without it the same programs still reduce exactly, by
 ; plain beta of the pure-Scott fallback bodies num.lin carries beside every op.
 (load "std/drivers/arith.lin")
+; readback (printing, effects, FFI dispatch) is a driver's too, and it comes first among these: the
+; prelude's own top-level forms are observed as they are evaluated, so the printer has to be there.
+(load "std/drivers/readback.lin")
+; value storage (the DT_FLOAT box table) is a driver's: see std/drivers/values.c
+(load "std/drivers/values.lin")
 
 (load "bool.lin")
 (load "num.lin")

@@ -85,7 +85,7 @@
 ; expect => 3
 
 (third sol1)
-; expect => 0
+; expect => (\a (\b a))
 
 (fourth sol1)
 ; expect => 2

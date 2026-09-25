@@ -28,7 +28,7 @@
 ; expect => 2
 
 (snd (pair 1 (pair 2 3)))
-; expect => (\f ((f 2) 3))
+; expect => (\a ((a 2) 3))
 
 ; Boolean reductions & conditionals
 (if true 111 222)

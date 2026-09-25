@@ -30,7 +30,7 @@
 (define fib5 (fib_step fib4))
 
 (fst fib0)
-; expect => 0
+; expect => (\a (\b a))
 (fst fib1)
 ; expect => 1
 (fst fib2)

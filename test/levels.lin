@@ -9,29 +9,29 @@
 ; expect => 4
 
 (let ((x (add 1 2))) (pair x x))
-; expect => (\f ((f 3) 3))
+; expect => (\a ((a 3) 3))
 
 (let ((x (add 1 2))) (let ((y (mul x x))) (pair y x)))
-; expect => (\f ((f 9) 3))
+; expect => (\a ((a 9) 3))
 
 (let ((x 5)) (let ((y (add x x))) (mul y y)))
 ; expect => 100
 
 (let ((f (\x (add x 1)))) (pair (f 1) (f 2)))
-; expect => (\f ((f 2) 3))
+; expect => (\a ((a 2) 3))
 
 ; a shared closure: the fan sits on a partially applied op, and the argument arrives per use
 (let ((g (add 2))) (pair (g 3) (g 4)))
-; expect => (\f ((f 5) 6))
+; expect => (\a ((a 5) 6))
 
 ; sharing inside a shared value.  Measured, this is the INCOMPARABLE case, not the nested one: a
 ; census of every DUPxDUP interaction over the suite, 400 random closed terms and 49 shapes built to
 ; nest levels finds zero nested pairs, so net.c's nested branch is unexercised and this line does
 ; not cover it.
 (let ((x (let ((y (add 2 3))) (pair y y)))) (pair x x))
-; expect => (\f ((f (\f' ((f' 5) 5))) (\f' ((f' 5) 5))))
+; expect => (\a ((a (\b ((b 5) 5))) (\b ((b 5) 5))))
 
 ; sharing a recursive result (a knot of levels around a clone)
 (define! sumto (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))
 (let ((y (sumto 4))) (pair y y))
-; expect => (\f ((f 10) 10))
+; expect => (\a ((a 10) 10))

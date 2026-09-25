@@ -12,6 +12,7 @@
  * on any failure gpu_ready=0 so the base CPU engine takes over transparently.
  * ========================================================================== */
 #include "../../src/lin.h"
+#include "../runtime/pattern.h"     /* the structural recognisers: what a foldable head IS */
 #include "selftest.h"          /* canonical per-wave bit-exact differential (std-wide) */
 #include <vulkan/vulkan.h>
 #include <stdlib.h>
@@ -332,6 +333,17 @@ static void gpu_selftest(Net *n, int nred) {
   }
 }
 
+/* A HEAD THE HOST FOLDS: an `_op` head or an `_ffi` closure.  A net carries no label, so the SHAPE
+   is the whole of what says which head this is -- the same pair of tests the fold drivers make,
+   because this driver has to agree with them about which redexes are theirs.  PURE: `claim` runs
+   before any slice exists and must not touch the net. */
+static int gpu_foldable_head(const Net *n, int node) {
+  LinMatch m;
+  if (node < 0 || node >= n->nn || n->dead[node] || n->tag[node] != LAM) return 0;
+  if (lin_pat_match((Net *)n, (Port){node, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m)) return 1;
+  return lin_pat_op_head(n, (Port){node, 0}, NULL);
+}
+
 /* claim: a fixed-allocation redex (beta, inline-scope annihilate).  Commute /
    heap-scope annihilate / `_ffi` closures are NOT claimed (SIMD claims `_ffi`
    at higher priority; commute is the base engine's). */
@@ -357,22 +369,17 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
        claiming such a redex on-device would beta-reduce instead, leaving a
        different net than the host — the per-wave differential mismatch observed
        under gpu.  Hand them to the pre-emptor. */
-    const char *lnm = p1.node < n->nn ? (n->name[p1.node] ? n->name[p1.node] : "") : "";
-    int c = ctor_tag(lnm);
-    if (c == DT_FFI || c == DT_OP) return 0;            /* head is a foldable closure */
+    if (gpu_foldable_head(n, p1.node)) return 0;       /* head is a foldable closure */
     /* argument `aa` = APP port 2; a foldable closure argument is eagerly folded
        inside the host's beta (fold_arg), which the kernel cannot replicate */
     Port aa = WIRE(n, ((Port){p2.node, 2}));
     if (aa.node >= 0 && aa.node < n->nn && !n->dead[aa.node]) {
       if (n->tag[aa.node] == LAM) {
-        int ac = n->name[aa.node] ? ctor_tag(n->name[aa.node]) : -1;
-        if (ac == DT_FFI || ac == DT_OP) return 0;
+        if (gpu_foldable_head(n, aa.node)) return 0;
       } else if (n->tag[aa.node] == APP) {
         Port h = WIRE(n, ((Port){aa.node, 0}));
-        if (h.node >= 0 && h.node < n->nn && !n->dead[h.node] && n->tag[h.node] == LAM) {
-          int hc = n->name[h.node] ? ctor_tag(n->name[h.node]) : -1;
-          if (hc == DT_OP || hc == DT_FFI) return 0;
-        }
+        if (h.node >= 0 && h.node < n->nn && !n->dead[h.node] && n->tag[h.node] == LAM)
+          if (gpu_foldable_head(n, h.node)) return 0;
       }
     }
     return 1;                                                 /* beta */
@@ -515,7 +522,7 @@ gpu_done:
 }
 
 LinDriver lin_gpu_driver = {
-  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI,
+  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
   .name = "gpu", .description = "Vulkan compute: fixed-rule interaction reduction",
   .caps = LIN_CAP_FIXED, .priority = 20,
   .claim = gpu_claim, .reduce = gpu_reduce,

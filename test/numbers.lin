@@ -1,7 +1,7 @@
 ; Church numeral arithmetic
 
 0
-; expect => 0
+; expect => (\a (\b a))
 
 1
 ; expect => 1

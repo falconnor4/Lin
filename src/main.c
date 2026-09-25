@@ -165,7 +165,21 @@ static double ms_since(struct timespec a, struct timespec b) {
    the two apart, so a load of the prelude evaluates its forms quietly. */
 static int quiet_forms = 0;
 
-static void run_and_report(Net *net) {
+/* What the compiler KNOWS about the observed result, passed to readback so it decodes instead of
+   guessing: the head of the form's type, when it names one of the builtin value domains.  An arrow
+   or a type variable is not a value domain (-1), and a user datatype is a pure-Lin term whose
+   encoding is its own -- readback prints the structure, which is the honest answer. */
+static int type_domain(Type *t) {
+  while (t && t->kind == TLINK) t = t->a;
+  if (!t || t->kind != TNOM || !t->name) return -1;
+  if (!strcmp(t->name, "num")) return DT_NUM;
+  if (!strcmp(t->name, "bool")) return DT_BOOL;
+  if (!strcmp(t->name, "float")) return DT_FLOAT;
+  if (!strcmp(t->name, "list")) return DT_STR;     /* a list IS the string encoding: cells of values */
+  return -1;
+}
+
+static void run_and_report(Net *net, int domain) {
   struct timespec t0, t1;
   if (!bench_measured) {                 /* nobody reduced this net yet: do it here */
     if (bench_mode) {
@@ -183,7 +197,7 @@ static void run_and_report(Net *net) {
   /* net_print is what OBSERVES the value -- FFI dispatch (and so a prelude's `(set_driver ...)`)
      happens there -- so it always runs; only the `=> ` line is suppressed for the prelude. */
   if (no_io && !quiet_forms) printf("=> ");
-  if (no_io) net_print(net);
+  if (no_io) net_print(net, domain);
   if (no_io && !quiet_forms) putchar('\n');
   if (bench_mode) {
     fprintf(stderr, "[bench] %ld steps | %d nodes | %.2f ms | GoI det: %lld -> %lld\n",
@@ -209,7 +223,7 @@ void eval_form(Term *t) {
      reached a value.  Printing the net regardless is how a *partial* graph becomes the answer with
      exit status 0: measured, `(fib 12)` printed 0 where the answer is 144. */
   if (steps >= STEP_LIMIT) printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
-  else run_and_report(&net);
+  else run_and_report(&net, type_domain(sch.t));
   net_free(&net); term_free(ex);
 }
 
@@ -377,7 +391,9 @@ static Term *build_term = NULL;
 
 static int run_line_file(const char *path) {
   Net net; if (!net_load_line(&net, path)) return 0;
-  run_and_report(&net); net_free(&net); return 1;
+  /* A container carries no type, so nothing here knows what its result MEANS: readback decodes
+     what the structure determines by itself and prints the rest. */
+  run_and_report(&net, -1); net_free(&net); return 1;
 }
 
 static void export_namespace(const char *name);   /* (export <ns>) re-export */
@@ -673,7 +689,7 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char **argv) {
   bump_stack();
-  ctor_init_builtins();
+  lin_domains_init();
   /* No driver is loaded by default: the core runs pure Lin, and a program asks for an accelerator
      with `(set_driver "simd")` / `(load "std/drivers/...")`.  std/std.lin activates std/drivers/
      arith.lin, which is where the shared scalar-op table comes from. */

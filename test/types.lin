@@ -6,7 +6,7 @@
 ; expect error: unbound variable 'foo'
 
 (1 true)
-; expect => (\_ss (_ss 0))
+; expect => (\a (a (\b (\c b))))
 
 (\x (x x))
 ; expect error: infinite type
@@ -41,7 +41,7 @@
 ; expect error: type mismatch
 
 (fst 3)
-; expect => (\_ss (_ss 2))
+; expect => (\a (a 2))
 
 (lambda y (y y))
 ; expect error: infinite type

@@ -4,6 +4,18 @@
 ; Asynchronous event-driven I/O, destination-directed stream writing, and
 ; POSIX file operations integrated with interaction net readback.
 ;
+; AN EFFECT IS  \e. ((((e <CODE>) p0) p1) p2): the tag's own binder applied to the
+; effect's CODE first, then its payloads.  The code is a numeral, the encoding this
+; language has for an index, and it is what makes the effects tellable apart: a net
+; carries no label, so `io_print msg next` and `io_wait src cb` are otherwise the SAME
+; net (a payload and a continuation).  std/drivers/readback.c owns the enumeration —
+; 0 done, 1 print (msg, next), 2 write_to (dst, msg, next), 3 wait (src, cb) — and the
+; PAYLOAD COUNT is what the reader checks with the code.  EVERY code carries at least
+; TWO payloads, and that is not decoration: with fewer, the effect's shape is exactly
+; the shape of the language's own data — `\k.((k a) b)` is a PAIR and `\c.\n.((c h) t)`
+; is a LIST CELL — so a payload-poor effect encoding makes `(pair true false)` read as
+; a finished effect.  Two units for `io_done` is what keeps the two apart.
+;
 ; Every public member below carries the globally-safe `io_*` name (never bare
 ; `wait`/`read`/`file`/`write_to`/`print`/`done`/`prompt`/`call`), so
 ; `(export io)` re-exports exactly those safe names bare without colliding with
@@ -27,16 +39,16 @@
 ;   - "!cmd" or "cmd:...": process output
 ;   - "file:...": disk file contents
 ;   - "sleep:ms": timer delay
-(define io_wait (\src (\cb (\_iow ((_iow src) cb)))))
+(define io_wait (\src (\cb (\_eff (((_eff 3) src) cb)))))
 (define io_read (\cb (io.io_wait 0 cb)))
 (define io_file (\path (\cb (io.io_wait path cb))))
 
 ; --- Destination-Directed Output ---
 ;   - 1 or omitted: standard output
 ;   - 2: standard error
-(define io_write_to (\dst (\msg (\next (\_iop (((_iop dst) msg) next))))))
-(define io_print    (\msg (\next (\_iop ((_iop msg) next)))))
-(define io_done     (\_iod _iod))
+(define io_write_to (\dst (\msg (\next (\_eff ((((_eff 2) dst) msg) next))))))
+(define io_print    (\msg (\next (\_eff (((_eff 1) msg) next)))))
+(define io_done     (\_eff (((_eff 0) 0) 0)))
 
 ; --- Interactive Utilities ---
 (define io_prompt   (\p (\cb (io.io_print p (io.io_read cb)))))

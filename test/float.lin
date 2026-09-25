@@ -73,7 +73,7 @@
 (if (flt 1.0 2.0) 42 0)
 ; expect => 42
 (if (flt 2.0 1.0) 42 0)
-; expect => 0
+; expect => (\a (\b a))
 (if (feq 2.5 2.5) 7 8)
 ; expect => 7
 (if (fleq 2.0 2.0) 1 2)

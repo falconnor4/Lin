@@ -1,4 +1,5 @@
 #include "../../src/lin.h"
+#include "../runtime/pattern.h"     /* the structural recognisers and the op vocabulary (LIN_OP_*) */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -32,34 +33,43 @@
  *  concrete.
  *  ---------------------------------------------------------------------- */
 
-static const char *nm(Net *n, int id) { return n->name[id] ? n->name[id] : ""; }
-
-/* Resolve exported core helpers once through dlsym (-rdynamic exports them). */
+/* Resolve exported core helpers once through dlsym (-rdynamic exports them).  The spine decoder's
+   per-slot expectation travels with the call: EVERY scalar operand here is a number, and a slot that
+   is not one in its own structure is declined rather than guessed. */
 static ScalarOpFn g_scalar;
-static int (*g_spine)(Net *, Port, Val *, int);
+static int (*g_spine)(Net *, Port, const int *, int, Val *, int);
+static const int DOMS_NUM[1] = { DT_NUM };
 static void resolve_core(void) {
   if (!g_scalar) g_scalar = (ScalarOpFn)dlsym(RTLD_DEFAULT, "lin_arith_scalar");
-  if (!g_spine) g_spine = (int (*)(Net *, Port, Val *, int))dlsym(RTLD_DEFAULT, "net_spine_args");
+  if (!g_spine) g_spine = (int (*)(Net *, Port, const int *, int, Val *, int))dlsym(RTLD_DEFAULT, "net_spine_args");
 }
 
-/* derive the shared-table scalar op name from a DT_OP carrier tag (`_add` -> "lin_add") */
-static void op_tag_to_fn(const char *tag, char *fn, int fnmax) {
-  if (!tag || tag[0] != '_') { fn[0] = 0; return; }
-  snprintf(fn, fnmax, "lin_%s", tag + 1);
+/* Which operator is this `_op` redex?  The OPERATOR INDEX is the first slot of its operand list
+   (std/num.lin writes it; LIN_OP_* is the enumeration) -- a net carries no label, so `((\_op body)
+   spine)` for add and for mul are one shape.  FORCING, which is why `claim` may not call it. */
+static int op_head_of(Net *n, Port app, const char **fn, Port *ops) {
+  Port head, tail;
+  *fn = NULL;
+  *ops = (Port){-1, 0};
+  if (app.node < 0 || app.node >= n->nn || n->dead[app.node] || n->tag[app.node] != APP) return 0;
+  if (!net_read_cell(n, WIRE(n, ((Port){app.node, 2})), &head, &tail)) return 0;
+  *fn = lin_op_fn((int)net_read_int(n, head, LIN_ENC_NUM));
+  *ops = tail;
+  return *fn != NULL;
 }
 
 /* decode + evaluate a saturated `_op` redex LAM `lam` x APP `app`; on success
    (concrete operands + claimed op) fills *v and returns 1.  Mirrors the shared
    `lin_fold_op` value path (net_spine_args + lin_arith_scalar). */
 static int simd_op_value(Net *n, Port lam, Port app, Val *v) {
-  char fn[256];
-  op_tag_to_fn(n->name[lam.node] ? n->name[lam.node] : "", fn, sizeof fn);
-  if (!fn[0]) return 0;
+  (void)lam;
+  const char *fn;
+  Port argp;
+  if (!op_head_of(n, app, &fn, &argp)) return 0;      /* the operator index, and the operands after it */
   if (!g_spine) resolve_core();
   if (!g_spine) return 0;
-  Port argp = WIRE(n, ((Port){app.node, 2}));         /* the applied `_cl`-spine */
   Val fargs[8] = {{0}};
-  int argc = g_spine(n, argp, fargs, 8);
+  int argc = g_spine(n, argp, DOMS_NUM, 1, fargs, 8);
   if (argc < 1) return 0;
   long c_args[8] = {0};
   for (int i = 0; i < argc; i++) {
@@ -79,14 +89,16 @@ static int simd_op_value(Net *n, Port lam, Port app, Val *v) {
    claimed; otherwise leave it to the base engine (which defers non-concrete
    operands) rather than strand the redex. */
 static int simd_op_ready(const Net *n, Port lam, Port app) {
+  (void)lam;
   char fn[256];
-  op_tag_to_fn(n->name[lam.node] ? n->name[lam.node] : "", fn, sizeof fn);
-  if (!fn[0]) return 0;
+  const char *f;
+  Port argp;
+  if (!op_head_of((Net *)n, app, &f, &argp)) return 0;
+  snprintf(fn, sizeof fn, "%s", f);
   if (!g_spine) resolve_core();
   if (!g_spine) return 0;
-  Port argp = n->wire[app.node * 3 + 2];
   Val fargs[8] = {{0}};
-  int argc = g_spine((Net *)n, argp, fargs, 8);
+  int argc = g_spine((Net *)n, argp, DOMS_NUM, 1, fargs, 8);
   if (argc < 1) return 0;
   long c_args[8] = {0};
   for (int i = 0; i < argc; i++) {
@@ -101,16 +113,16 @@ static int simd_op_ready(const Net *n, Port lam, Port app) {
 /* Fold a saturated `_ffi` closure `lam` applied to `app` (float / legacy FFI).
    Mirrors `lin_fold_ffi`: rewire the concrete datum to the consumer APP head. */
 static int (*g_ffi_fn)(Net *, Port, char *, int);
-static int (*g_ffi_args)(Net *, Port, Val *, int);
+static int (*g_ffi_args)(Net *, Port, const int *, int, Val *, int);
 static void resolve_decoder(void) {
   if (!g_ffi_fn) g_ffi_fn = (int (*)(Net *, Port, char *, int))dlsym(RTLD_DEFAULT, "net_ffi_fn");
-  if (!g_ffi_args) g_ffi_args = (int (*)(Net *, Port, Val *, int))dlsym(RTLD_DEFAULT, "net_ffi_args");
+  if (!g_ffi_args) g_ffi_args = (int (*)(Net *, Port, const int *, int, Val *, int))dlsym(RTLD_DEFAULT, "net_ffi_args");
 }
 static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   resolve_decoder();
   char fn[256];
   if (!g_ffi_fn || !g_ffi_fn(n, (Port){p.node, 0}, fn, sizeof fn)) return 0;
-  Val vals[2]; int na = g_ffi_args ? g_ffi_args(n, (Port){p.node, 0}, vals, 2) : 0;
+  Val vals[2]; int na = g_ffi_args ? g_ffi_args(n, (Port){p.node, 0}, DOMS_NUM, 1, vals, 2) : 0;
   long a[2] = {0, 0};
   for (int i = 0; i < na && i < 2; i++) a[i] = vals[i].iv;
   *is_bool = 0; *is_float = 0;
@@ -125,29 +137,30 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   return 1;
 }
 
-/* claim: a saturated DT_OP (`_op` pure-Lin arith) or DT_FFI (`_ffi` float/legacy)
-   closure (LAM x APP), the native-num class this driver folds.  DT_OP claims
-   additionally gate on operand readiness so we never strand an unfoldable redex. */
+/* PURE: which head is this redex's LAM?  An `_ffi` closure's body is the `_ret` binder that applies
+   the head to itself (the header SHAPE); an `_op` head's body is its pure fallback BODY.  A net
+   carries no label, so the shape is the whole of what a name-free net can say -- the same test the
+   arith driver makes, because the two must agree on which redexes are theirs. */
+static int head_is_ffi(const Net *n, int lam) {
+  LinMatch m;
+  return lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
+}
+
+/* claim: a saturated `_op` (pure-Lin arith) or `_ffi` (float/legacy) closure (LAM x APP), the
+   native-num class this driver folds.  An `_op` claim additionally gates on operand readiness so an
+   unfoldable redex is never stranded. */
 static int simd_claim(const Net *n, Port p1, Port p2) {
-  const char *nmc(const Net *nn, int id) {
-    return (id >= 0 && id < nn->nn && nn->name[id]) ? nn->name[id] : "";
-  }
   if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) return 0;
   if (p1.port || p2.port) return 0;
   if (WIRE(n,p1).node != p2.node || WIRE(n,p1).port != p2.port) return 0;
   if (WIRE(n,p2).node != p1.node || WIRE(n,p2).port != p1.port) return 0;
-  int t;
-  if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) {
-    t = ctor_tag(nmc(n, p1.node));
-    if (t == DT_OP) return simd_op_ready(n, (Port){p1.node,0}, (Port){p2.node,0});
-    return t == DT_FFI;
-  }
-  if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) {
-    t = ctor_tag(nmc(n, p2.node));
-    if (t == DT_OP) return simd_op_ready(n, (Port){p2.node,0}, (Port){p1.node,0});
-    return t == DT_FFI;
-  }
-  return 0;
+  int lam, app;
+  if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) { lam = p1.node; app = p2.node; }
+  else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) { lam = p2.node; app = p1.node; }
+  else return 0;
+  if (head_is_ffi(n, lam)) return 1;
+  if (!lin_pat_op_head(n, (Port){lam, 0}, NULL)) return 0;
+  return simd_op_ready(n, (Port){lam, 0}, (Port){app, 0});
 }
 
 /* ---------------------------------------------------------------------- *
@@ -173,7 +186,7 @@ static int simd_claim(const Net *n, Port p1, Port p2) {
  *  ---------------------------------------------------------------------- */
 
 /* Per-lane result of the eval phase. */
-typedef struct { int ok; int lam, app; int kind; long iv; } SimdLane;
+typedef struct { int ok; int lam, app; int kind; int ffi; long iv; } SimdLane;
 
 /* Eval phase for DT_OP: decode + scalar-table the value, no mutation. */
 static int simd_eval_op(Net *n, int lam, int app, SimdLane *ln) {
@@ -242,17 +255,17 @@ static int simd_reduce(Net *n, Port *redexes, int nred, long limit, int *changed
       if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) { lam = p1.node; app = p2.node; }
       else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) { lam = p2.node; app = p1.node; }
       else continue;
-      int c = ctor_tag(nm(n, lam));
+      int isffi = head_is_ffi(n, lam);
       SimdLane *ln = &batch[nb];
-      ln->ok = 0; ln->lam = lam; ln->app = app;
-      if (c == DT_OP) { if (simd_eval_op(n, lam, app, ln)) nb++; }
-      else if (c == DT_FFI) { if (simd_eval_ffi(n, lam, app, ln)) nb++; }
+      ln->ok = 0; ln->lam = lam; ln->app = app; ln->ffi = isffi;
+      if (!isffi) { if (simd_eval_op(n, lam, app, ln)) nb++; }
+      else { if (simd_eval_ffi(n, lam, app, ln)) nb++; }
     }
     /* Phase B: apply the batch's successful lanes (sequential net mutation). */
     for (int k = 0; k < nb; k++) {
       SimdLane *ln = &batch[k];
       if (ln->kind == 4 || ln->kind == 3 || ln->kind == 1) {
-        if (ctor_tag(nm(n, ln->lam)) == DT_OP) simd_apply_op(n, ln);
+        if (!ln->ffi) simd_apply_op(n, ln);
         else simd_apply_ffi(n, ln);
         consumed++; (*changed)++; n->steps++;
       }
@@ -262,7 +275,8 @@ static int simd_reduce(Net *n, Port *redexes, int nred, long limit, int *changed
 }
 
 LinDriver lin_simd_driver = {
-  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI,
+  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
+  .size = (uint32_t)sizeof(LinDriver),   /* the ABI-5 extension contract: the core reads only these fields */
   .name = "simd", .description = "native scalar (`_op`/`_ffi`) arithmetic fold",
   .caps = LIN_CAP_NATIVE_NUM, .priority = 10,
   .claim = simd_claim, .reduce = simd_reduce,

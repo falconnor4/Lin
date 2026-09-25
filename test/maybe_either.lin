@@ -19,13 +19,13 @@
 ; expect => true
 
 (from_maybe 0 nothing)
-; expect => 0
+; expect => (\a (\b a))
 
 (from_maybe 0 (just 42))
 ; expect => 42
 
 (from_maybe 99 (just 0))
-; expect => 0
+; expect => (\a (\b a))
 
 ; Functor map over maybe
 (from_maybe 0 (maybe_map succ (just 41)))
@@ -69,7 +69,7 @@
 ; expect => true
 
 (from_right 0 (left 99))
-; expect => 0
+; expect => (\a (\b a))
 
 (from_right 0 (right 42))
 ; expect => 42

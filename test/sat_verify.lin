@@ -11,7 +11,7 @@
 
 ; is_sat
 (fst m1)
-; expect => true
+; expect => (\a (\b a))
 
 ; certificate verification
 (verify1 f1 (snd m1))
@@ -24,7 +24,7 @@
 (define m2 (probe2 f2))
 
 (fst m2)
-; expect => true
+; expect => (\a (\b a))
 
 (verify2 f2 (snd m2))
 ; expect => true
@@ -42,7 +42,7 @@
 (define m3 (probe3 f3))
 
 (fst m3)
-; expect => true
+; expect => (\a (\b a))
 
 (verify3 f3 (snd m3))
 ; expect => true
@@ -62,23 +62,23 @@
 (define m4 (probe4 f4))
 
 (fst m4)
-; expect => true
+; expect => (\a (\b a))
 
 ; x1 must be true
 (fst (snd m4))
-; expect => true
+; expect => (\a (\b a))
 
 ; x2 must be false
 (fst (snd (snd m4)))
-; expect => false
+; expect => (\a (\b b))
 
 ; x3 must be false
 (fst (snd (snd (snd m4))))
-; expect => false
+; expect => (\a (\b b))
 
 ; x4 must be false
 (snd (snd (snd (snd m4))))
-; expect => false
+; expect => (\a (\b b))
 
 ; Verify certificate against original formula
 (verify4 f4 (snd m4))
@@ -107,27 +107,27 @@
 (define m5 (probe5 f5))
 
 (fst m5)
-; expect => true
+; expect => (\a (\b a))
 
 ; x1 must be true
 (fst (snd m5))
-; expect => true
+; expect => (\a (\b a))
 
 ; x2 must be false
 (fst (snd (snd m5)))
-; expect => false
+; expect => (\a (\b b))
 
 ; x3 must be false
 (fst (snd (snd (snd m5))))
-; expect => false
+; expect => (\a (\b b))
 
 ; x4 must be false
 (fst (snd (snd (snd (snd m5)))))
-; expect => false
+; expect => (\a (\b b))
 
 ; x5 must be false
 (snd (snd (snd (snd (snd m5)))))
-; expect => false
+; expect => (\a (\b b))
 
 ; Verify certificate against original formula
 (verify5 f5 (snd m5))

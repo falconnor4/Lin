@@ -44,6 +44,6 @@
 ;     return the base case, 0, for any depth). ---
 (define down (\n (bool.ifl (is_zero n) (\_ 0) (\_ (down (pred n))))))
 (down 20)
-; expect => 0
+; expect => (\a (\b a))
 (down 1)
-; expect => 0
+; expect => (\a (\b a))

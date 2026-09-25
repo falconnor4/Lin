@@ -99,7 +99,7 @@ test_b.x
 ; expect 20
 
 (io_wait (ccall2 "lin_eq" 42 43) (\b (io_print (not b) (io_print "\n" io_done))))
-; expect true
+; expect (\a (\b a))
 
 ; 10. String literal escape sequences (issue 5)
 (str.length "\e[31mLin\e[0m")

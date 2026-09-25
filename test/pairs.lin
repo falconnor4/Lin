@@ -7,10 +7,10 @@
 ; expect => 2
 
 (pair 1 2)
-; expect => (\f ((f 1) 2))
+; expect => (\a ((a 1) 2))
 
 (pair true false)
-; expect => (\f ((f true) false))
+; expect => (\a ((a (\b (\c b))) (\b (\c c))))
 
 (not (snd (pair true false)))
 ; expect => true
@@ -22,7 +22,7 @@
 ; expect => 9
 
 (fst (pair true false))
-; expect => true
+; expect => (\a (\b a))
 
 (snd (pair 42 7))
 ; expect => 7

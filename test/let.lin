@@ -13,7 +13,7 @@
 ; expect => 1
 
 (let ((id (\x x))) (pair (id 1) (id true)))
-; expect => (\f ((f 1) true))
+; expect => (\a ((a 1) (\b (\c b))))
 
 ; --- simple bindings ---
 (let ((x 2)) x)
@@ -85,7 +85,7 @@
 ; expect => ""
 
 (let ((x cons)) x)
-; expect => (\h (\t (\c (\n ((c h) t)))))
+; expect => (\a (\b (\c (\d ((c a) b)))))
 
 (let ((h (cons 65 nil))) h)
 ; expect => "A"
@@ -100,10 +100,10 @@
 ; fans sharing one gauge, the two arguments used to merge ((pair 1 2) twice here)
 ; rather than reaching the two consumers separately.
 (let ((f (\x (pair x x)))) (pair (f 1) (f 2)))
-; expect => (\f ((f (\f' ((f' 1) 1))) (\f' ((f' 2) 2))))
+; expect => (\a ((a (\b ((b 1) 1))) (\b ((b 2) 2))))
 
 (let ((f (\x (add x 1)))) (pair (f 1) (f 2)))
-; expect => (\f ((f 2) 3))
+; expect => (\a ((a 2) 3))
 
 (let ((f (\x (\y (pair x y))))) (pair (f 1 2) (f 3 4)))
-; expect => (\f ((f (\f' ((f' 1) 2))) (\f' ((f' 3) 4))))
+; expect => (\a ((a (\b ((b 1) 2))) (\b ((b 3) 4))))

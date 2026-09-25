@@ -38,7 +38,7 @@
 ; expect => 15
 
 (((C pair) 1) 2)
-; expect => (\f ((f 2) 1))
+; expect => (\a ((a 2) 1))
 
 ; W combinator: self-application / duplication
 ((W add) 21)
@@ -48,4 +48,4 @@
 ; expect => 49
 
 ((W pair) 99)
-; expect => (\f ((f 99) 99))
+; expect => (\a ((a 99) 99))

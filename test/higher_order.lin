@@ -89,10 +89,10 @@
 ; expect => 8
 
 ((\x x) (\x x))
-; expect => (\x x)
+; expect => (\a a)
 
 (((\x x) (\x x)) (\x x))
-; expect => (\x x)
+; expect => (\a a)
 
 (\f (\x (f (f x))))
-; expect => (\f (\x (f (f x))))
+; expect => (\a (\b (a (a b))))

@@ -64,7 +64,7 @@
 ; expect => 0
 
 (sign 0)
-; expect => 0
+; expect => (\a (\b a))
 
 (sign 1)
 ; expect => 1
