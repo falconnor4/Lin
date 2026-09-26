@@ -4,17 +4,14 @@
 #include <string.h>
 #include <dlfcn.h>
 
-/* ============================================================================
- * The core's value readers: net STRUCTURE in, a value out -- under an encoding the CALLER states.
- *
- * There is no per-node label to consult.  Scott zero (`\b0.\b1.b0`), Church TRUE and the empty list
- * are ONE net, so which value a node holds cannot be recovered from the node: the EXPECTATION is the
- * only source of meaning -- the type the compiler computed, a domain a driver declared, a slot's FFI
- * signature -- and a reader that has none must DECLINE (readback then prints the structure) rather
- * than guess.  The core keeps the encoding WALKS (below), the generic box builders, the one arg-spine
- * decoder and the thin dispatchers to whichever driver declares LIN_WANT_READBACK; what a value MEANS
- * beyond its shape -- the table behind a float box, FFI dispatch -- is never the core's.
- * ==========================================================================*/
+/* The core's value readers: net STRUCTURE in, a value out -- under an encoding the CALLER states.
+   There is no per-node label to consult.  Scott zero (`\b0.\b1.b0`), Church TRUE and the empty list
+   are ONE net, so which value a node holds cannot be recovered from the node: the EXPECTATION is the
+   only source of meaning -- the type the compiler computed, a domain a driver declared, a slot's FFI
+   signature -- and a reader that has none must DECLINE (readback then prints the structure) rather
+   than guess.  The core keeps the encoding WALKS (below), the generic box builders, the one arg-spine
+   decoder and the thin dispatchers to whichever driver declares LIN_WANT_READBACK; what a value MEANS
+   beyond its shape -- the table behind a float box, FFI dispatch -- is never the core's. */
 static Net *N;
 /* Where readback's VALUE is written.  Loading the prelude must still EVALUATE its top-level forms
    -- FFI dispatch happens in readback, so `(set_driver "arith")` in std/drivers/arith.lin only runs
@@ -85,10 +82,8 @@ Port net_force_val(Net *n, Port p) {
    Every layer is FORCED before it is read: under needed order a cell can still hold an unreduced
    thunk, and reading it is what demands it (readback is the consumer, so readback forces).  A layer
    that is not the expected encoding's -- or not a normal form yet -- DECLINES; nothing is guessed.
-     NUM   `\b0.\b1.b0` ZERO     `\b0.\b1.(b1 tail)` successor        (BOOL: the same two, read as
-     CONS  `\c.\n.<value>` NIL   `\h.\t.\c.\n.((c h) t)` cell           TRUE / FALSE; STR: the
-                                                                        cell shapes with a payload)
-*/
+     NUM   `\b0.\b1.b0` ZERO     `\b0.\b1.(b1 tail)` successor    (BOOL: the same two, read as
+     CONS  `\c.\n.<value>` NIL   `\h.\t.\c.\n.((c h) t)` cell       TRUE/FALSE; STR: cells with a payload) */
 enum { L_TERMINAL, L_INDUCTIVE, L_FALSE };
 typedef struct { int layer; Port head, tail; } Layer;
 
@@ -311,14 +306,13 @@ Port net_alloc_float(Net *n, double d) {
    language's vocabulary, std/num.lin) and an `_ffi` closure names its symbol in its argument list.
    See std/num.lin and pattern.h for the shapes a driver tells apart. */
 
-/* dig the `_ffi`-closure header at LAM `lam` (shape \_ffi. \_ret. ((_ffi <fn>) <args>)) into `*a1` (fn APP) and `*argp` (arg-spine).
-   PURE -- it reads wires and tags and never forces.  Forcing here would run the reducer from inside a
-   reader, and a reader is reached FROM the reducer (a driver decoding an operand calls this through
-   net_read_value): that re-entry lands on the same closure and repeats for ever.  A caller that needs
-   a closure's body reduced says so itself, in a place where reduction is legal (`reduce`, `match`).
-   Through `dup_hop`: a closure the reduction SHARED is reached through a fan, so its body wire leads
-   to a DUP auxiliary whose principal is the body -- the copy and the original do not have separate
-   bodies -- and reading it plainly would find the fan instead. */
+/* dig the `_ffi`-closure header at LAM `lam` (shape \_ffi.\_ret. ((_ffi <fn>) <args>)) into `*a1` (fn
+   APP) and `*argp` (arg-spine).  PURE: it reads wires and tags and never forces, because forcing here
+   would run the reducer from inside a reader, and a reader is reached FROM the reducer (a driver
+   decoding an operand calls this through net_read_value) -- that re-entry lands on the same closure
+   and repeats for ever.  A caller that needs the body reduced says so itself, where reduction is legal
+   (`reduce`, `match`).  Through `dup_hop`: a SHARED closure is reached through a fan, so its body wire
+   leads to a DUP auxiliary whose principal is the body, and reading it plainly finds the fan. */
 int net_ffi_header(Net *n, Port lam, Port *a1, Port *argp) {
   Port r = dup_hop(n, wr(n, (Port){lam.node, 2}));
   if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
@@ -386,7 +380,15 @@ int net_spine_slots(Net *n, Port argp) {
    Where the expectation does not hold, the slot's structure may still determine the value ON ITS OWN,
    and using it is not a guess: a box is not a numeral, a numbered chain is not a cell, and a cons
    chain of numbers is not either.  What is deliberately NOT here is a preference ORDER between
-   domains -- that would be exactly the name-sniffing this design removed. */
+   domains -- that would be exactly the name-sniffing this design removed.
+   One shape is excluded outright: an UNSATURATED `_ffi` CLOSURE has no value the structure can
+   state.  Its header IS the language's cons cell (`\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn)
+   args)` are one net, as net_read_string's own note records), so a shape read of one is a MISREAD
+   and not a guess: measured, `(add (ccall1 "lin_parse_float" (ffi.getenv "N")) 1)` read the
+   closure's fn-name CELL where a number belongs -- the numeral 0 through net_read_int, the string
+   "getenv" through net_read_string -- and the fold then fired on that garbage.  Dispatching above
+   is the only way such a slot yields a value, so when dispatch produces nothing the slot DECLINES
+   (the caller retries -- the operand is not concrete YET) instead of being shape-read. */
 static int dec_arg(Net *n, Port p, int dom, Val *v) {
   /* A NESTED CLOSURE comes first: what a slot's expectation is about is the VALUE, and a closure's
      value is what dispatching it produces -- `(fadd (float "2.5") (float "3.5"))` has closures where
@@ -394,6 +396,11 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
      is the readback provider's, and its own shape test is pure, so a slot that already IS a value
      pays only a walk of two wires. */
   if (net_read_value(n, p, DT_FFI, v) && v->kind) return 1;
+  {
+    char fnb[NAME];
+    Port q = net_dhop(n, p);
+    if (q.port == 0 && net_ffi_fn(n, q, fnb, sizeof fnb)) return 0;
+  }
   switch (dom) {
   case DT_NUM: {
     long x = net_read_int(n, p, LIN_ENC_NUM);

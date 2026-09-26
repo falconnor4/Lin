@@ -639,6 +639,93 @@ static const LinPat *const lin_pat_enc_ffi = P_FAN(P_ALL3(
   P_PORT(2, P_FAN(P_AT(0, P_ALL3(P_BIND(1), P_TAG(LAM),
     P_PORT(2, lin_pat_enc_ffi_hdr)))))));
 
+/* ---------------------------------------------------------------------------
+ * THE BOX: the encoding a driver CHOOSES so that its own domain is unambiguous
+ * ---------------------------------------------------------------------------
+ * A domain's ordinary encoding is SHARED -- `\b0.\b1.b0` is the Scott numeral
+ * ZERO, Church TRUE and the empty list at once, and FALSE is the nil cell -- so a
+ * value at a position nothing states the domain of (a tuple slot, an effect
+ * payload, the result of a container that carries no type) can only be written as
+ * the net it is.  That is what `value_any` does, and it is why an artifact whose
+ * container carries no type prints `(\a (\b a))` where the interpreter prints `0`.
+ *
+ * A driver that owns a domain fixes it FOR ITS DOMAIN by choosing, at AOT time, to
+ * write the values it observes in a shape no other encoding claims -- the
+ * LIN_ENC_BOX precedent (src/io.c: `\b0.\b1.(b0 (b1 i))`, "a numeral applies ONE
+ * binder per layer, a box BOTH"), one binder further out.  Three nested binders,
+ * each applied once to the payload, spelled in the order the domain names:
+ *
+ *   LIN_BOX_NUM   `\a.\b.\c.(a (b (c v)))`
+ *   LIN_BOX_BOOL  `\a.\b.\c.(a (c (b v)))`
+ *
+ * Neither is zero/TRUE/nil (no application at all), FALSE (the second binder
+ * selected), a successor layer (the BINDER is applied to the tail, not the other
+ * way round), a cons cell (two binders, then an application), the float box (two
+ * binders) or the `_op` / `_ffi` headers -- and they are distinct from each OTHER:
+ * the second application is a different binder.  The payload's encoding is then
+ * the box's business, which is the point: a box SAYS its payload is a value of one
+ * domain, so it is readable with no expectation to state.  The LIN_P_* vocabulary
+ * states all of that, and the pattern is the whole recogniser.
+ * ------------------------------------------------------------------------- */
+#define LIN_BOX_NUM   0
+#define LIN_BOX_BOOL  1
+
+/* the layer walk the payload is read with (`lin_pat_enc_num_nf`), declared here because a box states
+   its payload's encoding and this is where that is stated */
+static inline int lin_pat_enc_num_nf(const Net *n, Port p, int enc, long *out);
+
+/* `(X (Y v))` at the current position: X and Y are the two innermost binders of the box, in the
+   order this domain applies them, and v (slot 7) is the payload they are applied to. */
+#define LIN_BOX_TAIL(fx, fy) P_FAN(P_ALL3(P_BIND(5), P_TAG(APP), \
+  P_ALL(P_PORT(0, P_FAN(P_AT(1, P_REF(fx)))), \
+    P_PORT(2, P_FAN(P_ALL3(P_BIND(6), P_TAG(APP), \
+      P_ALL(P_PORT(0, P_FAN(P_AT(1, P_REF(fy)))), \
+        P_PORT(2, P_BIND(7)))))))))
+/* `\a.\b.\c.(a <tail>)`: binds 0/1/2 the three binders, 3 the outer application, 7 the payload. */
+#define LIN_BOX_PAT(fx, fy) P_FAN(P_ALL3(P_BIND(0), P_TAG(LAM), \
+  P_PORT(2, P_FAN(P_AT(0, P_ALL3(P_BIND(1), P_TAG(LAM), \
+    P_PORT(2, P_FAN(P_AT(0, P_ALL3(P_BIND(2), P_TAG(LAM), \
+      P_PORT(2, P_FAN(P_ALL3(P_BIND(3), P_TAG(APP), \
+        P_ALL(P_PORT(0, P_FAN(P_AT(1, P_REF(0)))), \
+          P_PORT(2, LIN_BOX_TAIL(fx, fy))))))))))))))))
+
+static const LinPat *const lin_pat_enc_num_box  = LIN_BOX_PAT(1, 2);
+static const LinPat *const lin_pat_enc_bool_box = LIN_BOX_PAT(2, 1);
+
+/* PURE: which domain's box is at `p`, and where its payload is observed; 0 = not a box.  Nothing is
+   forced: a payload that is not a normal form yet is still a box, which is what lets readback read a
+   boxed value without demanding anything. */
+static inline int lin_pat_box(const Net *n, Port p, int *which, Port *payload) {
+  LinMatch m;
+  if (lin_pat_match((Net *)n, p, lin_pat_enc_num_box, LIN_PAT_BUDGET_FOR(n), &m)) {
+    if (which) *which = LIN_BOX_NUM;
+  } else if (lin_pat_match((Net *)n, p, lin_pat_enc_bool_box, LIN_PAT_BUDGET_FOR(n), &m)) {
+    if (which) *which = LIN_BOX_BOOL;
+  } else return 0;
+  if (payload) *payload = m.bind[7];
+  return 1;
+}
+
+/* The BOX WRITER -- the other half of the encoding, in net structure: a driver that chose the shape
+   owns everything about it, so the builder is here beside the recogniser.  `v` is the value's port,
+   and the returned port is the box's principal.  The caller relinks its own root to it. */
+static inline Port lin_pat_box_build(Net *n, Port v, int dom) {
+  Scope sc = scope_nil();
+  Port a = net_alloc(n, LAM, sc), b = net_alloc(n, LAM, sc), c = net_alloc(n, LAM, sc);
+  Port o = net_alloc(n, APP, sc), m = net_alloc(n, APP, sc), q = net_alloc(n, APP, sc);
+  int f1 = dom == LIN_BOX_BOOL ? c.node : b.node, f2 = dom == LIN_BOX_BOOL ? b.node : c.node;
+  net_link(n, (Port){a.node, 2}, (Port){b.node, 0}, 0);      /* \a.\b.\c. ...  */
+  net_link(n, (Port){b.node, 2}, (Port){c.node, 0}, 0);
+  net_link(n, (Port){c.node, 2}, (Port){o.node, 1}, 0);      /* ... whose body is the application */
+  net_link(n, (Port){o.node, 0}, (Port){a.node, 1}, 0);
+  net_link(n, (Port){o.node, 2}, (Port){m.node, 1}, 0);
+  net_link(n, (Port){m.node, 0}, (Port){f1, 1}, 0);
+  net_link(n, (Port){m.node, 2}, (Port){q.node, 1}, 0);
+  net_link(n, (Port){q.node, 0}, (Port){f2, 1}, 0);
+  net_link(n, (Port){q.node, 2}, v, 0);                      /* the payload takes the old place */
+  return (Port){a.node, 0};
+}
+
 /* The pattern for a LAYER of an expected encoding: NULL when the (enc, layer) pair
    names no shape, which is how the caller's expectation is spelled as data.  The
    OP and FFI headers have one shape each, so their layer is ignored. */
@@ -960,3 +1047,4 @@ static inline Port lin_pat_op_args(const Net *n, int app) {
 static inline int lin_pat_num_nf(const Net *n, Port p, long *out) {
   return lin_pat_enc_num_nf(n, p, LIN_ENC_NUM, out);
 }
+

@@ -40,6 +40,7 @@
  * print (src/net.c lin_driver_carry_write / lin_driver_carry_read).
  * ==========================================================================*/
 #include "../../src/lin.h"
+#include "../runtime/pattern.h"   /* the encodings, boxes included: a reader takes the shape it expects */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,29 @@ static int render_val(FILE *f, Val v) {
   fflush(f); return 1;
 }
 
+/* A BOXED value of one of the numeric driver's domains: it is unambiguous BY CONSTRUCTION (three
+   binders, each applied once -- see std/runtime/pattern.h), so it is read the same way with or
+   without an expectation.  0 = not that box, and a box whose payload is not in the domain's own
+   encoding is NOT a value: it declines rather than being guessed at. */
+static inline int box_num(Net *n, Port p, long *out) {
+  int w; Port pay;
+  long k;
+  if (!lin_pat_box(n, p, &w, &pay) || w != LIN_BOX_NUM) return 0;
+  /* FORCING: the payload is the value the caller is observing, so readback may reduce to it -- and
+     the core's own reader is the authority here exactly as it is for every other operand walk. */
+  if ((k = net_read_int(n, pay, LIN_ENC_NUM)) < 0) return 0;
+  *out = k;
+  return 1;
+}
+static inline int box_bool(Net *n, Port p, long *out) {
+  int w; Port pay;
+  long k;
+  if (!lin_pat_box(n, p, &w, &pay) || w != LIN_BOX_BOOL) return 0;
+  if ((k = net_read_int(n, pay, LIN_ENC_BOOL)) < 0) return 0;
+  *out = k;
+  return 1;
+}
+
 /* ---------------- value decoding, under an expectation or without one ----------------
    `decode` is the expectation: the caller states the DOMAIN the value means, and the registry
    (src/io.c) turns that into the encoding its structure must have.  A value whose structure is
@@ -77,8 +101,11 @@ static int render_val(FILE *f, Val v) {
 static Val decode(Net *n, Port p, int domain) {
   Val v = {0};
   switch (domain) {
-  case DT_NUM: { long x = net_read_int(n, p, LIN_ENC_NUM); if (x >= 0) { v.iv = x; v.kind = 1; } break; }
-  case DT_BOOL: { long b = net_read_int(n, p, LIN_ENC_BOOL); if (b >= 0) { v.iv = b; v.kind = 3; } break; }
+  /* A BOX states its own domain, so it is tried BEFORE the plain encoding: `0` and both Church
+     booleans are shapes two or three domains claim, and a value a driver wrote in a box is
+     unambiguous -- which is the whole reason it chose that encoding at AOT time. */
+  case DT_NUM: { long x; if (box_num(n, p, &x) || (x = net_read_int(n, p, LIN_ENC_NUM)) >= 0) { v.iv = x; v.kind = 1; } break; }
+  case DT_BOOL: { long b; if (box_bool(n, p, &b) || (b = net_read_int(n, p, LIN_ENC_BOOL)) >= 0) { v.iv = b; v.kind = 3; } break; }
   case DT_STR: if (net_read_string(n, p, LIN_ENC_NUM, v.sv, sizeof v.sv) >= 0) v.kind = 2; break;
   case DT_FLOAT: { double d; if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; } break; }
   /* DT_FFI deliberately has NO case: dispatching a closure is `run_ffi`, which the callers do
@@ -119,6 +146,11 @@ static int str_determined(Net *n, Port p, char *buf, size_t max) {
    is the numeral zero, TRUE and the empty list at once, and the geometry cannot choose. */
 static Val value_any(Net *n, Port p) {
   Val v = {0};
+  long b;
+  /* A BOX NAMES ITS DOMAIN, which is what choosing the encoding at AOT time buys: it is the one
+     reading that works with no expectation to state, and it is tried first for that reason. */
+  if (box_num(n, p, &b)) { v.iv = b; v.kind = 1; return v; }
+  if (box_bool(n, p, &b)) { v.iv = b; v.kind = 3; return v; }
   double d;
   if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; return v; }
   long k = net_read_int(n, p, LIN_ENC_NUM);
@@ -156,6 +188,16 @@ static int str_fn(const char *fn) {
          !strcmp(fn, "dlopen") || !strcmp(fn, "lin_parse_float") || !strcmp(fn, "fopen") ||
          !strcmp(fn, "driver_set") || !strcmp(fn, "driver_add");
 }
+/* Is this symbol's value a function of its OPERANDS alone?  Only a pure `lin_*` builtin is: the
+   scalar/math table, the float constructors, the string cast -- and `lin_folds`/`lin_folded` are
+   `lin_*` but observe the REDUCTION, so they are excluded, exactly as arith.c's fold excludes them.
+   Everything else reaches outside the net: the environment (`getenv`), the file system
+   (`fopen`/`dlopen`), the process (`system`/`puts`/`exit`), the driver selection, or an arbitrary
+   foreign symbol through `dlsym`.  Readback is the only place that knows this, because the
+   signature is the symbol's, not the net's. */
+static int pure_lin_fn(const char *fn) {
+  return !strncmp(fn, "lin_", 4) && strcmp(fn, "lin_folds") && strcmp(fn, "lin_folded");
+}
 /* the domain slot `i` of the call `fn` is in (`ndoms` entries, the last one repeating) */
 static void arg_doms(const char *fn, int doms[2], int *ndoms) {
   int two_str = !strcmp(fn, "lin_streq") || !strcmp(fn, "fopen");
@@ -186,6 +228,24 @@ static Val run_ffi(Net *n, Port p) {
      a helper used to be dispatched as a call to the symbol "" (measured on `(v3scale 2.0 (vec3 ...))`).
      No foreign symbol is nameless, so the empty read is not this closure. */
   if (net_read_string(n, wire((Port){a1.node, 2}), LIN_ENC_NUM, fn, sizeof(fn)) <= 0) return v;
+  /* A BUILD MAY NOT MAKE THE PROGRAM'S OBSERVATIONS.  This dispatch is reached at build time through
+     the core's operand decoder (`dec_arg` -> `net_read_value`), i.e. by a fold asking what an
+     operand's VALUE is -- and answering it here for a symbol whose value comes from outside the net
+     EVALUATES that call at build time, so its answer is frozen into the artifact.  Measured: `lin
+     build` of test/runtime_ffi.lin -- whose whole point is that N exists only at RUN time -- baked
+     the build-time `getenv("N")`: built with N=2 the artifact printed 3 for every N, built with N
+     unset (getenv -> NULL -> parse_float -> 0) it printed 1 where the interpreter prints 7.  The
+     residual must compute it instead, so a non-pure symbol declines here, exactly as arith.c's
+     `ffi_eval` declines non-`lin_*` names and the fold counters for the same reason ("build-time
+     evaluation must be observation-free").  Precompilation is a build step too and its operands are
+     free variables, so it declines as well.  At RUN time both markers are 0 and every row works.
+     Declining is not enough on its own -- a half-evaluated net built on a declined operand is no more
+     honest than a baked answer -- so the call also REPORTS itself (lin_build_observed) and the build
+     ships the program unreduced (aot_run). */
+  if ((lin_build_depth > 0 || lin_precompile_depth > 0) && !pure_lin_fn(fn)) {
+    lin_build_observed = 1;
+    return v;
+  }
   int doms[2], ndoms;
   arg_doms(fn, doms, &ndoms);
   Val fargs[8] = {{0}};
@@ -509,6 +569,13 @@ static int ob_val(Val v) {
    never pass for an answer. */
 static void print_port(Port p, int depth, int dom) {
   if (p.node < 0 || p.node >= N->nn) { ob_putc('?'); qmarks++; return; }
+  /* A BOX IS TRANSPARENT TO THE PRINTER, and it is unwrapped BEFORE the force: it states its payload's
+     domain -- the whole point of choosing that encoding at AOT time -- so the payload is the value
+     here, rendered with THAT domain, and one the domain does not hold is rendered as the value it is
+     rather than as the box's own application. */
+  int boxed = 0;
+  { int bw; Port bpay;
+    if (lin_pat_box(N, p, &bw, &bpay)) { p = bpay; boxed = 1; dom = bw == LIN_BOX_NUM ? DT_NUM : DT_BOOL; } }
   /* Everything the printer is about to render is observed, so it is forced first: under needed
      order a sub-term the program never demanded is still an unreduced thunk, and printing it as
      written would report the term instead of its value. */
@@ -543,7 +610,12 @@ static void print_port(Port p, int depth, int dom) {
          and printed as the closure it is written as.  The dig is pure and two wires deep on a port
          that turns out not to be a closure, so asking first costs nothing. */
       if (ob_val(run_ffi(N, p))) break;
-      if (dom >= 0 ? ob_val(decode(N, p, dom)) : ob_val(value_any(N, p))) break;
+      if (dom >= 0 && ob_val(decode(N, p, dom))) break;
+      /* A stated domain that does not hold falls through to what the STRUCTURE determines.  A box's
+         payload is the case that needs it: the driver chose the encoding, and if the read declines
+         the payload is still whatever it is -- rendering it as the box's own application would be
+         reporting the envelope instead of the letter. */
+      if (dom < 0 || boxed) { if (ob_val(value_any(N, p))) break; }
       ob_printf("(\\%s ", pp_push(p.node));
       print_port(wire((Port){p.node, 2}), depth + 1, -1); ob_putc(')'); pp_top--; break;
     }
@@ -661,16 +733,6 @@ static long rb_run_io(Net *n, void *st, long limit) {
   return rc;
 }
 
-/* An EMPTY, NAMED section: an artifact therefore loads this driver by name at run time, which is what
-   lets a `.line` file -- whose prelude forms are never re-evaluated -- still print.  Nothing is
-   carried, so the container still learns a name and not a meaning. */
-static int rb_carry_save(Net *n, void *st, void **blob, size_t *len) {
-  (void)n; (void)st;
-  *blob = NULL;
-  *len = 0;
-  return 1;
-}
-
 LinDriver lin_readback_driver;
 static void __attribute__((constructor)) readback_load(void) {
   static int registered = 0;
@@ -686,5 +748,4 @@ LinDriver lin_readback_driver = {
   .caps = LIN_CAP_PROVIDER, .priority = 0,
   .wants = LIN_WANT_READBACK,
   .read_value = rb_read_value, .print = rb_print, .run_io = rb_run_io,
-  .carry_save = rb_carry_save,
 };

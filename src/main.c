@@ -75,26 +75,48 @@ int lin_precompile_depth = 0;
    (lin_folds)/(lin_folded) would otherwise freeze the build-time answer into the
    .line file and the program could never observe anything else. */
 int lin_build_depth = 0;
+/* Set by whoever DISPATCHES an FFI call while `lin_build_depth` or `lin_precompile_depth` is raised,
+   for a symbol whose value is not a function of its operands (the environment, the file system, the
+   process): the readback driver declines such a call -- a build may not make the program's
+   observations -- and says so here.  `aot_run` reads it and, having been told, ships the program
+   UNREDUCED rather than partially evaluated.  The two halves are the same rule: a build either
+   evaluates what the net determines or it bakes nothing. */
+int lin_build_observed = 0;
 
 /* The one pipeline: a term becomes a reduced net the same way in every mode — expand defines,
-   (AOT only) optimize, compile, run the core to the mode's limit.  `depth` raises the single
-   build-time marker the reduction happens under.  Returns steps run, or -1 if it did not compile. */
+   (AOT only) optimize, compile, (AOT only) offer the drivers their passes, run the core to the
+   mode's limit.  `depth` raises the single build-time marker the reduction happens under.
+   Returns steps run, or -1 if it did not compile. */
 enum { DEPTH_RUN = 0, DEPTH_PRECOMPILE = 1, DEPTH_BUILD = 2 };
+static const Scheme *build_sch;      /* the program's inferred type: what the AOT pass point is handed */
 static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, int *compiled, char *err, int errsz) {
   Term *ex = expand_defs(t);
   Term *opt = optimize ? egraph_optimize(ex) : ex;
   int ok = compile(opt, net, err, errsz);
-  if (opt != ex) term_free(opt);
-  if (!ok) { term_free(ex); return -1; }
+  if (!ok) { if (opt != ex) term_free(opt); term_free(ex); return -1; }
   if (compiled) *compiled = net->nn;
   if (depth == DEPTH_PRECOMPILE) lin_precompile_depth++;
   else if (depth == DEPTH_BUILD) lin_build_depth++;
+  /* THE PASS POINT, and the only place the core mentions it: AOT is one very large wave with full
+     information and no step limit, so a driver decides here, ONCE, what the runtime would otherwise
+     re-derive every wave.  Offered under the build marker (a pass cannot bake an observation the
+     program would make at run time) and before compaction, so what it rewrites is what ships.
+     NOT to a build that ships the program UNREDUCED (`limit == 0`, see aot_run): a pass's subject is
+     the value a build EVALUATED -- it forces the cone and encodes the result -- and there is none
+     here, by the caller's own decision.  Offered anyway it encodes what it CAN force, and what it can
+     force is a stuck thunk: measured, `test/runtime_ffi.lin`'s declined `getenv` shipped ROOT inside
+     `arith`'s num box, whose payload hangs off an application's ARGUMENT -- which needed order never
+     demands -- so the artifact printed the payload as structure for ever. */
+  if (depth == DEPTH_BUILD && limit > 0) lin_driver_aot(net, opt, build_sch);
   long steps = net_reduce(net, limit);
   /* Needed order leaves a term's un-demanded thunks alone, which is exactly right at RUN time and
-     useless to a build: what a build wants to bake is the VALUE, so it observes the root itself. */
-  if (depth != DEPTH_RUN) net_force(net, (Port){0, 0});
+     useless to a build: what a build wants to bake is the VALUE, so it observes the root itself.
+     NOT when the caller ships a program UNREDUCED (`limit == 0`, see aot_run): forcing is how a build
+     finds its value, and a caller that wants no bake must not have one happen behind its back. */
+  if (depth != DEPTH_RUN && limit > 0) net_force(net, (Port){0, 0});
   if (depth == DEPTH_PRECOMPILE) lin_precompile_depth--;
   else if (depth == DEPTH_BUILD) lin_build_depth--;
+  if (opt != ex) term_free(opt);
   term_free(ex);
   return steps;
 }
@@ -352,14 +374,12 @@ static int resolve_path(const char *rel, char *out, size_t out_sz) {
   char cand[PATH_MAX];
   const char *std_dir = getenv("LIN_STD_DIR") ?: "std";
   const char *sub = !strncmp(rel, "std/", 4) ? rel + 4 : rel;
-  /* A `std/`-prefixed load names a standard-library module.  When LIN_STD_DIR is
-     explicitly configured (e.g. a packaged /nix/store std), that configured dir
-     MUST win over a coincidental ./std sitting in the process CWD — otherwise a
-     checkout run overrides the configured std with a local one, mixing two stds
-     and stranding private defs (e.g. num._padd unbound when a second num.lin is
-     loaded on top of the configured one).  So resolve `std/...` against
-     LIN_STD_DIR first; a plain (non-`std/`) relative load still falls through to
-     the CWD / loading-file-relative lookup below. */
+  /* A `std/`-prefixed load names a standard-library module.  A configured LIN_STD_DIR (a packaged
+     /nix/store std) MUST win over a coincidental ./std in the process CWD — otherwise a checkout run
+     overrides the configured std with a local one, mixing two stds and stranding private defs (e.g.
+     num._padd unbound when a second num.lin is loaded on top of the configured one).  So resolve
+     `std/...` against LIN_STD_DIR first; a plain relative load still falls through to the CWD /
+     loading-file-relative lookup below. */
   if (rel[0] != '/' && !strncmp(rel, "std/", 4)) {
     snprintf(cand, sizeof cand, "%s/%s", std_dir, sub);
     if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
@@ -388,6 +408,13 @@ static void load_std(void) {
 
 static int building = 0;
 static Term *build_term = NULL;
+/* The READER's last delivery while building was an error, i.e. the program's final form never
+   parsed.  A build compiles the LAST expression of the file (`build_term`), so building a truncated
+   prefix would ship an artifact for a program the interpreter refuses -- measured: test/types.lin
+   ends in an unterminated `(1`, the interpreter reports `parse error: missing ')'` as that form's
+   outcome, and the artifact printed the 500 of the form BEFORE it.  A read error that a LATER form
+   supersedes is harmless (the interpreter continues form by form, and so does the build). */
+static int build_read_err = 0;
 
 static int run_line_file(const char *path) {
   Net net; if (!net_load_line(&net, path)) return 0;
@@ -399,7 +426,8 @@ static int run_line_file(const char *path) {
 static void export_namespace(const char *name);   /* (export <ns>) re-export */
 static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
-  if (perr) { printf("error: %s\n", perr); return; }
+  if (perr) { build_read_err = 1; printf("error: %s\n", perr); return; }
+  build_read_err = 0;
   if (t->type == TLOAD) { if (!load_file(t->name)) printf("error: cannot load '%s'\n", t->name); }
   else if (t->type == TNS) set_namespace(t->name);
   else if (t->type == TOPEN) open_namespace(t->name);
@@ -443,21 +471,16 @@ static int load_file(const char *path) {
   if (!resolve_path(path, full, sizeof full)) return 0;
   if (is_already_loaded(full)) return 1;
   mark_loaded(full);
-
   char *src = read_file(full);
   if (!src) return 0;
-
   char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", full);
   char *last_slash = strrchr(dir, '/');
   if (last_slash) *last_slash = '\0'; else snprintf(dir, sizeof dir, ".");
-
   if (dir_sp >= dir_cap) dir_stack = realloc(dir_stack, (size_t)(dir_cap = dir_cap ? dir_cap * 2 : 16) * sizeof *dir_stack);
   snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
-
   char prev_ns[NAME]; snprintf(prev_ns, sizeof prev_ns, "%s", curr_ns); int prev_n_open = n_open_ns;
   parse_forms(src, form_cb, NULL);
   snprintf(curr_ns, sizeof curr_ns, "%s", prev_ns); n_open_ns = prev_n_open;
-
   if (dir_sp > 0) dir_sp--;
   free(src);
   return 1;
@@ -516,8 +539,22 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  Needed order
      stops at the first effect or non-pure FFI closure, so the artifact keeps only what genuinely
      needs the runtime -- and a Y-knot is left as the cycle it is instead of being unrolled to a
-     bound the build had to guess. */
+     bound the build had to guess.
+     A program that OBSERVES (an FFI call whose value is not a function of its operands -- `getenv`,
+     a driver selection, a file) is the exception: the observation belongs to the run time, so the
+     build ships the program UNREDUCED and lets the artifact compute it there.  Measured without this:
+     `lin build` of test/runtime_ffi.lin executed the program's own `getenv` and froze the answer into
+     the artifact -- built with N=2 the artifact printed 3 for every N, and built without N (getenv ->
+     NULL -> parse_float -> 0) it printed 1 where the interpreter prints 7.  The readback driver
+     declines such a call and reports it here (lin_build_observed); the second pass runs with
+     `limit = 0`, i.e. compile and NOTHING else -- no reduction and no driver pass, which is exactly
+     the pipeline a plain compile takes -- and the container re-seeds from structure when it loads. */
+  lin_build_observed = 0;
   long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
+  if (baked >= 0 && lin_build_observed) {
+    net_free(&net); net_init(&net, 1 << 16);
+    baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, 0, &st->compiled, err, sizeof err);
+  }
   if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
   st->aot_steps = (int)baked; st->residual = net.nn;
   net_gc(&net);
@@ -579,12 +616,17 @@ static int aot_search(Term *build_term, const char *out_f) {
 }
 
 static int do_build(const char *in_f, const char *out_f) {
-  building = 1; build_term = NULL;
+  building = 1; build_term = NULL; build_read_err = 0;
   if (!load_file(in_f)) { fprintf(stderr, "error: cannot read '%s'\n", in_f); return 1; }
+  /* The interpreter REFUSES a final form it cannot read (it reports the reader's error as that
+     form's outcome), so a build must refuse it too: the expression it would compile is an earlier
+     form, i.e. a different program.  Agreeing on refusing is the only honest agreement here. */
+  if (build_read_err) { fprintf(stderr, "error: cannot build '%s': its last form did not parse\n", in_f); return 1; }
   if (!build_term && def_find("main")) build_term = term_new(TVAR, "main", NULL, NULL);
   if (!build_term) { fprintf(stderr, "error: no expression to build in '%s'\n", in_f); return 1; }
   char err[512]; Scheme sch;
   if (!type_check(build_term, &sch, err, sizeof err)) { fprintf(stderr, "error: %s\n", err); return 1; }
+  build_sch = &sch;                    /* the AOT pass point is handed the types the compiler inferred */
   /* The artifact is the deliverable, so the build's decisions are the ones the measurements choose. */
   int rc = aot_search(build_term, out_f);
   term_free(build_term);
@@ -624,8 +666,7 @@ static int paren_balance(const char *s, int *in_str) {
   for (int i = 0; s[i]; i++) {
     if (*in_str) { if (s[i] == '\\' && s[i + 1]) i++; else if (s[i] == '"') *in_str = 0; continue; }
     if (s[i] == ';') break;
-    if (s[i] == '"') { *in_str = 1; continue; }
-    if (s[i] == '(') bal++; else if (s[i] == ')') bal--;
+    if (s[i] == '"') { *in_str = 1; continue; } if (s[i] == '(') bal++; else if (s[i] == ')') bal--;
   }
   return bal;
 }
@@ -728,7 +769,6 @@ int main(int argc, char **argv) {
   }
 
   if (argc == 2 && run_line_file(argv[1])) return 0;
-
   load_std();
   int ran_eval = 0;
   for (int i = 1; i < argc; i++) {

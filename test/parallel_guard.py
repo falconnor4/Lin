@@ -23,11 +23,11 @@ the run TERMINATING, rather than hanging or quietly reporting a value it never c
 
 The last two probes are about a net with NO ANNOTATIONS AT ALL.  A net used to carry carrier names
 ("_sz", "_cl") on its nodes and everything that read a value consulted them; it is now tags, wiring
-and gauges alone -- alpha-equivalent nets are ONE net -- so the core grew a general partitioner
-(`lin_partition`, src/net.c) and the shared matcher grew structural recognisers whose EXPECTED
-ENCODING is an argument, never something sniffed off the node (std/runtime/pattern.h).  Probe 11
-builds a net by hand -- no name on any node -- recognises shapes in it, cuts a region around its
-redex, claims it, rewrites it and reads the result back structurally.  Probe 12 takes a COMPILER's
+and gauges alone -- alpha-equivalent nets are ONE net -- so the shared matcher grew structural
+recognisers whose EXPECTED ENCODING is an argument, never something sniffed off the node
+(std/runtime/pattern.h), and the claim protocol lets a driver state the region it wants.  Probe 11
+builds a net by hand -- no name on any node -- recognises shapes in it, proposes a region around its
+redex, gets it certified, rewrites it and reads the result back structurally.  Probe 12 takes a COMPILER's
 net and shows a structural driver recognising and folding it, with the compiler's TYPE supplying the
 result's meaning: the answer is the same value it was (4), read structurally AND PRINTED, because
 readback is handed the domain the type checker computed.  That inversion is the point of the
@@ -538,16 +538,16 @@ __attribute__((constructor)) static void pk_init(void) { atexit(pk_report); }
 # --- probe 11: a RAW net -- no carrier name anywhere, recognised by STRUCTURE ----------------
 # Part 2's recognisers exist because the runtime's encodings must be readable from structure: a raw
 # net has no "_sz"/"_cl" label to consult.  This probe builds a small net with nameless nodes
-# -- every node nameless -- and then (a) recognises shapes in it with the recognisers, (b) cuts a
-# region around one of its redexes with `lin_partition` and claims it with the claim protocol, and
-# (c) rewrites it, reading the result back STRUCTURALLY.
+# -- every node nameless -- and then (a) recognises shapes in it with the recognisers, (b) proposes
+# and claims a region around one of its redexes (pairs it states itself, exits it declares itself,
+# certified by `lin_claim_check`), and (c) rewrites it, reading the result back STRUCTURALLY.
 #
 # The two nets the recognisers cannot be allowed to confuse are built here too: the SAME wire pattern
 # (LAM a with wire(a,2)={b,0}, LAM b with wire(b,2)={a,1}) is read once as a Scott numeral ZERO and
 # once as the Church boolean TRUE, and the whole point is that only the caller's expectation decides
 # -- so the marker reports both readings of one node, and reports that the numeral reader REFUSES the
 # select-second shape.  Nothing in the region may carry a name (`named=0`), which is what makes the
-# claim evidence that the cut really was made from wiring alone.
+# claim evidence that the region really was found from wiring alone.
 DRIVER_RAWNET = PROLOGUE_PAT + r'''
 LinDriver lin_rawnet_driver;
 
@@ -602,7 +602,7 @@ static Port raw_ffi(Net *n) {                             /* the `_ffi` header, 
 typedef struct {
   Port num7, sel_first, sel_second, str, ffi, lam, app, sink, ru, rw, rz;
   int done, pure, det, named, cells, ffi_ok, str_n, region_nodes, region_exits, region_pairs, ok;
-  int reuse, reuse_pairs, reuse_exits, offered, offered_ok;
+  int reuse, reuse_pairs, reuse_exits;
   long matches, num, as_num, as_bool, as_false, wrong, claims, acts, after;
 } Raw;
 static Raw rn_rep;                              /* the marker, copied out of the per-net state */
@@ -654,14 +654,10 @@ static int rn_match(Net *n, void *st, LinView *view, LinClaim *out) {
   LinMatch m;
   int l;
   long codes[8]; int nch = 0;
-  /* the CORE's own offer: the match phase hands out candidate REGIONS, not only redex pairs, and
-     every one of them must already be a region the core's validator accepts */
-  s->offered = view->nregions;
-  for (int i = 0; i < view->nregions; i++) {
-    LinClaim cc = view->regions[i];
-    char why[160];
-    if (lin_claim_check(n, &cc, why, sizeof why)) s->offered_ok++;
-  }
+  /* What the core offers is this wave's REDEXES (`view->pairs`).  The REGION is the driver's own to
+     propose: the view carries no candidate regions, so what this probe pins is that a driver that
+     states its own pairs and exits gets them certified by the core's validator. */
+  if (!view->pairs || view->npairs < 1) { rn_snap(s); return 0; }
   /* every recogniser, on a net whose nodes carry NO name at all */
   if (lin_pat_enc_num_nf(n, s->num7, LIN_ENC_NUM, &s->num)) s->matches++;
   if (lin_pat_enc_layer_of(n, s->num7, LIN_ENC_NUM, &l, &m) && l == LIN_L_INDUCTIVE) s->matches++;
@@ -678,24 +674,38 @@ static int rn_match(Net *n, void *st, LinView *view, LinClaim *out) {
     if (nch == 2 && codes[0] == 4 && codes[1] == 5) s->matches++;
   }
   if (lin_pat_match(n, s->ffi, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m)) { s->ffi_ok++; s->matches++; }
-  /* the second cut: certified, but not acted on (only the region above is returned to the core) */
+  /* The driver proposes its OWN region: the redex it wants plus the exits it declares.  This one
+     (`ru`/`rw`/`rz`) is reached from the redex through AUXILIARY ports alone, so its closure really
+     is interaction-closed and it declares no exits -- `lin_claim_check` walks the closure, finds
+     `ru` through `rw`'s auxiliary port, and certifies the region as it stands.  Nothing is acted on:
+     this is the validator's contract on a region a driver chose. */
   {
     LinClaim c;
     char why[160];
-    s->reuse = lin_partition(n, (Port){s->ru.node, 0}, &c,
-                             2 * LIN_MAX_CLAIM_PAIRS + LIN_MAX_CLAIM_EXITS, LIN_CLAIM_NODES, why, sizeof why) &&
-               lin_claim_check(n, &c, why, sizeof why);
+    memset(&c, 0, sizeof c);
+    c.flags = LIN_CLAIM_REGION;
+    c.npairs = 1; c.pairs[0] = (Port){s->rw.node, 0}; c.pairs[1] = (Port){s->rz.node, 0};
+    s->reuse = lin_claim_check(n, &c, why, sizeof why);
     s->reuse_pairs = c.npairs; s->reuse_exits = c.nexits;
   }
-  /* the cut: twice, to show it is deterministic, and with the net untouched across both */
+  /* The region under test, again the driver's own statement: the redex plus the three auxiliary
+     ports that leave it.  Validating it twice must give the same region (the walk is deterministic)
+     and must not touch the net (nn and steps unchanged): a validator that forced or allocated would
+     move the structure out from under the wave that is holding it. */
   {
     long nn0 = n->nn, st0 = n->steps;
     LinClaim c1, c2;
     char why[160];
-    int ok1 = lin_partition(n, (Port){s->app.node, 0}, &c1,
-                            2 * LIN_MAX_CLAIM_PAIRS + LIN_MAX_CLAIM_EXITS, LIN_CLAIM_NODES, why, sizeof why);
-    int ok2 = lin_partition(n, (Port){s->app.node, 0}, &c2,
-                            2 * LIN_MAX_CLAIM_PAIRS + LIN_MAX_CLAIM_EXITS, LIN_CLAIM_NODES, why, sizeof why);
+    memset(&c1, 0, sizeof c1);
+    c1.flags = LIN_CLAIM_REGION;
+    c1.npairs = 1; c1.pairs[0] = (Port){s->lam.node, 0}; c1.pairs[1] = (Port){s->app.node, 0};
+    c1.exits[0] = (Port){s->lam.node, 2};       /* the body slot: leads out to the numeral */
+    c1.exits[1] = (Port){s->app.node, 1};       /* the continuation: the sink */
+    c1.exits[2] = (Port){s->app.node, 2};       /* the argument */
+    c1.nexits = 3;
+    c2 = c1;
+    int ok1 = lin_claim_check(n, &c1, why, sizeof why);
+    int ok2 = lin_claim_check(n, &c2, why, sizeof why);
     s->pure = (n->nn == nn0 && n->steps == st0);
     s->det = ok1 && ok2 && c1.npairs == c2.npairs && c1.nexits == c2.nexits && c1.nnodes == c2.nnodes &&
              !memcmp(c1.nodes, c2.nodes, sizeof(int) * (size_t)c1.nnodes) &&
@@ -703,7 +713,6 @@ static int rn_match(Net *n, void *st, LinView *view, LinClaim *out) {
     if (!ok1) { rn_snap(s); return 0; }
     s->region_nodes = c1.nnodes; s->region_exits = c1.nexits; s->region_pairs = c1.npairs;
     s->named = 0;                      /* a net carries no names at all: nothing to count */
-    if (!lin_claim_check(n, &c1, why, sizeof why)) { rn_snap(s); return 0; }
     s->claims++;
     s->done = 1;
     *out = c1;
@@ -726,13 +735,11 @@ static int rn_act(Net *n, void *st, LinClaim *c) {
 static void rn_report(void) {
   fprintf(stderr, "[rawnet] matches=%ld num=%ld as_num=%ld as_bool=%ld as_false=%ld wrong=%ld "
                   "cells=%d str_n=%d ffi=%d det=%d pure=%d named=%d pairs=%d nodes=%d exits=%d "
-                  "claims=%ld acts=%ld after=%ld ok=%d reuse=%d reuse_pairs=%d reuse_exits=%d "
-                  "offered=%d offered_ok=%d\n",
+                  "claims=%ld acts=%ld after=%ld ok=%d reuse=%d reuse_pairs=%d reuse_exits=%d\n",
           rn_rep.matches, rn_rep.num, rn_rep.as_num, rn_rep.as_bool, rn_rep.as_false, rn_rep.wrong,
           rn_rep.cells, rn_rep.str_n, rn_rep.ffi_ok, rn_rep.det, rn_rep.pure, rn_rep.named,
           rn_rep.region_pairs, rn_rep.region_nodes, rn_rep.region_exits, rn_rep.claims, rn_rep.acts,
-          rn_rep.after, rn_rep.ok, rn_rep.reuse, rn_rep.reuse_pairs, rn_rep.reuse_exits,
-          rn_rep.offered, rn_rep.offered_ok);
+          rn_rep.after, rn_rep.ok, rn_rep.reuse, rn_rep.reuse_pairs, rn_rep.reuse_exits);
 }
 LinDriver lin_rawnet_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
@@ -848,8 +855,16 @@ static int sp_match(Net *n, void *st, LinView *view, LinClaim *out) {
     sp_lists++;
     if (s->nops != 2) continue;
     if (!getenv("LIN_STRIP_FOLD")) continue;        /* recognised; the core reduces it itself */
-    if (!lin_partition(n, (Port){m.bind[1].node, 0}, &c, 2 * LIN_MAX_CLAIM_PAIRS + LIN_MAX_CLAIM_EXITS,
-                       LIN_CLAIM_NODES, why, sizeof why)) continue;
+    /* The region the driver proposes: the `_op` redex it matched, with the four auxiliary ports
+       that leave it (the marker binder, the body, the continuation and the operand spine).  The
+       core validates it; there is no candidate cut to receive it from. */
+    memset(&c, 0, sizeof c);
+    c.flags = LIN_CLAIM_REGION;
+    c.npairs = 1;
+    c.pairs[0] = (Port){m.bind[0].node, 0}; c.pairs[1] = (Port){m.bind[1].node, 0};
+    c.exits[0] = (Port){m.bind[0].node, 1}; c.exits[1] = (Port){m.bind[0].node, 2};
+    c.exits[2] = (Port){m.bind[1].node, 1}; c.exits[3] = (Port){m.bind[1].node, 2};
+    c.nexits = 4;
     if (!lin_claim_check(n, &c, why, sizeof why)) continue;
     sp_lam = m.bind[0].node; sp_app = m.bind[1].node;
     sp_opcode = s->opcode;                          /* WHICH operator, stated by the net itself */
@@ -1115,8 +1130,9 @@ def main():
 
     # -- 11. a RAW net recognised, claimed and rewritten by structure alone ---------------------
     # Every node is built with an empty carrier name, so nothing the recognisers do can come from
-    # `name[]`; the region is cut by `lin_partition` from wiring alone, certified by the claim
-    # protocol, and the result of the rewrite is read back with the same structural readers.
+    # `name[]`; the region is the driver's own statement about wiring (one redex plus its auxiliary
+    # exits), certified by the claim protocol, and the result of the rewrite is read back with the
+    # same structural readers.
     why = build("rawnet", DRIVER_RAWNET)
     if why:
         print("parallel_guard: SKIPPED (rawnet probe did not compile: %s)" % why)
@@ -1126,14 +1142,13 @@ def main():
                   r"as_false=(-?\d+) wrong=(\d+) cells=(\d+) str_n=(\d+) ffi=(\d+) det=(\d+) "
                   r"pure=(\d+) named=(\d+) pairs=(\d+) nodes=(\d+) exits=(\d+) claims=(\d+) "
                   r"acts=(\d+) after=(-?\d+) ok=(\d+) reuse=(\d+) reuse_pairs=(\d+) "
-                  r"reuse_exits=(\d+) offered=(\d+) offered_ok=(\d+)", serr)
+                  r"reuse_exits=(\d+)", serr)
     if not m:
         bad.append("rawnet never reported (stderr=%r)" % serr.strip()[-200:])
     else:
         (ran_matches, ran_num, ran_asnum, ran_asbool, ran_asfalse, ran_wrong, ran_cells, ran_strn,
          ran_ffi, ran_det, ran_pure, ran_named, ran_pairs, ran_nodes, ran_exits, ran_claims,
-         ran_acts, ran_after, ran_ok, ran_reuse, ran_rpairs, ran_rexits, ran_offered,
-         ran_offok) = (int(x) for x in m.groups())
+         ran_acts, ran_after, ran_ok, ran_reuse, ran_rpairs, ran_rexits) = (int(x) for x in m.groups())
         if ran_matches < 6 or ran_num != 7:
             bad.append("the structural recognisers did not read the RAW numeral 7 (matches=%d num=%d, "
                        "stderr=%r)" % (ran_matches, ran_num, serr.strip()[-160:]))
@@ -1149,28 +1164,22 @@ def main():
             bad.append("the cons cell / string cell / `_ffi` header were not recognised from "
                        "structure alone (cells=%d str_n=%d ffi=%d)" % (ran_cells, ran_strn, ran_ffi))
         if not ran_det or not ran_pure:
-            bad.append("lin_partition must be deterministic and must not mutate the net "
+            bad.append("lin_claim_check must be deterministic and must not mutate the net "
                        "(det=%d pure=%d)" % (ran_det, ran_pure))
         if ran_named:
             bad.append("the region contains %d NAMED nodes: this probe's net has no names, so the "
                        "cut did not come from wiring alone" % ran_named)
         if not (ran_pairs == 1 and ran_nodes == 2 and ran_exits == 3 and ran_claims == 1):
-            bad.append("the partitioner's candidate was not the expected region (pairs=%d nodes=%d "
-                       "exits=%d claims=%d): it must find the redex, close at auxiliary ports only, "
-                       "and pass lin_claim_check" % (ran_pairs, ran_nodes, ran_exits, ran_claims))
+            bad.append("the driver's own region was not certified as stated (pairs=%d nodes=%d "
+                       "exits=%d claims=%d): one redex plus its three auxiliary exits must certify "
+                       "to that region through lin_claim_check" % (ran_pairs, ran_nodes, ran_exits, ran_claims))
         if ran_acts != 1 or ran_after != 7 or not ran_ok:
             bad.append("the rewrite of the raw region did not produce the right result "
                        "(acts=%d after=%d ok=%d)" % (ran_acts, ran_after, ran_ok))
-        if ran_offered < 1 or ran_offok != ran_offered:
-            bad.append("the match phase did not offer the driver candidate REGIONS the core's own "
-                       "validator accepts (offered=%d accepted=%d): LinView.regions is the wiring "
-                       "that lets a driver classify a region instead of a pair"
-                       % (ran_offered, ran_offok))
         if not ran_reuse or ran_rpairs != 1 or ran_rexits != 0:
-            bad.append("the cut did not stay handable to lin_claim_check when a later growth "
-                       "invalidated an exit recorded earlier (reuse=%d pairs=%d exits=%d: the region "
-                       "must be certified, with the stale exit gone rather than pointing inside)"
-                       % (ran_reuse, ran_rpairs, ran_rexits))
+            bad.append("a region a driver declared CLOSED (no exits) was not certified "
+                       "(reuse=%d pairs=%d exits=%d): the validator must walk the closure through the "
+                       "auxiliary ports and accept a region nothing leaves" % (ran_reuse, ran_rpairs, ran_rexits))
 
     # -- 12. a name-stripped compiler net --------------------------------------------------------
     # The same structure readers, over a net the compiler built and every `name[]` entry cleared.
@@ -1255,8 +1264,8 @@ def main():
           "wave and is acted on later without losing the work; a pattern match drives the claim "
           "protocol with the exits derived from what it matched; matching is pure; P_BIND/P_REF "
           "tells one shared node from two equal ones; P_CYCLE matches a knot and terminates; a net "
-          "built by hand, with no name on any node, is recognised by structure, cut into a region "
-          "by lin_partition, claimed and rewritten, and the result read back structurally; a "
+          "built by hand, with no name on any node, is recognised by structure, has its own region "
+          "certified by the claim protocol, is rewritten, and the result is read back structurally; a "
           "COMPILER net carries no labels either -- the `_op` header, the operator INDEX inside its "
           "operand list and the operands themselves are all recognised structurally, the program's "
           "reduction answer is unchanged (4), and readback PRINTS it as `=> 4` from the domain the "

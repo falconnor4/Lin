@@ -460,6 +460,77 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
   return done;
 }
 
+/* ====================================================================== *
+ *  THE AOT PASS: this driver's build-time decision about its own domain
+ * ====================================================================== *
+ *  The compiler OFFERS the pass point (LinDriver.aot, src/main.c); this driver owns
+ *  what its pass does.  What it receives is the whole program with full information
+ *  and no step limit: the expanded term, the TYPES the compiler inferred for it, the
+ *  net it compiled to, and a term -> port map that lives only for the call.  What it
+ *  may emit is a rewrite -- of the term or of the net -- or its own opaque carry
+ *  section.  Nothing else, and nothing that outlives the build.
+ *
+ *  WHY THIS PASS, AND WHY IT IS AN ENCODING CHOICE
+ *  ----------------------------------------------
+ *  Measured on the corpus before it existed (Stage 1): `lin build` already bakes every
+ *  closed numeric cone -- all 30 suites come out of the build with runtime=1 reduce
+ *  step and 0 runtime folds -- so a pass whose payoff is FOLDING has nothing left to
+ *  buy, and the region hand-out machinery has no consumer at all.  What the AOT path
+ *  really loses is MEANING: a container carries no type, so an artifact is read with
+ *  no domain to state, and this driver's two domains are exactly the ones whose
+ *  encodings are shared with other domains:
+ *
+ *      `\b0.\b1.b0`   is the numeral ZERO, Church TRUE and the empty list at once
+ *      `\b0.\b1.b1`   is Church FALSE and the nil cell
+ *
+ *  so readback may decode only what the STRUCTURE determines, and 14 of the 30 suites
+ *  printed a lambda structure from the artifact where the interpreter printed the
+ *  value (`test/nqueens.lin`: `true` comes back `(\a (\b a))`).  The fix is the one
+ *  the brief names: this driver chooses an UNAMBIGUOUS ENCODING for the values its
+ *  domain OBSERVES -- the LIN_ENC_BOX precedent, one binder further out
+ *  (std/runtime/pattern.h, LIN_BOX_NUM / LIN_BOX_BOOL) -- at AOT time, where the
+ *  compiler's inferred type is still available to say which domain is meant.
+ *
+ *  The box IS the derivation: it is net structure, so readback recognises it with no
+ *  expectation and no table, and there is nothing keyed by node index for a recycled
+ *  slot to make stale.  A pass that cannot decide (no scheme, a result that is not
+ *  this driver's domain, a root the compiler does not confirm) declines and leaves the
+ *  program exactly as it was -- which is why the whole thing is optional and the
+ *  interpreter path never runs it. */
+static int arith_aot(Net *n, void *st, const Term *t, const Scheme *sch,
+                     Port (*node_of)(void *ctx, const Term *), void *ctx) {
+  (void)st;
+  Type *ty = sch ? sch->t : NULL;
+  while (ty && ty->kind == TLINK) ty = ty->a;
+  int dom = -1;
+  if (ty && ty->kind == TNOM && ty->name) {
+    if (!strcmp(ty->name, "num")) dom = LIN_BOX_NUM;
+    else if (!strcmp(ty->name, "bool")) dom = LIN_BOX_BOOL;
+  }
+  if (dom < 0) return 0;
+  /* THE CORRESPONDENCE IS CHECKED, NOT TRUSTED.  A pass rewrites the net the compiler built, so the
+     only port it may touch is the one the compiler says it built -- and it has to be the port ROOT is
+     wired to, or this is not the observed result and the pass has nothing to say about it. */
+  Port v = node_of(ctx, t);
+  Port root = net_wire(n, (Port){0, 0});
+  if (!IN_NET(n, v.node) || root.node != v.node || root.port != v.port) return 0;
+  /* SPECIALISE THE CONE AT BUILD TIME, and do it BEFORE the encoding is chosen.  A box at ROOT stops
+     the build's own root-forcing at a LAM -- needed order's walk follows ROOT's wire and no further --
+     so wrapping the value without this bakes an UNREDUCED thunk and moves the program's real work
+     into readback: measured on test/nqueens.lin, 7933 steps forced at PRINT time (27 ms against
+     0.3 ms) while the build's own metric reported "1 reduce step" and could not see it.  So the value
+     is evaluated HERE, while ROOT still names it: the same needed-order wave and the same root force
+     the build runs afterwards, on the port the box is about to move out of its way.  AOT is one very
+     large wave with full information and no step limit, and this is that wave; it runs under the build
+     marker, so nothing the program would observe at run time can be baked by it. */
+  net_reduce(n, n->steps + (1L << 22));
+  net_force(n, (Port){0, 0});
+  /* AND CHOOSE THE ENCODING.  `lin_pat_box_build` relinks the value into the box first, so ROOT's own
+     wire is the only thing left pointing at the old place, and the box takes it. */
+  net_link(n, (Port){0, 0}, lin_pat_box_build(n, net_wire(n, (Port){0, 0}), dom), 0);
+  return 1;
+}
+
 /* ---- registration ----
    Two roles in one plugin:
      - lin_arith_scalar is the shared SEMANTIC authority every strategy calls;
@@ -484,4 +555,5 @@ LinDriver lin_arith_driver = {
   .name = "arith", .description = "native scalar arithmetic table + `_op`/`_ffi` fold pre-emptor",
   .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_PREEMPT, .priority = 5,   /* before simd(10): claim folds first */
   .claim = arith_claim, .reduce = arith_reduce,
+  .wants = LIN_WANT_AOT, .aot = arith_aot,   /* the driver's own build-time pass, offered by the core */
 };

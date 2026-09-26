@@ -103,7 +103,20 @@ static Port *use_ports(CVar *e, Port bind) {
   return ts;
 }
 
-static Port ct(Term *t, Scope sc) {
+static Port ct(Term *t, Scope sc);        /* records: every position the compiler compiled itself */
+
+/* The AOT pass's term -> port correspondence: filled by the walk that BUILDS the net, kept until the
+   next compile, and compile-time only -- a driver gets it as a callback and never serialises it.  A
+   term spliced in as a precompiled value has no entry: a decline, not a guess. */
+static struct { const Term *t; Port p; } *aot_map; static int aot_n, aot_cap;
+
+Port lin_node_of(void *ctx, const Term *t) {
+  (void)ctx;
+  for (int i = aot_n; i-- > 0; ) if (aot_map[i].t == t) return aot_map[i].p;
+  return (Port){-1, 0};
+}
+
+static Port ct_in(Term *t, Scope sc) {
   switch (t->type) {
   case TFLOAT: return net_alloc_float(N, strtod(t->name, NULL));
   case TVAR: {
@@ -197,8 +210,16 @@ static Port ct(Term *t, Scope sc) {
   return (Port){-1, 0};
 }
 
+static Port ct(Term *t, Scope sc) {
+  Port p = ct_in(t, sc);
+  if (aot_n == aot_cap)
+    aot_map = realloc(aot_map, (size_t)(aot_cap = aot_cap ? aot_cap * 2 : 256) * sizeof *aot_map);
+  aot_map[aot_n].t = t; aot_map[aot_n++].p = p;
+  return p;
+}
+
 int compile(Term *t, Net *n, char *err, int errsz) {
-  N = n; csp = 0; cur_lvl = 0;
+  N = n; csp = 0; cur_lvl = 0; aot_n = 0;
   if (!cstack) { ccsp = 64; cstack = malloc((size_t)ccsp * sizeof(CVar)); }
   if (setjmp(CJ)) {
     snprintf(err, errsz, "%s", CMSG);
@@ -354,17 +375,14 @@ static int eg_has_var(EGraph *g, int c, const char *name) {
 /* Substitute `arg` for `name` in class `c`.  Beta is only sound if this is CAPTURE-AVOIDING: the
    argument lands under whatever binders the body has, so a binder whose name occurs free in the
    argument would capture those occurrences and silently change the meaning.  Measured on
-   `((\y (((\x (\y x)) y) 5)) 99)`: the correct answer is 99, but substituting under the inner `\y`
-   captured the argument's `y`, so the pass rewrote the term to `(\y y)`, extraction preferred that
-   form (cost 3 against 9), and `lin build` shipped an artifact printing 5 while the interpreter
-   printed 99 -- on the DEFAULT candidate, not just under LIN_AOT_SEARCH.
-
-   Alpha-renaming the binder also fixes the meaning, and was measured: it keeps the rewrite, but
-   Lin PRINTS binder names, so the invented name is observable -- the same program came out as
-   `(\y%0 y)` from the artifact where the interpreter prints `(\y y)`.  A pass that only ever
-   removes work should not be able to alter what a program prints, so a capture-risk rewrite is
-   DECLINED instead (`g->capture`), and extraction can then only return a term the compiler would
-   have produced anyway.  Every name in the graph survives verbatim. */
+   `((\y (((\x (\y x)) y) 5)) 99)`: the answer is 99, but substituting under the inner `\y` captured
+   the argument's `y`, the pass rewrote the term to `(\y y)`, extraction preferred it (cost 3 against
+   9), and the DEFAULT candidate shipped an artifact printing 5 where the interpreter printed 99.
+   Alpha-renaming the binder also fixes the meaning, and was measured: it keeps the rewrite, but Lin
+   PRINTS binder names, so the invented name is observable -- the same program came out `(\y%0 y)`.
+   A pass that only ever removes work must not alter what a program prints, so a capture-risk rewrite
+   is DECLINED (`g->capture`) and extraction can then only return a term the compiler would have
+   produced anyway: every name in the graph survives verbatim. */
 static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
   if (d > 1024) { g->capture = 1; return c; }
   c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];

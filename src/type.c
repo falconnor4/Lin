@@ -96,21 +96,16 @@ static void unify(Type *x, Type *y) {
   tfail("type mismatch");
 }
 
-/* Environment entries come in two kinds, and the distinction is what makes
-   generalization both order-independent and cheap:
-
-     - a DEFINITION scheme is closed and never mutated after registration, so the
-       set of type variables it contributes to the environment is fixed and is
-       maintained incrementally in a refcount table (`envrc`) instead of being
-       recomputed by walking every scheme on every `generalize` (that walk was
+/* Environment entries come in two kinds, and the distinction is what makes generalization both
+   order-independent and cheap:
+     - a DEFINITION scheme is closed and never mutated after registration, so the set of type
+       variables it contributes is fixed and is maintained incrementally in a refcount table
+       (`envrc`) rather than recomputed by walking every scheme on every `generalize` (that walk was
        160k entry scans / 11.9M node visits per std load -- 372 of its 421 ms);
-
-     - a BINDER entry (`\x.` and the self-recursive `f : a` slot) holds a fresh
-       variable that unification may LINK LATER, so its contribution cannot be
-       cached at push time: `(\x (x 5))` pushes `a`, then `unify(a, num -> c)`
-       makes `c` free in the environment through `x`.  Those are resolved when
-       `generalize` runs -- O(1) while the root is still a bare variable, and a
-       walk only in the rare case that it was linked. */
+     - a BINDER entry (`\x.` and the self-recursive `f : a` slot) holds a fresh variable unification
+       may LINK LATER, so its contribution cannot be cached at push time: `(\x (x 5))` pushes `a`,
+       then `unify(a, num -> c)` makes `c` free in the environment through `x`.  Those are resolved
+       when `generalize` runs -- O(1) while the root is a bare variable, a walk only if it was linked. */
 typedef struct { char name[NAME]; Scheme s; int isdef; } TEnv;
 static TEnv *env;
 static int envn, envcap;

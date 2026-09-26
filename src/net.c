@@ -205,15 +205,13 @@ Port net_alloc(Net *n, int tag, Scope sc) {
   int id = -1;
   /* Reuse a reclaimed slot.  NOT inside a wave: the parallel path reserves room by growing `nn` and
      every worker holds raw pointers into the arrays, so two of them must not race for one free slot.
-
-     THIS is why reclaiming a consumed pair does not yet save memory, and it is worth stating plainly
-     because the machinery is otherwise easy to mistake for a win: rules allocate inside the wave, so
-     the pop below is never taken there and `nn` grows regardless of how much was freed.  Measured
+     THIS is why reclaiming a consumed pair does not yet save memory: rules allocate inside the wave,
+     so the pop below is never taken there and `nn` grows regardless of how much was freed.  Measured
      with reaping on and off (steps identical, so the comparison is like for like): sudoku 14106 vs
      14178 slots, bench_loop 36565 vs 36577, nqueens 11510 vs 11854 -- 0.5%, and at most 3%.  The
      freeing is correct and cheap (best-of-5: 3.72 vs 3.70 ms) but dormant; making it pay needs the
-     wave to hand each worker a PRIVATE slice of the free list before the region opens and to merge
-     what is left over after it closes, so a worker can pop without racing for one slot. */
+     wave to hand each worker a PRIVATE slice of the free list while the region is open, so a worker
+     can pop without racing for a slot. */
   
   if (!in_parallel && n->free_head >= 0) {
     id = n->free_head;
@@ -276,13 +274,11 @@ static void ensure_tact(void) {
 }
 
 /* Cut the wire at `p`, at BOTH ends.  The calculus itself never needs this -- a rule always relinks
-   the ports it takes over -- but DISPOSING of a subgraph does: whatever is abandoned must be cut
-   loose, or a live node is left pointing into a node that no longer exists.  Cutting is also what
-   erases: the subgraph becomes unreachable, and so reclaimable.
-
-   This is the operation `pair_boundary` uses for a class whose other end was never wired (an unused
-   binder, whose argument goes nowhere), and the one a driver uses for the subgraph a fold replaces.
-   It is deliberately not a "free": it removes connections and nothing else. */
+   the ports it takes over -- but DISPOSING of a subgraph does: whatever is abandoned must be cut loose,
+   or a live node is left pointing into a node that no longer exists.  Cutting is also what erases: the
+   subgraph becomes unreachable, and so reclaimable.  This is what `pair_boundary` uses for a class
+   whose other end was never wired (an unused binder), and what a driver uses for the subgraph a fold
+   replaces.  It is deliberately not a "free": it removes connections and nothing else. */
 void lin_pin(Net *n) { n->pins++; }
 void lin_unpin(Net *n) { if (n->pins > 0) n->pins--; }
 
@@ -392,31 +388,28 @@ void net_sever(Net *n, Port p) {
 
 /* Reclamation has ONE safepoint, and it is the collector's: `reduce_depth == 1` (the outermost
    reduce, so no readback force is in progress) and `pins == 0` (no walk is holding a port).  Both
-   halves are load-bearing for the free list, and both were measured:
-     - without the depth test, a nested reduce entered from a driver's reducer publishes slots the
-       wave it is dispatched from still names;
-     - without the pins test, test/ffi.lin prints its closure unreduced, because the readback walk
-       forces a chain whose node is handed out underneath it and comes back as NONE.
-   A freed slot that nobody reuses is harmless; REUSE is what turns a stale index into a wrong node,
-   since redex_live rejects a dead slot but accepts the fresh node that replaced it. */
+   halves are load-bearing for the free list and both were measured: without the depth test a nested
+   reduce entered from a driver's reducer publishes slots the wave it is dispatched from still names,
+   and without the pins test test/ffi.lin prints its closure unreduced.  A freed slot nobody reuses is
+   harmless; REUSE is what turns a stale index into a wrong node, since redex_live rejects a dead slot
+   but accepts the fresh node that replaced it. */
 
 /* Retire the two nodes a rule consumed: the rule owns exactly this pair, so they are freed together.
-   Both are marked dead first, because their principals are wired to each other and the ownership
-   test below would otherwise find a live partner and decline.  Reaping is sound here because every
-   class pair_boundary sees is accounted for: a class needs s-1 edges to be connected and has at most
-   `i` internal wires plus 2 correspondence edges, while its outside ends number s-2i-u, so `ne >= 4`
+   Both are marked dead first, because their principals are wired to each other and the ownership test
+   below would otherwise find a live partner and decline.  Reaping is sound here because every class
+   pair_boundary sees is accounted for: a class needs s-1 edges to be connected and has at most `i`
+   internal wires plus 2 correspondence edges, while its outside ends number s-2i-u -- so `ne >= 4`
    would need more correspondence edges than beta or delta-delta have.  ne is therefore 0 (closed
    inside the pair), 1 (the unused-binder erasure the rule severs) or 2 (joined). */
 static void retire(Net *n, int a, int b) {
   n->dead[a] = 1; n->dead[b] = 1;      /* both ends of the pair go together, so neither owns the other */
   /* A NESTED reduce is entered from net_force, which READBACK calls while it holds ports of its own
-     (its cursor, its recursion stack, the result port it is about to inspect).  Reaping there is the
-     free-list twin of collecting at a non-safepoint: the slot is handed out again while a handle
-     still names it, so the forced chain comes back as NONE and readback stops recognising the value.
-     The same holds for the readback walk itself: net_print pins the whole walk, and the reduce it
-     enters by forcing is the OUTERMOST one (reduce_depth == 1), so the depth test alone does not see
-     it -- `pins` does.  Measured: with this guard removed, test/ffi.lin prints its closure unreduced,
-     the FFI readback having forced a chain whose node was handed out underneath it. */
+   (its cursor, its recursion stack, the result port it is about to inspect).  Reaping there is the
+   free-list twin of collecting at a non-safepoint: the slot is handed out again while a handle still
+   names it, so the forced chain comes back as NONE and readback stops recognising the value.  The
+   same holds for the readback walk itself: net_print pins the whole walk, and the reduce it enters by
+   forcing is the OUTERMOST one (reduce_depth == 1), so the depth test alone does not see it -- `pins`
+   does.  Measured: with this guard removed, test/ffi.lin prints its closure unreduced. */
   if (reduce_depth > 1 || n->pins || in_parallel || getenv("LIN_NORETIRE")) return;
   release_now(n, a); release_now(n, b);
 }
@@ -505,11 +498,11 @@ static void split2(Net *n, int t1, Scope s1a, Scope s1b,
 
 /* Hand the pair's four auxiliaries to the four copies a duplication rule just made.  Each copy takes
    the place of one auxiliary -- UNLESS two of them are shorted to EACH OTHER, i.e. their class is
-   closed inside the pair.  There the two copies must be joined to each other; wiring one onto a port
-   of a node the rule has already killed leaves a live node pointing at a discarded one, which is
-   exactly what readback reports as `_` (measured on a nested Y-knot: a DUP's aux2 wired to its
-   partner's aux2, and the copy for it landed on the dead node's port).
-   `t[k]` is what auxiliary k leads to; `cp[k]` is the copy that takes it over. */
+   closed inside the pair; there the two copies must be joined to each other, since wiring one onto a
+   port of a node the rule has already killed leaves a live node pointing at a discarded one, which is
+   what readback reports as `_` (measured on a nested Y-knot: a DUP's aux2 wired to its partner's aux2,
+   and the copy for it landed on the dead node's port).  `t[k]` is what auxiliary k leads to; `cp[k]`
+   is the copy that takes it over. */
 static void link_copies(Net *n, int n1, int n2, const Port *t, const int *cp) {
   int inside[4] = {0, 0, 0, 0};
   for (int k = 0; k < 4; k++) {
@@ -597,34 +590,24 @@ int net_interact(Net *n, Port p1, Port p2) {
    out ~2x LARGER than the un-evaluated one (474 KB vs 224 KB) despite being a value. */
 /* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING.
 
-   Reachability starts from all the anchors, not from ROOT alone: under needed order the program's
-   result is often nowhere near node 0 -- readback registers the port it is forcing as a demand root,
-   and a wave's queued pairs are live work whether or not anything demands them yet.  A ROOT-only
-   trace calls the running computation garbage (measured on test/sudoku.lin: 3 of 14426 live nodes
-   are reachable from ROOT alone), and that was one of the two defects in the compacting version.
-
-   The other was that it MOVED.  Renumbering invalidates every node index held across the reduction
-   by something outside the reducer, and it does so silently: the printer's memo arrays are keyed by
-   node, and readback and net_force hold ports across calls.  16 of the 52 output suites came back
-   with the right number of lines and the wrong values because of it.  So instead of compacting, the
-   unreachable nodes are put on a free list and reused by net_alloc.  Every index stays valid, which
-   is what makes an external handle -- a memo key, a port held by readback, a driver's reference --
-   safe to keep.
+   Reachability starts from ALL the anchors, not from ROOT alone: under needed order the result is
+   often nowhere near node 0 (readback registers the port it is forcing as a demand root, and a wave's
+   queued pairs are live work whether anything demands them yet).  A ROOT-only trace calls the running
+   computation garbage -- measured on test/sudoku.lin: 3 of 14426 live nodes are reachable from ROOT
+   alone -- and that was one of the compacting version's two defects.  The other was that it MOVED:
+   renumbering silently invalidates every node index something outside the reducer holds (the printer's
+   memo arrays are keyed by node; readback and net_force hold ports across calls), and 16 of the 52
+   suites then came back with the right lines and the wrong values.  So the unreachable nodes go on a
+   free list and are reused by net_alloc: every index stays valid, which keeps an external handle (a
+   memo key, a port held by readback, a driver's reference) safe to keep.
 
    WHY THIS IS SOUND FOR A NON-MOVING COLLECTOR, and was NOT for a moving one.  Wires are the only
-   pointers, and the mark follows wires out of every reachable node, so: if any reachable node points
-   at v, then v is reachable.  Contrapositive: an unreachable node is pointed at by NOTHING reachable.
-   Freeing it therefore cannot leave a live node pointing into free space, and a one-sided stale wire
-   (a "dangle", where a live node points at a node the reduction killed) is harmless here -- it just
-   makes its target reachable and unfreeable, which is the conservative direction.  Compaction, by
-   contrast, rewrote those wires to NONE and destroyed the connections they expressed.
-
-   SAFEPOINT.  Reclaiming only when reduce_depth == 1 AND nothing is pinned is what keeps "no external
-   handle is held" true by construction.  Depth covers the reducer's own nesting: a driver that forces
-   an operand during a wave is at depth 2, so its cursors are safe.  Pins cover readback: `net_print`
-   and `net_run_io` walk the net holding ports and call net_force at depth 1, where depth alone would
-   have allowed a collection underneath them -- measured, that was test/vector.lin truncating at 19
-   of 21 lines with the threshold forced down. */
+   pointers and the mark follows them out of every reachable node, so an unreachable node is pointed
+   at by NOTHING reachable: freeing it cannot leave a live node pointing into free space.  A stale
+   one-sided wire (a "dangle") is harmless here -- it just makes its target reachable and unfreeable,
+   the conservative direction -- where compaction rewrote those wires to NONE, destroying what they
+   expressed.  SAFEPOINT: reclaiming only when reduce_depth == 1 and nothing is pinned keeps "no
+   external handle is held" true by construction (see net_reduce_body for both measurements). */
 void net_gc(Net *n) {
   if (n->nn <= 1) return;
   unsigned char *reach = calloc((size_t)n->nn + 1, 1);
@@ -693,6 +676,7 @@ void lin_driver_add(LinDriver *d) {
   if ((d->wants & LIN_WANT_STATE) && (!DRV_HAS(d, state_new) || !d->state_new)) goto missing;
   if ((d->wants & LIN_WANT_RECYCLE) && (!DRV_HAS(d, node_recycled) || !d->node_recycled)) goto missing;
   if ((d->wants & LIN_WANT_CARRY) && (!DRV_HAS(d, carry_save) || !d->carry_save)) goto missing;
+  if ((d->wants & LIN_WANT_AOT) && (!DRV_HAS(d, aot) || !d->aot)) goto missing;
   if ((d->wants & LIN_WANT_VALUES) && (!DRV_HAS(d, val_box) || !d->val_box ||
                                        !DRV_HAS(d, val_unbox) || !d->val_unbox)) goto missing;
   if ((d->wants & LIN_WANT_READBACK) && (!DRV_HAS(d, read_value) || !d->read_value ||
@@ -818,67 +802,6 @@ int lin_claim_check(Net *n, LinClaim *c, char *why, int whysz) {
   return 1;
 }
 
-/* ---- the partitioner: cut a candidate region out of the RAW net --------------------------------
-   The claim protocol says what a region IS (redexes plus an auxiliary-only frontier); this says how
-   to FIND one, with no policy at all: the core cuts by wiring alone and a driver classifies.  NO
-   NO NAME IS READ ANYWHERE BELOW, which is what makes it work on a raw net -- tags, wiring and gauges
-   are the whole of what it consults
-   -- and why a recogniser must take the encoding it expects as an argument (std/runtime/pattern.h). */
-int lin_partition(Net *n, Port seed, LinClaim *out, int max_ports, int budget, char *why, int whysz) {
-  if (!n || !out) return 0;
-  #define PART_NO(msg) do { if (why && whysz > 0) snprintf(why, (size_t)whysz, "%s", (msg)); \
-                            memset(out, 0, sizeof *out); return 0; } while (0)
-  memset(out, 0, sizeof *out);
-  if (!NAT_IN(n, seed.node) || n->dead[seed.node]) PART_NO("seed is not a live node");
-  if (budget <= 0) PART_NO("no budget");
-  if (max_ports <= 0) PART_NO("no room for a region");
-  int cap = budget < LIN_CLAIM_NODES ? budget : LIN_CLAIM_NODES;
-  out->flags = LIN_CLAIM_REGION;
-  out->nodes[out->nnodes++] = seed.node;
-  /* `out->nodes` is the region AND its work queue: each entry is expanded once, in discovery order,
-     and its three ports in order -- so the same net and the same seed give the same cut. */
-  for (int qi = 0; qi < out->nnodes; qi++) {
-    int u = out->nodes[qi];
-    for (int p = 0; p < 3; p++) {
-      if (claim_is_exit(out, u, p)) continue;
-      Port w = WIRE(n, ((Port){u, p}));
-      if (!NAT_IN(n, w.node) || n->dead[w.node]) continue;   /* an unconnected port is not a frontier */
-      if (claim_in_set(out, w.node)) continue;               /* already inside the region */
-      if (p == 0) {                                          /* a PRINCIPAL boundary: grow, never cut */
-        if (out->nnodes >= cap || out->nnodes >= LIN_CLAIM_NODES) PART_NO("region exceeds the budget");
-        out->nodes[out->nnodes++] = w.node;
-        /* An exit recorded earlier may point at THIS node (a node with two users: one auxiliary, one
-           principal).  Growing it in makes that exit INTERNAL, which lin_claim_check refuses, so the
-           exit goes: the port then leads inside the region, which is what the closure says it does. */
-        for (int k = 0; k < out->nexits; ) {
-          if (WIRE(n, out->exits[k]).node == w.node) out->exits[k] = out->exits[--out->nexits];
-          else k++;
-        }
-        continue;
-      }
-      if (out->nexits >= LIN_MAX_CLAIM_EXITS) PART_NO("region has more exits than a claim can carry");
-      out->exits[out->nexits++] = (Port){u, p};              /* auxiliary: a legal cut */
-    }
-  }
-  /* The redexes inside: every mutually wired principal pair, which is what a redex IS. */
-  for (int i = 0; i < out->nnodes; i++) {
-    int u = out->nodes[i];
-    Port w = WIRE(n, ((Port){u, 0}));
-    if (w.port != 0 || !claim_in_set(out, w.node) || u > w.node) continue;
-    if (WIRE(n, w).node != u || WIRE(n, w).port != 0) continue;
-    if (out->npairs >= LIN_MAX_CLAIM_PAIRS) PART_NO("region has more redexes than a claim can carry");
-    out->pairs[2 * out->npairs] = (Port){u, 0};
-    out->pairs[2 * out->npairs + 1] = w;
-    out->npairs++;
-  }
-  /* A region with no redex in it is not a candidate: lin_claim_check would refuse it, and a driver
-     that wants the shape without the work must say so itself. */
-  if (!out->npairs) PART_NO("no redex inside the region");
-  if (2 * out->npairs + out->nexits > max_ports) PART_NO("region exceeds max_ports");
-  #undef PART_NO
-  return 1;
-}
-
 int lin_demanded(const Net *n, Port p) { return demanded((Net *)n, p); }
 
 /* Lazy: a driver may be registered after the net exists (the prelude loads plugins). */
@@ -923,16 +846,33 @@ static LinDriver *driver_by_name(const char *name) {
   return NULL;
 }
 
+/* Is this driver's PRESENCE part of what the net means?  A net is compiled and reduced under a set of
+   drivers, and one that supplies SEMANTICS -- a fold pre-emptor that gives an `_op`/`_ffi` closure its
+   value, the scalar table behind it, a value domain's storage -- is not an accelerator the artifact
+   can do without: with it gone the same net is a different program.  Measured: `test/runtime_ffi.lin`
+   (whose runtime `getenv` makes the build ship it UNREDUCED) never folded its `(add <closure> 1)` in
+   the artifact while the interpreter answered 7, because `arith` has no state, so no section named it
+   and the artifact ran with no fold pre-emptor.  These are the caps `lin_driver_clear` refuses to
+   drop, plus the scalar-table providers; a PURE STRATEGY (FIXED/COMMUTE only, e.g. gpu) is NOT
+   carried, because a container runs prelude-free and naming one would bake the host's choice in. */
+static int carries_presence(const LinDriver *d) {
+  return (d->caps & (LIN_CAP_PREEMPT | LIN_CAP_PROVIDER | LIN_CAP_NATIVE_NUM)) != 0;
+}
+
 void lin_driver_carry_write(Net *n, FILE *f) {
   struct { LinDriver *d; void *blob; size_t len; } sec[LIN_DRV_SLOTS];
   uint32_t count = 0;
   for (int i = 0; i < LIN_DRV_SLOTS; i++) {
     LinDriver *d = dslot[i];
+    if (!d) continue;
     /* Storage may be process-wide rather than per net (the float table must be), so a section
-       depends on the driver having something to carry, not on this net having state. */
-    if (!d || !DRV_HAS(d, carry_save) || !d->carry_save) continue;
+       depends on the driver having something to carry, not on this net having state.  Its NAME is
+       written either way: a section is the driver's PRESENCE as much as its payload, and the reader
+       needs nothing more than the name to dlopen whoever supplied it (net_load_line). */
     void *blob = NULL; size_t len = 0;
-    if (!d->carry_save(n, n->drv[i], &blob, &len)) continue;
+    int state = DRV_HAS(d, carry_save) && d->carry_save;
+    if (state && !d->carry_save(n, n->drv[i], &blob, &len)) { state = 0; blob = NULL; len = 0; }
+    if (!state && !carries_presence(d)) continue;   /* a pure strategy with nothing to carry: not ours */
     sec[count].d = d; sec[count].blob = blob; sec[count].len = len;
     count++;
   }
@@ -1004,6 +944,20 @@ LinDriver *lin_driver_wanting(uint64_t want) {
   return NULL;
 }
 
+/* The AOT pass point.  The core OFFERS and the driver OWNS: `drv[]` is in priority order, so the
+   passes run in it and each sees what the ones before it wrote -- the arbitration the runtime uses.
+   LIN_NO_PASS skips every pass, which is what makes each optional: a skipped pass leaves a VALID net,
+   and the interpreter path never runs one at all. */
+int lin_driver_aot(Net *n, const Term *t, const Scheme *sch) {
+  if (!n || !t || getenv("LIN_NO_PASS")) return 0;
+  int ran = 0;
+  for (int i = 0; i < ndrv; i++)
+    if (DRV_HAS(drv[i], aot) && drv[i]->aot && (drv[i]->wants & LIN_WANT_AOT)) {
+      drv[i]->aot(n, lin_driver_state(n, drv[i]), t, sch, lin_node_of, NULL); ran++;
+    }
+  return ran;
+}
+
 /* ---------------- needed order ----------------
    A redex is reduced only when the value the caller observes needs it.  `net_mark_demand` walks from
    the demand roots -- ROOT (the program's result) plus every port lin_demand/net_force registered --
@@ -1017,9 +971,9 @@ LinDriver *lin_driver_wanting(uint64_t want) {
      APP/DUP p. 0  -> same: a facing principal is a redex, otherwise stop
      LAM   port 2  -> stop: a lambda's body is a thunk until the lambda is applied
 
-   Every rule of the calculus is untouched; the filter only decides WHICH active pairs are in a wave.
-   A pair off the demand path stays queued in `act` and is picked up by a later wave, which is what
-   makes a cycle (a Y-knot) reduce when the recursive call is demanded instead of unrolling for ever. */
+   No rule of the calculus changes: the filter only decides WHICH active pairs are in a wave, and a
+   pair off the demand path stays queued in `act` for a later wave -- which is what makes a cycle (a
+   Y-knot) reduce when the recursive call is demanded instead of unrolling for ever. */
 static void net_mark_demand(Net *n) {
   unsigned int stamp = ++n->dem_stamp;
   if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; }
@@ -1221,27 +1175,20 @@ static long net_reduce_body(Net *n, long limit) {
      spin on the queued pairs. */
   Port *curr = NULL; int curr_cap = 0;
   Port *base_rx = NULL; int base_cap = 0;
-  /* When reclamation runs: live nodes above this, and no reusable slot left.  1M by default, so the
-     suite never reaches it -- which is why LIN_GC exists, to force the collector on and keep it
-     honest.  (It was dormant at 1M while the COLLECTOR was wrong: two independent defects, a
-     ROOT-only root set and a renumbering pass, both now replaced by the non-moving collector.)
-
-     KNOWN UNSOUND BELOW THE DEFAULT, for two INDEPENDENT reasons, measured by switching parts of
-     the reclamation block off (with the whole block skipped: 52/52 output suites; with it fully on:
-     33/52; with the renumbering skipped and only the reachability taken: 49/52):
-
-       1. IT MOVES.  Renumbering invalidates every node index that something outside the reducer is
-          holding across the reduction -- the printer's memo arrays are keyed by node, and readback
-          and net_force hold ports across calls.  16 of the 52 suites come back with the right number
-          of lines and the WRONG VALUES, which is that invalidation and nothing else.
-       2. IT IS STILL INCOMPLETE.  With the move skipped, modules.lin, numbers.lin and vector.lin
-          still truncate (21/31, 37/56, 19/21): some anchor is not in the seed set, so live work is
-          called garbage and the run stops early.
-
-     The conclusion is not "tune the threshold" but "replace this with reclamation that does NOT
-     move": mark and put the unreachable nodes on a free list, so every index stays valid, then close
-     the remaining anchor gap.  Fixing (1) is what makes (2) findable, because with indices stable a
-     wrongly reclaimed node is a missing value rather than silent corruption. */
+    /* When reclamation runs: live nodes above this, and no reusable slot left.  1M by default, so the
+     suite never reaches it -- hence LIN_GC, which forces the collector on.  (It was dormant at 1M
+     while the COLLECTOR was wrong: a ROOT-only root set and a renumbering pass, both now replaced.)
+     KNOWN UNSOUND BELOW THE DEFAULT, for two INDEPENDENT reasons, measured by switching parts of the
+     block off (whole block skipped: 52/52 output suites; fully on: 33/52; renumbering skipped and
+     only the reachability taken: 49/52):
+       1. IT MOVES: renumbering invalidates every index something outside the reducer holds, and 16 of
+          the 52 suites come back with the right lines and the wrong values (see net_gc above).
+       2. IT IS STILL INCOMPLETE.  With the move skipped, modules.lin, numbers.lin and vector.lin still
+          truncate (21/31, 37/56, 19/21): some anchor is not in the seed set, so live work is called
+          garbage and the run stops early.
+     The conclusion is not "tune the threshold" but "reclaim WITHOUT moving" -- a free list, so every
+     index stays valid -- and then close the anchor gap: fixing (1) is what makes (2) findable, since
+     with stable indices a wrongly reclaimed node is a missing value, not silent corruption. */
   long gcmark = getenv("LIN_GC") ? atol(getenv("LIN_GC")) : (1L << 20);
   Port *slices[16] = {0}; int scaps[16] = {0}, scnts[16] = {0};
   /* per-wave claim scratch: candidates offered, per-pair ownership, claims (one per driver) */
@@ -1299,20 +1246,12 @@ static long net_reduce_body(Net *n, long limit) {
         cand[cand_cnt++] = p1; cand[cand_cnt++] = p2;
       }
 
-      /* ONE CALL PER DRIVER, before any slice exists -- which is what lets a claim be exact: a
-         matcher may inspect and force what it must read, where a per-pair predicate could not
-         (the snapshot and every slice are built from the net it would be mutating).  It also keeps
-         dispatch from growing with the number of drivers.
-
-         The candidate REGIONS are cut here, once for every driver: bounded, auxiliary-closed cones
-         around the first redexes the wave offers, so a driver classifies a REGION and not only a
-         pair.  Bounded on purpose (the offer is free for each driver, so it must not cost the wave a
-         walk of the net), and cut from WIRING alone -- lin_partition never reads a name. */
-      LinClaim regs[LIN_VIEW_REGIONS]; int nregs = 0;
-      for (int i = 0; i < cand_cnt / 2 && nregs < LIN_VIEW_REGIONS; i++)
-        if (lin_partition(n, cand[2 * i], &regs[nregs],
-                          2 * LIN_MAX_CLAIM_PAIRS + LIN_MAX_CLAIM_EXITS, LIN_CLAIM_NODES, NULL, 0))
-          nregs++;
+      /* ONE CALL PER DRIVER, before any slice exists -- which is what lets a claim be exact: a matcher
+         may inspect and force what it must read, where a per-pair predicate could not (the snapshot
+         and every slice are built from the net it would be mutating).  It also keeps dispatch from
+         growing with the number of drivers.
+         What a driver gets is the wave's redexes; what it OWNS is the region it proposes itself (the
+         pairs plus the exits it declares), which the core then validates. */
       int steps_before = n->steps;
       for (int di = 0; di < ndrv; di++) {
         LinDriver *d = drv[di];
@@ -1322,8 +1261,6 @@ static long net_reduce_body(Net *n, long limit) {
         LinView view;
         view.pairs = cand;
         view.npairs = cand_cnt / 2;      /* pairs, not ports: `pairs` holds 2*npairs ports */
-        view.regions = nregs ? regs : NULL;
-        view.nregions = nregs;
         if (!d->match(n, n->drv[d->slot], &view, &c)) continue;
         if (!lin_claim_check(n, &c, why, sizeof why)) {
           static int warned;

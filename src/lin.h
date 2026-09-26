@@ -21,6 +21,9 @@ typedef struct Term {
   struct Term *l, *r;
   Type *annot;
 } Term;
+/* A type scheme, declared here because the driver ABI hands a pass the inferred types and that hook
+   is defined long before the type interface below. */
+typedef struct { int nq, q[256]; Type *t; } Scheme;
 
 /* ---------------- interaction net ---------------- */
 enum { LAM, APP, DUP, ERA, ROOT };
@@ -32,12 +35,12 @@ typedef struct { int node:30; unsigned int port:2; } Port;
 typedef uint32_t Scope;
 
 /* ---- claiming: a lease on STRUCTURE, not on values ----
-   A driver identifies structure it can optimize and asks the core to reserve it: a set of redexes
-   plus the region's EXITS, validated before the driver may touch it.  Nothing here knows what a
-   driver matches or why (tags, ports, wiring only), so a loop compiler, a fusion pass and a scalar
-   folder share one protocol.  Every exit must be at an AUXILIARY port: a redex is two mutually
-   wired principal ports, so such a boundary cannot be crossed by one, which is the whole safety
-   argument for rewriting a region in isolation. */
+   A driver identifies structure it can optimize and asks the core to reserve it: a set of redexes plus
+   the region's EXITS, validated before the driver may touch it.  Nothing here knows what a driver
+   matches or why (tags, ports, wiring only), so a loop compiler, a fusion pass and a scalar folder
+   share one protocol.  Every exit must be at an AUXILIARY port: a redex is two mutually wired
+   principal ports, so such a boundary cannot be crossed by one -- the whole safety argument for
+   rewriting a region in isolation. */
 #define LIN_MAX_CLAIM_PAIRS 32
 #define LIN_MAX_CLAIM_EXITS 16
 #define LIN_CLAIM_NODES     128     /* a bounded region: the core walks it per claim, so it is capped */
@@ -56,12 +59,10 @@ typedef struct {
 
 /* What a driver is offered in the match phase: this wave's unclaimed redexes.  A driver is
    consulted ONCE per wave, not once per pair, which keeps dispatch from growing with the number of
-   drivers.  `regions` is the OPTIONAL half: bounded candidate regions the core cut out of the RAW
-   net around the first few redexes (lin_partition), so a driver classifies a REGION and not only a
-   pair.  They are the core's this-wave scratch -- read them, never keep them -- and a driver that
-   ignores them sees exactly the view it saw before they existed. */
-#define LIN_VIEW_REGIONS 4
-typedef struct { Port *pairs; int npairs; LinClaim *regions; int nregions; } LinView;
+   drivers.  What it OWNS is the region it proposes ITSELF -- redexes plus the exits it declares --
+   and the core validates that claim before the driver may touch the structure.  The offer is
+   this-wave scratch and read-only: read it, never keep it. */
+typedef struct { Port *pairs; int npairs; } LinView;
 
 /* Per-net state slots, one per registered driver: where a driver keeps its own tables.  The
    core only allocates, releases and copies them; it never looks inside. */
@@ -147,22 +148,19 @@ typedef struct { int kind; long iv; char sv[4096]; } Val;
    A value DOMAIN (DT_*) is what a value MEANS; an ENCODING (LIN_ENC_*) is the net STRUCTURE it is
    written in, and the two are different questions: Scott zero (`\sz.\ss.sz`), Church TRUE and the
    empty list are ONE net, so nobody may recover a node's meaning from the node.  The EXPECTATION is
-   the reader's, and a reader given none (a raw net from anywhere) must decline rather than guess.
-   DT_FLOAT is where the distinction bites: its values are a BOXED INDEX (LIN_ENC_BOX) into a
-   provider's table, so the domain -- or the table's bounds -- is what says "2.5" rather than "2". */
+   the reader's, and one given none (a raw net from anywhere) must decline rather than guess.
+   DT_FLOAT is where this bites: its values are a BOXED INDEX (LIN_ENC_BOX) into a provider's table,
+   so the domain -- or the table's bounds -- is what says "2.5" rather than "2". */
 enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC_FFI,
        LIN_ENC_EFF, LIN_ENC_BOX };
 
 /* ---------------- driver ABI ---------------- */
 #define LIN_DRIVER_MAGIC 0x4C494E44u            /* 'LIND' */
-/* ABI 4 adds `net_size`.  The ABI number alone does not protect a plugin: a plugin reads the Net it
-   is handed DIRECTLY (n->tag, n->wire, n->dead), so adding a field to Net shifts every offset and
-   the plugin silently reads the wrong memory -- measured, a `fold` that simply stopped firing, with
-   a plugin that still passed every ABI check.  `net_size` makes that a loud rejection at load time
-   instead.
-   ABI 6 is the ENCODING change: a net carries no carrier names any more, so `read_value` and
-   `print` take the encoding (LIN_ENC_*) / the domain (DT_*) the caller expects -- a plugin built
-   against ABI 5 would be handed values whose type it cannot state, so the number moves. */
+/* ABI 4 adds `net_size`: a plugin reads the Net it is handed DIRECTLY (n->tag, n->wire, n->dead), so a
+   field added to Net shifts every offset and it silently reads the wrong memory -- measured, a `fold`
+   that simply stopped firing with the plugin still passing every ABI check.  ABI 6 is the ENCODING
+   change: a net carries no carrier names, so `read_value`/`print` take the encoding (LIN_ENC_*) /
+   the domain (DT_*) the caller expects, and the number moves. */
 #define LIN_DRIVER_ABI   6u
 #define LIN_CAP_NATIVE_NUM 0x01u                 /* satur `_ffi` arithmetic */
 #define LIN_CAP_FIXED      0x02u                 /* beta / annihilate / erase */
@@ -182,8 +180,9 @@ enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC
 #define LIN_WANT_MATCH    0x10u   /* match / act: claim by shape, once per wave */
 #define LIN_WANT_HELD     0x20u   /* revalidate / release_claim: claims across waves */
 #define LIN_WANT_READBACK 0x40u   /* read_value / print / run_io: observing a reduced net */
+#define LIN_WANT_AOT      0x80u   /* aot: a build-time pass this driver owns */
 #define LIN_WANT_ALL      (LIN_WANT_STATE | LIN_WANT_RECYCLE | LIN_WANT_CARRY | LIN_WANT_VALUES | \
-                           LIN_WANT_MATCH | LIN_WANT_HELD | LIN_WANT_READBACK)
+                           LIN_WANT_MATCH | LIN_WANT_HELD | LIN_WANT_READBACK | LIN_WANT_AOT)
 
 /* The interface is EXTENSIBLE BY SIZE (the point of this ABI): a plugin sets `size` to the struct
    as it was built, the core reads only fields that fit, so appending a hook is not a break.  The
@@ -236,25 +235,24 @@ struct LinDriver {
   int  (*read_value)(Net *n, void *st, Port p, int domain, Val *v); /* decode one value, as `domain` */
   int  (*print)(Net *n, void *st, int domain);             /* walk the net and write the result */
   long (*run_io)(Net *n, void *st, long limit);            /* run the net's effects */
+  /* ---- ABI 6, append-only: the AOT PASS POINT.  The compiler OFFERS it, the driver OWNS the pass:
+     called once per AOT build in priority order with the expanded term, the types the compiler
+     inferred for it, the net, and a term -> port map as a CALLBACK that is compile-time only -- never
+     serialised, never stored, so a pass cannot smuggle the compiler's knowledge of meaning past the
+     build.  It may emit a rewrite of the term or the net, or its own opaque section
+     (carry_save/carry_load), and nothing else.  A pass that declines leaves the net as it found it;
+     every pass is OPTIONAL (LIN_NO_PASS); and at runtime a section is a DERIVATION of the net
+     (node_recycled invalidates it), never the authority. */
+  int  (*aot)(Net *n, void *st, const Term *t, const Scheme *sch,
+              Port (*node_of)(void *ctx, const Term *t), void *ctx);
 };
 
 /* Validate a claim and fill in `nodes`: every exit auxiliary and on the frontier, every pair live,
-   the region bounded.  0 = refused, with the reason in `why`. */
+   the region bounded.  0 = refused, with the reason in `why`.  A driver PROPOSES its region (the
+   pairs it wants and the exits it declares) and this is the whole of the core's part: structure,
+   never meaning -- so the caller states its own boundary and the exit rule is what it must satisfy. */
 int lin_claim_check(Net *n, LinClaim *c, char *why, int whysz);
 
-/* Cut a candidate region out of the RAW net around `seed`: a bounded cone grown over wires from
-   `seed`, stopped at an AUXILIARY-only frontier, so the piece is interaction-closed and therefore
-   independently rewritable (the exit rule lin_claim_check enforces).  The walk never cuts at a
-   PRINCIPAL boundary port -- a redex is two mutually wired principals and would cross such a cut --
-   it GROWS there instead.  `out` comes back LinClaim-shaped -- the redexes found inside, the exits
-   on the frontier, LIN_CLAIM_REGION set -- so the caller hands it straight to lin_claim_check.
-   `budget` bounds the cone in nodes and `max_ports` the region's enumerated ports (2 per redex plus
-   1 per exit); exceeding either, an exit no claim could carry, or a region with no redex in it, is a
-   clean DECLINE (0, the reason in `why`, `out` left inert) and never a partial region.  Same net +
-   same seed gives the same cut, and the net is only read.
-   IT NEVER READS n->name: this is the mechanism that must work on a raw, unannotated net -- the core
-   cuts by wiring alone and a driver classifies by the encoding it expects (std/runtime/pattern.h). */
-int lin_partition(Net *n, Port seed, LinClaim *out, int max_ports, int budget, char *why, int whysz);
 /* Is this port's node on the demand path?  A matcher prefers demanded structure: firing undemanded
    work is what unrolls a Y-knot, so it defers instead (LIN_CLAIM_HELD). */
 int lin_demanded(const Net *n, Port p);
@@ -301,7 +299,6 @@ void term_free(Term *t); int term_refs(Term *t, const char *name);
 Term *term_fix(const char *name, Term *body);
 
 /* ---------------- types ---------------- */
-typedef struct { int nq, q[256]; Type *t; } Scheme;
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
@@ -313,6 +310,14 @@ Scheme scheme_all(Type *t);
 /* ---------------- compile & aot & .line ---------------- */
 int compile(Term *t, Net *n, char *err, int errsz);
 Term *egraph_optimize(Term *t);
+/* THE PASS POINT.  Offer every registered driver its AOT pass (LIN_WANT_AOT), in priority order, on
+   the compilation of `t`.  Every pass is OPTIONAL (LIN_NO_PASS skips them all): a skipped one must
+   leave a net that still runs correctly, and the interpreter path never runs one.  A build that ships
+   its program UNREDUCED makes no offer at all: a pass's subject is the value a build EVALUATED, and
+   such a build has none by the caller's own decision (src/main.c, the pass point). */
+int lin_driver_aot(Net *n, const Term *t, const Scheme *sch);
+/* The term -> port map the core hands a pass: {-1,0} for a term it did not compile itself. */
+Port lin_node_of(void *ctx, const Term *t);
 int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const char *path);
 void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
 
@@ -372,6 +377,11 @@ extern int lin_precompile_depth;
 /* !=0 while the AOT build is partially evaluating: a driver must not bake anything the
    program would observe at RUN time (e.g. a (lin_folds) probe) into the artifact */
 extern int lin_build_depth;
+/* Raised by whoever declines to dispatch an FFI call whose value is not a function of its operands
+   while a build marker is up (`lin_build_depth` / `lin_precompile_depth`): a build may not make the
+   program's observations.  The build then ships the program UNREDUCED instead of partially
+   evaluating it -- see aot_run.  Cleared before each build-time reduction. */
+extern int lin_build_observed;
 Port net_alloc_scott(Net *n, long k); Port net_alloc_bool(Net *n, int v);
 Port net_alloc_float(Net *n, double d);
 /* Float boxes are net structure like any other; the TABLE behind the index is a driver's
