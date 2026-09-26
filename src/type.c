@@ -16,10 +16,9 @@ static void tfail(const char *fmt, ...) {
   longjmp(TJ, 1);
 }
 
-/* nominal-type registry: a declared user data type (ADT/struct), optionally with
-   a fixed number of type parameters (its arity).  parse_type_atom resolves a
-   registered name to a TNOM head with arity arg chains, so two values of the
-   same declared type unify (parameter-wise) and different types do not. */
+/* nominal-type registry: a declared user data type (ADT/struct), optionally with a fixed number of type
+   parameters (its arity).  parse_type_atom resolves a registered name to a TNOM head with arity arg
+   chains, so two values of the same declared type unify (parameter-wise) and different types do not. */
 typedef struct { const char *name; int arity; } NomDecl;
 static NomDecl noms[512]; static int n_nom = 0;
 int nominal_arity(const char *name) {
@@ -98,14 +97,14 @@ static void unify(Type *x, Type *y) {
 
 /* Environment entries come in two kinds, and the distinction is what makes generalization both
    order-independent and cheap:
-     - a DEFINITION scheme is closed and never mutated after registration, so the set of type
-       variables it contributes is fixed and is maintained incrementally in a refcount table
-       (`envrc`) rather than recomputed by walking every scheme on every `generalize` (that walk was
-       160k entry scans / 11.9M node visits per std load -- 372 of its 421 ms);
-     - a BINDER entry (`\x.` and the self-recursive `f : a` slot) holds a fresh variable unification
-       may LINK LATER, so its contribution cannot be cached at push time: `(\x (x 5))` pushes `a`,
-       then `unify(a, num -> c)` makes `c` free in the environment through `x`.  Those are resolved
-       when `generalize` runs -- O(1) while the root is a bare variable, a walk only if it was linked. */
+     - a DEFINITION scheme is closed and never mutated after registration, so its type variables are
+       fixed and are kept incrementally in a refcount table (`envrc`) rather than recomputed by walking
+       every scheme on every `generalize` (that walk was 160k entry scans / 11.9M node visits per std
+       load -- 372 of its 421 ms);
+     - a BINDER entry (`\x.` and the self-recursive `f : a` slot) holds a fresh variable unification may
+       LINK LATER, so its contribution cannot be cached at push time: `(\x (x 5))` pushes `a`, then
+       `unify(a, num -> c)` makes `c` free in the environment through `x`.  Those are resolved when
+       `generalize` runs -- O(1) while the root is a bare variable, a walk only if it was linked. */
 typedef struct { char name[NAME]; Scheme s; int isdef; } TEnv;
 static TEnv *env;
 static int envn, envcap;

@@ -33,6 +33,17 @@ result's meaning: the answer is the same value it was (4), read structurally AND
 readback is handed the domain the type checker computed.  That inversion is the point of the
 probe: it used to assert that a net with its names cleared could not be printed.
 
+Probes 13-14 are about the BUILD-PURITY RULE, which is a capability rule and not a naming convention:
+a provider of callables DECLARES, where it registers (`lin_scalar_ops_add(fn, pure)`), whether calling
+it observes the world, and the core's one gate refuses a build at every call nobody declared pure.  The
+old rule spelled this as "does the symbol start with `lin_`", which trusted an effectful `lin_*` symbol
+and refused a pure callable that was not spelled `lin_`; probe 13 registers a PURE callable under a name
+that is not `lin_`-prefixed and shows the build folding it (probe 13), while probe 14 registers an
+EFFECTFUL one under `lin_world` and shows a build declining, REPORTING it, and leaving the answer to the
+run.  Both are loaded into the BUILD process with LD_PRELOAD, because a build evaluates `(load ...)`
+forms and defines only -- a program's own `(set_driver ...)` is a form the artifact carries, not one the
+build runs (measured: a build of test/unison.lin registers neither simd nor gpu).
+
 This test compiles those drivers from strings into a scratch std tree -- they are NOT part of the
 shipped std.  A compiler is needed to build the probes; where none is found the test SKIPS loudly
 rather than passing quietly, so a CI that loses its toolchain is visible.
@@ -907,6 +918,63 @@ LinDriver lin_stripper_driver = {
 __attribute__((constructor)) static void sp_init(void) { atexit(sp_report); lin_driver_add(&lin_stripper_driver); }
 '''
 
+# --- probe 13: a callable DECLARED PURE under a name that is not `lin_`-prefixed ----------------
+# The old rule ("is it a pure `lin_*` builtin") classified this as an observation, so a build would not
+# fold it.  The declaration says otherwise, and the build must fold it -- which is observable because
+# NOTHING in the artifact's own process can compute it: the probe registers no LinDriver, so no section
+# of the container names it and the artifact's process never loads it.
+PROBE_PURE_DECL = PROLOGUE + r"""
+#include <dlfcn.h>
+static int probe_scalar(const char *fn, int argc, const long *a, long *out, int *okind) {
+  *okind = 0;
+  if (argc < 0) return !strcmp(fn, "probe_pure");     /* the OWNERSHIP query: no operands, no computing */
+  if (strcmp(fn, "probe_pure") || argc < 1) return 0;
+  *out = a[0] + 1;
+  *okind = 1;
+  return 1;
+}
+__attribute__((constructor)) static void probe_pure_init(void) {
+  /* dlsym, never a direct call: this plugin is PRELOADED into the build process (see the harness), and
+     a preloaded object is relocated before the executable's symbols are in scope -- the direct call
+     dies with `undefined symbol: lin_scalar_ops_add` at load time. */
+  void (*add)(int (*)(const char *, int, const long *, long *, int *), int) =
+    (void (*)(int (*)(const char *, int, const long *, long *, int *), int))
+    dlsym(RTLD_DEFAULT, "lin_scalar_ops_add");
+  if (add) add(probe_scalar, 1);                      /* DECLARED PURE: a build may fold it */
+}
+"""
+
+# --- probe 14: a callable DECLARED EFFECTFUL under a `lin_`-prefixed name -----------------------
+# The other half of the same defect: the old rule trusted the prefix, so this call would have been made
+# (and its answer baked) at build time.  It reads the process's environment, which is exactly what a
+# build may not do -- and the driver registers a LinDriver as well, so the ARTIFACT can load it by name
+# and answer from its OWN environment.
+PROBE_WORLD_DECL = PROLOGUE + r"""
+#include <dlfcn.h>
+static int world_scalar(const char *fn, int argc, const long *a, long *out, int *okind) {
+  *okind = 0;
+  if (strcmp(fn, "lin_world") || argc < 1) return 0;
+  const char *e = getenv("PROBE_WORLD");
+  *out = a[0] + (long)(e ? strlen(e) : 0);
+  *okind = 1;
+  return 1;
+}
+LinDriver lin_worldprobe_driver = {
+  .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
+  .size = (uint32_t)sizeof(LinDriver),
+  .name = "worlddecl", .description = "a callable whose value is the process's own environment",
+  .caps = LIN_CAP_PROVIDER, .priority = 3,      /* presence is carried, so the artifact loads it */
+};
+__attribute__((constructor)) static void probe_world_init(void) {
+  void (*add)(int (*)(const char *, int, const long *, long *, int *), int) =
+    (void (*)(int (*)(const char *, int, const long *, long *, int *), int))
+    dlsym(RTLD_DEFAULT, "lin_scalar_ops_add");
+  void (*dadd)(LinDriver *) = (void (*)(LinDriver *))dlsym(RTLD_DEFAULT, "lin_driver_add");
+  if (add) add(world_scalar, 0);                      /* DECLARED EFFECTFUL: a build must refuse it */
+  if (dadd) dadd(&lin_worldprobe_driver);
+}
+"""
+
 PROGRAM = '''(load "std/drivers/driver.lin")
 (set_driver "%s")
 ((\\x x) (mul 2 2))
@@ -1251,6 +1319,93 @@ def main():
             bad.append("the folded result read structurally is wrong (answer=%d answer_ok=%d)"
                        % (answer, answer_ok))
 
+    # -- 13/14. PURITY IS DECLARED WHERE A CALLABLE IS REGISTERED, NOT SPELLED IN ITS NAME ---------
+    # Both probes are PRELOADED into the BUILD process: a build evaluates `(load ...)` forms and
+    # defines, so a program's own `(set_driver ...)` is a form the artifact carries rather than one the
+    # build runs (measured: a build of test/unison.lin registers neither simd nor gpu), and there is no
+    # other way for a provider to be present while the build reduces.  What is asserted is the
+    # DECLARATION and nothing else:
+    #   * probe 13 declares its callable PURE under `probe_pure`, a name the old `lin_`-prefix rule
+    #     would have called an observation: the build must FOLD it.  The artifact's own process has no
+    #     such provider (the probe registers no LinDriver, so no section names it), so the folded value
+    #     can only have come from the build -- and the same program built WITHOUT the probe must not
+    #     produce it, which is the control that keeps this from passing vacuously.
+    #   * probe 14 declares its callable EFFECTFUL under `lin_world`, a name the old rule TRUSTED: the
+    #     build must decline it, REPORT it, and leave the answer to the run.  Two builds under different
+    #     PROBE_WORLD values must be byte-identical, and one artifact run under a THIRD value must
+    #     answer with that value -- the artifact's own environment, which is the only one the program
+    #     was ever about.
+    for name, src in (("puredecl", PROBE_PURE_DECL), ("worlddecl", PROBE_WORLD_DECL)):
+        why = build(name, src)
+        if why:
+            print("parallel_guard: SKIPPED (%s probe did not compile: %s)" % (name, why))
+            return 0
+
+    # 13: a driver-declared PURE callable is foldable at build time
+    pure_src = os.path.join(tmp, "decl_pure.lin")
+    with open(pure_src, "w") as fh:
+        fh.write('(load "std/std.lin")\n(add (ccall1 "probe_pure" 41) 1)\n')
+    pure_so = os.path.join(std, "drivers", "puredecl.so")
+    for tag, preload in (("without", None), ("with", pure_so)):
+        art = os.path.join(tmp, "decl_pure.%s.line" % tag)
+        benv = dict(env)
+        if preload:
+            benv["LD_PRELOAD"] = preload
+        brc, _, berr = run([lin, "build", pure_src, "-o", art], 300, benv)
+        if brc != 0 or not os.path.exists(art):
+            bad.append("building a program that calls a declared-pure provider %s the probe failed "
+                       "(rc=%d, %s)" % (tag, brc, berr.strip()[-120:]))
+            continue
+        # the artifact is run with the probe ABSENT from its environment: only a build-time fold can
+        # put 43 in it (probe_pure 41 -> 42, + 1), since no provider in that process supplies it
+        _, out, _ = run([art], 60, env)
+        folded = "=> 43" in out
+        if preload and not folded:
+            bad.append("a provider that DECLARED its callable pure (under `probe_pure`, not "
+                       "`lin_`-prefixed) was not folded at build time: the artifact prints %r, and no "
+                       "provider in ITS process can supply that call (build stderr=%r)"
+                       % (out.strip()[-80:], berr.strip()[-160:]))
+        if not preload and folded:
+            bad.append("the control run answered 43 without the provider present, so this probe cannot "
+                       "tell a build-time fold from anything else (stdout=%r)" % out.strip()[-80:])
+    # a build that meets a call nobody declared must SAY so: the same program, no probe
+    _, serr_cntl = run([lin, "build", pure_src, "-o", os.path.join(tmp, "decl_pure.ctl.line")], 300,
+                       env)[1:]
+    if "build stopped at `probe_pure`" not in serr_cntl:
+        bad.append("a build was not told WHAT it stopped at for an undeclared call (stderr tail: %r)"
+                   % serr_cntl.strip()[-160:])
+
+    # 14: a driver-declared EFFECTFUL callable declines, is reported, and is left to the run
+    world_src = os.path.join(tmp, "decl_world.lin")
+    with open(world_src, "w") as fh:
+        fh.write('(load "std/std.lin")\n(add (ccall1 "lin_world" 40) 0)\n')
+    world_so = os.path.join(std, "drivers", "worlddecl.so")
+    arts = []
+    for tag, val in (("aa", "aa"), ("aaaa", "aaaa")):
+        art = os.path.join(tmp, "decl_world.%s.line" % tag)
+        arts.append(art)
+        benv = dict(env, LD_PRELOAD=world_so, PROBE_WORLD=val)
+        brc, _, berr = run([lin, "build", world_src, "-o", art], 300, benv)
+        if brc != 0 or not os.path.exists(art):
+            bad.append("building a program that calls a declared-EFFECTFUL provider failed (rc=%d, %s)"
+                       % (brc, berr.strip()[-120:]))
+            continue
+        if "build stopped at `lin_world`" not in berr:
+            bad.append("a build that met a driver-declared EFFECTFUL call did not report it: the "
+                       "`lin_` prefix used to be enough to trust it (stderr tail: %r)"
+                       % berr.strip()[-160:])
+    if len(arts) == 2 and all(os.path.exists(a) for a in arts):
+        if open(arts[0], "rb").read() != open(arts[1], "rb").read():
+            bad.append("the artifact DEPENDS ON THE BUILD HOST: two builds of the same program under "
+                       "different PROBE_WORLD values (%d vs %d bytes) differ, so the build made the "
+                       "program's observation" % (os.path.getsize(arts[0]), os.path.getsize(arts[1])))
+        # the artifact answers for the process IT runs in (len("xxxxxx") = 6, never the build's 2 or 4)
+        _, out, _ = run([arts[0]], 60, dict(env, PROBE_WORLD="xxxxxx"))
+        if "=> 46" not in out:
+            bad.append("the artifact did not answer from its OWN environment: 40 + len(PROBE_WORLD=6) "
+                       "is 46, and it printed %r (a baked answer would be 42 or 44)"
+                       % out.strip()[-80:])
+
     if bad:
         for b in bad:
             print("FAIL " + b)
@@ -1269,7 +1424,11 @@ def main():
           "COMPILER net carries no labels either -- the `_op` header, the operator INDEX inside its "
           "operand list and the operands themselves are all recognised structurally, the program's "
           "reduction answer is unchanged (4), and readback PRINTS it as `=> 4` from the domain the "
-          "compiler's type computed)")
+          "compiler's type computed); a provider that DECLARED its callable pure is folded by a build "
+          "under a name the old `lin_`-prefix rule would have refused, a provider that declared its "
+          "callable EFFECTFUL is refused and named under a `lin_`-prefixed one, and the artifact that "
+          "comes out of that refusal is byte-identical across build environments and answers from the "
+          "environment of the process IT runs in")
     return 0
 
 

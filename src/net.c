@@ -203,15 +203,13 @@ static void net_ensure_cap(Net *n, int need) {
 
 Port net_alloc(Net *n, int tag, Scope sc) {
   int id = -1;
-  /* Reuse a reclaimed slot.  NOT inside a wave: the parallel path reserves room by growing `nn` and
-     every worker holds raw pointers into the arrays, so two of them must not race for one free slot.
-     THIS is why reclaiming a consumed pair does not yet save memory: rules allocate inside the wave,
-     so the pop below is never taken there and `nn` grows regardless of how much was freed.  Measured
-     with reaping on and off (steps identical, so the comparison is like for like): sudoku 14106 vs
-     14178 slots, bench_loop 36565 vs 36577, nqueens 11510 vs 11854 -- 0.5%, and at most 3%.  The
-     freeing is correct and cheap (best-of-5: 3.72 vs 3.70 ms) but dormant; making it pay needs the
-     wave to hand each worker a PRIVATE slice of the free list while the region is open, so a worker
-     can pop without racing for a slot. */
+  /* Reuse a reclaimed slot.  NOT inside a wave: the parallel path reserves room by growing `nn` and every
+     worker holds raw pointers into the arrays, so two of them must not race for one free slot.  THIS is
+     why reclaiming a consumed pair does not yet save memory: rules allocate inside the wave, so the pop
+     below is never taken there and `nn` grows regardless of how much was freed.  Measured with reaping on
+     and off (steps identical, so like for like): sudoku 14106 vs 14178 slots, bench_loop 36565 vs 36577,
+     nqueens 11510 vs 11854 -- 0.5%, at most 3%.  The freeing is correct and cheap (best-of-5: 3.72 vs
+     3.70 ms) but dormant; making it pay needs each worker to get a PRIVATE free-list slice per wave. */
   
   if (!in_parallel && n->free_head >= 0) {
     id = n->free_head;
@@ -497,12 +495,11 @@ static void split2(Net *n, int t1, Scope s1a, Scope s1b,
 }
 
 /* Hand the pair's four auxiliaries to the four copies a duplication rule just made.  Each copy takes
-   the place of one auxiliary -- UNLESS two of them are shorted to EACH OTHER, i.e. their class is
-   closed inside the pair; there the two copies must be joined to each other, since wiring one onto a
-   port of a node the rule has already killed leaves a live node pointing at a discarded one, which is
-   what readback reports as `_` (measured on a nested Y-knot: a DUP's aux2 wired to its partner's aux2,
-   and the copy for it landed on the dead node's port).  `t[k]` is what auxiliary k leads to; `cp[k]`
-   is the copy that takes it over. */
+   the place of one auxiliary -- UNLESS two are shorted to EACH OTHER (their class is closed inside the
+   pair): there the two copies are joined to each other, since wiring one onto a port of a node the rule
+   has already killed leaves a live node pointing at a discarded one, which readback reports as `_`
+   (measured on a nested Y-knot: a DUP's aux2 wired to its partner's aux2, and the copy for it landed on
+   the dead node's port).  `t[k]` is what auxiliary k leads to; `cp[k]` the copy that takes it over. */
 static void link_copies(Net *n, int n1, int n2, const Port *t, const int *cp) {
   int inside[4] = {0, 0, 0, 0};
   for (int k = 0; k < 4; k++) {
@@ -585,29 +582,24 @@ int net_interact(Net *n, Port p1, Port p2) {
   return 0; /* era or stuck gauge pair: dropped, as in the reference */
 }
 
-/* Reclaim every node not reachable from ROOT.  The `.line` container stores ALL nodes and an actual
-   evaluation leaves far more dead intermediates than live ones: without this the baked artifact came
-   out ~2x LARGER than the un-evaluated one (474 KB vs 224 KB) despite being a value. */
-/* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING.
+/* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING.  A `.line` container
+   stores ALL nodes and an evaluation leaves far more dead intermediates than live ones: without this the
+   baked artifact came out ~2x LARGER than the un-evaluated one (474 KB vs 224 KB).
 
-   Reachability starts from ALL the anchors, not from ROOT alone: under needed order the result is
-   often nowhere near node 0 (readback registers the port it is forcing as a demand root, and a wave's
-   queued pairs are live work whether anything demands them yet).  A ROOT-only trace calls the running
-   computation garbage -- measured on test/sudoku.lin: 3 of 14426 live nodes are reachable from ROOT
-   alone -- and that was one of the compacting version's two defects.  The other was that it MOVED:
-   renumbering silently invalidates every node index something outside the reducer holds (the printer's
-   memo arrays are keyed by node; readback and net_force hold ports across calls), and 16 of the 52
-   suites then came back with the right lines and the wrong values.  So the unreachable nodes go on a
-   free list and are reused by net_alloc: every index stays valid, which keeps an external handle (a
-   memo key, a port held by readback, a driver's reference) safe to keep.
-
-   WHY THIS IS SOUND FOR A NON-MOVING COLLECTOR, and was NOT for a moving one.  Wires are the only
-   pointers and the mark follows them out of every reachable node, so an unreachable node is pointed
-   at by NOTHING reachable: freeing it cannot leave a live node pointing into free space.  A stale
-   one-sided wire (a "dangle") is harmless here -- it just makes its target reachable and unfreeable,
-   the conservative direction -- where compaction rewrote those wires to NONE, destroying what they
-   expressed.  SAFEPOINT: reclaiming only when reduce_depth == 1 and nothing is pinned keeps "no
-   external handle is held" true by construction (see net_reduce_body for both measurements). */
+   Reachability starts from ALL the anchors, not ROOT alone: under needed order the result is often nowhere
+   near node 0 (readback registers the port it is forcing as a demand root, and a wave's queued pairs are
+   live work whether anything demands them yet).  A ROOT-only trace calls the running computation garbage
+   -- measured on test/sudoku.lin: 3 of 14426 live nodes are reachable from ROOT alone -- one of the
+   compacting version's two defects.  The other was that it MOVED: renumbering invalidates every
+   node index something outside the reducer holds (the printer's memo arrays are keyed by node; readback
+   and net_force hold ports across calls), and 16 of the 52 suites came back with the right lines and the
+   wrong values.  So the unreachable nodes go on a free list, reused by net_alloc: every index stays valid,
+   so an external handle (a memo key, a port readback holds, a driver's reference) stays safe -- AND THAT
+   IS WHY IT IS SOUND: wires are the only pointers and the mark follows them out of every reachable node,
+   so an unreachable node is pointed at by NOTHING reachable, and a stale one-sided wire (a "dangle") is
+   merely conservative here where compaction rewrote it to NONE, destroying what it expressed.  SAFEPOINT:
+   reclaiming only when reduce_depth == 1 and nothing is pinned keeps "no external handle is held" true by
+   construction (see net_reduce_body for both measurements). */
 void net_gc(Net *n) {
   if (n->nn <= 1) return;
   unsigned char *reach = calloc((size_t)n->nn + 1, 1);
@@ -846,15 +838,15 @@ static LinDriver *driver_by_name(const char *name) {
   return NULL;
 }
 
-/* Is this driver's PRESENCE part of what the net means?  A net is compiled and reduced under a set of
-   drivers, and one that supplies SEMANTICS -- a fold pre-emptor that gives an `_op`/`_ffi` closure its
-   value, the scalar table behind it, a value domain's storage -- is not an accelerator the artifact
-   can do without: with it gone the same net is a different program.  Measured: `test/runtime_ffi.lin`
-   (whose runtime `getenv` makes the build ship it UNREDUCED) never folded its `(add <closure> 1)` in
-   the artifact while the interpreter answered 7, because `arith` has no state, so no section named it
-   and the artifact ran with no fold pre-emptor.  These are the caps `lin_driver_clear` refuses to
-   drop, plus the scalar-table providers; a PURE STRATEGY (FIXED/COMMUTE only, e.g. gpu) is NOT
-   carried, because a container runs prelude-free and naming one would bake the host's choice in. */
+/* Is this driver's PRESENCE part of what the net means?  A driver that supplies SEMANTICS -- a fold
+   pre-emptor that gives an `_op`/`_ffi` closure its value, the scalar table behind it, a value domain's
+   storage -- is not an accelerator the artifact can do without: with it gone the same net is a
+   different program.  Measured: `test/runtime_ffi.lin` -- whose runtime `getenv` leaves the fold of
+   `(add <closure> 1)` to the artifact -- never folded it while the interpreter answered 7, because
+   `arith` has no state, so no section named it and the artifact ran with no fold pre-emptor.  These are
+   the caps `lin_driver_clear` refuses to drop, plus the scalar-table providers; a PURE STRATEGY
+   (FIXED/COMMUTE only, e.g. gpu) is NOT carried: a container runs prelude-free, so naming one would
+   bake the host's choice in. */
 static int carries_presence(const LinDriver *d) {
   return (d->caps & (LIN_CAP_PREEMPT | LIN_CAP_PROVIDER | LIN_CAP_NATIVE_NUM)) != 0;
 }
@@ -959,9 +951,9 @@ int lin_driver_aot(Net *n, const Term *t, const Scheme *sch) {
 }
 
 /* ---------------- needed order ----------------
-   A redex is reduced only when the value the caller observes needs it.  `net_mark_demand` walks from
-   the demand roots -- ROOT (the program's result) plus every port lin_demand/net_force registered --
-   along the paths a weak head normal form of those ports actually runs through:
+   A redex is reduced only when the value the caller observes needs it: `net_mark_demand` walks from the
+   demand roots -- ROOT plus every port lin_demand/net_force registered -- along the paths a weak head
+   normal form of those ports runs through:
 
      ROOT          -> its wire (the result)
      APP   port 1  -> port 0 (a demanded result demands its function)
@@ -971,9 +963,9 @@ int lin_driver_aot(Net *n, const Term *t, const Scheme *sch) {
      APP/DUP p. 0  -> same: a facing principal is a redex, otherwise stop
      LAM   port 2  -> stop: a lambda's body is a thunk until the lambda is applied
 
-   No rule of the calculus changes: the filter only decides WHICH active pairs are in a wave, and a
-   pair off the demand path stays queued in `act` for a later wave -- which is what makes a cycle (a
-   Y-knot) reduce when the recursive call is demanded instead of unrolling for ever. */
+   No rule of the calculus changes: the filter decides WHICH active pairs are in a wave, and a pair off
+   the demand path stays queued in `act` for a later one -- which is what makes a cycle (a Y-knot)
+   reduce when the recursive call is demanded instead of unrolling for ever. */
 static void net_mark_demand(Net *n) {
   unsigned int stamp = ++n->dem_stamp;
   if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; }
@@ -1176,19 +1168,18 @@ static long net_reduce_body(Net *n, long limit) {
   Port *curr = NULL; int curr_cap = 0;
   Port *base_rx = NULL; int base_cap = 0;
     /* When reclamation runs: live nodes above this, and no reusable slot left.  1M by default, so the
-     suite never reaches it -- hence LIN_GC, which forces the collector on.  (It was dormant at 1M
-     while the COLLECTOR was wrong: a ROOT-only root set and a renumbering pass, both now replaced.)
-     KNOWN UNSOUND BELOW THE DEFAULT, for two INDEPENDENT reasons, measured by switching parts of the
-     block off (whole block skipped: 52/52 output suites; fully on: 33/52; renumbering skipped and
-     only the reachability taken: 49/52):
+     suite never reaches it -- hence LIN_GC, which forces the collector on.  (It was dormant at 1M while
+     the COLLECTOR was wrong: a ROOT-only root set and a renumbering pass, both now replaced.)  KNOWN
+     UNSOUND BELOW THE DEFAULT, for two INDEPENDENT reasons, measured by switching parts of the block off
+     (skipped: 52/52 output suites; fully on: 33/52; move skipped, reachability only: 49/52):
        1. IT MOVES: renumbering invalidates every index something outside the reducer holds, and 16 of
           the 52 suites come back with the right lines and the wrong values (see net_gc above).
-       2. IT IS STILL INCOMPLETE.  With the move skipped, modules.lin, numbers.lin and vector.lin still
-          truncate (21/31, 37/56, 19/21): some anchor is not in the seed set, so live work is called
+       2. IT IS STILL INCOMPLETE: with the move skipped, modules.lin, numbers.lin and vector.lin still
+          truncate (21/31, 37/56, 19/21) -- some anchor is not in the seed set, so live work is called
           garbage and the run stops early.
-     The conclusion is not "tune the threshold" but "reclaim WITHOUT moving" -- a free list, so every
-     index stays valid -- and then close the anchor gap: fixing (1) is what makes (2) findable, since
-     with stable indices a wrongly reclaimed node is a missing value, not silent corruption. */
+     So the conclusion is not "tune the threshold" but "reclaim WITHOUT moving" -- a free list, so every
+     index stays valid -- and then close the anchor gap: fixing (1) is what makes (2) findable, since a
+     wrongly reclaimed node is then a missing value, not silent corruption. */
   long gcmark = getenv("LIN_GC") ? atol(getenv("LIN_GC")) : (1L << 20);
   Port *slices[16] = {0}; int scaps[16] = {0}, scnts[16] = {0};
   /* per-wave claim scratch: candidates offered, per-pair ownership, claims (one per driver) */

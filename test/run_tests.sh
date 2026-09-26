@@ -53,6 +53,11 @@ done
 # compile time.  N is what the program reads; it is fixed so the assertions can state values.
 N=6 run_test test/runtime_ffi.lin
 
+# A program that OBSERVES the world (a shell reading this process's environment): the interpreter
+# answers for ITS process, and aot_equiv.py pins the build half -- the build must not run the
+# command, must say what it stopped at, and the artifact must decide from its own environment.
+run_test test/build_observe.lin
+
 # ----------------------------------------------------------------------------
 # Tier 2.5: Canonical cross-driver selftest
 #   Runs std/selftest.lin under the base CPU engine (golden) and under every

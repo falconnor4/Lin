@@ -35,12 +35,15 @@
 
 /* Resolve exported core helpers once through dlsym (-rdynamic exports them).  The spine decoder's
    per-slot expectation travels with the call: EVERY scalar operand here is a number, and a slot that
-   is not one in its own structure is declined rather than guessed. */
-static ScalarOpFn g_scalar;
+   is not one in its own structure is declined rather than guessed.
+   The SEMANTICS are not resolved here: they come from the core's registry (`lin_scalar_ops_run`),
+   because that is where a provider states whether a call to it is a function of its operands alone.  A
+   driver that dlsym'd the provider's own symbol would perform calls the provider never vouched for as
+   pure -- which a build may not do -- and it would be blind to a provider not loaded yet, where the
+   registry is what loads it. */
 static int (*g_spine)(Net *, Port, const int *, int, Val *, int);
 static const int DOMS_NUM[1] = { DT_NUM };
 static void resolve_core(void) {
-  if (!g_scalar) g_scalar = (ScalarOpFn)dlsym(RTLD_DEFAULT, "lin_arith_scalar");
   if (!g_spine) g_spine = (int (*)(Net *, Port, const int *, int, Val *, int))dlsym(RTLD_DEFAULT, "net_spine_args");
 }
 
@@ -77,8 +80,7 @@ static int simd_op_value(Net *n, Port lam, Port app, Val *v) {
     c_args[i] = fargs[i].iv;
   }
   long out; int okind = 0;
-  if (!g_scalar) resolve_core();
-  if (!g_scalar || !g_scalar(fn, argc, c_args, &out, &okind)) return 0;
+  if (!lin_scalar_ops_run(fn, argc, c_args, &out, &okind)) return 0;
   if (okind == 4) v->kind = 4; else if (okind == 3) v->kind = 3; else v->kind = 1;
   v->iv = out;
   return 1;
@@ -106,8 +108,7 @@ static int simd_op_ready(const Net *n, Port lam, Port app) {
     c_args[i] = fargs[i].iv;
   }
   long out; int okind = 0;
-  if (!g_scalar) resolve_core();
-  return g_scalar && g_scalar(fn, argc, c_args, &out, &okind);
+  return lin_scalar_ops_run(fn, argc, c_args, &out, &okind);
 }
 
 /* Fold a saturated `_ffi` closure `lam` applied to `app` (float / legacy FFI).
@@ -127,10 +128,8 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
   for (int i = 0; i < na && i < 2; i++) a[i] = vals[i].iv;
   *is_bool = 0; *is_float = 0;
   if (na < 1) return 0;
-  if (!g_scalar) resolve_core();
-  if (!g_scalar) return 0;
   long out; int okind = 0;
-  if (!g_scalar(fn, na, a, &out, &okind)) return 0;
+  if (!lin_scalar_ops_run(fn, na, a, &out, &okind)) return 0;
   if (okind == 4) { memcpy(v, &out, 8); *is_float = 1; }
   else if (okind == 3) { *v = out; *is_bool = 1; }
   else *v = out;

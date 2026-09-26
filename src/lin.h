@@ -36,11 +36,10 @@ typedef uint32_t Scope;
 
 /* ---- claiming: a lease on STRUCTURE, not on values ----
    A driver identifies structure it can optimize and asks the core to reserve it: a set of redexes plus
-   the region's EXITS, validated before the driver may touch it.  Nothing here knows what a driver
-   matches or why (tags, ports, wiring only), so a loop compiler, a fusion pass and a scalar folder
-   share one protocol.  Every exit must be at an AUXILIARY port: a redex is two mutually wired
-   principal ports, so such a boundary cannot be crossed by one -- the whole safety argument for
-   rewriting a region in isolation. */
+   the region's EXITS, validated before the driver may touch it.  Nothing here knows what a driver matches
+   or why (tags, ports, wiring only), so a loop compiler, a fusion pass and a scalar folder share one
+   protocol.  Every exit must be at an AUXILIARY port: a redex is two mutually wired principal ports, so
+   such a boundary cannot be crossed by one -- the whole safety argument for rewriting in isolation. */
 #define LIN_MAX_CLAIM_PAIRS 32
 #define LIN_MAX_CLAIM_EXITS 16
 #define LIN_CLAIM_NODES     128     /* a bounded region: the core walks it per claim, so it is capped */
@@ -146,11 +145,11 @@ typedef struct { int kind; long iv; char sv[4096]; } Val;
 
 /* ---------------- value ENCODINGS: the SHAPE a value is written in ----------------
    A value DOMAIN (DT_*) is what a value MEANS; an ENCODING (LIN_ENC_*) is the net STRUCTURE it is
-   written in, and the two are different questions: Scott zero (`\sz.\ss.sz`), Church TRUE and the
-   empty list are ONE net, so nobody may recover a node's meaning from the node.  The EXPECTATION is
-   the reader's, and one given none (a raw net from anywhere) must decline rather than guess.
-   DT_FLOAT is where this bites: its values are a BOXED INDEX (LIN_ENC_BOX) into a provider's table,
-   so the domain -- or the table's bounds -- is what says "2.5" rather than "2". */
+   written in.  Those are different questions: Scott zero (`\sz.\ss.sz`), Church TRUE and the empty list
+   are ONE net, so nobody may recover a node's meaning from the node -- the EXPECTATION is the reader's,
+   and one given none (a raw net from anywhere) must decline rather than guess.  DT_FLOAT is where this
+   bites: its values are a BOXED INDEX (LIN_ENC_BOX) into a provider's table, so the domain -- or the
+   table's bounds -- is what says "2.5" rather than "2". */
 enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC_FFI,
        LIN_ENC_EFF, LIN_ENC_BOX };
 
@@ -236,13 +235,12 @@ struct LinDriver {
   int  (*print)(Net *n, void *st, int domain);             /* walk the net and write the result */
   long (*run_io)(Net *n, void *st, long limit);            /* run the net's effects */
   /* ---- ABI 6, append-only: the AOT PASS POINT.  The compiler OFFERS it, the driver OWNS the pass:
-     called once per AOT build in priority order with the expanded term, the types the compiler
-     inferred for it, the net, and a term -> port map as a CALLBACK that is compile-time only -- never
-     serialised, never stored, so a pass cannot smuggle the compiler's knowledge of meaning past the
-     build.  It may emit a rewrite of the term or the net, or its own opaque section
-     (carry_save/carry_load), and nothing else.  A pass that declines leaves the net as it found it;
-     every pass is OPTIONAL (LIN_NO_PASS); and at runtime a section is a DERIVATION of the net
-     (node_recycled invalidates it), never the authority. */
+     called once per AOT build in priority order with the expanded term, the types inferred for it, the
+     net, and a term -> port map as a CALLBACK that is compile-time only -- never serialised, never
+     stored, so a pass cannot smuggle the compiler's knowledge of meaning past the build.  It may emit a
+     rewrite of the term or the net, or its own opaque section (carry_save/carry_load), and nothing else.
+     A pass that declines leaves the net as it found it, every pass is OPTIONAL (LIN_NO_PASS), and at
+     runtime a section is a DERIVATION of the net (node_recycled invalidates it), never the authority. */
   int  (*aot)(Net *n, void *st, const Term *t, const Scheme *sch,
               Port (*node_of)(void *ctx, const Term *t), void *ctx);
 };
@@ -284,10 +282,18 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
 typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
-void lin_scalar_ops_add(ScalarOpFn f);
+/* A provider of callables DECLARES, where it registers, whether calling it observes the world: `pure`
+   means every call it supplies is a function of its operands alone.  That is a CAPABILITY, never a naming
+   convention -- a pure callable need not be `lin_`-prefixed, and an `lin_`-prefixed one may observe the
+   reduction or the process -- and a provider that does not declare it is treated as observing, the sound
+   default for code the core cannot see.  `argc < 0` is the OWNERSHIP QUERY: answer 1 if this provider
+   supplies `fn` AND declared those calls pure, and compute NOTHING.  A provider that ignores the query is
+   never pre-approved, so its calls are made at run time instead. */
+void lin_scalar_ops_add(ScalarOpFn f, int pure);
 void lin_scalar_ops_load(const char *sym);
 /* Hand `fn` to the registered providers (first that owns it supplies the result); 1 on success.  The
-   registry is the core's because plugins register into it, so whoever dispatches, it stays here. */
+   registry is the core's because plugins register into it, so whoever dispatches, it stays here.
+   Under a build marker only a provider that DECLARED purity is consulted at all (src/io.c). */
 int lin_scalar_ops_run(const char *fn, int argc, const long *args, long *out, int *outkind);
 int lin_arith_scalar(const char *fn, int argc, const long *args, long *out, int *outkind);
 
@@ -363,11 +369,10 @@ Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) ch
 Port net_dup_hop(Net *n, Port p);                       /* deref it the way an arriving port implies */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_header(Net *n, Port lam, Port *fnp, Port *argp); /* dig \_ffi.\_ret.((_ffi fn) args) */
-/* The operand list of a saturated closure.  `doms[i]` is the DOMAIN slot i is expected to be (the
-   last entry repeats): the caller that knows what it is reading states it, and a slot that is not
-   in that domain -- including one that is not concrete YET -- is left undecoded, which is how a
-   fold tells "not ready" from "not my redex".  The CELL shape is the language's one cons encoding
-   (LIN_ENC_CONS), so it is not a parameter: what varies is what the slots MEAN. */
+/* The operand list of a saturated closure.  `doms[i]` is the DOMAIN slot i is expected to be (the last
+   entry repeats): the caller states it, and a slot that is not in that domain -- including one that is
+   not concrete YET -- is left undecoded, which is how a fold tells "not ready" from "not my redex".  The
+   CELL shape is the language's one cons encoding (LIN_ENC_CONS), so what varies is what slots MEAN. */
 int  net_ffi_args(Net *n, Port lam, const int *doms, int ndoms, Val *vals, int max);
 int  net_spine_args(Net *n, Port argp, const int *doms, int ndoms, Val *vals, int max);
 int  net_spine_slots(Net *n, Port argp); /* operand count of a cell-spine (-1: not a cons spine) */
@@ -377,10 +382,15 @@ extern int lin_precompile_depth;
 /* !=0 while the AOT build is partially evaluating: a driver must not bake anything the
    program would observe at RUN time (e.g. a (lin_folds) probe) into the artifact */
 extern int lin_build_depth;
-/* Raised by whoever declines to dispatch an FFI call whose value is not a function of its operands
-   while a build marker is up (`lin_build_depth` / `lin_precompile_depth`): a build may not make the
-   program's observations.  The build then ships the program UNREDUCED instead of partially
-   evaluating it -- see aot_run.  Cleared before each build-time reduction. */
+/* THE ONE BUILD-PURITY GATE (src/io.c), asked by every dispatch path before PERFORMING a call: while a
+   build marker is up it refuses any call the caller did not declare pure and no declared-pure provider
+   supplies -- the environment (`getenv`), the file system, the process, the DRIVER SET (`(get_driver)`:
+   an artifact runs prelude-free, so the build host's strategies must never be baked into it), the
+   REDUCTION (`lin_folds`), or a foreign symbol nobody declared.  The call is not made, its redex stays in
+   the net for the artifact to make at run time from its own environment, and `lin_build_observed` counts
+   the refusals: non-zero means the build observed something, and the FIRST one was reported on stderr,
+   naming the symbol. */
+int lin_build_gate(const char *fn, int pure);
 extern int lin_build_observed;
 Port net_alloc_scott(Net *n, long k); Port net_alloc_bool(Net *n, int v);
 Port net_alloc_float(Net *n, double d);

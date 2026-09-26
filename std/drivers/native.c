@@ -499,14 +499,11 @@ static int result_shared(const Net *n, int lam, int app) {
 
 /* ---- the interpreted fallback --------------------------------------------- */
 
-/* The shared semantic table lives in arith.so, which may not be loaded; resolving it
-   through dlsym is what keeps this plugin loadable on its own (the same reason
-   simd.so does it). */
-static ScalarOpFn scalar_table(void) {
-  static ScalarOpFn t; static int tried;
-  if (!tried) { tried = 1; t = (ScalarOpFn)dlsym(RTLD_DEFAULT, "lin_arith_scalar"); }
-  return t;
-}
+/* The shared semantic table lives in arith.so, and it is reached THROUGH THE CORE'S REGISTRY
+   (`lin_scalar_ops_run`), never by dlsym'ing the provider's symbol: the registry is where a provider
+   states whether a call to it is a function of its operands alone, so routing every call through it is
+   what makes that declaration authoritative -- a driver that resolved the symbol itself would perform
+   calls the provider never vouched for as pure, which a build may not do. */
 
 /* Exactly what the arith driver's op_eval does: force the operands (through the
    shared decoder, which demands each slot), then resolve the math through the one
@@ -526,10 +523,8 @@ static int fold_via_table(Net *n, const char *fn, Val *v, Port argp) {
     if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return 0;
     c[i] = fargs[i].iv;
   }
-  ScalarOpFn tab = scalar_table();
-  if (!tab) return 0;
   long out = 0; int okind = 0;
-  if (!tab(fn, slots, c, &out, &okind)) return 0;
+  if (!lin_scalar_ops_run(fn, slots, c, &out, &okind)) return 0;
   v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1);
   v->iv = out;
   return 1;

@@ -188,15 +188,19 @@ static int str_fn(const char *fn) {
          !strcmp(fn, "dlopen") || !strcmp(fn, "lin_parse_float") || !strcmp(fn, "fopen") ||
          !strcmp(fn, "driver_set") || !strcmp(fn, "driver_add");
 }
-/* Is this symbol's value a function of its OPERANDS alone?  Only a pure `lin_*` builtin is: the
-   scalar/math table, the float constructors, the string cast -- and `lin_folds`/`lin_folded` are
-   `lin_*` but observe the REDUCTION, so they are excluded, exactly as arith.c's fold excludes them.
-   Everything else reaches outside the net: the environment (`getenv`), the file system
-   (`fopen`/`dlopen`), the process (`system`/`puts`/`exit`), the driver selection, or an arbitrary
-   foreign symbol through `dlsym`.  Readback is the only place that knows this, because the
-   signature is the symbol's, not the net's. */
-static int pure_lin_fn(const char *fn) {
-  return !strncmp(fn, "lin_", 4) && strcmp(fn, "lin_folds") && strcmp(fn, "lin_folded");
+/* WHICH OF THIS DRIVER'S OWN ROWS IS A FUNCTION OF ITS OPERANDS ALONE -- the purity declaration the
+   core's gate (lin_build_gate, src/io.c) turns into the build rule.  It is a DECLARATION beside the
+   rows that perform the calls, never a test on the NAME: a pure callable need not be `lin_`-prefixed
+   (a provider declares those where it registers them, `lin_scalar_ops_add`), and `lin_folds` /
+   `lin_folded` ARE `lin_*` while observing the REDUCTION -- a build that folded them would freeze its
+   own fold count into the artifact.  Everything else this driver performs reaches outside the program:
+   the environment (`getenv`), the file system (`fopen`/`dlopen`), the process (`system`/`puts`/`exit`),
+   the DRIVER SET (`driver_get`/`driver_set`/`driver_add`/`driver_clear` -- an artifact runs
+   PRELUDE-FREE, so an answer that depends on the build host's strategies must never be baked into it),
+   or an arbitrary symbol through `dlsym` (a foreign call nobody declared: the sound default is that it
+   observes).  Readback is the only place that knows this, because the signature is the symbol's. */
+static int ffi_row_pure(const char *fn) {
+  return !strcmp(fn, "lin_float") || !strcmp(fn, "lin_parse_float") || !strcmp(fn, "lin_streq");
 }
 /* the domain slot `i` of the call `fn` is in (`ndoms` entries, the last one repeating) */
 static void arg_doms(const char *fn, int doms[2], int *ndoms) {
@@ -228,24 +232,19 @@ static Val run_ffi(Net *n, Port p) {
      a helper used to be dispatched as a call to the symbol "" (measured on `(v3scale 2.0 (vec3 ...))`).
      No foreign symbol is nameless, so the empty read is not this closure. */
   if (net_read_string(n, wire((Port){a1.node, 2}), LIN_ENC_NUM, fn, sizeof(fn)) <= 0) return v;
-  /* A BUILD MAY NOT MAKE THE PROGRAM'S OBSERVATIONS.  This dispatch is reached at build time through
-     the core's operand decoder (`dec_arg` -> `net_read_value`), i.e. by a fold asking what an
-     operand's VALUE is -- and answering it here for a symbol whose value comes from outside the net
-     EVALUATES that call at build time, so its answer is frozen into the artifact.  Measured: `lin
-     build` of test/runtime_ffi.lin -- whose whole point is that N exists only at RUN time -- baked
-     the build-time `getenv("N")`: built with N=2 the artifact printed 3 for every N, built with N
-     unset (getenv -> NULL -> parse_float -> 0) it printed 1 where the interpreter prints 7.  The
-     residual must compute it instead, so a non-pure symbol declines here, exactly as arith.c's
-     `ffi_eval` declines non-`lin_*` names and the fold counters for the same reason ("build-time
-     evaluation must be observation-free").  Precompilation is a build step too and its operands are
-     free variables, so it declines as well.  At RUN time both markers are 0 and every row works.
-     Declining is not enough on its own -- a half-evaluated net built on a declined operand is no more
-     honest than a baked answer -- so the call also REPORTS itself (lin_build_observed) and the build
-     ships the program unreduced (aot_run). */
-  if ((lin_build_depth > 0 || lin_precompile_depth > 0) && !pure_lin_fn(fn)) {
-    lin_build_observed = 1;
-    return v;
-  }
+  /* A BUILD MAY NOT MAKE THE PROGRAM'S OBSERVATIONS, and this dispatch IS reached at build time -- by
+     the core's operand decoder (`dec_arg` -> `net_read_value`), i.e. by a fold asking what an operand's
+     VALUE is -- so performing a call that reaches outside the net here freezes the build host's answer
+     into the artifact.  Measured before the rule: `lin build` of test/runtime_ffi.lin (whose whole
+     point is that N exists only at RUN time) baked the build-time `getenv("N")`: built with N=2 the
+     artifact printed 3 for every N, built without N it printed 1 where the interpreter prints 7.
+     ONE GATE, ASKED BEFORE ANY OPERAND IS READ: the answer is this driver's own declaration for its
+     rows (`ffi_row_pure`) plus whatever a provider declared pure where it registered -- and a call
+     nobody declared is REFUSED, which is the sound default for a foreign symbol.  Declining leaves the
+     call's redex in the net; the artifact makes it at run time, from its own environment.  Reading the
+     operands first would be worse than slow: a def being precompiled has FREE VARIABLES for them, and
+     forcing one walks a knot that never becomes a value. */
+  if (!lin_build_gate(fn, ffi_row_pure(fn))) return v;
   int doms[2], ndoms;
   arg_doms(fn, doms, &ndoms);
   Val fargs[8] = {{0}};
@@ -271,8 +270,11 @@ static Val run_ffi(Net *n, Port p) {
     if (s) lin_driver_add((LinDriver *)s);
     v.kind = 1; v.iv = 1; return v;
   }
-  /* Delegate to the core's registry of native scalar-op providers (e.g. arith.so); the first provider
-     that owns `fn` supplies it, and the registry pulls std/drivers/arith.so in on its first ask. */
+  /* Delegate to the core's registry of callable providers (e.g. arith.so); the first provider that owns
+     `fn` supplies it, the registry pulls std/drivers/arith.so in on its first ask, and each provider
+     states its own PURITY where it registers: under a build marker the registry consults only the ones
+     that declared a call to them a function of their operands, so this row cannot bake an observation
+     either -- and the value it hands back may be folded into the artifact for exactly that reason. */
   long out; int okind = 0;
   if (lin_scalar_ops_run(fn, argc, c_args, &out, &okind)) {
     if (okind == 4) v.kind = 4;

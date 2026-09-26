@@ -1,0 +1,38 @@
+; ==============================================================================
+; BUILD-TIME OBSERVATION: what a program observes belongs to the process it RUNS in
+; ==============================================================================
+; `lin build` EVALUATES the program, so every call the build performs is one the artifact
+; does not have to -- and that is only honest while the call is a function of its
+; OPERANDS.  A call that reaches outside the net is the program's own OBSERVATION, and
+; making one at build time answers a question the program was going to ask later, in a
+; different process: measured before the rule, `lin build` of test/runtime_ffi.lin read
+; `N` from the BUILD host's environment and froze that answer into the artifact -- built
+; with N=2 the artifact printed 3 for every N, built without N it printed 1 where the
+; interpreter prints 7.
+;
+; The rule is ONE GATE in the core (src/io.c `lin_build_gate`), asked by every dispatch
+; path before it performs a call, and it answers by CAPABILITY: a provider DECLARES, where
+; it registers, whether calling it observes the world (`lin_scalar_ops_add(..., pure)`),
+; a driver declares the same for its own rows (std/drivers/readback.c `ffi_row_pure`), and
+; a call NOBODY declared is refused -- the sound default for a foreign symbol.  A build
+; that reaches such a call does not make it: it REPORTS what it stopped at, leaves the
+; call's redex in the net, and the artifact makes it at run time, in its own process.
+;
+; This suite is that case end to end, and aot_equiv.py pins all of it: the build must not
+; RUN the command (its own run of this suite must produce no OBSERVED line), it must SAY
+; what it stopped at, and the ARTIFACT must decide from the environment of the process the
+; artifact is in -- which is the only environment the program was ever about.  The value
+; here is the command's EXIT STATUS (256 for a shell exiting 1, as ffi_systems.lin's `; expect 0`
+; already pins for a success), so the two answers are different numbers rather than different text.
+(load "std/std.lin")
+
+; Pure work first, so that what the build KEEPS is visible in the artifact: nothing here
+; depends on the world, so a build may (and does) evaluate all of it.
+(define! sumto (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))
+
+; ... and then the observation: a shell asking whether this process has LIN_BUILD_OBSERVE.
+; A build that ran it would bake the BUILD host's answer into the artifact; a build that
+; declines leaves the question to the run, and aot_equiv builds this suite with the
+; variable ABSENT and runs it with the variable SET, exactly as it does for runtime_ffi.
+(add (sumto 30) (ccall1 "system" "test -n \"$LIN_BUILD_OBSERVE\" >/dev/null 2>&1"))
+; expect => 721

@@ -5,13 +5,13 @@
 #include <dlfcn.h>
 
 /* The core's value readers: net STRUCTURE in, a value out -- under an encoding the CALLER states.
-   There is no per-node label to consult.  Scott zero (`\b0.\b1.b0`), Church TRUE and the empty list
-   are ONE net, so which value a node holds cannot be recovered from the node: the EXPECTATION is the
-   only source of meaning -- the type the compiler computed, a domain a driver declared, a slot's FFI
-   signature -- and a reader that has none must DECLINE (readback then prints the structure) rather
-   than guess.  The core keeps the encoding WALKS (below), the generic box builders, the one arg-spine
-   decoder and the thin dispatchers to whichever driver declares LIN_WANT_READBACK; what a value MEANS
-   beyond its shape -- the table behind a float box, FFI dispatch -- is never the core's. */
+   There is no per-node label to consult: Scott zero (`\b0.\b1.b0`), Church TRUE and the empty list are
+   ONE net, so a node does not say which value it holds, and the EXPECTATION is the only source of
+   meaning -- the type the compiler computed, a domain a driver declared, a slot's FFI signature.  A
+   reader with none must DECLINE (readback then prints the structure) rather than guess.  What a value
+   MEANS beyond its shape -- the table behind a float box, FFI dispatch -- is never the core's: the core
+   keeps the encoding WALKS (below), the box builders, the arg-spine decoder and the dispatchers to
+   whoever declares LIN_WANT_READBACK. */
 static Net *N;
 /* Where readback's VALUE is written.  Loading the prelude must still EVALUATE its top-level forms
    -- FFI dispatch happens in readback, so `(set_driver "arith")` in std/drivers/arith.lin only runs
@@ -24,9 +24,9 @@ static inline int live(const Net *n, Port p) { return p.node >= 0 && p.node < n-
 static inline Port wr(const Net *n, Port p) { return n->wire[p.node * 3 + p.port]; }
 
 void lin_domains_init(void) {
-  /* The builtin scalar domains are also nominal TYPES, so that parse_type_atom resolves
-     bool/num/float/list to distinct TNOM heads and the compiler can hand readback the expected
-     domain of an observed result.  Nothing here is keyed by a carrier name any more. */
+  /* The builtin scalar domains are also nominal TYPES: parse_type_atom resolves bool/num/float/list to
+     distinct TNOM heads, and the compiler can hand readback the expected domain of the result.  Nothing
+     here is keyed by a carrier name any more. */
   nominal_register("bool", 0);
   nominal_register("num", 0);
   nominal_register("float", 0);
@@ -58,11 +58,11 @@ Port net_dup_hop(Net *n, Port p) { N = n; return dup_hop(n, p); }
 
 /* Force the value at `p` and return a port that still names it.
    Readback holds the VALUE end of a wire, and forcing fires the redex that end may itself name; β then
-   consumes BOTH nodes of the pair and `p` dies with them, so every later read sees a discarded node
-   and the value prints as `_`.  pair_boundary joins the pair's body port to the port its RESULT was
-   wired to, so the value is one hop past the consumer's end -- which the rule never touches -- and
-   that is where the port is re-aimed.  Without this, forcing during readback destroyed the thing it
-   was forcing.  FORCING IS REDUCTION, which is why the primitive is the core's. */
+   consumes BOTH nodes of the pair and `p` dies with them, so every later read sees a discarded node and
+   the value prints as `_`.  pair_boundary joins the pair's body port to the port its RESULT was wired
+   to, so the value is one hop past the consumer's end -- which the rule never touches -- and that is
+   where the port is re-aimed; without this, forcing during readback destroyed what it was forcing.
+   FORCING IS REDUCTION, which is why the primitive is the core's. */
 Port net_force_val(Net *n, Port p) {
   for (int i = 0; i < 32; i++) {
     if (p.node < 0 || p.node >= n->nn) return p;
@@ -194,12 +194,10 @@ int net_read_string(Net *n, Port p, int pay_enc, char *buf, size_t max) {
     Layer L;
     if (!cons_layer(n, cur, &L)) break;
     if (L.layer != L_INDUCTIVE) { buf[len] = 0; return (int)len; }   /* the nil terminal */
-    /* A payload must be a NUMBER the structure determines ON ITS OWN -- one layer or more.  A payload
-       that is the bare terminal (`\b0.\b1.b0`) is also TRUE and nil, so reading it as a character
-       would be a guess; and a payload that is itself a CELL is a 1-element list whose "cell" is an
-       `_ffi` closure's header (the two ARE one net: `\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn)
-       args)`), so it is not a string either.  Both are skipped, exactly as an unreadable payload
-       always was. */
+    /* A payload must be a NUMBER the structure determines ON ITS OWN -- one layer or more.  The bare
+       terminal (`\b0.\b1.b0`) is also TRUE and nil, so reading it as a character would be a guess; a
+       payload that is itself a CELL is a 1-element list whose "cell" is an `_ffi` closure's header (the
+       two ARE one net: `\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)`).  Both are skipped. */
     long ch = net_read_int(n, L.head, pay_enc);
     if (ch > 0 && ch < 256) buf[len++] = (char)ch;
     cur = L.tail;
@@ -307,12 +305,12 @@ Port net_alloc_float(Net *n, double d) {
    See std/num.lin and pattern.h for the shapes a driver tells apart. */
 
 /* dig the `_ffi`-closure header at LAM `lam` (shape \_ffi.\_ret. ((_ffi <fn>) <args>)) into `*a1` (fn
-   APP) and `*argp` (arg-spine).  PURE: it reads wires and tags and never forces, because forcing here
-   would run the reducer from inside a reader, and a reader is reached FROM the reducer (a driver
-   decoding an operand calls this through net_read_value) -- that re-entry lands on the same closure
-   and repeats for ever.  A caller that needs the body reduced says so itself, where reduction is legal
-   (`reduce`, `match`).  Through `dup_hop`: a SHARED closure is reached through a fan, so its body wire
-   leads to a DUP auxiliary whose principal is the body, and reading it plainly finds the fan. */
+   APP) and `*argp` (arg-spine).  PURE: wires and tags are read and nothing is forced, because forcing
+   here would run the reducer from inside a reader -- and the reader is reached FROM the reducer (a
+   driver decoding an operand calls this through net_read_value), so the re-entry lands on the same
+   closure and repeats for ever.  A caller that needs the body reduced says so itself, where reduction
+   is legal (`reduce`, `match`).  Through `dup_hop`: a SHARED closure is reached through a fan, so its
+   body wire leads to a DUP auxiliary whose principal is the body. */
 int net_ffi_header(Net *n, Port lam, Port *a1, Port *argp) {
   Port r = dup_hop(n, wr(n, (Port){lam.node, 2}));
   if (r.node < 0 || r.port != 0 || n->tag[r.node] != LAM) return 0;
@@ -374,21 +372,17 @@ int net_spine_slots(Net *n, Port argp) {
   return slots;
 }
 
-/* Decode one slot into a Val.  `dom` is the EXPECTATION the caller states -- the signature of the
-   symbol being called, a driver's own operand domain -- and it is tried first, because it is the only
-   thing that can decide a shape TWO domains claim (`\b0.\b1.b0` is zero, TRUE and nil at once).
-   Where the expectation does not hold, the slot's structure may still determine the value ON ITS OWN,
-   and using it is not a guess: a box is not a numeral, a numbered chain is not a cell, and a cons
-   chain of numbers is not either.  What is deliberately NOT here is a preference ORDER between
-   domains -- that would be exactly the name-sniffing this design removed.
-   One shape is excluded outright: an UNSATURATED `_ffi` CLOSURE has no value the structure can
-   state.  Its header IS the language's cons cell (`\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn)
-   args)` are one net, as net_read_string's own note records), so a shape read of one is a MISREAD
-   and not a guess: measured, `(add (ccall1 "lin_parse_float" (ffi.getenv "N")) 1)` read the
-   closure's fn-name CELL where a number belongs -- the numeral 0 through net_read_int, the string
-   "getenv" through net_read_string -- and the fold then fired on that garbage.  Dispatching above
-   is the only way such a slot yields a value, so when dispatch produces nothing the slot DECLINES
-   (the caller retries -- the operand is not concrete YET) instead of being shape-read. */
+/* Decode one slot into a Val.  `dom` is the EXPECTATION the caller states -- the signature of the symbol
+   being called, a driver's own operand domain -- and it is tried first, because it is the only thing that
+   can decide a shape TWO domains claim (`\b0.\b1.b0` is zero, TRUE and nil at once).  Where it does not
+   hold, the slot's structure may still determine the value ON ITS OWN, and using it is not a guess: a box
+   is not a numeral, a numbered chain is not a cell, and a cons chain of numbers is not either.  What is
+   deliberately NOT here is a preference ORDER between domains -- the name-sniffing this design removed.
+   One shape is excluded outright: the UNSATURATED `_ffi` CLOSURE, whose header IS the language's cons
+   cell (`\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)` are one net), so a shape read of one is a
+   MISREAD and not a guess: measured, `(add (ccall1 "lin_parse_float" (ffi.getenv "N")) 1)` read the
+   closure's fn-name CELL where a number belongs -- the numeral 0, then the string "getenv" -- and the
+   fold fired on that garbage.  So when dispatch produces nothing the slot DECLINES, never shape-reads. */
 static int dec_arg(Net *n, Port p, int dom, Val *v) {
   /* A NESTED CLOSURE comes first: what a slot's expectation is about is the VALUE, and a closure's
      value is what dispatching it produces -- `(fadd (float "2.5") (float "3.5"))` has closures where
@@ -494,10 +488,30 @@ int lin_driver_load(const char *name) {
 
 /* The native scalar table is a REGISTRY the plugins write into (arith.so registers lin_arith_scalar at
    construction), so it is the core's however the dispatch is packaged.  Dispatch is *open*: the first
-   provider that owns `fn` supplies it.  outkind 1=int, 3=bool, 4=float-bits. */
-typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
-static ScalarOpFn scalar_ops[16]; static int n_scalar_ops = 0;
-void lin_scalar_ops_add(ScalarOpFn f) { if (n_scalar_ops < 16) scalar_ops[n_scalar_ops++] = f; }
+   provider that owns `fn` supplies it.  outkind 1=int, 3=bool, 4=float-bits.  A provider DECLARES its own
+   purity where it registers (lin.h), because only it can; the core classifies a call by that declaration,
+   never by the symbol's name, and while a build marker is up a provider that declared nothing is not
+   consulted at all -- so a call nobody vouched for cannot happen. */
+typedef struct { ScalarOpFn f; int pure; } ScalarProvider;
+static ScalarProvider scalar_ops[16]; static int n_scalar_ops = 0;
+void lin_scalar_ops_add(ScalarOpFn f, int pure) { if (n_scalar_ops < 16) scalar_ops[n_scalar_ops++] = (ScalarProvider){f, pure}; }
+
+/* !=0 once a build-time reduction reached an observation it may not make, and how many it was asked
+   for: the gate reports the FIRST one, naming it (see lin_build_gate). */
+int lin_build_observed = 0;
+
+/* THE ONE GATE (lin.h): every dispatch path asks it before PERFORMING a call, and it answers by
+   CAPABILITY -- the caller's own declaration, or a declared-pure provider's, because one call can be
+   reached two ways (a driver's own row, or the registry's ownership query). */
+int lin_build_gate(const char *fn, int pure) {
+  long out; int okind = 0;
+  if (!lin_build_depth && !lin_precompile_depth) return 1;      /* run time: every call is performed */
+  if (pure || lin_scalar_ops_run(fn, -1, NULL, &out, &okind)) return 1;
+  if (!lin_build_observed++)                                     /* the first one is the one reported */
+    fprintf(stderr, "lin: build stopped at `%s`: no provider DECLARED it a function of its operands, so "
+                    "the artifact makes that call at run time, from its own environment\n", fn);
+  return 0;
+}
 
 /* dlopen a std/drivers plugin by its `<sym>_driver` symbol (idempotent); its constructor registers providers. */
 void lin_scalar_ops_load(const char *sym) {
@@ -512,10 +526,20 @@ void lin_scalar_ops_load(const char *sym) {
 }
 
 /* The native scalar ops the std's float and ffi modules reach for come from std/drivers/arith.so.  The
-   core loads NO driver by default, so the first program that asks for one pulls the plugin in here. */
+   core loads NO driver by default, so the first program that asks for one pulls the plugin in here.
+   `argc < 0` is the OWNERSHIP QUERY (lin.h): answered without operands and without computing, because
+   the caller has read none yet and must not read any to find out -- a def being precompiled has FREE
+   VARIABLES for operands, and forcing one walks a knot that never becomes a value (measured: a fold that
+   decoded every closure's spine to classify it took test/sat_verify.lin from 295 ms to 82 s).  Only a
+   provider that DECLARED purity is ever asked, and one that cannot answer is not pre-approved either --
+   the sound direction, since the artifact makes such calls at run time; a plain query never loads one. */
 int lin_scalar_ops_run(const char *fn, int argc, const long *args, long *out, int *outkind) {
-  if (n_scalar_ops == 0) lin_scalar_ops_load("arith");
-  for (int s = 0; s < n_scalar_ops; s++) if (scalar_ops[s](fn, argc, args, out, outkind)) return 1;
+  if (n_scalar_ops == 0 && argc >= 0) lin_scalar_ops_load("arith");
+  int build = argc < 0 || lin_build_depth > 0 || lin_precompile_depth > 0;
+  for (int s = 0; s < n_scalar_ops; s++) {
+    if (build && !scalar_ops[s].pure) continue;   /* a build performs only DECLARED-pure calls */
+    if (scalar_ops[s].f(fn, argc, args, out, outkind)) return 1;
+  }
   return 0;
 }
 

@@ -68,20 +68,11 @@ static int guard_has(Guard *g, const char *name) {
    the operands here are free variables that never become concrete, so a driver must not fold (a baked closure
    would capture a stale value).  Which redexes that affects is the driver's business. */
 int lin_precompile_depth = 0;
-/* !=0 while the AOT build is partially evaluating the program.  Distinct from
-   lin_precompile_depth: that one says "operands are free variables"; this one says
-   "this reduction is happening at BUILD time, so nothing the program would OBSERVE at
-   run time may be baked into the artifact".  A driver that folds a probe like
-   (lin_folds)/(lin_folded) would otherwise freeze the build-time answer into the
-   .line file and the program could never observe anything else. */
+/* !=0 while the AOT build is partially evaluating the program.  Distinct from lin_precompile_depth
+   (operands are free variables): this one says the reduction is happening at BUILD time, so nothing the
+   program would OBSERVE at run time may be baked into the artifact -- a driver that folded a probe like
+   (lin_folds)/(lin_folded) would freeze the build-time answer into the .line file for ever. */
 int lin_build_depth = 0;
-/* Set by whoever DISPATCHES an FFI call while `lin_build_depth` or `lin_precompile_depth` is raised,
-   for a symbol whose value is not a function of its operands (the environment, the file system, the
-   process): the readback driver declines such a call -- a build may not make the program's
-   observations -- and says so here.  `aot_run` reads it and, having been told, ships the program
-   UNREDUCED rather than partially evaluated.  The two halves are the same rule: a build either
-   evaluates what the net determines or it bakes nothing. */
-int lin_build_observed = 0;
 
 /* The one pipeline: a term becomes a reduced net the same way in every mode — expand defines,
    (AOT only) optimize, compile, (AOT only) offer the drivers their passes, run the core to the
@@ -100,20 +91,16 @@ static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, 
   /* THE PASS POINT, and the only place the core mentions it: AOT is one very large wave with full
      information and no step limit, so a driver decides here, ONCE, what the runtime would otherwise
      re-derive every wave.  Offered under the build marker (a pass cannot bake an observation the
-     program would make at run time) and before compaction, so what it rewrites is what ships.
-     NOT to a build that ships the program UNREDUCED (`limit == 0`, see aot_run): a pass's subject is
-     the value a build EVALUATED -- it forces the cone and encodes the result -- and there is none
-     here, by the caller's own decision.  Offered anyway it encodes what it CAN force, and what it can
-     force is a stuck thunk: measured, `test/runtime_ffi.lin`'s declined `getenv` shipped ROOT inside
-     `arith`'s num box, whose payload hangs off an application's ARGUMENT -- which needed order never
-     demands -- so the artifact printed the payload as structure for ever. */
-  if (depth == DEPTH_BUILD && limit > 0) lin_driver_aot(net, opt, build_sch);
+     program would make at run time) and before compaction, so what it rewrites is what ships.  A pass's
+     subject is the value a build EVALUATED, so a pass that would encode a cone it could not evaluate
+     must DECLINE instead (std/drivers/arith.c: the encoding read is the test) -- measured otherwise,
+     with the build keeping its partial evaluation: `test/runtime_ffi.lin`'s declined `getenv` shipped
+     ROOT inside `arith`'s num box and the artifact printed the payload as structure for ever. */
+  if (depth == DEPTH_BUILD) lin_driver_aot(net, opt, build_sch);
   long steps = net_reduce(net, limit);
   /* Needed order leaves a term's un-demanded thunks alone, which is exactly right at RUN time and
-     useless to a build: what a build wants to bake is the VALUE, so it observes the root itself.
-     NOT when the caller ships a program UNREDUCED (`limit == 0`, see aot_run): forcing is how a build
-     finds its value, and a caller that wants no bake must not have one happen behind its back. */
-  if (depth != DEPTH_RUN && limit > 0) net_force(net, (Port){0, 0});
+     useless to a build: what a build wants to bake is the VALUE, so it observes the root itself. */
+  if (depth != DEPTH_RUN) net_force(net, (Port){0, 0});
   if (depth == DEPTH_PRECOMPILE) lin_precompile_depth--;
   else if (depth == DEPTH_BUILD) lin_build_depth--;
   if (opt != ex) term_free(opt);
@@ -167,12 +154,11 @@ Term *expand_defs(Term *t) {
   Guard g = {0}; Term *res = expand(t, &g); free(g.names); return res;
 }
 
-/* Benchmark accounting.  `eval_form` reduces the net *before* its
-   recursion-sentinel check, so `run_and_report` used to re-reduce an
-   already-reduced net and its timer always read 0.00 ms while `net->steps`
-   showed the real total.  The reduction that happens is recorded here instead,
-   and the effect-continuation re-reductions in `net_run_io` are added to it, so
-   the reported time covers getting the net to a value (not compile/readback). */
+/* Benchmark accounting.  `eval_form` reduces the net *before* its recursion-sentinel check, so
+   `run_and_report` used to re-reduce an already-reduced net and its timer always read 0.00 ms while
+   `net->steps` showed the real total.  The reduction that happens is recorded here instead, plus the
+   effect-continuation re-reductions in `net_run_io`, so the reported time covers getting the net to a
+   value (not compile/readback). */
 static int bench_measured;            /* a caller already reduced and timed it */
 static double bench_ms;
 static long long bench_goi0, bench_goi1;
@@ -377,9 +363,8 @@ static int resolve_path(const char *rel, char *out, size_t out_sz) {
   /* A `std/`-prefixed load names a standard-library module.  A configured LIN_STD_DIR (a packaged
      /nix/store std) MUST win over a coincidental ./std in the process CWD — otherwise a checkout run
      overrides the configured std with a local one, mixing two stds and stranding private defs (e.g.
-     num._padd unbound when a second num.lin is loaded on top of the configured one).  So resolve
-     `std/...` against LIN_STD_DIR first; a plain relative load still falls through to the CWD /
-     loading-file-relative lookup below. */
+     num._padd unbound when a second num.lin is loaded on top of the configured one).  A plain relative
+     load still falls through to the CWD / loading-file-relative lookup below. */
   if (rel[0] != '/' && !strncmp(rel, "std/", 4)) {
     snprintf(cand, sizeof cand, "%s/%s", std_dir, sub);
     if (access(cand, R_OK) == 0 && realpath(cand, out)) return 1;
@@ -408,12 +393,12 @@ static void load_std(void) {
 
 static int building = 0;
 static Term *build_term = NULL;
-/* The READER's last delivery while building was an error, i.e. the program's final form never
-   parsed.  A build compiles the LAST expression of the file (`build_term`), so building a truncated
-   prefix would ship an artifact for a program the interpreter refuses -- measured: test/types.lin
-   ends in an unterminated `(1`, the interpreter reports `parse error: missing ')'` as that form's
-   outcome, and the artifact printed the 500 of the form BEFORE it.  A read error that a LATER form
-   supersedes is harmless (the interpreter continues form by form, and so does the build). */
+/* The READER's last delivery while building was an error, i.e. the program's final form never parsed.
+   A build compiles the LAST expression of the file (`build_term`), so building a truncated prefix would
+   ship an artifact for a program the interpreter refuses -- measured: test/types.lin ends in an
+   unterminated `(1`, the interpreter reports `parse error: missing ')'` as that form's outcome, and the
+   artifact printed the 500 of the form BEFORE it.  A read error a LATER form supersedes is harmless:
+   the interpreter continues form by form, and so does the build. */
 static int build_read_err = 0;
 
 static int run_line_file(const char *path) {
@@ -486,11 +471,11 @@ static int load_file(const char *path) {
   return 1;
 }
 
-/* AOT decision search (std — not core).  The artifact is the deliverable, so a build-time decision
- * is made by building the candidates and measuring them: the work the runtime still has to do (the
+/* AOT decision search (std — not core).  The artifact is the deliverable, so a build-time decision is
+ * made by building the candidates and measuring them: the work the runtime still has to do (the
  * residual's own reduction -- what "AOT moved the work out" means) and how many bytes ship.  The
- * candidate space is a row list, not a chain of ifs; default is the single measured-best row, and
- * `LIN_AOT_SEARCH=1` explores the table and ships the winner, reporting every candidate's numbers. */
+ * candidate space is a row list, not a chain of ifs; `LIN_AOT_SEARCH=1` explores it and ships the
+ * winner, reporting every candidate's numbers. */
 
 typedef struct { const char *name; const char *egraph; const char *rules; int precompile; } AotCand;
 
@@ -537,24 +522,20 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   aot_reset_defs();
   Net net; net_init(&net, 1 << 16);
   /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  Needed order
-     stops at the first effect or non-pure FFI closure, so the artifact keeps only what genuinely
-     needs the runtime -- and a Y-knot is left as the cycle it is instead of being unrolled to a
-     bound the build had to guess.
-     A program that OBSERVES (an FFI call whose value is not a function of its operands -- `getenv`,
-     a driver selection, a file) is the exception: the observation belongs to the run time, so the
-     build ships the program UNREDUCED and lets the artifact compute it there.  Measured without this:
-     `lin build` of test/runtime_ffi.lin executed the program's own `getenv` and froze the answer into
-     the artifact -- built with N=2 the artifact printed 3 for every N, and built without N (getenv ->
-     NULL -> parse_float -> 0) it printed 1 where the interpreter prints 7.  The readback driver
-     declines such a call and reports it here (lin_build_observed); the second pass runs with
-     `limit = 0`, i.e. compile and NOTHING else -- no reduction and no driver pass, which is exactly
-     the pipeline a plain compile takes -- and the container re-seeds from structure when it loads. */
+     stops at the first effect or observation, so the artifact keeps only what genuinely needs the
+     runtime, and a Y-knot is left as the cycle it is instead of being unrolled to a guessed bound.
+     AN OBSERVING BUILD KEEPS THE WORK IT DID, and what it observed is not made here: the fold that
+     needs the observation declines (src/io.c's one gate) and the redex it declined STAYS in the net
+     (std/drivers/arith.c, the rule a precompiled def's free operands already had), so the artifact folds
+     it at run time after the observation its own environment makes -- one pass, and the partial
+     evaluation ships.  Measured without the gate: `lin build` of test/runtime_ffi.lin ran the program's
+     own `getenv` and froze the answer -- built with N=2 the artifact printed 3 for every N, built without
+     N it printed 1 where the interpreter prints 7.  Measured against discarding the whole net and
+     recompiling (this rule's previous form): test/runtime_ffi.lin 483 ms -> 204 ms with the artifact's
+     own work falling from 106 reduce steps to 1, and test/build_observe.lin 5953 ms -> 193 ms with
+     498739 steps -> 1. */
   lin_build_observed = 0;
   long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
-  if (baked >= 0 && lin_build_observed) {
-    net_free(&net); net_init(&net, 1 << 16);
-    baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, 0, &st->compiled, err, sizeof err);
-  }
   if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
   st->aot_steps = (int)baked; st->residual = net.nn;
   net_gc(&net);

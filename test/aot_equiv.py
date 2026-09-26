@@ -80,8 +80,9 @@ import tempfile
 # whose expectations come from the environment is BUILT with that variable absent and RUN with it
 # set: the artifact has to answer from its own run-time environment.  (Measured before this:
 # `lin build` executed the program's `getenv` and froze the build's answer into the artifact.)
-CORPUS_ENV = {'runtime_ffi.lin': {'N': '6'}}      # mirrors test/run_tests.sh's `N=6 run_test`
-CORPUS_BUILD_DROP = ('N',)                        # the run-time input: ABSENT while building
+CORPUS_ENV = {'runtime_ffi.lin': {'N': '6'},      # mirrors test/run_tests.sh's `N=6 run_test`
+              'build_observe.lin': {'LIN_BUILD_OBSERVE': '1'}}
+CORPUS_BUILD_DROP = ('N', 'LIN_BUILD_OBSERVE')    # the run-time inputs: ABSENT while building
 
 # Genuinely ENVIRONMENTAL, with both answers pinned so drift cannot pass silently.  `(get_driver)`
 # reports the strategy of the PROCESS it runs in, not a value of the compiled program: the
@@ -97,7 +98,12 @@ CORPUS_BUILD_DROP = ('N',)                        # the run-time input: ABSENT w
 ENVIRONMENTAL = {
     'unison.lin': ('=> gpu', '=> cpu',
                    'the interpreter evaluated the file\'s `(set_driver "gpu")`; a container runs '
-                   'prelude-free, so `(get_driver)` answers for a process with no strategy driver'),
+                   'prelude-free, so `(get_driver)` answers for a process with no strategy driver.  '
+                   'The DRIVER SET is an observation under the build rule (`driver_get`/`driver_set` '
+                   'are declared impure in std/drivers/readback.c), so a build may not bake the host '
+                   'strategies into the artifact -- see BUILD_TIME_OBSERVATION below, which builds a '
+                   'program whose answer IS the driver set and shows the build refusing and REPORTING '
+                   'it while the artifact still answers for its own process'),
 }
 
 # KNOWN DIVERGENCES: reported as FAILURES (never tolerated, never skipped silently) so the tree
@@ -251,6 +257,105 @@ def corpus(lin_abs, std_dir, env, tmp, known):
     return checked, refused, environ, known_hit, bad
 
 
+# ============================================================================================
+# BUILD-TIME OBSERVATION: WHAT A BUILD MAY NOT DO
+# --------------------------------------------------------------------------------------------
+# The corpus sweep already carries the differential for the ENVIRONMENT case: test/runtime_ffi.lin
+# and test/build_observe.lin are both built with their run-time input ABSENT and run with it SET, so
+# an artifact that baked the build host's answer diverges there.  This section pins the three things
+# that differential cannot see by itself, on the same rule:
+#
+#   (a) the build does NOT perform the observation -- not merely "does not ship it".  A command the
+#       program runs for its value is a command whose OUTPUT is program output: the build's own run
+#       of test/build_observe.lin must produce no OBSERVED line, and the artifact's must.
+#   (b) it SAYS what it stopped at, by name: `lin: build stopped at `<fn>`...`, which is the record
+#       the gate keeps (lin_build_observed) and the only reason a user can tell a refusal from a
+#       plain `not found`.
+#   (c) the artifact decides from ITS OWN environment: built with the variable absent and with it
+#       present, the two artifacts must be BYTE-IDENTICAL (nothing about the build host survives in
+#       them), and running one under each environment must give the two different answers the shells
+#       really produce.
+#
+# The last case is the same rule at the level of a single call: an FFI symbol nobody declared pure
+# (`system`) is refused at build time even though it is a plain libc call, because a build may not
+# perform what it cannot see the value of.
+BUILD_OBSERVE = 'build_observe.lin'
+BUILD_OBSERVE_VAR = 'LIN_BUILD_OBSERVE'
+BUILD_OBSERVE_YES = '=> 465'      # shell `test -n "$LIN_BUILD_OBSERVE"` exits 0
+BUILD_OBSERVE_NO = '=> 721'       # ... exits 1, and `system` reports the raw wait status (256)
+
+
+def build_time_observation(lin_abs, std_dir, env, tmp):
+    """(failures, note) for the build-time purity rule; see the section comment above."""
+    src = os.path.join(os.path.dirname(os.path.abspath(std_dir)), 'test', BUILD_OBSERVE)
+    if not os.path.exists(src):
+        print('FAIL test/%s is missing -- the build-observation rule is untested' % BUILD_OBSERVE)
+        return 1, ''
+    bad = 0
+    with_var = dict(env, **{BUILD_OBSERVE_VAR: '1'})
+    without = dict(env)
+    without.pop(BUILD_OBSERVE_VAR, None)
+
+    # (a) + (b): the command is not run, and the build says what it stopped at
+    gone = os.path.join(tmp, 'obs.absent.line')
+    present = os.path.join(tmp, 'obs.present.line')
+    rca, outa, erra = run([lin_abs, 'build', src, '-o', gone], 300, without)
+    rcb, _, _ = run([lin_abs, 'build', src, '-o', present], 300, with_var)
+    if rca != 0 or rcb != 0 or not (os.path.exists(gone) and os.path.exists(present)):
+        print('FAIL `lin build` of test/%s failed (rc=%d/%d)' % (BUILD_OBSERVE, rca, rcb))
+        return 1, ''
+    interp = last_line(run([lin_abs, src], 60, without)[1])
+    if interp != BUILD_OBSERVE_NO:
+        print('FAIL test/%s: the interpreter answers %r with %s absent, not %r'
+              % (BUILD_OBSERVE, interp, BUILD_OBSERVE_VAR, BUILD_OBSERVE_NO))
+        bad += 1
+    if not re.search(r'build stopped at `system`', erra):
+        print('FAIL the build of test/%s did not REPORT the call it stopped at (stderr tail: %r)'
+              % (BUILD_OBSERVE, last_line(erra)[-120:]))
+        bad += 1
+    # (c) nothing about the build host survives in the artifact ...
+    if open(gone, 'rb').read() != open(present, 'rb').read():
+        print('FAIL the artifact of test/%s depends on the BUILD host: built with %s absent it is %d '
+              'bytes, with it present %d -- the build made the program\'s observation'
+              % (BUILD_OBSERVE, BUILD_OBSERVE_VAR, os.path.getsize(gone), os.path.getsize(present)))
+        bad += 1
+    # ... and it decides from its own environment, both ways
+    for want, run_env in ((BUILD_OBSERVE_YES, with_var), (BUILD_OBSERVE_NO, without)):
+        got = last_line(run([gone], 60, run_env)[1])
+        if got != want:
+            print('FAIL the artifact of test/%s answers %r with %s=%r, not %r -- the observation is '
+                  'the RUN\'s, not the build\'s'
+                  % (BUILD_OBSERVE, got, BUILD_OBSERVE_VAR, run_env.get(BUILD_OBSERVE_VAR), want))
+            bad += 1
+
+    # the same rule on a bare FFI call: the build must not run the program's own command, and the
+    # artifact must -- so the refusal is not "the build quietly did nothing", it is "the run does it".
+    probe = os.path.join(tmp, 'obs_effect.lin')
+    with open(probe, 'w') as fh:
+        fh.write('(load "std/std.lin")\n(add (ccall1 "system" "echo BUILT") 1)\n')
+    art = os.path.join(tmp, 'obs_effect.line')
+    brc, bout, berr = run([lin_abs, 'build', probe, '-o', art], 300, env)
+    if brc != 0 or not os.path.exists(art):
+        print('FAIL the system-call probe did not build (rc=%d)' % brc)
+        return bad + 1, ''
+    if 'BUILT' in bout:
+        print('FAIL a build RAN the program\'s own command: its stdout carries the command\'s output '
+              '(%r)' % bout.strip()[:80])
+        bad += 1
+    if not re.search(r'build stopped at `system`', berr):
+        print('FAIL a build did not report the undeclared call `system` (stderr tail: %r)'
+              % last_line(berr)[-120:])
+        bad += 1
+    arc, aout, _ = run([art], 60, env)
+    if 'BUILT' not in aout or not aout.strip().endswith('1'):
+        print('FAIL the artifact did not run the program\'s command and answer from it (rc=%d, '
+              'stdout=%r)' % (arc, aout.strip()[-80:]))
+        bad += 1
+    return bad, ('%s: build refuses and names `system`, artifact byte-identical across build '
+                 'environments and answers %s/%s from its own' % (BUILD_OBSERVE, BUILD_OBSERVE_YES,
+                                                                  BUILD_OBSERVE_NO))
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__.strip().splitlines()[-1])
@@ -384,6 +489,9 @@ def main():
                   'with the rules vs %d without them' % (nodes['default'], nodes['no-egraph']))
             return 1
         payoff = '; pays off %d -> %d nodes on test/egraph.lin' % (nodes['no-egraph'], nodes['default'])
+    # ---- what a build may not DO (the rule the sweep's build/run split enforces) ----------------
+    bo_bad, bo_note = build_time_observation(lin_abs, std_dir, env, tmp)
+    bad += bo_bad
     # ---- the corpus differential: every `; expect` suite, artifact against interpreter -----------
     cchecked, crefused, cenviron, cknown, cbad = corpus(lin_abs, std_dir, env, tmp, KNOWN_DIVERGENT)
     bad += cbad
@@ -396,6 +504,8 @@ def main():
               'suites built and compared, %d of them refused by BOTH paths, %d environmental by '
               'construction, %d KNOWN and still failing)' % (bad, cchecked, crefused, cenviron, cknown))
         return 1
+    if bo_note:
+        print('aot_equiv: build-time observation: ' + bo_note)
     print('aot_equiv: OK (%d cases x {passes on, passes off, AOT-search}; e-graph fired %d time(s), '
           'declined %d capture-risk rewrite(s), %d searched builds; AOT pass improved %d value case(s) '
           '(%s), declined by type on %d; CORPUS: %d suites, artifact == interpreter\'s final answer, '

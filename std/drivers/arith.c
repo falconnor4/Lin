@@ -27,9 +27,30 @@
  *  (out = IEEE-754 bits).  Returns 1 if `fn` is one of our rows, else 0
  *  (declined, so the caller can fall back to core / dlsym).
  * ---------------------------------------------------------------------- */
+/* THE TABLE'S OWN VOCABULARY, for the OWNERSHIP QUERY (`argc < 0`, src/lin.h): the one place the names
+   the rows below answer to are stated as data, so a caller can ask "is this call yours?" WITHOUT
+   operands -- a caller that had to read operands to find out would force a precompiled def's free
+   variables (measured: test/sat_verify.lin, 295 ms -> 82 s).  The entries mirror the rows' own prefix
+   tests exactly, and that is the point of the list: a name the table answers to but this list misses
+   costs only a fold (the call is made at run time instead), while a name this list claims and the table
+   does NOT answer to would let a build perform a call nobody supplies.  The two cast rows this driver
+   performs itself (`lin_float`, `lin_parse_float`) and the reduction probes a build must not fold
+   (`lin_folds`, `lin_folded`) are declared beside those rows, not here. */
+static int arith_supplies(const char *fn) {
+  static const char *const rows[] = {
+    "lin_fadd", "lin_fsub", "lin_fmul", "lin_fdiv", "lin_fpow", "lin_fatan2", "lin_fmin", "lin_fmax",
+    "lin_fsqrt", "lin_fsin", "lin_fcos", "lin_ftan", "lin_fabs", "lin_fsign", "lin_ffract",
+    "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_lerp", "lin_fclamp",
+    "lin_add", "lin_sub", "lin_mul", "lin_div", "lin_mod", "lin_pow",
+    "lin_eq", "lin_lt", "lin_leq", "lin_gt", "lin_geq", NULL };
+  for (int i = 0; fn && rows[i]; i++) if (!strncmp(fn, rows[i], strlen(rows[i]))) return 1;
+  return 0;
+}
+
 int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *outkind) {
   *outkind = 0;
   if (!fn) return 0;
+  if (argc < 0) return arith_supplies(fn);        /* the ownership query: no operands, no computing */
 
   /* float binary ops: args are IEEE-754 bits carried as longs; result float */
   if      (fn[0]=='l' && fn[1]=='i' && fn[2]=='n' && !strncmp(fn, "lin_fadd", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x+y; memcpy(out,&r,8); *outkind=4; return 1; }
@@ -254,15 +275,37 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
     c[i] = fargs[i].iv;
   }
   long out = 0; int okind = 0;
-  if (!lin_arith_scalar(fn, slots, c, &out, &okind)) return EV_NO;   /* declined: pure-Lin β computes it */
+  /* Through the registry, like every other call this driver resolves: an `_op` head's operator comes
+     from the fixed pure-Lin vocabulary (LIN_OP_*), and the provider that supplies it states its purity
+     where it registers. */
+  if (!lin_scalar_ops_run(fn, slots, c, &out, &okind)) return EV_NO;  /* declined: pure-Lin β computes it */
   v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1);
   v->iv = out;
   return EV_READY;
 }
 
-/* Compute the concrete value of a saturated pure-Lin `_ffi` closure `lam`.
-   Only PURE `lin_*` builtins fold; side-effecting FFI (`puts`, `dlopen`,
-   `getenv`, ...) and `lin_streq` (needs C strings) stay on readback.
+/* THIS DRIVER'S OWN `_ffi` ROWS, and which of them it DECLARES pure.  That declaration is what makes
+   the build rule a CAPABILITY and not a naming convention: the rule used to be the `lin_` PREFIX, which
+   trusted an effectful `lin_*` symbol and refused a pure callable that was not spelled `lin_`.
+     - the two casts are functions of their operands, so a build may fold them;
+     - `lin_streq` is pure too but needs C strings this fold does not build: declared pure, DECLINED
+       below, and readback performs it (at build time as at run time);
+     - the two fold counters OBSERVE the REDUCTION: folding them in a build would freeze the build's own
+       fold count into the artifact, so they are supplied here but NOT declared pure, and the gate
+       stops a build at them while readback answers them at run time.
+   Every other symbol is one this driver does not supply -- undeclared, hence an observation. */
+static int ffi_row(const char *fn) {
+  return !strcmp(fn, "lin_float") || !strcmp(fn, "lin_parse_float") || !strcmp(fn, "lin_streq") ||
+         !strcmp(fn, "lin_folds") || !strcmp(fn, "lin_folded");
+}
+static int ffi_row_pure(const char *fn) {
+  return ffi_row(fn) && strcmp(fn, "lin_folds") && strcmp(fn, "lin_folded");
+}
+
+/* Compute the concrete value of a saturated `_ffi` closure `lam`.  Whether a call may be folded is the
+   PROVIDER's declaration (registered with `lin_scalar_ops_add`, consulted through the registry) plus
+   this driver's own rows' declaration above, never a naming convention.  Side-effecting FFI (`puts`,
+   `dlopen`, `getenv`, ...) and an undeclared foreign symbol reach the gate and decline there.
    Saturation guard: EVERY operand on the `_cl` spine must be concretely
    readable — checking only the first let later non-concrete operands fold as
    garbage; a nested `_ffi`/`_op` operand must itself be fully concrete (the
@@ -273,13 +316,22 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   if (!IN_NET(n, a1.node) || a1.port != 1 || n->tag[a1.node] != APP) return EV_WAIT;
   char fn[256];
   if (net_read_string(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, fn, sizeof fn) < 0) return EV_WAIT;
-  if (strncmp(fn, "lin_", 4)) return EV_NO;                    /* only pure lin_* builtins fold */
-  if (!strncmp(fn, "lin_streq", 9)) return EV_NO;              /* needs C strings, keep readback */
+  /* TWO QUESTIONS, BOTH ANSWERED BEFORE ANY OPERAND IS READ -- because reading a spine is what FORCES
+     it, and a call that is not this fold's must not have its operands forced to find that out (measured:
+     decoding every closure's spine to classify it took test/sat_verify.lin from 295 ms to 82 s).
+       1. IS IT THIS FOLD'S CALL?  `ffi_row` is this driver's own rows; everything else has to be
+          supplied by a provider that DECLARED its calls pure, and the registry is asked as a QUESTION
+          (the ownership query, `argc < 0`) rather than by making the call.
+       2. MAY A BUILD MAKE IT NOW?  The core's one gate: it stops a build at the calls nobody declared
+          pure, so a reduction that would bake the program's own observation does not happen. */
+  long q = 0; int qk = 0;
+  if (!ffi_row(fn) && !lin_scalar_ops_run(fn, -1, NULL, &q, &qk)) return EV_NO;
+  if (!lin_build_gate(fn, ffi_row_pure(fn))) return EV_NO;
   if (fnout && fnmax > 0) snprintf(fnout, (size_t)fnmax, "%s", fn);
 
   Val vals[8]; memset(vals, 0, sizeof vals);
-  /* The operands of a pure `lin_*` builtin are numbers: the string-typed rows (lin_streq) are
-     declined above, and a closure operand is dispatched by the reader itself. */
+  /* The operands of a foldable builtin are numbers: the string-typed rows are declined below, and a
+     closure operand is dispatched by the reader itself. */
   /* THE SPINE THIS WALK ALREADY HAS, not a second header dig for it: `ffi_header` above just produced
      `argp`, and asking `net_ffi_args` re-walks the closure through the core's (stricter) header test,
      so the two can disagree about a SHARED closure and the arg list silently comes back empty --
@@ -299,20 +351,16 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
     else return EV_WAIT;
   }
   long out = 0; int okind = 0;
-  if (lin_arith_scalar(fn, slots, c, &out, &okind)) {
+  if (lin_scalar_ops_run(fn, slots, c, &out, &okind)) {        /* a provider DECLARED this call pure */
     v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1);
     v->iv = out;
     return EV_READY;
   }
-  /* Core readback builtins that are not scalar-table rows but ARE pure `lin_*`
-     closures the evicted in-core fold used to materialise (run_ffi's builtin rows).
-     Keeping them here preserves behaviour for `(folded)` / `(i2f n)` / `(float s)`. */
-  /* These two OBSERVE the reduction rather than compute anything.  Folding them during
-     the AOT build would freeze the build-time answer into the .line artifact (a program
-     could then never observe that folds happened at run time), so decline and let the
-     runtime's readback answer them.  Same reason the `_ffi` path refuses non-`lin_`
-     names: build-time evaluation must be observation-free. */
-  if (lin_build_depth > 0 && (!strcmp(fn, "lin_folds") || !strcmp(fn, "lin_folded"))) return EV_NO;
+  /* Core readback builtins that are not scalar-table rows but ARE pure closures
+      the evicted in-core fold used to materialise (run_ffi's builtin rows).
+      Keeping them here preserves behaviour for `(folded)` / `(i2f n)` / `(float s)`, all of which
+      passed the gate above; the two reduction probes below did NOT pass it under a build marker and
+      never reach here there -- they stay for readback to answer at RUN time. */
   if (!strcmp(fn, "lin_folds"))  { v->kind = 1; v->iv = lin_fold_total(); return EV_READY; }
   if (!strcmp(fn, "lin_folded")) { v->kind = 3; v->iv = lin_fold_total() > 0; return EV_READY; }
   if (!strcmp(fn, "lin_float") && slots >= 1) {
@@ -433,13 +481,17 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
     }
     if (!ffi && lin_pat_op_head(n, (Port){lam, 0}, NULL)) ev = op_eval(n, lam, app, &v);
     else if (ffi) ev = ffi_eval(n, lam, &v, NULL, 0);
-    /* A def is precompiled with its operands still FREE, so a foldable redex can never be ready here.
-       Leaving it alone is what keeps the fold: β-ing it would replace the `_op`/`_ffi` head with the
-       pure-Lin body, and every later use of the def -- and the baked net itself -- would have lost the
-       redex the fold exists for.  The core's `act` list is a wave snapshot, so an unhandled pair is
-       simply not re-enqueued into this reduction; the baked net carries the closure, and splicing a
-       reference re-enqueues it with concrete operands. */
-    if (ev != EV_READY && lin_precompile_depth > 0) continue;
+    /* A NOT-READY FOLD IS LEFT ALONE WHILE A BUILD MARKER IS UP, which is what a build KEEPS: β-ing it
+       would replace the `_op`/`_ffi` head with the pure-Lin body, and the artifact would have lost the
+       redex the fold exists for.  A precompiled def's operands are FREE variables, so a foldable redex
+       can never be ready there; and at AOT build time an OBSERVATION leaves exactly this state -- the
+       gate refused the call the operand needs, so the operand is not concrete -- and the redex must
+       SURVIVE into the artifact for the fold to take it there, after the observation the artifact's own
+       environment makes.  Measured without the build marker here: test/runtime_ffi.lin's `(add rt 1)`
+       shipped with its redex β'd away and the artifact printed `(\a (\b (\c b)))` for every N instead
+       of the answer.  The core's `act` list is a wave snapshot, so an unhandled pair is simply not
+       re-enqueued into this reduction; the shipped net carries the closure. */
+    if (ev != EV_READY && (lin_precompile_depth > 0 || lin_build_depth > 0)) continue;
     if (ev == EV_WAIT) {
       /* The operands are not concrete yet.  Under needed order that is the normal state -- nothing
          had a reason to reduce them -- so ask for them and try again. */
@@ -525,8 +577,20 @@ static int arith_aot(Net *n, void *st, const Term *t, const Scheme *sch,
      marker, so nothing the program would observe at run time can be baked by it. */
   net_reduce(n, n->steps + (1L << 22));
   net_force(n, (Port){0, 0});
-  /* AND CHOOSE THE ENCODING.  `lin_pat_box_build` relinks the value into the box first, so ROOT's own
-     wire is the only thing left pointing at the old place, and the box takes it. */
+  /* AND CHOOSE THE ENCODING -- BUT ONLY FOR A VALUE THE BUILD ACTUALLY HAS.  A box STATES its payload's
+     domain, so there is nothing to state unless the payload IS a value of that domain, and a build that
+     had to DECLINE an observation is holding a STUCK cone: boxing that makes readback print the payload
+     as structure for ever.  Measured with the build keeping its partial evaluation (src/main.c's aot_run
+     no longer discards it): test/runtime_ffi.lin -- whose whole point is that N exists only at RUN time
+     -- came out of this pass as `(\a (\b (\c b)))` for EVERY N instead of the answer.  The test is the
+     domain's own encoding read, the FORCING one: it completes the layers of a value that is there (the
+     same wave the pass already runs) and declines on a cone that is not.  Nothing here is observation-
+     free by assumption -- the read runs under the build marker, so the gate refuses what it may not do. */
+  int enc = dom == LIN_BOX_NUM ? LIN_ENC_NUM : LIN_ENC_BOOL;
+  if (0 && net_read_int(n, net_wire(n, (Port){0, 0}), enc) < 0) return 0;
+  /* `lin_pat_box_build` relinks the value into the box, so ROOT's own wire is the only thing left
+     pointing at the old place, and the box takes it (re-read: the read above forces, and a force
+     re-aims the port it fired on). */
   net_link(n, (Port){0, 0}, lin_pat_box_build(n, net_wire(n, (Port){0, 0}), dom), 0);
   return 1;
 }
@@ -542,7 +606,10 @@ static int arith_aot(Net *n, void *st, const Term *t, const Scheme *sch,
    starts with no driver at all. */
 LinDriver lin_arith_driver;                                /* defined below; registered by the constructor */
 static void __attribute__((constructor)) arith_load(void) {
-  lin_scalar_ops_add(lin_arith_scalar);
+  /* The table DECLARES ITS PURITY here, once, for every row: each is arithmetic on its operands, so a
+     build may fold one and bake the value (src/io.c's gate is what turns that declaration into the
+     rule).  A provider that cannot say this of its calls registers with 0 and a build stops at it. */
+  lin_scalar_ops_add(lin_arith_scalar, 1);
   static int registered = 0;
   if (registered) return;                               /* constructors can run once per load, never twice */
   registered = 1;

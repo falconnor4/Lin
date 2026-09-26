@@ -373,16 +373,15 @@ static int eg_has_var(EGraph *g, int c, const char *name) {
 }
 
 /* Substitute `arg` for `name` in class `c`.  Beta is only sound if this is CAPTURE-AVOIDING: the
-   argument lands under whatever binders the body has, so a binder whose name occurs free in the
-   argument would capture those occurrences and silently change the meaning.  Measured on
-   `((\y (((\x (\y x)) y) 5)) 99)`: the answer is 99, but substituting under the inner `\y` captured
-   the argument's `y`, the pass rewrote the term to `(\y y)`, extraction preferred it (cost 3 against
-   9), and the DEFAULT candidate shipped an artifact printing 5 where the interpreter printed 99.
-   Alpha-renaming the binder also fixes the meaning, and was measured: it keeps the rewrite, but Lin
-   PRINTS binder names, so the invented name is observable -- the same program came out `(\y%0 y)`.
-   A pass that only ever removes work must not alter what a program prints, so a capture-risk rewrite
-   is DECLINED (`g->capture`) and extraction can then only return a term the compiler would have
-   produced anyway: every name in the graph survives verbatim. */
+   argument lands under whatever binders the body has, so a binder whose name occurs free in the argument
+   would capture those occurrences and silently change the meaning.  Measured on
+   `((\y (((\x (\y x)) y) 5)) 99)`: the answer is 99, but substituting under the inner `\y` captured the
+   argument's `y`, the pass rewrote the term to `(\y y)`, extraction preferred it (cost 3 against 9), and
+   the DEFAULT candidate shipped an artifact printing 5 where the interpreter printed 99.  Alpha-renaming
+   also fixes the meaning, and was measured: it keeps the rewrite, but Lin PRINTS binder names, so the
+   invented name is observable -- the same program came out `(\y%0 y)`.  A pass that only removes work
+   must not alter what a program prints, so a capture-risk rewrite is DECLINED (`g->capture`), and
+   extraction can then only return a term the compiler would have produced anyway. */
 static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
   if (d > 1024) { g->capture = 1; return c; }
   c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
@@ -523,10 +522,9 @@ int net_save_line(Net *n, const char *path) {
   if (n->nlv > 0) { fwrite(n->lv_parent + 1, sizeof(int), (size_t)n->nlv, f);
                     fwrite(n->lv_bit + 1, 1, (size_t)n->nlv, f); }
   /* v5: one opaque section per driver that has state to keep -- the table behind a value domain, a
-     compiled artifact, whatever.  The container does not know what any of them mean; it writes what
-     each driver hands it and hands it back on load, keyed by the driver's name.  Before v5 this
-     section was the float table itself, hardcoded here, which is exactly the leak the driver ABI
-     exists to close. */
+     compiled artifact, whatever.  The container does not know what any of them mean: it writes what each
+     driver hands it and hands it back on load, keyed by name.  Before v5 this section was the float table
+     itself, hardcoded here -- exactly the leak the driver ABI exists to close. */
   lin_driver_carry_write(n, f);
   fclose(f); chmod(path, 0755); return 1;
 }
