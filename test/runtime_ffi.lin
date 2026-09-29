@@ -7,15 +7,15 @@
 (load "std/std.lin")
 
 ; 2-deep nest: a runtime string parsed to a float
-(ccall1 "lin_parse_float" (ffi.getenv "N"))
+(ccall "lin_parse_float" (cons (ffi.getenv "N") nil))
 ; expect => 6
 
 ; 3-deep nest, as an expression
-(ccall1 "lin_ffloor" (float.float (ffi.getenv "N")))
+(ccall "lin_ffloor" (cons (float.float (ffi.getenv "N")) nil))
 ; expect => 6
 
 ; 3-deep nest inside a define (the precompile path that crashed)
-(define rt (ccall1 "lin_ffloor" (float.float (ffi.getenv "N"))))
+(define rt (ccall "lin_ffloor" (cons (float.float (ffi.getenv "N")) nil)))
 rt
 ; expect => 6
 

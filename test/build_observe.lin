@@ -34,5 +34,5 @@
 ; A build that ran it would bake the BUILD host's answer into the artifact; a build that
 ; declines leaves the question to the run, and aot_equiv builds this suite with the
 ; variable ABSENT and runs it with the variable SET, exactly as it does for runtime_ffi.
-(add (sumto 30) (ccall1 "system" "test -n \"$LIN_BUILD_OBSERVE\" >/dev/null 2>&1"))
+(add (sumto 30) (ccall "system" (cons "test -n \"$LIN_BUILD_OBSERVE\" >/dev/null 2>&1" nil)))
 ; expect => 721

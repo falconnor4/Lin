@@ -50,8 +50,8 @@
       (list.cons (list.head s1) (str_concat (list.tail s1) s2))))))
 
 ; Character-by-character string equality (FFI).
-(define streq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
-(define str_eq (\s1 (\s2 (ccall2 "lin_streq" s1 s2))))
+(define streq (\s1 (\s2 (ccall "lin_streq" (cons s1 (cons s2 nil))))))
+(define str_eq (\s1 (\s2 (ccall "lin_streq" (cons s1 (cons s2 nil))))))
 ; --- String -> Scott numeral parsing (pure Lin, no C) ------------------------
 ; A decimal digit string is a Scott char-list of ASCII codes; parse by peeling
 ; one char per recursion step: n <- n*10 + (code - 48).  `str_parse_int` folds a

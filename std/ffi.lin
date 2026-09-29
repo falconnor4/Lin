@@ -10,18 +10,15 @@
 
 ; FFI action is encoded as: (\_ffi (\_ret ((_ffi fn) args)))
 (define ffi    (\fn (\args (\_ffi (\_ret ((_ffi fn) args))))))
-(define ccall0 (\fn (ffi.ffi fn list.nil)))
-(define ccall1 (\fn (\a1 (ffi.ffi fn (list.cons a1 list.nil)))))
-(define ccall2 (\fn (\a1 (\a2 (ffi.ffi fn (list.cons a1 (list.cons a2 list.nil)))))))
-(define ccall3 (\fn (\a1 (\a2 (\a3 (ffi.ffi fn (list.cons a1 (list.cons a2 (list.cons a3 list.nil)))))))))
+(define ccall ffi.ffi)
 
 ; Core POSIX & System Bindings
-(define exit     (\c (ffi.ccall1 "exit" c)))
-(define getenv   (\name (ffi.ccall1 "getenv" name)))
-(define system   (\cmd (ffi.ccall1 "system" cmd)))
-(define load_lib (\lib (ffi.ccall1 "dlopen" lib)))
-(define folds    (ffi.ccall0 "lin_folds"))  ; native-driver fold count
-(define folded   (ffi.ccall0 "lin_folded")) ; true once any driver folded
+(define exit     (\c (ffi.ccall "exit" (cons c nil))))
+(define getenv   (\name (ffi.ccall "getenv" (cons name nil))))
+(define system   (\cmd (ffi.ccall "system" (cons cmd nil))))
+(define load_lib (\lib (ffi.ccall "dlopen" (cons lib nil))))
+(define folds    (ffi.ccall "lin_folds" nil))  ; native-driver fold count
+(define folded   (ffi.ccall "lin_folded" nil)) ; true once any driver folded
 
 (namespace _)
 (export ffi)

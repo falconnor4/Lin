@@ -11,6 +11,9 @@ pkgs.stdenv.mkDerivation {
   version = "0.1.0";
   src = ./.;
 
+  # libffi is what makes an FFI call dynamic: the driver builds the call interface from the argument
+  # kinds, so the ARITY is a runtime count and nothing enumerates it (std/drivers/readback.c).
+  buildInputs = [ pkgs.libffi ];
   nativeBuildInputs = [ pkgs.makeWrapper pkgs.vulkan-headers pkgs.vulkan-loader pkgs.glslang ];
 
   # Vulkan headers + loader so the gpu/simd driver plugins (std/drivers/*.so)
@@ -26,11 +29,11 @@ pkgs.stdenv.mkDerivation {
   # binary that cannot start; a future attempt has to solve the closure question first.
   buildPhase = ''
     runHook preBuild
-    $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl -lm
+    $CC -O2 -Wall -Wextra -std=c99 -fopenmp -rdynamic -o lin src/*.c -ldl -lm -lffi
     for d in std/drivers/*.c; do
       $CC -O2 -Wall -Wextra -std=c99 -fopenmp -fPIC -shared \
         -I${pkgs.vulkan-headers}/include \
-        -o "''${d%.c}.so" "$d" -ldl -lm -L${pkgs.vulkan-loader}/lib
+        -o "''${d%.c}.so" "$d" -ldl -lm -lffi -L${pkgs.vulkan-loader}/lib
     done
     # reduce.spv is a build artifact and gitignored, so it must be regenerated here rather than
     # staged; it is what the gpu driver dispatches to.

@@ -56,6 +56,7 @@ static void print_struct(FILE *f, Port r, int domain);
 /* Where readback's VALUE is written.  The core owns the stream: a prelude load aims it at a sink so
    the effects its top-level forms perform still run (dispatch happens HERE) without joining the
    program's own output, which a `; expect` line would then be one line off from. */
+#include <ffi.h>
 #define OUT (lin_out ? lin_out : stdout)
 static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 static inline int live(Port p) { return p.node >= 0 && p.node < N->nn && !N->dead[p.node]; }
@@ -215,8 +216,21 @@ static void arg_doms(const char *fn, int doms[2], int *ndoms) {
 /* Builtin dispatch: table rows for simple int/bool/str; side-effectors (exit) handled before the table, else dlsym. */
 #define B3(n, e) if (!strcmp(fn, n)) { v.kind = 3; v.iv = (long)(e); return v; }
 
-#define FFI_ARMS 8      /* the ladder's length: one arm per arity.  The C ABI cannot be forwarded for more without a
-                           per-arity thunk, and the std's `ccallN` family lives well inside it (test/ffi_arity.sh pins them) */
+/* The call is DYNAMIC: libffi builds the interface from the argument KINDS, so the arity is a runtime count
+   and nothing here enumerates it.  Integers and pointers both travel as 64-bit words (what every arm of the
+   old ladder did), and a value of kind 4 travels as the double its bits name -- which the ladder could not
+   express at all. */
+static long dyn_call(void *sym, int argc, long *c_args, const Val *fargs) {
+  int n = argc > 0 ? argc : 1;
+  ffi_type **at = calloc((size_t)n, sizeof *at); void **av = calloc((size_t)n, sizeof *av);
+  long r = 0;
+  if (!at || !av) { free(at); free(av); return 0; }
+  for (int i = 0; i < argc; i++) { at[i] = fargs[i].kind == 4 ? &ffi_type_double : &ffi_type_sint64; av[i] = &c_args[i]; }
+  ffi_cif cif;
+  if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned)argc, &ffi_type_sint64, at) == FFI_OK) ffi_call(&cif, FFI_FN(sym), &r, av);
+  free(at); free(av);
+  return r;
+}
 static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val v);
 
 static Val run_ffi(Net *n, Port p) {
@@ -325,14 +339,7 @@ static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val
   if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
   fflush(stdout); void *sym = dlsym(RTLD_DEFAULT, fn);
   if (!sym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
-  long (*f)() = (long (*)())sym;
-  /* One arm per arity: the C calling convention written out.  A call with more arguments than arms cannot be
-     forwarded without a per-arity thunk, so it is REFUSED OUT LOUD -- the last arm used to pass 8 arguments
-     whatever the count was, which is a WRONG CALL, not a clipped value.  The std's own `ccallN` family must
-     stay inside this (test/ffi_arity.sh pins them), so a program can never write such a call. */
-  if (argc > FFI_ARMS) { fprintf(stderr, "ffi: '%s' called with %d arguments; this ladder forwards %d\n", fn, argc, FFI_ARMS); return v; }
-  v.kind = 1; v.iv = (argc <= 0) ? f() : (argc == 1) ? f(c_args[0]) : (argc == 2) ? f(c_args[0], c_args[1]) :
-           (argc == 3) ? f(c_args[0], c_args[1], c_args[2]) : f(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]);
+  v.kind = 1; v.iv = dyn_call(sym, argc, c_args, fargs);
   return v;
 }
 

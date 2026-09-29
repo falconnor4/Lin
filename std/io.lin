@@ -54,12 +54,12 @@
 (define io_prompt   (\p (\cb (io.io_print p (io.io_read cb)))))
 
 ; --- Native C Standard I/O Bindings ---
-(define puts     (\s (ffi.ccall1 "puts" s)))
-(define putchar  (\c (ffi.ccall1 "putchar" c)))
-(define fopen    (\path (\mode (ffi.ccall2 "fopen" path mode))))
-(define fclose   (\fp (ffi.ccall1 "fclose" fp)))
-(define fgetc    (\fp (ffi.ccall1 "fgetc" fp)))
-(define fputc    (\c (\fp (ffi.ccall2 "fputc" c fp))))
+(define puts     (\s (ffi.ccall "puts" (cons s nil))))
+(define putchar  (\c (ffi.ccall "putchar" (cons c nil))))
+(define fopen    (\path (\mode (ffi.ccall "fopen" (cons path (cons mode nil))))))
+(define fclose   (\fp (ffi.ccall "fclose" (cons fp nil))))
+(define fgetc    (\fp (ffi.ccall "fgetc" (cons fp nil))))
+(define fputc    (\c (\fp (ffi.ccall "fputc" (cons c (cons fp nil))))))
 
 ; --- Monadic Wrappers ---
 (define io_call       (\fn (\args (\cb (io.io_wait (ffi.ffi fn args) cb)))))

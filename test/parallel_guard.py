@@ -1344,7 +1344,7 @@ def main():
     # 13: a driver-declared PURE callable is foldable at build time
     pure_src = os.path.join(tmp, "decl_pure.lin")
     with open(pure_src, "w") as fh:
-        fh.write('(load "std/std.lin")\n(add (ccall1 "probe_pure" 41) 1)\n')
+        fh.write('(load "std/std.lin")\n(add (ccall "probe_pure" (cons 41 nil)) 1)\n')
     pure_so = os.path.join(std, "drivers", "puredecl.so")
     for tag, preload in (("without", None), ("with", pure_so)):
         art = os.path.join(tmp, "decl_pure.%s.line" % tag)
@@ -1378,7 +1378,7 @@ def main():
     # 14: a driver-declared EFFECTFUL callable declines, is reported, and is left to the run
     world_src = os.path.join(tmp, "decl_world.lin")
     with open(world_src, "w") as fh:
-        fh.write('(load "std/std.lin")\n(add (ccall1 "lin_world" 40) 0)\n')
+        fh.write('(load "std/std.lin")\n(add (ccall "lin_world" (cons 40 nil)) 0)\n')
     world_so = os.path.join(std, "drivers", "worlddecl.so")
     arts = []
     for tag, val in (("aa", "aa"), ("aaaa", "aaaa")):

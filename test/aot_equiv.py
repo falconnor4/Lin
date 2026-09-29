@@ -332,7 +332,7 @@ def build_time_observation(lin_abs, std_dir, env, tmp):
     # artifact must -- so the refusal is not "the build quietly did nothing", it is "the run does it".
     probe = os.path.join(tmp, 'obs_effect.lin')
     with open(probe, 'w') as fh:
-        fh.write('(load "std/std.lin")\n(add (ccall1 "system" "echo BUILT") 1)\n')
+        fh.write('(load "std/std.lin")\n(add (ccall "system" (cons "echo BUILT" nil)) 1)\n')
     art = os.path.join(tmp, 'obs_effect.line')
     brc, bout, berr = run([lin_abs, 'build', probe, '-o', art], 300, env)
     if brc != 0 or not os.path.exists(art):

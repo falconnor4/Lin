@@ -44,4 +44,4 @@
 ; N EXISTS ONLY AT RUN TIME.  ffl(parse_float(getenv "BENCH_N")) is the 3-deep nest
 ; test/runtime_ffi.lin pins for exactly this reason, and it is what makes the build
 ; decline: the artifact has to ask its OWN environment.
-(sumto (ccall1 "lin_ffloor" (float.float (ffi.getenv "BENCH_N"))))
+(sumto (ccall "lin_ffloor" (cons (float.float (ffi.getenv "BENCH_N")) nil)))

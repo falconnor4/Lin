@@ -375,14 +375,14 @@ int net_spine_slots(Net *n, Port argp) {
 /* Decode one slot into a Val.  `dom` is the EXPECTATION the caller states (a symbol's signature, a driver's own
    operand domain), tried first because it is the only thing that can decide a shape TWO domains claim
    (`\b0.\b1.b0` is zero, TRUE and nil at once).  Where it does not hold, the slot's structure may still
-   determine the value ON ITS OWN, and that is not a guess: a box is not a numeral, a numbered chain is not a
-   cell, and a cons chain of numbers is not either -- what is deliberately NOT here is a preference ORDER between
-   domains (the name-sniffing this design removed).  One shape IS excluded outright: the UNSATURATED `_ffi`
-   CLOSURE, whose header IS the language's cons cell (`\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)` are
-   one net), so a shape read of one is a MISREAD: measured, `(add (ccall1 "lin_parse_float" (ffi.getenv "N")) 1)`
-   read the closure's fn-name CELL where a number belongs -- the numeral 0, then "getenv" -- and the fold fired
-   on that garbage.  So when dispatch produces nothing the slot DECLINES, never shape-reads. */
+   determine the value ON ITS OWN: a box is not a numeral, a numbered chain is not a cell, and a cons chain of
+   numbers is not either.  One shape IS excluded outright: the UNSATURATED `_ffi` CLOSURE, whose header IS the
+   language's cons cell (`\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)` are one net), so a shape read of
+   one is a MISREAD -- measured, `(add (ccall1 "lin_parse_float" (ffi.getenv "N")) 1)` read the closure's
+   fn-name CELL where a number belongs and the fold fired on that garbage.  So: dispatch-or-decline. */
 static int dec_arg(Net *n, Port p, int dom, Val *v) {
+  /* A BUILD MUST NOT FOLD WHAT IT CANNOT VERIFY: leave string operands to the ARTIFACT (measured: interp 7, artifact 1). */
+  if (dom == DT_STR && (lin_precompile_depth > 0 || lin_build_depth > 0)) return 0;
   /* A NESTED CLOSURE comes first: what a slot's expectation is about is the VALUE, and a closure's
      value is what dispatching it produces -- `(fadd (float "2.5") (float "3.5"))` has closures where
      floats belong, and `(lin_parse_float (getenv "N"))` has one where a string belongs.  Dispatching
