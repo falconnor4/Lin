@@ -10,3 +10,5 @@ result-*
 *.so
 *.spv
 .nixcache/
+*.line.cand*
+*.line.cand*

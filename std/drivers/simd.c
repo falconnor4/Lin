@@ -43,8 +43,11 @@
    registry is what loads it. */
 static int (*g_spine)(Net *, Port, const int *, int, Val *, int);
 static const int DOMS_NUM[1] = { DT_NUM };
+static int (*g_slots)(Net *, Port);   /* the spine's length: what the operand buffers are sized to */
+
 static void resolve_core(void) {
   if (!g_spine) g_spine = (int (*)(Net *, Port, const int *, int, Val *, int))dlsym(RTLD_DEFAULT, "net_spine_args");
+  if (!g_slots) g_slots = (int (*)(Net *, Port))dlsym(RTLD_DEFAULT, "net_spine_slots");
 }
 
 /* Which operator is this `_op` redex?  The OPERATOR INDEX is the first slot of its operand list
@@ -69,18 +72,23 @@ static int simd_op_value(Net *n, Port lam, Port app, Val *v) {
   const char *fn;
   Port argp;
   if (!op_head_of(n, app, &fn, &argp)) return 0;      /* the operator index, and the operands after it */
-  if (!g_spine) resolve_core();
-  if (!g_spine) return 0;
-  Val fargs[8] = {{0}};
-  int argc = g_spine(n, argp, DOMS_NUM, 1, fargs, 8);
-  if (argc < 1) return 0;
-  long c_args[8] = {0};
+  if (!g_spine || !g_slots) resolve_core();
+  if (!g_spine || !g_slots) return 0;
+  int slots = g_slots(n, argp);                 /* `_op` is N-ary: the spine sets the buffer size */
+  if (slots < 1) return 0;
+  Val *fargs = calloc((size_t)slots, sizeof *fargs);
+  long *c_args = calloc((size_t)slots, sizeof *c_args);
+  if (!fargs || !c_args) { free(fargs); free(c_args); return 0; }
+  int argc = g_spine(n, argp, DOMS_NUM, 1, fargs, slots);
+  if (argc < 1) { free(fargs); free(c_args); return 0; }
   for (int i = 0; i < argc; i++) {
-    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return 0;
+    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c_args); return 0; }
     c_args[i] = fargs[i].iv;
   }
   long out; int okind = 0;
-  if (!lin_scalar_ops_run(fn, argc, c_args, &out, &okind)) return 0;
+  int ok = lin_scalar_ops_run(fn, argc, c_args, &out, &okind);
+  free(fargs); free(c_args);
+  if (!ok) return 0;
   if (okind == 4) v->kind = 4; else if (okind == 3) v->kind = 3; else v->kind = 1;
   v->iv = out;
   return 1;
@@ -97,18 +105,23 @@ static int simd_op_ready(const Net *n, Port lam, Port app) {
   Port argp;
   if (!op_head_of((Net *)n, app, &f, &argp)) return 0;
   snprintf(fn, sizeof fn, "%s", f);
-  if (!g_spine) resolve_core();
-  if (!g_spine) return 0;
-  Val fargs[8] = {{0}};
-  int argc = g_spine((Net *)n, argp, DOMS_NUM, 1, fargs, 8);
-  if (argc < 1) return 0;
-  long c_args[8] = {0};
+  if (!g_spine || !g_slots) resolve_core();
+  if (!g_spine || !g_slots) return 0;
+  int slots = g_slots((Net *)n, argp);          /* `_op` is N-ary: the spine sets the buffer size */
+  if (slots < 1) return 0;
+  Val *fargs = calloc((size_t)slots, sizeof *fargs);
+  long *c_args = calloc((size_t)slots, sizeof *c_args);
+  if (!fargs || !c_args) { free(fargs); free(c_args); return 0; }
+  int argc = g_spine((Net *)n, argp, DOMS_NUM, 1, fargs, slots);
+  if (argc < 1) { free(fargs); free(c_args); return 0; }
   for (int i = 0; i < argc; i++) {
-    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return 0;
+    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c_args); return 0; }
     c_args[i] = fargs[i].iv;
   }
   long out; int okind = 0;
-  return lin_scalar_ops_run(fn, argc, c_args, &out, &okind);
+  int ok = lin_scalar_ops_run(fn, argc, c_args, &out, &okind);
+  free(fargs); free(c_args);
+  return ok;
 }
 
 /* Fold a saturated `_ffi` closure `lam` applied to `app` (float / legacy FFI).

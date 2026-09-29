@@ -74,6 +74,8 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <unistd.h>
+#include <limits.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <dlfcn.h>
@@ -216,8 +218,21 @@ static int spine_slots(Net *n, Port argp, Port *out, int max) {
   return m.nslots < cap ? m.nslots : cap;
 }
 
-static int emit_redex(Net *n, int app, Buf *b, int budget, int depth);
-static int emit_once(Net *n, int app, Buf *b, int budget, int depth);
+/* A cone walk is recursive, so the only honest bound on its depth is the C stack itself -- what this
+   machine grants (RLIMIT_STACK), not a number chosen here.  `base` is the shallowest frame of the walk,
+   remembered by the first call; the fraction leaves room for the frames below this driver, and labs()
+   because a stack may grow either way.  __thread: each thread walks on its own stack. */
+static __thread char *walk_base; static __thread long walk_room;
+static int walk_deep(const void *here) {
+  if (!walk_base) {
+    struct rlimit rl;
+    walk_base = (char *)here;
+    walk_room = getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY ? (long)(rl.rlim_cur / 4 * 3) : LONG_MAX;
+  }
+  return labs((const char *)here - walk_base) > walk_room;
+}
+static int emit_redex(Net *n, int app, Buf *b, int budget);
+static int emit_once(Net *n, int app, Buf *b, int budget);
 
 /* Fire ONE beta redex standing between a slot and the operand behind it.
  *
@@ -273,10 +288,10 @@ static int fire_wrapper(Net *n, int app) {
    belongs here rather than only at the top.  Each round fires one interaction the
    interpreter would have taken anyway, and the bound keeps a pathological cone from
    walking the net; failing after it costs nothing, because reduce falls back. */
-static int emit_redex(Net *n, int app, Buf *b, int budget, int depth) {
-  for (int round = 0; round < 6; round++) {
+static int emit_redex(Net *n, int app, Buf *b, int budget) {
+  for (int round = 0; round < budget; round++) {          /* as many wrappers as the budget allows: the bound is the net's own, not a count chosen here */
     int mark = b->len;
-    if (emit_once(n, app, b, budget, depth)) {
+    if (emit_once(n, app, b, budget)) {
       if (round) DBG("    exposed after %d fire(s)\n", round);
       return 1;
     }
@@ -295,15 +310,15 @@ static int emit_redex(Net *n, int app, Buf *b, int budget, int depth) {
    an unevaluated op redex seen at its APP's result port, or an op closure whose
    principal is observed directly.  Both redex shapes hand the driver the LAM and the
    APP the pattern recognized, so nothing here re-reads the wires to find them. */
-static int emit_cone(Net *n, Port p, Buf *b, int budget, int depth) {
-  if (budget <= 0 || depth > 16) { DBG("    cone: budget/depth\n"); return 0; }
+static int emit_cone(Net *n, Port p, Buf *b, int budget) {
+  if (budget <= 0 || walk_deep(&p)) { DBG("    cone: budget/stack\n"); return 0; }
   long k;
   LinMatch m;
   if (lin_pat_num_nf(n, p, &k)) { put(b, "%ldL", k); return b->len >= 0; }
   if (lin_pat_match(n, p, P_CONE_RESULT, LIN_PAT_BUDGET_FOR(n), &m))
-    return emit_redex(n, m.bind[1].node, b, budget - 1, depth + 1);
+    return emit_redex(n, m.bind[1].node, b, budget - 1);
   if (lin_pat_match(n, p, P_CONE_PRINCIPAL, LIN_PAT_BUDGET_FOR(n), &m))
-    return emit_redex(n, m.bind[1].node, b, budget - 1, depth + 1);
+    return emit_redex(n, m.bind[1].node, b, budget - 1);
   DBG("    cone: no op redex at %d.%d\n", p.node, p.port);
   return 0;
 }
@@ -324,8 +339,8 @@ static int emit_cone(Net *n, Port p, Buf *b, int budget, int depth) {
    forcing can consume the node the port names (pair_boundary re-aims the consumer's end),
    so re-reading the wire instead would let a cone compile out of a net that has moved
    underneath the read.  Pure read, then force, then pure read, then emit. */
-static int emit_once(Net *n, int app, Buf *b, int budget, int depth) {
-  if (budget <= 0 || depth > 16) return 0;
+static int emit_once(Net *n, int app, Buf *b, int budget) {
+  if (budget <= 0 || walk_deep(&app)) return 0;
   LinMatch m;
   if (!lin_pat_match(n, (Port){app, 0}, P_OP_PAIR, LIN_PAT_BUDGET_FOR(n), &m)) return 0;
   int lam = m.bind[0].node;
@@ -343,9 +358,9 @@ static int emit_once(Net *n, int app, Buf *b, int budget, int depth) {
      a[1], so anything else is a shape this driver does not model and declines. */
   if (ns != 2) return 0;
   put(b, "%s(", h);
-  if (!emit_cone(n, slots[0], b, budget - 2, depth + 1)) return 0;
+  if (!emit_cone(n, slots[0], b, budget - 2)) return 0;
   put(b, ", ");
-  if (!emit_cone(n, slots[1], b, budget - 2, depth + 1)) return 0;
+  if (!emit_cone(n, slots[1], b, budget - 2)) return 0;
   put(b, ")");
   return b->len >= 0;
 }
@@ -513,21 +528,22 @@ static int result_shared(const Net *n, int lam, int app) {
    time and land on a different one. */
 static int fold_via_table(Net *n, const char *fn, Val *v, Port argp) {
   int slots = net_spine_slots(n, argp);
-  if (slots < 1 || slots > 8) return 0;
-  Val fargs[8];
-  memset(fargs, 0, sizeof fargs);
-  int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, 8);
-  if (argc < slots) return 0;
-  long c[8] = {0};
+  if (slots < 1) return 0;
+  Val *fargs = calloc((size_t)slots, sizeof *fargs);   /* sized to the spine: an `_op` is N-ary */
+  long *c = calloc((size_t)slots, sizeof *c);
+  if (!fargs || !c) { free(fargs); free(c); return 0; }
+  int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
+  if (argc < slots) { free(fargs); free(c); return 0; }
   for (int i = 0; i < slots; i++) {
-    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return 0;
+    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c); return 0; }
     c[i] = fargs[i].iv;
   }
+  free(fargs);
   long out = 0; int okind = 0;
-  if (!lin_scalar_ops_run(fn, slots, c, &out, &okind)) return 0;
-  v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1);
-  v->iv = out;
-  return 1;
+  int ok = lin_scalar_ops_run(fn, slots, c, &out, &okind);
+  if (ok) { v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1); v->iv = out; }
+  free(c);
+  return ok;
 }
 
 /* ---- LinDriver hooks ------------------------------------------------------ */
@@ -611,7 +627,7 @@ static int native_reduce(Net *n, Port *redexes, int nred, long limit, int *chang
     if (h && slots == 2) {
       char expr[2048];
       Buf b = { expr, sizeof expr, 0 };
-      if (emit_redex(n, app, &b, 64, 0)) {
+      if (emit_redex(n, app, &b, LIN_PAT_BUDGET_FOR(n))) {          /* the same budget the matcher uses: read from the net, never a constant */
         long (*f)(void) = compile_expr(expr);
         if (f) { v.kind = 1; v.iv = f(); have = 1; DBG("compiled %s = %ld\n", expr, v.iv); }
       } else {

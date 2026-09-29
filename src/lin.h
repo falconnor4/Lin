@@ -5,8 +5,6 @@
 #include <stdio.h>
 #include <stddef.h>
 
-#define NAME 256
-
 /* ---------------- core terms (pure untyped lambda) ---------------- */
 enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT, TEXPORT,
        /* (let ((n v)) b): ONE net shared by every use of `n`, value included, so a use of
@@ -17,13 +15,13 @@ typedef struct Type { int kind, id; struct Type *a, *b; const char *name; } Type
 enum { TVR, TARROW, TLINK, TNOM, TARG, TPARAM };
 typedef struct Term {
   int type;
-  char name[NAME];
+  const char *name;
   struct Term *l, *r;
   Type *annot;
 } Term;
 /* A type scheme, declared here because the driver ABI hands a pass the inferred types and that hook
    is defined long before the type interface below. */
-typedef struct { int nq, q[256]; Type *t; } Scheme;
+typedef struct { int nq; int *q; Type *t; } Scheme;
 
 /* ---------------- interaction net ---------------- */
 enum { LAM, APP, DUP, ERA, ROOT };
@@ -40,9 +38,10 @@ typedef uint32_t Scope;
    or why (tags, ports, wiring only), so a loop compiler, a fusion pass and a scalar folder share one
    protocol.  Every exit must be at an AUXILIARY port: a redex is two mutually wired principal ports, so
    such a boundary cannot be crossed by one -- the whole safety argument for rewriting in isolation. */
-#define LIN_MAX_CLAIM_PAIRS 32
-#define LIN_MAX_CLAIM_EXITS 16
-#define LIN_CLAIM_NODES     128     /* a bounded region: the core walks it per claim, so it is capped */
+#define N_OF(a) ((int)(sizeof (a) / sizeof *(a)))   /* how many the STORAGE holds: every bound is `what fits`, never a number chosen separately, so a region and its guard cannot drift apart */
+#define LIN_MAX_CLAIM_PAIRS 32      /* the region's own size (see LinClaim below) */
+#define LIN_MAX_CLAIM_EXITS 16      /* the region's own size */
+#define LIN_CLAIM_NODES     128     /* the region's own size: the core walks it per claim */
 #define LIN_CLAIM_REGION 0x01u      /* validate the closure and reserve every redex inside it */
 #define LIN_CLAIM_HELD   0x02u      /* keep this claim across waves (see revalidate) */
 
@@ -103,6 +102,10 @@ typedef struct {
   LinDriver *held_drv[4];
   int nheld;
   long steps;
+  /* APPEND-ONLY TAIL.  A plugin reads the Net it is handed directly, so a field beside its kin would
+     shift every later offset and misdirect every plugin; appended here it shifts nothing.  `act_of[i]` =
+     node i's queued-pair index in `act` or -1; `dem_out`/`dem_cnt`/`dem_cap` = this wave's emitted pairs. */
+  int *act_of; Port *dem_out; int dem_cnt, dem_cap;
 } Net;
 
 /* wire of a port (drivers read the graph directly) */
@@ -141,7 +144,7 @@ void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit)
 
 /* A decoded value: the ABI's common currency between the core's readers and a driver's storage.
    kind: 0 none, 1 int, 2 str, 3 bool, 4 float (iv carries IEEE-754 bits). */
-typedef struct { int kind; long iv; char sv[4096]; } Val;
+typedef struct { int kind; long iv; const char *sv; } Val;   /* sv points into the core's identifier arena: a value carries the WHOLE string, and nobody states its length */
 
 /* ---------------- value ENCODINGS: the SHAPE a value is written in ----------------
    A value DOMAIN (DT_*) is what a value MEANS; an ENCODING (LIN_ENC_*) is the net STRUCTURE it is
@@ -300,6 +303,7 @@ int lin_arith_scalar(const char *fn, int argc, const long *args, long *out, int 
 typedef void (*FormFn)(Term *, const char *, void *);
 void parse_forms(const char *src, FormFn fn, void *ud);
 Term *term_new(int type, const char *name, Term *l, Term *r); Term *term_copy(Term *t);
+const char *lin_intern(const char *s, size_t n); const char *lin_internf(const char *fmt, ...);
 void term_free(Term *t); int term_refs(Term *t, const char *name);
 Term *term_fix(const char *name, Term *body);
 
@@ -339,7 +343,7 @@ void lin_domains_init(void);
    encoding -- including one that is still an unreduced thunk -- is DECLINED, never guessed. */
 long net_read_int(Net *n, Port p, int enc);          /* layers: a numeral's value, a list's length,
                                                         a BOOL's 1/0; -1 when `p` is not that encoding */
-int  net_read_string(Net *n, Port p, int pay_enc, char *buf, size_t max); /* cell chain; pay_enc = the char-code encoding */
+int  net_read_string_arena(Net *n, Port p, int pay_enc, const char **out); /* cell chain into the arena; pay_enc = the char-code encoding */
 /* One cell of the language's cons encoding: `*head`/`*tail` when `p` is a cell, 0 otherwise.  The
    cell shape is the one every spine walk agrees on, so it is exported once (readback walks it to
    check a payload, a driver to read an operand list). */
@@ -399,7 +403,7 @@ Port net_alloc_float(Net *n, double d);
 long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
-typedef struct { char name[NAME]; Term *term, *expanded; Scheme sch; int typed, rec;
+typedef struct { const char *name; Term *term, *expanded; Scheme sch; int typed, rec;
                  Net *compiled; int comp_tried; } Def;
 extern Def *defs;
 extern int ndefs, lin_threads;

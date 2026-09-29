@@ -266,22 +266,29 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
   if (result_shared(n, lam, app)) return EV_NO;      /* a shared result is the core's β to take */
   if (!op_head_of(n, app, &fn, &argp)) return EV_NO;
   int slots = net_spine_slots(n, argp);
-  Val fargs[8]; memset(fargs, 0, sizeof fargs);
-  int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, 8);
-  if (slots < 1 || slots > 8 || argc < slots) return EV_WAIT;   /* operand spine not readably concrete */
-  long c[8] = {0};
+  if (slots < 1) return EV_WAIT;                                /* operand spine not readably concrete */
+  /* The scratch is sized to the SPINE, never to a constant: an `_op` is N-ary by construction, and a
+     fixed count declines the fold past it -- not a wrong answer (the redex still reduces, through the
+     pure-Lin fallback below) but a fold given up on every visit, where once would do. */
+  Val *fargs = calloc((size_t)slots, sizeof *fargs);
+  long *c = calloc((size_t)slots, sizeof *c);
+  if (!fargs || !c) { free(fargs); free(c); return EV_WAIT; }
+  int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
+  if (argc < slots) { free(fargs); free(c); return EV_WAIT; }
   for (int i = 0; i < slots; i++) {
-    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) return EV_WAIT;
+    if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c); return EV_WAIT; }
     c[i] = fargs[i].iv;
   }
+  free(fargs);
   long out = 0; int okind = 0;
   /* Through the registry, like every other call this driver resolves: an `_op` head's operator comes
      from the fixed pure-Lin vocabulary (LIN_OP_*), and the provider that supplies it states its purity
      where it registers. */
-  if (!lin_scalar_ops_run(fn, slots, c, &out, &okind)) return EV_NO;  /* declined: pure-Lin β computes it */
-  v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1);
-  v->iv = out;
-  return EV_READY;
+  int rc = EV_READY;
+  if (!lin_scalar_ops_run(fn, slots, c, &out, &okind)) rc = EV_NO;   /* declined: pure-Lin β computes it */
+  else { v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1); v->iv = out; }
+  free(c);
+  return rc;
 }
 
 /* THIS DRIVER'S OWN `_ffi` ROWS, and which of them it DECLARES pure.  That declaration is what makes
@@ -310,12 +317,14 @@ static int ffi_row_pure(const char *fn) {
    readable — checking only the first let later non-concrete operands fold as
    garbage; a nested `_ffi`/`_op` operand must itself be fully concrete (the
    shared dec_arg does that, and a slot it cannot decode is counted skipped). */
+static int ffi_apply(const char *fn, int slots, Val *vals, long *c, Val *v);
+
 static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   Port a1, argp;
   if (!ffi_header(n, lam, &a1, &argp)) return EV_WAIT;         /* closure header not formed yet */
   if (!IN_NET(n, a1.node) || a1.port != 1 || n->tag[a1.node] != APP) return EV_WAIT;
-  char fn[256];
-  if (net_read_string(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, fn, sizeof fn) < 0) return EV_WAIT;
+  const char *fn;
+  if (net_read_string_arena(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, &fn) < 0) return EV_WAIT;
   /* TWO QUESTIONS, BOTH ANSWERED BEFORE ANY OPERAND IS READ -- because reading a spine is what FORCES
      it, and a call that is not this fold's must not have its operands forced to find that out (measured:
      decoding every closure's spine to classify it took test/sat_verify.lin from 295 ms to 82 s).
@@ -329,21 +338,29 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   if (!lin_build_gate(fn, ffi_row_pure(fn))) return EV_NO;
   if (fnout && fnmax > 0) snprintf(fnout, (size_t)fnmax, "%s", fn);
 
-  Val vals[8]; memset(vals, 0, sizeof vals);
-  /* The operands of a foldable builtin are numbers: the string-typed rows are declined below, and a
-     closure operand is dispatched by the reader itself. */
+  /* COUNT FIRST, THEN SIZE: a spine's length is a property of the net (net_spine_slots reads slot
+     cells; it does not force them), and an `_ffi` call is N-ary by construction -- so the operand
+     buffer is the spine's length, never a constant.  A fixed count declines the fold past it, which is
+     not a wrong answer (the artifact still makes the call at run time) but a fold lost on every wave. */
   /* THE SPINE THIS WALK ALREADY HAS, not a second header dig for it: `ffi_header` above just produced
      `argp`, and asking `net_ffi_args` re-walks the closure through the core's (stricter) header test,
      so the two can disagree about a SHARED closure and the arg list silently comes back empty --
      measured on `(let ((x (float "2.5"))) (fadd x x))`, where the arity guard then read 2 slots and 0
      decoded operands and the fold declined for ever.  One dig, one spine. */
-  int na = net_spine_args(n, argp, DOMS_NUM, 1, vals, 8);
   int slots = net_spine_slots(n, argp);
-  if (slots < 0) { if (na != 0) return EV_WAIT; slots = 0; }   /* not a cons spine: only the empty arg list is concrete */
-  else if (slots > 8) return EV_WAIT;
-  if (na < slots) return EV_WAIT;                              /* a present operand is not concrete yet */
+  if (slots < 0) slots = 0;                                     /* not a cons spine: only the empty arg list is concrete */
+  Val *vals = slots ? calloc((size_t)slots, sizeof *vals) : NULL;
+  long *c = slots ? calloc((size_t)slots, sizeof *c) : NULL;
+  if (slots && (!vals || !c)) { free(vals); free(c); return EV_WAIT; }
+  int na = net_spine_args(n, argp, DOMS_NUM, 1, vals, slots);
+  if (na < slots || (!slots && na != 0)) { free(vals); free(c); return EV_WAIT; }  /* an operand is not concrete */
+  int rc = ffi_apply(fn, slots, vals, c, v);
+  free(vals); free(c);
+  return rc;
+}
 
-  long c[8] = {0};
+/* The fold itself, over operands the caller sized from the spine. */
+static int ffi_apply(const char *fn, int slots, Val *vals, long *c, Val *v) {
   for (int i = 0; i < slots; i++) {
     int k = vals[i].kind;
     if (k == 2) c[i] = (long)(intptr_t)vals[i].sv;             /* string operand: hand the C string through, as run_ffi does */
@@ -428,19 +445,20 @@ static void fold_ffi_head(Net *n, int lam, int app, const Val *v) {
    rather than consuming it. */
 static void force_spine(Net *n, Port argp) {
   int slots = net_spine_slots(n, argp);
-  if (slots > 8) slots = 8;
-  Port ops[8]; int nops = 0;
-  if (slots > 0) {
-    Port cur = net_dhop(n, net_force_val(n, argp));
-    for (int k = 0; k < slots; k++) {
-      Port head, next;
-      if (!net_read_cell(n, cur, &head, &next)) break;
-      ops[nops++] = head;                 /* the slot port: read, NOT forced (io.c's cell_layer) */
-      cur = next;
-    }
-    for (int i = 0; i < nops; i++) lin_demand(n, ops[i]);
+  if (slots <= 0) return;
+  Port *ops = malloc((size_t)slots * sizeof *ops);   /* one root a slot: the spine decides how many */
+  if (!ops) return;
+  Port cur = net_dhop(n, net_force_val(n, argp));
+  int nops = 0;
+  for (int k = 0; k < slots; k++) {
+    Port head, next;
+    if (!net_read_cell(n, cur, &head, &next)) break;
+    ops[nops++] = head;                   /* the slot port: read, NOT forced (io.c's cell_layer) */
+    cur = next;
   }
+  for (int i = 0; i < nops; i++) lin_demand(n, ops[i]);
   for (int i = 0; i < nops; i++) net_force(n, ops[i]);
+  free(ops);
 }
 
 /* ---- LinDriver hooks ---- */

@@ -15,9 +15,10 @@ static long long modpow(long long a, long long e) {
 
 /* GoI invariant: det(2I - A) mod p over the node-port adjacency */
 long long goi_det(Net *n) {
-  if (n->nn > 400) return -1;
   int d = n->nn * 3;
+  /* No node-count cap: the only real bound is the matrix itself, so ask for it and say so if the machine says no. */
   long long *m = calloc((size_t)d * d, sizeof(long long));
+  if (!m) return -1;
   for (int i = 0; i < d; i++) m[(size_t)i * d + i] = 2;
   for (int i = 0; i < n->nn; i++)
     for (int p = 0; p < 3; p++) {

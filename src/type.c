@@ -20,7 +20,7 @@ static void tfail(const char *fmt, ...) {
    parameters (its arity).  parse_type_atom resolves a registered name to a TNOM head with arity arg
    chains, so two values of the same declared type unify (parameter-wise) and different types do not. */
 typedef struct { const char *name; int arity; } NomDecl;
-static NomDecl noms[512]; static int n_nom = 0;
+static NomDecl *noms; static int n_nom = 0, nom_cap = 0;
 int nominal_arity(const char *name) {
   for (int i = 0; i < n_nom; i++) if (!strcmp(noms[i].name, name)) return noms[i].arity;
   return -1;
@@ -28,8 +28,8 @@ int nominal_arity(const char *name) {
 int nominal_lookup(const char *name) { return nominal_arity(name) >= 0; }
 int nominal_register(const char *name, int arity) {
   if (nominal_lookup(name)) return 0;
-  if (n_nom < 512) { char *p = malloc(strlen(name) + 1); strcpy(p, name); noms[n_nom++] = (NomDecl){.name = p, .arity = arity}; return 1; }
-  return 0;
+  if (n_nom == nom_cap) noms = realloc(noms, (size_t)(nom_cap = nom_cap ? nom_cap * 2 : 64) * sizeof *noms);
+  char *p = malloc(strlen(name) + 1); strcpy(p, name); noms[n_nom++] = (NomDecl){.name = p, .arity = arity}; return 1;
 }
 
 static Type *tvar(void) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, .id = next_id++}; return t; }
@@ -105,14 +105,14 @@ static void unify(Type *x, Type *y) {
        LINK LATER, so its contribution cannot be cached at push time: `(\x (x 5))` pushes `a`, then
        `unify(a, num -> c)` makes `c` free in the environment through `x`.  Those are resolved when
        `generalize` runs -- O(1) while the root is a bare variable, a walk only if it was linked. */
-typedef struct { char name[NAME]; Scheme s; int isdef; } TEnv;
+typedef struct { const char *name; Scheme s; int isdef; } TEnv;
 static TEnv *env;
 static int envn, envcap;
 
 static void env_push(const char *name, Scheme s) {
   if (envn >= envcap)
     env = realloc(env, (size_t)(envcap = envcap ? envcap * 2 : 128) * sizeof(TEnv));
-  snprintf(env[envn].name, NAME, "%s", name);
+  env[envn].name = name;
   env[envn].s = s; env[envn].isdef = 0;
   envn++;
 }
@@ -123,20 +123,20 @@ static Scheme *env_find(const char *name) {
   return (d && d->typed) ? &d->sch : NULL;
 }
 
-static void fv(Type *t, int *set, int *n) {
+typedef struct { int *v; int n, cap; } IL;   /* growable like the refcount table above: a fixed one silently DROPS a free variable past its bound, and a dropped free variable is a wrong type -- the failure mode the datatype arity scope had */
+static void il_push(IL *l, int id) { if (l->n == l->cap) l->v = realloc(l->v, (size_t)(l->cap = l->cap ? l->cap * 2 : 64) * sizeof(int)); l->v[l->n++] = id; }
+
+static void fv(Type *t, IL *f) {
   t = find(t);
   if (t->kind == TVR) {
-    for (int i = 0; i < *n; i++)
-      if (set[i] == t->id) return;
-    if (*n < 256) set[(*n)++] = t->id;
+    for (int i = 0; i < f->n; i++)
+      if (f->v[i] == t->id) return;
+    il_push(f, t->id);
     return;
   }
-  if (t->kind == TARROW) {
-    fv(t->a, set, n);
-    fv(t->b, set, n);
-  }
-  if (t->kind == TNOM) { if (t->a) fv(t->a, set, n); }
-  if (t->kind == TARG) { fv(t->a, set, n); if (t->b) fv(t->b, set, n); }
+  if (t->kind == TARROW) { fv(t->a, f); fv(t->b, f); }
+  if (t->kind == TNOM) { if (t->a) fv(t->a, f); }
+  if (t->kind == TARG) { fv(t->a, f); if (t->b) fv(t->b, f); }
 }
 
 /* ---- environment free-variable set (see the TEnv comment): membership is a refcount
@@ -153,9 +153,9 @@ static void rc_grow(int id) {
 }
 static int rc_has(int id) { return id < envrc_cap && envrc[id] > 0; }
 
-static int mid[256];
-static Type *mty[256];
-static int mn;
+static int *mid;
+static Type **mty;
+static int mn, mcap;
 
 static Type *inst_rec(Type *t) {
   t = find(t);
@@ -171,30 +171,28 @@ static Type *inst_rec(Type *t) {
 }
 
 static Type *instantiate(Scheme *s) {
-  mn = 0;
+  mn = 0; if (s->nq > mcap) { mcap = s->nq; mid = realloc(mid, (size_t)mcap * sizeof(int)); mty = realloc(mty, (size_t)mcap * sizeof *mty); }
   for (int i = 0; i < s->nq; i++) { mid[mn] = s->q[i]; mty[mn++] = tvar(); }
   return inst_rec(s->t);
 }
 
 static Scheme generalize(Type *t) {
-  int f[256], fn = 0; fv(t, f, &fn);
-  /* Binder entries first: O(1) each while the pushed variable is still bare, and only
-     an entry whose variable was linked needs the walk. */
-  int dyn[256], dn = 0;
+  IL f = {0}; fv(t, &f);
+  IL dyn = {0};   /* binder entries first: O(1) each while the pushed variable is still bare, so only an entry whose variable was linked needs the walk */
   for (int i = 0; i < envn; i++) {
     if (env[i].isdef) continue;
     Type *u = find(env[i].s.t);
-    if (u->kind == TVR) { if (dn < 256) dyn[dn++] = u->id; }
-    else fv(env[i].s.t, dyn, &dn);
+    if (u->kind == TVR) il_push(&dyn, u->id);
+    else fv(env[i].s.t, &dyn);
   }
-  int q[256], qn = 0;
-  for (int j = 0; j < fn; j++) {
-    if (rc_has(f[j])) continue;                       /* free in a def scheme's type */
-    int hit = 0;
-    for (int k = 0; k < dn; k++) if (dyn[k] == f[j]) { hit = 1; break; }
-    if (!hit && qn < 256) q[qn++] = f[j];
+  int qn = 0;
+  for (int j = 0; j < f.n; j++) {
+    int esc = rc_has(f.v[j]);                         /* free in a def scheme's type, so never quantified here */
+    for (int k = 0; !esc && k < dyn.n; k++) esc = dyn.v[k] == f.v[j];
+    if (!esc) f.v[qn++] = f.v[j];                     /* compact in place: f's buffer becomes the scheme's own */
   }
-  Scheme s; s.nq = qn; memcpy(s.q, q, (size_t)qn * sizeof(int)); s.t = t; return s;
+  free(dyn.v);
+  Scheme s; s.nq = qn; s.q = f.v; s.t = t; return s;
 }
 
 static Type *infer(Term *t) {
@@ -249,8 +247,9 @@ static void env_load_defs(void) {
   static int reg_n = 0;                     /* defs whose free variables are already counted */
   for (int i = reg_n; i < ndefs; i++) {
     if (!defs[i].typed) continue;
-    int f[256], n = 0; fv(defs[i].sch.t, f, &n);
-    for (int j = 0; j < n; j++) { rc_grow(f[j]); envrc[f[j]]++; }
+    IL f = {0}; fv(defs[i].sch.t, &f);
+    for (int j = 0; j < f.n; j++) { rc_grow(f.v[j]); envrc[f.v[j]]++; }
+    free(f.v);
   }
   reg_n = ndefs;
   envn = 0;
@@ -296,6 +295,6 @@ Type *type_arg(Type *arg) { return targ(arg, NULL); }
 Type *type_param(int idx) { return tparam(idx); }
 
 Scheme scheme_all(Type *t) {
-  int f[64], fn = 0; fv(t, f, &fn);
-  Scheme s; s.nq = fn; memcpy(s.q, f, (size_t)fn * sizeof(int)); s.t = t; return s;
+  IL f = {0}; fv(t, &f);
+  Scheme s; s.nq = f.n; s.q = f.v; s.t = t; return s;
 }

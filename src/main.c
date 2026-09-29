@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <limits.h>
 #include <sys/resource.h>
 #ifdef _OPENMP
 #include <omp.h>
@@ -20,44 +21,41 @@ static void bump_stack(void) {
 Def *defs;
 int ndefs = 0, defcap = 0;
 
-static long STEP_LIMIT = 1L << 24;
+static long STEP_LIMIT = LONG_MAX;   /* no ceiling: the engine ALREADY stops when a wave fires nothing (the observed ports are in WHNF), so a budget never ended a reduction -- it only cut off the ones that needed more.  LIN_STEPS sets a watchdog; the message at the end reports it when one is set. */
 /* Bounded so `lin build` cannot hang on a program that does not terminate at build
    time: the residual is then simply "what the compiler did not finish". */
-static long AOT_STEP_LIMIT = 1L << 22;
 static int bench_mode = 0;
 
-char curr_ns[NAME] = "";
-char open_ns[32][NAME];
-int n_open_ns = 0;
+const char *curr_ns = "";
+static const char **open_ns; static int n_open_ns = 0, open_ns_cap = 0;
 
 void set_namespace(const char *name) {
-  if (!name || !*name || !strcmp(name, "_") || !strcmp(name, "root")) curr_ns[0] = '\0';
-  else snprintf(curr_ns, sizeof curr_ns, "%s", name);
+  curr_ns = (!name || !*name || !strcmp(name, "_") || !strcmp(name, "root")) ? "" : name;
 }
 void open_namespace(const char *name) {
   if (!name || !*name) return;
   for (int i = 0; i < n_open_ns; i++) if (!strcmp(open_ns[i], name)) return;
-  if (n_open_ns < 32) snprintf(open_ns[n_open_ns++], NAME, "%s", name);
+  if (n_open_ns == open_ns_cap) open_ns = realloc(open_ns, (size_t)(open_ns_cap = open_ns_cap ? open_ns_cap * 2 : 8) * sizeof *open_ns);
+  open_ns[n_open_ns++] = name;
 }
 static Def *lookup_raw(const char *s) {
   for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, s)) return &defs[i];
   return NULL;
 }
 Def *def_find(const char *name) {
-  char qn[NAME * 2 + 2]; Def *d;
+  Def *d;
   if (strchr(name, '.')) return lookup_raw(name);
-  if (curr_ns[0]) { snprintf(qn, sizeof qn, "%s.%s", curr_ns, name); if ((d = lookup_raw(qn))) return d; }
+  if (curr_ns[0] && (d = lookup_raw(lin_internf("%s.%s", curr_ns, name)))) return d;
   for (int o = n_open_ns - 1; o >= 0; o--) {
-    snprintf(qn, sizeof qn, "%s.%s", open_ns[o], name);
-    if ((d = lookup_raw(qn))) return d;
+    if ((d = lookup_raw(lin_internf("%s.%s", open_ns[o], name)))) return d;
   }
   return lookup_raw(name);
 }
 
-typedef struct { char (*names)[NAME]; int count, cap; } Guard;
+typedef struct { const char **names; int count, cap; } Guard;
 static void guard_push(Guard *g, const char *name) {
   if (g->count >= g->cap) g->names = realloc(g->names, (size_t)(g->cap = g->cap ? g->cap * 2 : 64) * sizeof *g->names);
-  snprintf(g->names[g->count++], NAME, "%s", name);
+  g->names[g->count++] = name;
 }
 static int guard_has(Guard *g, const char *name) {
   for (int i = 0; i < g->count; i++) if (!strcmp(g->names[i], name)) return 1;
@@ -237,8 +235,8 @@ void eval_form(Term *t) {
 static void qualify_free(Term *t, Guard *b) {
   if (!t) return;
   if (t->type == TVAR && !strchr(t->name, '.') && !guard_has(b, t->name) && curr_ns[0]) {
-    char qn[NAME * 2 + 2]; snprintf(qn, sizeof qn, "%s.%s", curr_ns, t->name);
-    if (lookup_raw(qn)) { strncpy(t->name, qn, NAME - 1); t->name[NAME - 1] = 0; }
+    const char *qn = lin_internf("%s.%s", curr_ns, t->name);
+    if (lookup_raw(qn)) t->name = qn;
   }
   int bound = (t->type == TLAM);
   if (bound) guard_push(b, t->name);
@@ -250,15 +248,15 @@ static void qualify_free(Term *t, Guard *b) {
 static void process_def(Term *t);
 static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
   (void)dn;
-  char dslot[NAME]; snprintf(dslot, sizeof dslot, "_d%d", idx);
+  const char *dslot = lin_internf("_d%d", idx);
   /* curried application (d_idx f1 f2 ...) */
   Term *app = term_new(TVAR, dslot, NULL, NULL);
   for (Term *f = fields; f; f = f->r) app = term_new(TAPP, "", app, term_new(TVAR, f->name, NULL, NULL));
   /* dispatch binders are innermost: \f1..\fk \d0..\d_{m-1} (d_i f1..fk) */
   Term *lam = app;
-  for (int i = m - 1; i >= 0; i--) { char dn2[NAME]; snprintf(dn2, sizeof dn2, "_d%d", i); lam = term_new(TLAM, dn2, lam, NULL); }
-  char (*fs)[NAME] = NULL; int nf = 0, cap = 0;
-  for (Term *f = fields; f; f = f->r) { fs = realloc(fs, (size_t)(cap = cap ? cap * 2 : 8) * sizeof *fs); snprintf(fs[nf++], NAME, "%s", f->name); }
+  for (int i = m - 1; i >= 0; i--) { const char *dn2 = lin_internf("_d%d", i); lam = term_new(TLAM, dn2, lam, NULL); }
+  const char **fs = NULL; int nf = 0, cap = 0;
+  for (Term *f = fields; f; f = f->r) { fs = realloc(fs, (size_t)(cap = cap ? cap * 2 : 8) * sizeof *fs); fs[nf++] = f->name; }
   for (int i = nf - 1; i >= 0; i--) lam = term_new(TLAM, fs[i], lam, NULL);
   free(fs);
   return lam;
@@ -289,12 +287,12 @@ static void process_datatype(Term *t) {
        type (annot) contributes that type (param refs resolved); an untyped field
        (no annot) contributes a fresh polymorphic var. */
     Type *head = type_nominal(t->name); Type **hp = &head->a;
-    Type *params[16];
-    for (int ip = 0; ip < arity && ip < 16; ip++) { params[ip] = type_var(); *hp = type_arg(params[ip]); hp = &(*hp)->b; }
-    Type *ct = head;
-    Type *args[16]; int nf = 0;
-    for (Term *f = c->l; f; f = f->r) if (nf < 16) args[nf++] = resolve_dt_type(f->annot, params);
+    Type **params = calloc((size_t)(arity ? arity : 1), sizeof *params);   /* the DATA's sizes, not a constant: a fixed array would silently drop parameters or fields, and a dropped field changes the type inferred */
+    for (int ip = 0; ip < arity; ip++) { params[ip] = type_var(); *hp = type_arg(params[ip]); hp = &(*hp)->b; }
+    Type *ct = head; Type **args = NULL; int nf = 0;
+    for (Term *f = c->l; f; f = f->r) { args = realloc(args, (size_t)(nf + 1) * sizeof *args); args[nf++] = resolve_dt_type(f->annot, params); }
     for (int i = nf - 1; i >= 0; i--) ct = type_arrow(args[i], ct);  /* fields left-to-right */
+    free(params); free(args);
     Term *def = term_new(TDEFX, c->name, lam, NULL); def->annot = ct;
     process_def(def);                                   /* takes ownership of lam */
   }
@@ -311,10 +309,10 @@ static void process_def(Term *t) {
   Guard b = {0}; qualify_free(t->l, &b); free(b.names);
   Def *d = &defs[ndefs++];
   if (curr_ns[0] && !strchr(t->name, '.')) {
-    char qn[NAME * 2 + 2]; snprintf(qn, sizeof qn, "%s.%s", curr_ns, t->name);
-    strncpy(d->name, qn, NAME - 1); d->name[NAME - 1] = 0;
+    const char *qn = lin_internf("%s.%s", curr_ns, t->name);
+    d->name = qn;
   } else {
-    strncpy(d->name, t->name, NAME - 1); d->name[NAME - 1] = 0;
+    d->name = t->name;
   }
   d->sch = sch; d->typed = 1; d->rec = rec;
   /* A self-referential body becomes the standard fixpoint `Y (\name. body)`.  The binder carries
@@ -327,7 +325,6 @@ static void process_def(Term *t) {
 }
 
 #include <unistd.h>
-#include <limits.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -426,10 +423,10 @@ static void form_cb(Term *t, const char *perr, void *ud) {
 /* (export <ns>): re-export every public member of `ns` into the current namespace, mirroring hand-written `(define! y ns.y)` aliases but preserving each scheme + recursion metadata so exported names reduce exactly as their qualified originals */
 static void export_namespace(const char *name) {
   if (!name || !*name) return;
-  char pfx[NAME + 2]; snprintf(pfx, sizeof pfx, "%s.", name);
+  const char *pfx = lin_internf("%s.", name);
   int pflen = (int)strlen(pfx);
   /* Re-export by routing each public member through process_def as the exact `(define x ns.x)` alias shape the hand-written modules used, so each gets identical type-checking/qualification/precompile (avoiding closure-bake differences).  Collect names first so appending can't invalidate iteration */
-  static char (*out)[NAME]; static int outcap = 0;
+  static const char **out; static int outcap = 0;
   int nout = 0;
   for (int i = 0; i < ndefs; i++) {
     const char *dn = defs[i].name;
@@ -438,13 +435,10 @@ static void export_namespace(const char *name) {
     if (!*suffix || strchr(suffix, '.')) continue;          /* only direct members */
     if (suffix[0] == '_') continue;                         /* `_`-prefixed = private */
     if (nout >= outcap) out = realloc(out, (size_t)(outcap = outcap ? outcap * 2 : 64) * sizeof *out);
-    snprintf(out[nout++], NAME, "%s", suffix);
+    out[nout++] = suffix;
   }
   for (int k = 0; k < nout; k++) {
-    char qn[NAME * 2 + 2];
-    if (curr_ns[0]) snprintf(qn, sizeof qn, "%s.%s", curr_ns, out[k]);
-    else snprintf(qn, sizeof qn, "%s", out[k]);
-    char fullname[NAME * 2 + 2]; snprintf(fullname, sizeof fullname, "%s.%s", name, out[k]);
+    const char *fullname = lin_internf("%s.%s", name, out[k]);
     process_def(term_new(TDEF, out[k], term_new(TVAR, fullname, NULL, NULL), NULL));
   }
 }
@@ -462,19 +456,18 @@ static int load_file(const char *path) {
   if (last_slash) *last_slash = '\0'; else snprintf(dir, sizeof dir, ".");
   if (dir_sp >= dir_cap) dir_stack = realloc(dir_stack, (size_t)(dir_cap = dir_cap ? dir_cap * 2 : 16) * sizeof *dir_stack);
   snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
-  char prev_ns[NAME]; snprintf(prev_ns, sizeof prev_ns, "%s", curr_ns); int prev_n_open = n_open_ns;
+  const char *prev_ns = curr_ns; int prev_n_open = n_open_ns;
   parse_forms(src, form_cb, NULL);
-  snprintf(curr_ns, sizeof curr_ns, "%s", prev_ns); n_open_ns = prev_n_open;
+  curr_ns = prev_ns; n_open_ns = prev_n_open;
   if (dir_sp > 0) dir_sp--;
   free(src);
   return 1;
 }
 
-/* AOT decision search (std — not core).  The artifact is the deliverable, so a build-time decision is
- * made by building the candidates and measuring them: the work the runtime still has to do (the
- * residual's own reduction -- what "AOT moved the work out" means) and how many bytes ship.  The
- * candidate space is a row list, not a chain of ifs; `LIN_AOT_SEARCH=1` explores it and ships the
- * winner, reporting every candidate's numbers. */
+/* AOT decision search (std — not core).  The artifact is the deliverable, so a build-time decision is made by
+ * building the candidates and measuring them: the work the runtime still has to do (the residual's own reduction
+ * -- what "AOT moved the work out" means) and how many bytes ship.  The candidate space is a row list, not a chain
+ * of ifs; `LIN_AOT_SEARCH=1` explores it and ships the winner, with every candidate's numbers. */
 
 typedef struct { const char *name; const char *egraph; const char *rules; int precompile; } AotCand;
 
@@ -532,7 +525,7 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
      with the artifact's own work falling from 106 reduce steps to 1, and test/build_observe.lin 5953 -> 193 ms with
      498739 steps -> 1. */
   lin_build_observed = 0;
-  long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);
+  long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, STEP_LIMIT, &st->compiled, err, sizeof err);
   if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
   st->aot_steps = (int)baked; st->residual = net.nn;
   net_gc(&net);
@@ -543,7 +536,7 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   st->rsteps = -1;
   if (net_load_line(&run, out_f)) {
     lin_build_depth++;
-    st->rsteps = net_reduce(&run, AOT_STEP_LIMIT);
+    st->rsteps = net_reduce(&run, STEP_LIMIT);
     lin_build_depth--;
     net_free(&run);
   }
@@ -650,15 +643,14 @@ static int paren_balance(const char *s, int *in_str) {
 }
 
 static void repl(void) {
-  char buf[65536];
-  char line[8192];
+  char *buf = NULL, *line = NULL; size_t buf_cap = 0, line_cap = 0;
   int buf_len = 0, depth = 0, in_str = 0;
   printf("lin 0.1 - interaction combinator language\n");
   printf("commands: :type <expr>  :goi <expr>  :load <file>  :help  :q\n");
   for (;;) {
     printf(depth > 0 || in_str ? "...  " : "lin> ");
     fflush(stdout);
-    if (!fgets(line, sizeof line, stdin)) break;
+    if (getline(&line, &line_cap, stdin) < 0) break;
     size_t len = strlen(line);
     while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
       line[--len] = 0;
@@ -686,12 +678,11 @@ static void repl(void) {
     depth += delta;
     if (depth < 0) depth = 0;
 
-    if (buf_len + (int)len + 2 < (int)sizeof(buf)) {
-      memcpy(buf + buf_len, line, len);
-      buf_len += len;
-      buf[buf_len++] = '\n';
-      buf[buf_len] = 0;
-    }
+    if (buf_len + (int)len + 2 > (int)buf_cap) buf = realloc(buf, buf_cap = (size_t)(buf_len + (int)len + 2) * 2);
+    memcpy(buf + buf_len, line, len);
+    buf_len += len;
+    buf[buf_len++] = '\n';
+    buf[buf_len] = 0;
 
     if (depth == 0 && !in_str) {
       parse_forms(buf, form_cb, NULL);

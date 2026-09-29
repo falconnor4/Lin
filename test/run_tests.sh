@@ -120,6 +120,48 @@ else
 fi
 rm -f "$OPT_LOG"
 
+# ----------------------------------------------------------------------------
+# Tier 2.8: no hardcoded limits.
+#   Lin's rule is that a limit is DERIVED from the data (a net's node count, a spine's length, an
+#   e-graph's class count) -- and that a chosen one is written down with a reason instead of hiding
+#   in the tree.  test/no_caps.py audits the core and the drivers and fails on anything undeclared,
+#   so a new hardcoded cap cannot land quietly.  `python3 test/no_caps.py --list` is the inventory.
+# ----------------------------------------------------------------------------
+NC_LOG=$(mktemp)
+if python3 test/no_caps.py >"$NC_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 83)); echo "PASS test/no_caps.py ($(sed -n 2p "$NC_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/no_caps.py"; cat "$NC_LOG"
+fi
+rm -f "$NC_LOG"
+
+# ----------------------------------------------------------------------------
+# Tier 2.85: a datatype's constructor type describes EVERY field.
+#   The count comes from the program (test/datatype_arity.sh), so this pins the property and not a
+#   number: the compiler used to scope a constructor's parameters and fields to a fixed 16, which
+#   silently dropped the rest and handed the constructor a different type.
+# ----------------------------------------------------------------------------
+DA_LOG=$(mktemp)
+if ./test/datatype_arity.sh "$LIN_BIN" >"$DA_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/datatype_arity.sh ($(tail -1 "$DA_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/datatype_arity.sh"; cat "$DA_LOG"
+fi
+rm -f "$DA_LOG"
+
+# ----------------------------------------------------------------------------
+# Tier 2.9: the FFI ladder's arity against the arity the language can write (test/ffi_arity.sh).
+#   The ladder is ONE call per arity, so the std's ccallN family must fit inside it and a larger
+#   call must be REFUSED -- not forwarded with the wrong count, which is what it used to do.
+# ----------------------------------------------------------------------------
+FA_LOG=$(mktemp)
+if ./test/ffi_arity.sh >"$FA_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/ffi_arity.sh ($(tail -1 "$FA_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/ffi_arity.sh"; cat "$FA_LOG"
+fi
+rm -f "$FA_LOG"
+
 printf "[Tier 3: Constraint Satisfaction & Term Rewriting]\n"
 for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do
   run_test "$f"
@@ -269,6 +311,24 @@ if bash test/wave_parallel.sh "$LIN_BIN" "$STD_DIR" >"$WP_LOG" 2>&1; then
   rm -f "$WP_LOG"
 else
   fail=$((fail+1)); echo "FAIL test/wave_parallel.sh"; cat "$WP_LOG"; rm -f "$WP_LOG"
+fi
+
+# ----------------------------------------------------------------------------
+# Tier 5.6: the carried DEMAND CLAIM (test/demand_carry.sh).
+#   `act` is not serialized and neither were the demand roots, so an artifact
+#   re-derived ROOT alone and could never fire more than one pair a wave.  A net
+#   file now carries the roots (v7) -- the reducer's own scheduling state, written
+#   where the reducer holds it.  This tier proves the path end to end: a build-time
+#   pass publishes roots, the artifact carries them, and the artifact runs wider
+#   with the PRODUCER DELETED, on the same work and the same answer.  See that
+#   file's header for what it does NOT claim (width, not speed).
+# ----------------------------------------------------------------------------
+DC_LOG=$(mktemp)
+if bash test/demand_carry.sh "$LIN_BIN" "$STD_DIR" >"$DC_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 7)); echo "PASS test/demand_carry.sh (7 checks: claim carried to the artifact, width, thread-identity)"
+  rm -f "$DC_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/demand_carry.sh"; cat "$DC_LOG"; rm -f "$DC_LOG"
 fi
 
 # ----------------------------------------------------------------------------

@@ -86,9 +86,12 @@ enum { L_TERMINAL, L_INDUCTIVE, L_FALSE };
 typedef struct { int layer; Port head, tail; } Layer;
 
 /* `\b0.\b1.b0` (first) / `\b0.\b1.b1` (second): the shape ZERO, TRUE and NIL share with FALSE. */
+/* One spine step (the fan walk is explained in cell_layer below): hop the fan, insist the result is a LAM's wire. */
+static int hop_lam(Net *n, Port *p, int cross) {
+  *p = cross ? dup_hop(n, net_force_val(n, *p)) : skip_dup(n, net_force_val(n, *p)); return live(n, *p) && n->tag[p->node] == LAM;
+}
 static int sel_layer(Net *n, Port p, int second) {
-  p = dup_hop(n, net_force_val(n, p));
-  if (!live(n, p) || n->tag[p.node] != LAM) return 0;
+  if (!hop_lam(n, &p, 1)) return 0;
   Port w = dup_hop(n, net_force_val(n, wr(n, (Port){p.node, 2})));
   if (w.port != 0 || !live(n, w) || n->tag[w.node] != LAM) return 0;
   Port b = dup_hop(n, net_force_val(n, wr(n, (Port){w.node, 2})));
@@ -99,8 +102,7 @@ static int sel_layer(Net *n, Port p, int second) {
 /* `\b0.\b1.(b1 tail)`: a successor layer.  The LAYER APPLIES ITS OWN SECOND BINDER, which is what
    makes this shape a numeral and not a cell (a cell applies an inner LAM). */
 static int succ_layer(Net *n, Port p, Port *tail) {
-  p = dup_hop(n, net_force_val(n, p));
-  if (!live(n, p) || n->tag[p.node] != LAM) return 0;
+  if (!hop_lam(n, &p, 1)) return 0;
   Port w = dup_hop(n, net_force_val(n, wr(n, (Port){p.node, 2})));
   if (w.port != 0 || !live(n, w) || n->tag[w.node] != LAM) return 0;
   Port body = dup_hop(n, net_force_val(n, wr(n, (Port){w.node, 2})));
@@ -118,8 +120,7 @@ static int cell_layer(Net *n, Port p, Port *head, Port *tail) {
      `dup_hop` (which reads whichever auxiliary the arriving port implies) is for the binder wiring a
      NUMERAL needs.  Measuring the difference: a shared closure `(let ((f (\x (add x 1)))) (add (f 1)
      (f 2)))` folded with the FIRST use's operand twice -- 4 where 5 is right. */
-  p = skip_dup(n, net_force_val(n, p));
-  if (!live(n, p) || n->tag[p.node] != LAM) return 0;
+  if (!hop_lam(n, &p, 0)) return 0;
   Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));
   if (c.port != 0 || !live(n, c) || n->tag[c.node] != LAM) return 0;
   Port body = skip_dup(n, net_force_val(n, wr(n, (Port){c.node, 2})));
@@ -132,8 +133,7 @@ static int cell_layer(Net *n, Port p, Port *head, Port *tail) {
 }
 int net_read_cell(Net *n, Port p, Port *head, Port *tail) { return cell_layer(n, p, head, tail); }
 static int nil_layer(Net *n, Port p) {
-  p = skip_dup(n, net_force_val(n, p));
-  if (!live(n, p) || n->tag[p.node] != LAM) return 0;
+  if (!hop_lam(n, &p, 0)) return 0;
   Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));
   if (c.port != 0 || !live(n, c) || n->tag[c.node] != LAM) return 0;
   Port body = skip_dup(n, net_force_val(n, wr(n, (Port){c.node, 2})));
@@ -182,26 +182,26 @@ long net_read_int(Net *n, Port p, int enc) {
   return -1;
 }
 
-/* A cell chain whose PAYLOAD is in `pay_enc` -- a string is this with a numeral (char code) payload.
-   The payload's encoding is an argument for the same reason every other one is: a list of lists is the
-   same cell, so the cell alone does not say what is inside it. */
-int net_read_string(Net *n, Port p, int pay_enc, char *buf, size_t max) {
-  size_t len = 0;
+/* A cell chain whose PAYLOAD is in `pay_enc` -- a string is this with a numeral (char code) payload.  The
+   payload's encoding is an argument for the same reason every other one is: a list of lists is the same cell.
+   THE WHOLE STRING, never a prefix: the scratch grows with what it reads and the arena keeps the result. */
+int net_read_string_arena(Net *n, Port p, int pay_enc, const char **out) {
+  char *buf = NULL; size_t len = 0, cap = 0;
   Port cur = p;
-  for (int step = 0; step < n->nn && len + 1 < max; step++) {
+  for (size_t step = 0; step < (size_t)n->nn; step++) {                    /* a chain longer than the net has nodes has REPEATED itself: that is where a string ends, and it is the net's own size, not a length */
     Layer L;
     if (!cons_layer(n, cur, &L)) break;
-    if (L.layer != L_INDUCTIVE) { buf[len] = 0; return (int)len; }   /* the nil terminal */
+    if (L.layer != L_INDUCTIVE) { *out = len ? lin_intern(buf, len) : lin_intern("", 0); free(buf); return (int)len; }   /* the nil terminal: an EMPTY string is still a string, and 0 is how a caller tells it from -1 (not a string at all) */
     /* A payload must be a NUMBER the structure determines ON ITS OWN -- one layer or more.  The bare
        terminal (`\b0.\b1.b0`) is also TRUE and nil, so reading it as a character would be a guess; a
        payload that is itself a CELL is a 1-element list whose "cell" is an `_ffi` closure's header (the
        two ARE one net: `\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)`).  Both are skipped. */
     long ch = net_read_int(n, L.head, pay_enc);
-    if (ch > 0 && ch < 256) buf[len++] = (char)ch;
+    if (ch > 0 && ch < 256) { if (len == cap) buf = realloc(buf, cap = cap ? cap * 2 : 64); buf[len++] = (char)ch; }
     cur = L.tail;
   }
-  if (len > 0) { buf[len] = 0; return (int)len; }
-  return -1;
+  if (len) { *out = lin_intern(buf, len); free(buf); return (int)len; }
+  free(buf); return -1;
 }
 
 /* Decoding a float box is entirely the provider's: the core hands it the port, because the box's shape
@@ -250,8 +250,7 @@ Port net_box_index(Net *n, long i) {
   return (Port){a.node, 0};
 }
 static int box_layer(Net *n, Port p, Port *idx) {
-  p = dup_hop(n, net_force_val(n, p));
-  if (!live(n, p) || n->tag[p.node] != LAM) return 0;
+  if (!hop_lam(n, &p, 1)) return 0;
   Port b = dup_hop(n, net_force_val(n, wr(n, (Port){p.node, 2})));
   if (b.port != 0 || !live(n, b) || n->tag[b.node] != LAM) return 0;
   Port oa = dup_hop(n, net_force_val(n, wr(n, (Port){b.node, 2})));
@@ -341,7 +340,10 @@ int net_ffi_fn(Net *n, Port p, char *fn, int fnmax) {
   Port a1;
   if (!net_ffi_header(n, p, &a1, 0)) return 0;
   if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return 0;
-  return net_read_string(n, wr(n, (Port){a1.node, 2}), LIN_ENC_NUM, fn, (size_t)fnmax) > 0;
+  const char *s;
+  if (net_read_string_arena(n, wr(n, (Port){a1.node, 2}), LIN_ENC_NUM, &s) <= 0) return 0;
+  snprintf(fn, (size_t)fnmax, "%s", s);
+  return 1;
 }
 
 /* ---------------- the one arg-spine walk ----------------
@@ -388,7 +390,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
      pays only a walk of two wires. */
   if (net_read_value(n, p, DT_FFI, v) && v->kind) return 1;
   {
-    char fnb[NAME];
+    char fnb[2];                                     /* a sink: only the name's PRESENCE is tested, and any buffer over one byte reports one */
     Port q = net_dhop(n, p);
     if (q.port == 0 && net_ffi_fn(n, q, fnb, sizeof fnb)) return 0;
   }
@@ -404,7 +406,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
     break;
   }
   case DT_STR:
-    if (net_read_string(n, p, LIN_ENC_NUM, v->sv, sizeof v->sv) >= 0) { v->kind = 2; return 1; }
+    if (net_read_string_arena(n, p, LIN_ENC_NUM, &v->sv) >= 0) { v->kind = 2; return 1; }
     break;
   case DT_FLOAT: {
     double d;
@@ -422,7 +424,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
   if (net_read_float(n, p, &d)) { memcpy(&v->iv, &d, 8); v->kind = 4; return 1; }
   long x = net_read_int(n, p, LIN_ENC_NUM);
   if (x > 0) { v->iv = x; v->kind = 1; return 1; }
-  if (net_read_string(n, p, LIN_ENC_NUM, v->sv, sizeof v->sv) > 0) { v->kind = 2; return 1; }
+  if (net_read_string_arena(n, p, LIN_ENC_NUM, &v->sv) > 0) { v->kind = 2; return 1; }
   return 0;
 }
 
@@ -474,11 +476,10 @@ int net_read_value(Net *n, Port p, int domain, Val *v) {
    it.  `<name>_driver` is the symbol every plugin exports, which makes a NAME-only section enough. */
 int lin_driver_load(const char *name) {
   if (!name || !name[0]) return 0;
-  char sym[NAME + 16], path[4096];
-  snprintf(sym, sizeof sym, "lin_%s_driver", name);
+  const char *sym = lin_internf("lin_%s_driver", name);
   if (dlsym(RTLD_DEFAULT, sym)) return 1;               /* already loaded */
   const char *dir = getenv("LIN_STD_DIR");
-  snprintf(path, sizeof path, "%s/drivers/%s.so", dir ? dir : "std", name);
+  const char *path = lin_internf("%s/drivers/%s.so", dir ? dir : "std", name);
   if (!dlopen(path, RTLD_NOW | RTLD_GLOBAL)) return 0;
   return dlsym(RTLD_DEFAULT, sym) != NULL;
 }
@@ -490,8 +491,11 @@ int lin_driver_load(const char *name) {
    never by the symbol's name, and while a build marker is up a provider that declared nothing is not
    consulted at all -- so a call nobody vouched for cannot happen. */
 typedef struct { ScalarOpFn f; int pure; } ScalarProvider;
-static ScalarProvider scalar_ops[16]; static int n_scalar_ops = 0;
-void lin_scalar_ops_add(ScalarOpFn f, int pure) { if (n_scalar_ops < 16) scalar_ops[n_scalar_ops++] = (ScalarProvider){f, pure}; }
+static ScalarProvider *scalar_ops; static int n_scalar_ops = 0, scalar_ops_cap = 0;
+void lin_scalar_ops_add(ScalarOpFn f, int pure) {
+  if (n_scalar_ops == scalar_ops_cap) scalar_ops = realloc(scalar_ops, (size_t)(scalar_ops_cap = scalar_ops_cap ? scalar_ops_cap * 2 : 8) * sizeof *scalar_ops);
+  scalar_ops[n_scalar_ops++] = (ScalarProvider){f, pure};
+}
 
 /* !=0 once a build-time reduction reached an observation it may not make, and how many it was asked
    for: the gate reports the FIRST one, naming it (see lin_build_gate). */
@@ -513,11 +517,12 @@ int lin_build_gate(const char *fn, int pure) {
 /* dlopen a std/drivers plugin by its `<sym>_driver` symbol (idempotent); its constructor registers providers. */
 void lin_scalar_ops_load(const char *sym) {
   if (!sym || !sym[0]) return;
-  char sfx[256], path[4096];
-  snprintf(sfx, sizeof sfx, "%s_driver", sym);
+  const char *dir = getenv("LIN_STD_DIR"); if (!dir) dir = "std";
+  size_t n = strlen(dir) + strlen(sym) + 16;   /* sized from the PARTS, not a constant: a longer path would be silently truncated, and a truncated path names a different file -- or none */
+  char sfx[n], path[n];
+  snprintf(sfx, n, "%s_driver", sym);
   if (dlsym(RTLD_DEFAULT, sfx)) return;                 /* already loaded */
-  const char *dir = getenv("LIN_STD_DIR");
-  snprintf(path, sizeof path, "%s/drivers/%s.so", dir ? dir : "std", sym);
+  snprintf(path, n, "%s/drivers/%s.so", dir, sym);
   if (dlopen(path, RTLD_NOW | RTLD_GLOBAL)) return;
   fprintf(stderr, "warning: driver plugin '%s' not found (looked for '%s')\n", sym, path);
 }

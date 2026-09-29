@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 
 typedef struct {
-  char name[NAME];
+  const char *name;
   Port bind;
   int count;
   Port *extra;
@@ -30,7 +30,7 @@ static _Noreturn void cfail(const char *fmt, ...) {
 static void push_var(const char *name, Port bind) {
   if (csp >= ccsp) cstack = realloc(cstack, (size_t)(ccsp = ccsp ? ccsp * 2 : 64) * sizeof(CVar));
   CVar *e = &cstack[csp++];
-  snprintf(e->name, NAME, "%s", name);
+  e->name = name;
   e->bind = bind; e->count = 0; e->extra = NULL; e->nextra = e->mextra = 0;
 }
 
@@ -234,7 +234,7 @@ int compile(Term *t, Net *n, char *err, int errsz) {
    Whole-program equality saturation over the expanded term, with sharing-aware extraction.  A PASS,
    not part of the calculus: it may be wrong or absent and every program still compiles and runs
    (`egraph_optimize` falls back to the term it was given). */
-typedef struct { int type; char name[NAME]; int l, r; } ENode;
+typedef struct { int type; const char *name; int l, r; } ENode;
 typedef struct { int parent, best_node, cost; } EClass;
 typedef struct {
   ENode *nodes; int nn, ncap;
@@ -344,7 +344,7 @@ static int eg_add(EGraph *g, int type, const char *name, int l, int r) {
     g->classes = realloc(g->classes, (size_t)(g->ccap = g->ccap ? g->ccap * 2 : 128) * sizeof(EClass));
   int nid = g->nn++, cid = g->nc++;
   g->nodes[nid] = (ENode){.type = type, .l = l, .r = r};
-  snprintf(g->nodes[nid].name, NAME, "%s", name ? name : "");
+  g->nodes[nid].name = name ? name : "";
   g->node_cls[nid] = cid;
   g->classes[cid] = (EClass){.parent = cid, .best_node = nid, .cost = eg_cost(g, &g->nodes[nid])};
   eg_insert(g, nid);
@@ -381,17 +381,18 @@ static int eg_has_var(EGraph *g, int c, const char *name) {
    PRINTS binder names, so the invented name is observable -- the same program came out `(\y%0 y)`.  A pass that
    only removes work must not alter what a program prints, so a capture-risk rewrite is DECLINED (`g->capture`),
    and extraction can then only return a term the compiler would have produced anyway. */
-static int eg_subst(EGraph *g, int c, const char *name, int arg, int d) {
-  if (d > 1024) { g->capture = 1; return c; }
+static int eg_subst(EGraph *g, int c, const char *name, int arg, int d, int lim) {
+  /* `lim` is the class count at entry, not a chosen depth: a substitution descends only through classes that already exist (a cycle can only revisit one), so the graph's own size is the deepest it can need; snapshotted because eg_add grows the graph as the rewrite is rebuilt. */
+  if (d > lim) { g->capture = 1; return c; }
   c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
   if (n.type == TVAR) return !strcmp(n.name, name) ? arg : c;
   if (n.type == TLAM) {
     if (!strcmp(n.name, name)) return c;
     if (eg_has_var(g, arg, n.name)) { g->capture = 1; return c; }
-    return eg_add(g, TLAM, n.name, eg_subst(g, n.l, name, arg, d + 1), -1);
+    return eg_add(g, TLAM, n.name, eg_subst(g, n.l, name, arg, d + 1, lim), -1);
   }
   if (n.type == TAPP)
-    return eg_add(g, TAPP, "", eg_subst(g, n.l, name, arg, d + 1), eg_subst(g, n.r, name, arg, d + 1));
+    return eg_add(g, TAPP, "", eg_subst(g, n.l, name, arg, d + 1, lim), eg_subst(g, n.r, name, arg, d + 1, lim));
   /* A binding is cyclic by construction, so substituting into it is declined rather than guessed at
      (the same signal a capture uses); `eg_has_var` above is conservative for the same reason. */
   if (n.type == TLET) { g->capture = 1; return c; }
@@ -413,10 +414,10 @@ static void eg_saturate(EGraph *g) {
           if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TLAM) {
             int bl = eg_find(g, g->nodes[bn].l);
             if (g->classes[bl].cost <= eg_rules[r].param) {
-              char vn[NAME]; snprintf(vn, NAME, "%s", g->nodes[bn].name);
+              const char *vn = g->nodes[bn].name;
               int before = eg_find(g, cls);
               g->capture = 0;
-              int sub = eg_subst(g, g->nodes[bn].l, vn, n.r, 0);
+              int sub = eg_subst(g, g->nodes[bn].l, vn, n.r, 0, g->nc);
               /* a rewrite that would capture is not applied at all -- see eg_subst */
               if (g->capture) { eg_rules[r].declines++; continue; }
               eg_union(g, cls, sub);
@@ -446,19 +447,19 @@ static void eg_saturate(EGraph *g) {
   }
 }
 
-static Term *eg_extract(EGraph *g, int c, int d) {
-  if (d > 2048) return NULL;
+static Term *eg_extract(EGraph *g, int c, int d, int lim) {
+  if (d > lim) return NULL;   /* as in eg_subst: the graph's own depth, snapshotted at entry */
   c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
   if (n.type == TVAR) return term_new(TVAR, n.name, NULL, NULL);
   if (eg_opaque(n.type)) return term_new(n.type, n.name, NULL, NULL);
-  if (n.type == TLAM) { Term *l = eg_extract(g, n.l, d + 1); return l ? term_new(TLAM, n.name, l, NULL) : NULL; }
+  if (n.type == TLAM) { Term *l = eg_extract(g, n.l, d + 1, lim); return l ? term_new(TLAM, n.name, l, NULL) : NULL; }
   if (n.type == TAPP) {
-    Term *l = eg_extract(g, n.l, d + 1), *r = eg_extract(g, n.r, d + 1);
+    Term *l = eg_extract(g, n.l, d + 1, lim), *r = eg_extract(g, n.r, d + 1, lim);
     if (!l || !r) { term_free(l); term_free(r); return NULL; }
     return term_new(TAPP, "", l, r);
   }
   if (n.type == TLET) {
-    Term *l = eg_extract(g, n.l, d + 1), *r = eg_extract(g, n.r, d + 1);
+    Term *l = eg_extract(g, n.l, d + 1, lim), *r = eg_extract(g, n.r, d + 1, lim);
     if (!l || !r) { term_free(l); term_free(r); return NULL; }
     return term_new(TLET, n.name, l, r);
   }
@@ -480,7 +481,7 @@ Term *egraph_optimize(Term *t) {
     }
     for (int c = 0; c < g.nc; c++) if (g.uses[c] >= 2) shared++;
   }
-  Term *res = (root < 0) ? NULL : eg_extract(&g, root, 0);
+  Term *res = (root < 0) ? NULL : eg_extract(&g, root, 0, g.nc);
   if (getenv("LIN_PASSES")) {
     fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, rules:",
             g.nc, g.nn, shared);
@@ -509,10 +510,9 @@ void lin_set_self_path(const char *p) {
 int net_save_line(Net *n, const char *path) {
   FILE *f = fopen(path, "wb"); if (!f) return 0;
   fprintf(f, "#!%s\n", self_path); fwrite("LINE", 1, 4, f);
-  /* v6 dropped the per-node NAME TABLE: a net has no carrier labels, so there is nothing to write.
-     The word that carried the count stays in the header (it is 0) so that the fixed-size metadata
-     keeps its shape, and a v<=5 artifact still loads -- its name table is read and DISCARDED. */
-  uint32_t meta[4] = { 6, (uint32_t)n->nn, (uint32_t)n->nlv, 0 };
+  /* v6 dropped the per-node NAME TABLE: a net has no carrier labels, so there is nothing to write, and the count word
+     stays in the header (as 0) so the metadata keeps its shape -- a v<=5 artifact still loads, its names DISCARDED. */
+  uint32_t meta[4] = { 7, (uint32_t)n->nn, (uint32_t)n->nlv, 0 };
   fwrite(meta, sizeof(uint32_t), 4, f);
   fwrite(n->tag, 1, (size_t)n->nn, f); fwrite(n->dead, 1, (size_t)n->nn, f);
   fwrite(n->wire, sizeof(Port) * 3, (size_t)n->nn, f);
@@ -520,30 +520,30 @@ int net_save_line(Net *n, const char *path) {
   /* the level trie: parents come before children by construction, so ids reload directly */
   if (n->nlv > 0) { fwrite(n->lv_parent + 1, sizeof(int), (size_t)n->nlv, f);
                     fwrite(n->lv_bit + 1, 1, (size_t)n->nlv, f); }
-  /* v5: one opaque section per driver that has state to keep -- the table behind a value domain, a
-     compiled artifact, whatever.  The container does not know what any of them mean: it writes what each
-     driver hands it and hands it back on load, keyed by name.  Before v5 this section was the float table
-     itself, hardcoded here -- exactly the leak the driver ABI exists to close. */
+  /* v7: the DEMAND ROOTS.  `act` is not serialized either (a load rebuilds it) and demand is the other half of the same
+     scheduling state: without it an artifact re-derives ROOT alone, so no wave can ever fire more than one pair. */
+  uint32_t nr = (uint32_t)n->nroot; fwrite(&nr, sizeof nr, 1, f); fwrite(n->root, sizeof(Port), (size_t)n->nroot, f);
+  /* v5: one opaque section per driver with state to keep, written and handed back on load, keyed by name -- the container
+     never learns what one means (lin.h).  Before v5 this section was the float table itself, hardcoded here: the leak the
+     driver ABI exists to close. */
   lin_driver_carry_write(n, f);
   fclose(f); chmod(path, 0755); return 1;
 }
 
 int net_load_line(Net *n, const char *path) {
   FILE *f = fopen(path, "rb"); if (!f) return 0;
-  /* Skip the shebang, which `net_save_line` writes as `#!<realpath(argv[0])>` -- so its length is the
-     *install path's* and cannot be assumed.  A fixed-size `fgets` buffer silently fails here when the
-     line is at least as long as the buffer: it stops mid-line, the newline stays in the stream, the
-     magic read then yields "\nLIN" instead of "LINE", the load fails, and `run_line_file` returns 0 --
-     after which main falls through to `load_file` and parses the *binary container* as Lin source.
-     Measured: a 31-char dev path works (33-char shebang) and a 61-char Nix store path does not
-     (63-char shebang, exactly the old limit), which is why `nix flake check` was red (DESIGN 11.4). */
+  /* Skip the shebang, which `net_save_line` writes as `#!<realpath(argv[0])>`, so its length is the *install path's* and
+     cannot be assumed.  A fixed-size `fgets` buffer silently fails when the line is at least as long as the buffer: it stops
+     mid-line, the newline stays in the stream, the magic read yields "\nLIN" instead of "LINE", the load fails, and main
+     falls through to `load_file`, parsing the *binary container* as Lin source (measured: a 33-char shebang works, the
+     63-char Nix store one did not -- DESIGN 11.4). */
   int c1 = fgetc(f), c2 = fgetc(f);
   if (c1 == '#' && c2 == '!') { int ch; while ((ch = fgetc(f)) != EOF && ch != '\n') {} }
   else fseek(f, 0, SEEK_SET);
   char magic[4]; uint32_t meta[4];
   /* v3 files predate the float table and are still readable; a v3 file simply has no floats. */
   if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "LINE", 4) || fread(meta, 4, 4, f) != 4 ||
-      (meta[0] != 3 && meta[0] != 4 && meta[0] != 5 && meta[0] != 6)) {
+      (meta[0] != 3 && meta[0] != 4 && meta[0] != 5 && meta[0] != 6 && meta[0] != 7)) {
     fclose(f); return 0;
   }
   int ver = (int)meta[0];
@@ -553,9 +553,8 @@ int net_load_line(Net *n, const char *path) {
   if (fread(n->tag, 1, (size_t)nn, f) != (size_t)nn || fread(n->dead, 1, (size_t)nn, f) != (size_t)nn ||
       fread(n->wire, sizeof(Port) * 3, (size_t)nn, f) != (size_t)nn ||
       fread(n->scope, sizeof(Scope), (size_t)nn, f) != (size_t)nn) { fclose(f); net_free(n); return 0; }
-  /* A v<=5 artifact stored a carrier name per node.  Those names are IGNORED, not rejected: an old
-     artifact still reduces and prints exactly as it did (the labels never carried meaning -- the
-     reader's expectation does), so an artifact from a previous build keeps working. */
+  /* A v<=5 artifact stored a carrier name per node.  Those names are IGNORED, not rejected: the labels never carried
+     meaning (the reader's expectation does), so an artifact from a previous build reduces and prints as it did. */
   for (uint32_t k = 0; k < nnamed; k++) {
     uint32_t id = 0; uint8_t len = 0;
     if (fread(&id, 4, 1, f) != 1 || fread(&len, 1, 1, f) != 1) { fclose(f); net_free(n); return 0; }
@@ -570,9 +569,11 @@ int net_load_line(Net *n, const char *path) {
     net_level_set(n, nlv, par, bit);
     free(par); free(bit);
   }
+  if (ver >= 7) { uint32_t nr = 0; Port rp;
+    if (fread(&nr, sizeof nr, 1, f) != 1) { fclose(f); net_free(n); return 0; }
+    for (uint32_t k = 0; k < nr; k++) { if (fread(&rp, sizeof rp, 1, f) != 1) { fclose(f); net_free(n); return 0; } lin_demand(n, rp); } }
   if (ver == 4) {
-    /* A v4 artifact carried the float table inline.  The core passes it to whoever provides that
-       domain and does not interpret it. */
+    /* A v4 artifact carried the float table inline.  The core passes it to whoever provides that domain. */
     uint32_t nf = 0;
     if (fread(&nf, sizeof(uint32_t), 1, f) != 1) { fclose(f); net_free(n); return 0; }
     if (nf > 0) {

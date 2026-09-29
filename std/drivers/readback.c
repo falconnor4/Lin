@@ -106,7 +106,7 @@ static Val decode(Net *n, Port p, int domain) {
      unambiguous -- which is the whole reason it chose that encoding at AOT time. */
   case DT_NUM: { long x; if (box_num(n, p, &x) || (x = net_read_int(n, p, LIN_ENC_NUM)) >= 0) { v.iv = x; v.kind = 1; } break; }
   case DT_BOOL: { long b; if (box_bool(n, p, &b) || (b = net_read_int(n, p, LIN_ENC_BOOL)) >= 0) { v.iv = b; v.kind = 3; } break; }
-  case DT_STR: if (net_read_string(n, p, LIN_ENC_NUM, v.sv, sizeof v.sv) >= 0) v.kind = 2; break;
+  case DT_STR: if (net_read_string_arena(n, p, LIN_ENC_NUM, &v.sv) >= 0) v.kind = 2; break;
   case DT_FLOAT: { double d; if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; } break; }
   /* DT_FFI deliberately has NO case: dispatching a closure is `run_ffi`, which the callers do
      explicitly.  Routing it through here would call back into net_read_value, which is where this
@@ -120,23 +120,24 @@ static Val decode(Net *n, Port p, int domain) {
    with at least one layer each: a payload that is the bare terminal (`\b0.\b1.b0`) is the same net
    as TRUE and as nil, so reading it as a character would be a guess -- and `net_read_string` has
    no way to know that, which is why this check exists here and not there. */
-static int str_determined(Net *n, Port p, char *buf, size_t max) {
-  size_t len = 0;
+static const char *str_determined(Net *n, Port p) {
+  char *buf = NULL; size_t len = 0, cap = 0;
   Port cur = p;
-  for (int step = 0; step < n->nn && len + 1 < max; step++) {
+  for (size_t step = 0; step < (size_t)n->nn; step++) {                   /* as in the core: a chain longer than the net has nodes has repeated itself */
     Port head, tail;
     if (!net_read_cell(n, cur, &head, &tail)) {
       long k = net_read_int(n, cur, LIN_ENC_STR);      /* the nil terminal ends the chain */
-      if (k == 0) { buf[len] = 0; return len > 0; }
-      break;
+      if (k != 0) break;
+      if (!len) { free(buf); return NULL; }
+      const char *r = lin_intern(buf, len); free(buf); return r;
     }
     long ch = net_read_int(n, head, LIN_ENC_NUM);
     if (ch <= 0 || ch > 255) break;                    /* a bare terminal payload: ambiguous */
+    if (len == cap) buf = realloc(buf, cap = cap ? cap * 2 : 64);
     buf[len++] = (char)ch;
     cur = tail;
   }
-  if (len > 0) { buf[len] = 0; return 1; }
-  return 0;
+  free(buf); return NULL;
 }
 
 /* WHAT AN UNLABELLED NET READS AS.  With no expectation to state, only the shapes ONE domain
@@ -155,14 +156,14 @@ static Val value_any(Net *n, Port p) {
   if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; return v; }
   long k = net_read_int(n, p, LIN_ENC_NUM);
   if (k > 0) { v.iv = k; v.kind = 1; return v; }
-  if (str_determined(n, p, v.sv, sizeof v.sv)) { v.kind = 2; return v; }
+  { const char *s = str_determined(n, p); if (s) { v.sv = s; v.kind = 2; return v; } }
   return v;                                            /* kind 0: the caller writes the net */
 }
 
 /* resolve a driver: "cpu" -> base engine, else LinDriver sym / lin_<name>_driver / std/drivers plugin */
 static void *resolve_driver(const char *dn) {
   if (!strcmp(dn, "cpu")) return NULL;
-  char sym[NAME + 16]; snprintf(sym, sizeof sym, "lin_%s_driver", dn);
+  char sym[strlen(dn) + sizeof "lin__driver"]; snprintf(sym, sizeof sym, "lin_%s_driver", dn);
   void *s = dlsym(RTLD_DEFAULT, dn);
   if (!s) s = dlsym(RTLD_DEFAULT, sym);
   /* The core's loader is what dlopens `$LIN_STD_DIR/drivers/<name>.so`; a plugin's construction
@@ -214,6 +215,10 @@ static void arg_doms(const char *fn, int doms[2], int *ndoms) {
 /* Builtin dispatch: table rows for simple int/bool/str; side-effectors (exit) handled before the table, else dlsym. */
 #define B3(n, e) if (!strcmp(fn, n)) { v.kind = 3; v.iv = (long)(e); return v; }
 
+#define FFI_ARMS 8      /* the ladder's length: one arm per arity.  The C ABI cannot be forwarded for more without a
+                           per-arity thunk, and the std's `ccallN` family lives well inside it (test/ffi_arity.sh pins them) */
+static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val v);
+
 static Val run_ffi(Net *n, Port p) {
   Val v = {0};
   N = n;
@@ -226,12 +231,12 @@ static Val run_ffi(Net *n, Port p) {
   if (!net_ffi_header(n, (Port){p.node, 0}, &a1, &argp)) return v;
   if (a1.node < 0 || a1.port != 1 || n->tag[a1.node] != APP) return v;
 
-  char fn[256];
-  /* A NON-EMPTY name: `net_read_string` answers 0 for a nil payload, and the header SHAPE is shared
+  const char *fn;
+  /* A NON-EMPTY name: an empty read answers 0 for a nil payload, and the header SHAPE is shared
      with the std's own `ccallN` helpers (`\fn.\args.((_ffi fn) args)`), so the empty read is how such
      a helper used to be dispatched as a call to the symbol "" (measured on `(v3scale 2.0 (vec3 ...))`).
      No foreign symbol is nameless, so the empty read is not this closure. */
-  if (net_read_string(n, wire((Port){a1.node, 2}), LIN_ENC_NUM, fn, sizeof(fn)) <= 0) return v;
+  if (net_read_string_arena(n, wire((Port){a1.node, 2}), LIN_ENC_NUM, &fn) <= 0) return v;
   /* A BUILD MAY NOT MAKE THE PROGRAM'S OBSERVATIONS, and this dispatch IS reached at build time -- by
      the core's operand decoder (`dec_arg` -> `net_read_value`), i.e. by a fold asking what an operand's
      VALUE is -- so performing a call that reaches outside the net here freezes the build host's answer
@@ -247,20 +252,36 @@ static Val run_ffi(Net *n, Port p) {
   if (!lin_build_gate(fn, ffi_row_pure(fn))) return v;
   int doms[2], ndoms;
   arg_doms(fn, doms, &ndoms);
-  Val fargs[8] = {{0}};
-  int argc = net_spine_args(n, argp, doms, ndoms, fargs, 8);
+  /* COUNT FIRST, THEN SIZE.  `net_spine_slots` reads slot CELLS and does not force them, so counting
+     before decoding is safe even here (a def being precompiled has free variables in those slots), and
+     an FFI call is N-ary by construction -- the argument list is a list.  The arrays are therefore the
+     spine's length, never a constant: a fixed count declares a call it cannot read and the fold is then
+     given up on every wave, where once would do.  The rows live in `rb_rows` so that this function owns
+     the three buffers and is the one place that frees them. */
   /* Never call a symbol unless every operand is there: guessing the arity called libc `getenv()` with
      no arguments at all and segfaulted (a three-deep `_ffi` nest inside a precompiled define).  Fewer
      decoded values than slots = not foldable yet, so decline and let the redex be retried. */
   int slots = net_spine_slots(n, argp);
-  if (slots < 0 ? argc != 0 : (slots > 8 || argc < slots)) return v;
-  long c_args[8] = {0}; char sbufs[8][4096];
+  if (slots < 0) slots = 0;                                  /* not a cons spine: only the empty arg list is concrete */
+  size_t n_ = slots ? (size_t)slots : 1;
+  Val *fargs = calloc(n_, sizeof *fargs);
+  long *c_args = calloc(n_, sizeof *c_args);
+  if (!fargs || !c_args) { free(fargs); free(c_args); return v; }
+  int argc = net_spine_args(n, argp, doms, ndoms, fargs, slots);
+  if (argc < slots || (slots == 0 && argc != 0)) { free(fargs); free(c_args); return v; }
   for (int i = 0; i < argc; i++)
-    if (fargs[i].kind == 2) { snprintf(sbufs[i], 4096, "%s", fargs[i].sv); c_args[i] = (long)(intptr_t)sbufs[i]; }
+    if (fargs[i].kind == 2) c_args[i] = (long)(intptr_t)fargs[i].sv;   /* sv already IS a stable C string: no copy to keep alive */
     else c_args[i] = fargs[i].iv;
+  v = rb_rows(fn, argc, c_args, fargs, v);
+  free(fargs); free(c_args);
+  return v;
+}
+
+/* The FFI rows: the effect builtins and the symbol call, over operands the caller sized from the spine. */
+static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val v) {
 
   if (!strcmp(fn, "exit")) { exit(argc > 0 ? (int)c_args[0] : 0); return v; }
-  if (!strcmp(fn, "driver_get")) { LinDriver *d = lin_get_driver(); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", d ? d->name : "cpu"); return v; }
+  if (!strcmp(fn, "driver_get")) { LinDriver *d = lin_get_driver(); v.kind = 2; v.sv = d ? d->name : "cpu"; return v; }
   if (!strcmp(fn, "driver_set") || !strcmp(fn, "driver_add") || !strcmp(fn, "driver_clear")) {
     if (!strcmp(fn, "driver_clear")) { lin_driver_clear(); v.kind = 1; v.iv = 1; return v; }
     const char *dn = argc > 0 ? (char *)c_args[0] : "cpu";
@@ -299,12 +320,17 @@ static Val run_ffi(Net *n, Port p) {
     if (!strcmp(fn, "lin_streq") && argc >= 2 && fargs[1].kind == 2) { v.kind = 3; v.iv = !strcmp((char *)c_args[0], (char *)c_args[1]); return v; }
     if (!strcmp(fn, "dlopen") && argc > 0) { v.kind = 1; v.iv = (long)(intptr_t)dlopen((char *)c_args[0], RTLD_NOW | RTLD_GLOBAL); return v; }
     if (!strcmp(fn, "puts") && argc > 0) { v.kind = 1; v.iv = puts((char *)c_args[0]); return v; }
-    if (!strcmp(fn, "getenv") && argc > 0) { char *ev = getenv((char *)c_args[0]); v.kind = 2; snprintf(v.sv, sizeof(v.sv), "%s", ev ? ev : "(null)"); return v; }
+    if (!strcmp(fn, "getenv") && argc > 0) { char *ev = getenv((char *)c_args[0]); v.kind = 2; v.sv = ev ? ev : "(null)"; return v; }
   }
   if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
   fflush(stdout); void *sym = dlsym(RTLD_DEFAULT, fn);
   if (!sym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
   long (*f)() = (long (*)())sym;
+  /* One arm per arity: the C calling convention written out.  A call with more arguments than arms cannot be
+     forwarded without a per-arity thunk, so it is REFUSED OUT LOUD -- the last arm used to pass 8 arguments
+     whatever the count was, which is a WRONG CALL, not a clipped value.  The std's own `ccallN` family must
+     stay inside this (test/ffi_arity.sh pins them), so a program can never write such a call. */
+  if (argc > FFI_ARMS) { fprintf(stderr, "ffi: '%s' called with %d arguments; this ladder forwards %d\n", fn, argc, FFI_ARMS); return v; }
   v.kind = 1; v.iv = (argc <= 0) ? f() : (argc == 1) ? f(c_args[0]) : (argc == 2) ? f(c_args[0], c_args[1]) :
            (argc == 3) ? f(c_args[0], c_args[1], c_args[2]) : f(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]);
   return v;
@@ -468,8 +494,8 @@ static long run_io_body(Net *n, long step_limit) {
         if (fd == 0) read_stdin(in_buf, sizeof(in_buf));
         else if (fd > 0) { ssize_t nr = read((int)fd, in_buf, sizeof(in_buf) - 1); if (nr > 0) { in_buf[nr] = 0; chomp(in_buf); } }
         else {
-          char src[1024];
-          if (net_read_string(n, src_p, LIN_ENC_NUM, src, sizeof(src)) >= 0) {
+          const char *src;
+          if (net_read_string_arena(n, src_p, LIN_ENC_NUM, &src) >= 0) {
             if (!strcmp(src, "stdin") || !strcmp(src, "0")) read_stdin(in_buf, sizeof(in_buf));
             else if (src[0] == '!' || !strncmp(src, "cmd:", 4)) read_stream(popen(src[0] == '!' ? src + 1 : src + 4, "r"), in_buf, sizeof(in_buf), 1);
             else if (!strncmp(src, "sleep:", 6)) { res_int = strtol(src + 6, NULL, 10); if (res_int > 0) usleep((useconds_t)(res_int * 1000)); is_int = 1; }
@@ -513,7 +539,8 @@ static long dmarks = 0;            /* '_' marks emitted for a node the reduction
    introduces: a, b, ... z, a1, ... .  Depth is what a reader needs -- nested binders never collide,
    and two sibling binders may share a name because their scopes do not overlap -- and it is
    deterministic, so the same net always prints the same text. */
-static struct { int node; char printed[NAME]; } *pp_stack;
+/* binder_name writes 'a' + d%26, then d/26 in decimal: an int's decimal is at most 3 chars per byte, which is what sizes the field */
+static struct { int node; char printed[sizeof "a" + sizeof(int) * 3]; } *pp_stack;
 static int pp_top = 0, pp_cap = 0;
 
 static void binder_name(int depth, char *out, size_t outsz) {
@@ -528,7 +555,7 @@ static const char *pp_lookup(int node) {
 static const char *pp_push(int node) {
   if (pp_top >= pp_cap) pp_stack = realloc(pp_stack, (size_t)(pp_cap = pp_cap ? pp_cap * 2 : 32) * sizeof *pp_stack);
   pp_stack[pp_top].node = node;
-  binder_name(pp_top, pp_stack[pp_top].printed, NAME);
+  binder_name(pp_top, pp_stack[pp_top].printed, sizeof pp_stack[pp_top].printed);
   return pp_stack[pp_top++].printed;
 }
 

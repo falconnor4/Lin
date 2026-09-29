@@ -1,6 +1,7 @@
 #include "lin.h"
 #include <ctype.h>
 #include <setjmp.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +15,22 @@ static void pfail(const char *msg) {
   longjmp(PJ, 1);
 }
 
+static const char **iset; static size_t iset_n, iset_cap;   /* identifiers: one block each, kept for the run, so a handed-out pointer never moves */
+static size_t islot(const char *s, size_t n, size_t cap) { size_t j = 2166136261u; for (size_t i = 0; i < n; i++) j = (j ^ (unsigned char)s[i]) * 16777619u; return j & (cap - 1); }
+/* Interning is IDEMPOTENT: the same text returns the same pointer, so a reader that reads one string a million times keeps ONE copy of it. */
+const char *lin_intern(const char *s, size_t n) {
+  if (iset_n * 2 >= iset_cap) { const char **old = iset; size_t was = iset_cap; iset_cap = iset_cap ? iset_cap * 2 : 64; iset = calloc(iset_cap, sizeof *iset); iset_n = 0;
+    for (size_t i = 0; i < was; i++) { if (old[i]) { size_t k = islot(old[i], strlen(old[i]), iset_cap); while (iset[k]) k = (k + 1) & (iset_cap - 1); iset[k] = old[i]; iset_n++; } } free((void *)old); }
+  size_t j = islot(s, n, iset_cap);
+  while (iset[j]) { if (!strncmp(iset[j], s, n) && !iset[j][n]) return iset[j]; j = (j + 1) & (iset_cap - 1); }
+  char *p = malloc(n + 1); memcpy(p, s, n); p[n] = 0; iset[j] = p; iset_n++; return p;
+}
+const char *lin_internf(const char *fmt, ...) {
+  va_list ap, ap2; va_start(ap, fmt); va_copy(ap2, ap);
+  int n = vsnprintf(NULL, 0, fmt, ap); va_end(ap); if (n < 0) { va_end(ap2); return ""; }
+  char *p = malloc((size_t)n + 1); vsnprintf(p, (size_t)n + 1, fmt, ap2); va_end(ap2); return p;
+}
+
 static void skipws(void) {
   for (;;) {
     while (S[P] && isspace((unsigned char)S[P])) P++;
@@ -24,7 +41,7 @@ static void skipws(void) {
 
 Term *term_new(int type, const char *name, Term *l, Term *r) {
   Term *t = malloc(sizeof *t); *t = (Term){.type = type, .l = l, .r = r};
-  snprintf(t->name, NAME, "%s", name ? name : ""); return t;
+  t->name = name ? name : ""; return t;
 }
 void term_free(Term *t) { if (t) { term_free(t->l); term_free(t->r); free(t); } }
 Term *term_copy(Term *t) { return t ? term_new(t->type, t->name, term_copy(t->l), term_copy(t->r)) : NULL; }
@@ -47,21 +64,11 @@ int term_refs(Term *t, const char *name) {
   }
 }
 
-static int sym(char *buf, int bufsz) {
-  int i = 0;
-  if (S[P] == '\\' || ((unsigned char)S[P] == 0xce && (unsigned char)S[P + 1] == 0xbb)) {
-    int len = S[P] == '\\' ? 1 : 2;
-    if (bufsz > len) memcpy(buf, S + P, len);
-    P += len;
-    buf[len] = 0;
-    return len;
-  }
-  while (S[P] && !isspace((unsigned char)S[P]) && S[P] != '(' && S[P] != ')') {
-    if (i < bufsz - 1) buf[i++] = S[P];
-    P++;
-  }
-  buf[i] = 0;
-  return i;
+static const char *sym(void) {
+  int start = P;
+  if (S[P] == '\\' || ((unsigned char)S[P] == 0xce && (unsigned char)S[P + 1] == 0xbb)) P += S[P] == '\\' ? 1 : 2;
+  else while (S[P] && !isspace((unsigned char)S[P]) && S[P] != '(' && S[P] != ')') P++;
+  return P > start ? lin_intern(S + start, (size_t)(P - start)) : NULL;
 }
 
 static int islambda(const char *s) {
@@ -98,13 +105,13 @@ static Term *parse_term(void);
 
 /* type annotations: t := atom ('->' t)? ; atom := name | '(' t ')'; scalars bool/num/float + datatypes are nominals */
 static Type *parse_type(void);
-static char (*tvn)[NAME];
+static const char **tvn;
 static Type **tvt;
 static int tvnn, tvcap;
 /* datatype field-type parsing context: when non-zero, `params` lists the declared
    type-parameter names of the datatype, and a bare type atom matching one becomes
    a TPARAM reference (index into params) instead of a fresh type variable. */
-static char (*dt_params)[NAME]; static int dt_np;
+static const char **dt_params; static int dt_np;
 static int dt_in = 0;
 
 static Type *parse_type_atom(void) {
@@ -114,8 +121,8 @@ static Type *parse_type_atom(void) {
     if (S[P] != ')') pfail("type: missing ')'");
     P++; return t;
   }
-  char nm[NAME];
-  if (!sym(nm, NAME)) pfail("type: expected name");
+  const char *nm = sym();
+  if (!nm) pfail("type: expected name");
   if (nominal_lookup(nm)) {
     /* generic nominal: consume `arity` type-argument atoms, chained as TARGs. */
     Type *t = type_nominal(nm); Type **cur = &t->a;
@@ -131,7 +138,7 @@ static Type *parse_type_atom(void) {
     tvn = realloc(tvn, (size_t)(tvcap = tvcap ? tvcap * 2 : 64) * sizeof *tvn);
     tvt = realloc(tvt, (size_t)tvcap * sizeof *tvt);
   }
-  snprintf(tvn[tvnn], NAME, "%s", nm);
+  tvn[tvnn] = nm;
   tvt[tvnn] = type_var();
   return tvt[tvnn++];
 }
@@ -196,15 +203,15 @@ static Term *parse_term(void) {
   if (S[P] == '(') {
     P++; skipws();
     if (S[P] == '(') return parse_tail(parse_term());
-    char kw[NAME];
-    if (!sym(kw, NAME)) pfail("empty '('");
+    const char *kw = sym();
+    if (!kw) pfail("empty '('");
     if (islambda(kw)) {
-      skipws(); char var[NAME]; if (!sym(var, NAME)) pfail("lambda: expected binder");
+      skipws(); const char *var = sym(); if (!var) pfail("lambda: expected binder");
       Term *body = parse_term(); return term_new(TLAM, var, parse_tail(body), NULL);
     }
     if (!strcmp(kw, "define") || !strcmp(kw, "define!")) {
       int typed = !strcmp(kw, "define!");
-      skipws(); char name[NAME]; if (!sym(name, NAME)) pfail("define: expected name");
+      skipws(); const char *name = sym(); if (!name) pfail("define: expected name");
       Type *ty = typed ? parse_type_top() : NULL;
       Term *v = parse_term(); skipws();
       if (S[P] != ')') pfail("define: expected ')'"); else P++;
@@ -216,15 +223,14 @@ static Term *parse_term(void) {
       int start = ++P;
       while (S[P] && S[P] != '"') { if (S[P] == '\\' && S[P + 1]) P++; P++; }
       if (S[P] != '"') pfail("load: unterminated path");
-      int len = P - start; char path[NAME];
-      if (len >= NAME) pfail("load: path too long");
-      memcpy(path, S + start, (size_t)len); path[len] = '\0'; P++; skipws();
+      const char *path = lin_intern(S + start, (size_t)(P - start));
+      P++; skipws();
       if (S[P] != ')') pfail("load: expected ')'"); else P++;
       return term_new(TLOAD, path, NULL, NULL);
     }
     if (!strcmp(kw, "namespace") || !strcmp(kw, "ns") || !strcmp(kw, "module") || !strcmp(kw, "open") || !strcmp(kw, "use")) {
       int isOpen = !strcmp(kw, "open") || !strcmp(kw, "use");
-      skipws(); char name[NAME]; if (!sym(name, NAME)) pfail("expected name");
+      skipws(); const char *name = sym(); if (!name) pfail("expected name");
       skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
       return term_new(isOpen ? TOPEN : TNS, name, NULL, NULL);
     }
@@ -232,7 +238,7 @@ static Term *parse_term(void) {
       /* (export <ns>): re-export every public member of `ns` into the current
          namespace.  Collapses the per-module `(open ns)` + `(define! x ns.x)`
          alias boilerplate. */
-      skipws(); char name[NAME]; if (!sym(name, NAME)) pfail("expected name");
+      skipws(); const char *name = sym(); if (!name) pfail("expected name");
       skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
       return term_new(TEXPORT, name, NULL, NULL);
     }
@@ -244,19 +250,19 @@ static Term *parse_term(void) {
       while (S[P] == '(') {
         P++; skipws();
         if (S[P] == ')') { P++; break; }
-        int k = 0; char (*vs)[NAME] = NULL;
+        int k = 0; const char **vs = NULL;
         if (S[P] == '(') { /* (Ctor v1...vk) -> bind the fields */
           P++; skipws();
-          char ctorhead[NAME]; if (!sym(ctorhead, NAME)) pfail("match: bad pattern");
+          const char *ctorhead = sym(); if (!ctorhead) pfail("match: bad pattern");
           int cap = 0;
           for (;;) {
             skipws(); if (S[P] == ')') { P++; break; }
-            char vn[NAME]; if (!sym(vn, NAME)) pfail("match: bad field");
+            const char *vn = sym(); if (!vn) pfail("match: bad field");
             vs = realloc(vs, (size_t)(cap = cap ? cap * 2 : 4) * sizeof *vs);
-            snprintf(vs[k++], NAME, "%s", vn);
+            vs[k++] = vn;
           }
         } else {
-          char pn[NAME]; if (!sym(pn, NAME)) pfail("match: bad pattern"); /* nullary/_ */
+          const char *pn = sym(); if (!pn) pfail("match: bad pattern"); /* nullary/_ */
         }
         Term *body = parse_tail(parse_term());
         Term *lam = body; /* nullary / wildcard: pass the value directly */
@@ -269,16 +275,16 @@ static Term *parse_term(void) {
       return app;
     }
     if (!strcmp(kw, "datatype") || !strcmp(kw, "data")) {
-      skipws(); char dn[NAME];
+      skipws(); const char *dn;
       /* generic form: (datatype (Name p1 p2 ..) (Ctor f..) ..) declares `Name`
          with |pi| type parameters (arity); otherwise a simple name (arity 0). */
       int arity = 0; int np_ctx = 0;
       if (!dt_params) { dt_params = malloc(64 * sizeof *dt_params); }
       if (S[P] == '(') {
-        P++; skipws(); if (!sym(dn, NAME)) pfail("datatype: expected name");
-        skipws(); while (S[P] != ')') { char pn[NAME]; if (!sym(pn, NAME)) pfail("datatype: bad type param"); snprintf(dt_params[arity], NAME, "%s", pn); arity++; skipws(); }
+        P++; skipws(); if (!(dn = sym())) pfail("datatype: expected name");
+        skipws(); while (S[P] != ')') { const char *pn = sym(); if (!pn) pfail("datatype: bad type param"); dt_params[arity] = pn; arity++; skipws(); }
         P++;
-      } else if (!sym(dn, NAME)) pfail("datatype: expected name");
+      } else if (!(dn = sym())) pfail("datatype: expected name");
       nominal_register(dn, arity);   /* register early so self-referential field types ((left Tree a)) parse */
       np_ctx = arity;                       /* field types may reference these params */
       /* constructors: (Name f1 f2 ...) where a field is `name` or `(name Type..)`. */
@@ -289,20 +295,20 @@ static Term *parse_term(void) {
       while (S[P] == '(') {
         P++; skipws();
         if (S[P] == ')') { P++; continue; }
-        char cn[NAME]; if (!sym(cn, NAME)) pfail("datatype: expected constructor");
+        const char *cn = sym(); if (!cn) pfail("datatype: expected constructor");
         Term *fields = NULL, *ftail = NULL;
         skipws();
         while (S[P] != ')') {
-          char fn[NAME]; Term *fv;
+          const char *fn; Term *fv;
           if (S[P] == '(') {                 /* typed field (name Type..) */
-            P++; skipws(); if (!sym(fn, NAME)) pfail("datatype: bad field");
+            P++; skipws(); if (!(fn = sym())) pfail("datatype: bad field");
             skipws();
             Type *ty = parse_type();         /* param context active */
             skipws(); if (S[P] != ')') pfail("datatype: bad field type");
             P++;
             fv = term_new(TVAR, fn, NULL, NULL); fv->annot = ty;
           } else {	                         /* bare name: untyped polymorphism */
-            if (!sym(fn, NAME)) pfail("datatype: expected field");
+            if (!(fn = sym())) pfail("datatype: expected field");
             fv = term_new(TVAR, fn, NULL, NULL);
           }
           if (!fields) fields = ftail = fv; else { ftail->r = fv; ftail = fv; }
@@ -321,18 +327,18 @@ static Term *parse_term(void) {
     }
     if (!strcmp(kw, "let")) {
       skipws(); if (S[P] != '(') pfail("let: expected '('"); P++;
-      char (*names)[NAME] = NULL; Term **vals = NULL; int nb = 0, ncap = 0;
+      const char **names = NULL; Term **vals = NULL; int nb = 0, ncap = 0;
       for (;;) {
         skipws(); if (S[P] == ')') { P++; break; }
         if (S[P] != '(') pfail("let: expected binding");
-        P++; skipws(); char vn[NAME]; if (!sym(vn, NAME)) pfail("let: bad binding");
+        P++; skipws(); const char *vn = sym(); if (!vn) pfail("let: bad binding");
         Term *v = parse_term(); skipws(); if (S[P] != ')') pfail("let: missing ')' in binding");
         P++;
         if (nb >= ncap) {
           names = realloc(names, (size_t)(ncap = ncap ? ncap * 2 : 16) * sizeof *names);
           vals = realloc(vals, (size_t)ncap * sizeof *vals);
         }
-        snprintf(names[nb], NAME, "%s", vn); vals[nb++] = v;
+        names[nb] = vn; vals[nb++] = v;
       }
       Term *body = parse_tail(parse_term());
       /* A binding is a TLET, not `((\x body) value)`: same scope (each binding is visible in the
@@ -345,8 +351,8 @@ static Term *parse_term(void) {
     }
     return parse_tail(parse_atom(kw));
   }
-  char kw[NAME];
-  if (!sym(kw, NAME)) pfail("unexpected character");
+  const char *kw = sym();
+  if (!kw) pfail("unexpected character");
   return parse_atom(kw);
 }
 
