@@ -4,14 +4,12 @@
 #include <string.h>
 #include <dlfcn.h>
 
-/* The core's value readers: net STRUCTURE in, a value out -- under an encoding the CALLER states.
-   There is no per-node label to consult: Scott zero (`\b0.\b1.b0`), Church TRUE and the empty list are
-   ONE net, so a node does not say which value it holds, and the EXPECTATION is the only source of
-   meaning -- the type the compiler computed, a domain a driver declared, a slot's FFI signature.  A
-   reader with none must DECLINE (readback then prints the structure) rather than guess.  What a value
-   MEANS beyond its shape -- the table behind a float box, FFI dispatch -- is never the core's: the core
-   keeps the encoding WALKS (below), the box builders, the arg-spine decoder and the dispatchers to
-   whoever declares LIN_WANT_READBACK. */
+/* The core's value readers: net STRUCTURE in, a value out -- under an encoding the CALLER states (lin.h's
+   value-ENCODINGS block says why a node cannot say which value it holds).  The source of meaning is the type
+   the compiler computed, a domain a driver declared, or a slot's FFI signature; a reader given NONE must
+   DECLINE (readback then prints the structure) rather than guess.  What a value MEANS beyond its shape -- the
+   table behind a float box, FFI dispatch -- is never the core's: the core keeps the encoding WALKS (below), the
+   box builders, the arg-spine decoder and the dispatchers to whoever declares LIN_WANT_READBACK. */
 static Net *N;
 /* Where readback's VALUE is written.  Loading the prelude must still EVALUATE its top-level forms
    -- FFI dispatch happens in readback, so `(set_driver "arith")` in std/drivers/arith.lin only runs
@@ -372,17 +370,16 @@ int net_spine_slots(Net *n, Port argp) {
   return slots;
 }
 
-/* Decode one slot into a Val.  `dom` is the EXPECTATION the caller states -- the signature of the symbol
-   being called, a driver's own operand domain -- and it is tried first, because it is the only thing that
-   can decide a shape TWO domains claim (`\b0.\b1.b0` is zero, TRUE and nil at once).  Where it does not
-   hold, the slot's structure may still determine the value ON ITS OWN, and using it is not a guess: a box
-   is not a numeral, a numbered chain is not a cell, and a cons chain of numbers is not either.  What is
-   deliberately NOT here is a preference ORDER between domains -- the name-sniffing this design removed.
-   One shape is excluded outright: the UNSATURATED `_ffi` CLOSURE, whose header IS the language's cons
-   cell (`\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)` are one net), so a shape read of one is a
-   MISREAD and not a guess: measured, `(add (ccall1 "lin_parse_float" (ffi.getenv "N")) 1)` read the
-   closure's fn-name CELL where a number belongs -- the numeral 0, then the string "getenv" -- and the
-   fold fired on that garbage.  So when dispatch produces nothing the slot DECLINES, never shape-reads. */
+/* Decode one slot into a Val.  `dom` is the EXPECTATION the caller states (a symbol's signature, a driver's own
+   operand domain), tried first because it is the only thing that can decide a shape TWO domains claim
+   (`\b0.\b1.b0` is zero, TRUE and nil at once).  Where it does not hold, the slot's structure may still
+   determine the value ON ITS OWN, and that is not a guess: a box is not a numeral, a numbered chain is not a
+   cell, and a cons chain of numbers is not either -- what is deliberately NOT here is a preference ORDER between
+   domains (the name-sniffing this design removed).  One shape IS excluded outright: the UNSATURATED `_ffi`
+   CLOSURE, whose header IS the language's cons cell (`\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)` are
+   one net), so a shape read of one is a MISREAD: measured, `(add (ccall1 "lin_parse_float" (ffi.getenv "N")) 1)`
+   read the closure's fn-name CELL where a number belongs -- the numeral 0, then "getenv" -- and the fold fired
+   on that garbage.  So when dispatch produces nothing the slot DECLINES, never shape-reads. */
 static int dec_arg(Net *n, Port p, int dom, Val *v) {
   /* A NESTED CLOSURE comes first: what a slot's expectation is about is the VALUE, and a closure's
      value is what dispatching it produces -- `(fadd (float "2.5") (float "3.5"))` has closures where

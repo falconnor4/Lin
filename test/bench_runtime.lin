@@ -1,0 +1,47 @@
+; ==============================================================================
+; A RUNTIME-WORK BENCHMARK: work whose operands exist only in the process that runs it
+; ==============================================================================
+; WHY THE CORPUS COULD NOT ANSWER THE QUESTION
+; -------------------------------------------
+; Almost every suite in `test/` is CLOSED: its operands are literals, so `lin build`
+; evaluates the whole numeric cone at build time and the artifact that ships runs in
+; ~1 reduce step (the `[aot]` line of `lin build` reports it).  A measurement of what
+; a DRIVER spends on RECOGNITION at run time taken over that corpus therefore measures
+; almost nothing -- the run-time reduction it would instrument has already happened,
+; on the build host, in a different process.  This benchmark is the missing case.
+;
+; WHAT IT DOES.  `(sumto N)` with N read from the environment: the value of the
+; program is decided by the process that RUNS it, so the build cannot bake it.
+; Needed order stops at the observation (src/io.c's `lin_build_gate` -- a call no
+; provider DECLARED a function of its operands is not performed by a build), the
+; residual ships, and the artifact performs the observation AND the whole loop in its
+; own process.  Measured at BENCH_N=12: the interpreter runs 19876 reduce steps and
+; the artifact 19796 -- the AOT pass moved one step of it.
+;
+; WHY THIS SHAPE AND NOT SOMETHING FANCIER.  `sumto` is the loop
+; test/runtime_ffi.lin and test/build_observe.lin already use, so its values are
+; pinned by suites that pass: `(sumto 6)` is 21, `(sumto 30)` is 465.  Every operator
+; in it (`add`, `pred`, `is_zero`, `ifl`, the `_cl` operand spine) is one a fold driver
+; has to RECOGNIZE on every iteration, which is exactly the cost under measurement --
+; a loop built out of pure-Lin dispatch with no `_op` redex in it would run steps
+; without ever entering a recogniser, and would measure the wrong thing.
+;
+; WHAT IT IS NOT.  It is not a `; expect` suite: its answer depends on the environment
+; (`BENCH_N`), so a fixed expectation would have to freeze one N.  test/bench_runtime.sh
+; is the harness -- it pins the answer against the interpreter at more than one N,
+; checks the artifact agrees, and (with the temporary recognition counters compiled in)
+; prints the recognition table.  A suite with no `; expect` line is skipped by
+; test/run_tests.sh and by test/aot_equiv.py's corpus sweep, which is intended:
+; nothing here is asserted about a fixed N.
+; ==============================================================================
+(load "std/std.lin")
+
+; The loop.  `add` is a saturated `_op` closure (std/num.lin), so each iteration is a
+; fold driver's problem: recognize the redex, read the operator index and the operand
+; spine, then either compile the cone (native) or resolve the two scalars (arith).
+(define! sumto (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))
+
+; N EXISTS ONLY AT RUN TIME.  ffl(parse_float(getenv "BENCH_N")) is the 3-deep nest
+; test/runtime_ffi.lin pins for exactly this reason, and it is what makes the build
+; decline: the artifact has to ask its OWN environment.
+(sumto (ccall1 "lin_ffloor" (float.float (ffi.getenv "BENCH_N"))))

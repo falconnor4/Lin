@@ -414,18 +414,33 @@ static void fold_ffi_head(Net *n, int lam, int app, const Val *v) {
 /* Force every operand slot of a `_cl` arg spine.  Needed order leaves an operand as a thunk
    until something needs it, and this fold is that something: `(div (mul 150 150) 100)` reaches
    the `div` redex with its first operand still an unreduced `_op` closure.  Reads through the
-   shared decoder, so the slot walk is the same one the fold itself uses. */
+   shared decoder, so the slot walk is the same one the fold itself uses.
+
+   THE WHOLE SPINE IS ONE OBLIGATION.  This fold does not fire until EVERY operand is a value, so
+   each slot port is observed by construction -- nothing here guesses that an operand will be
+   needed.  Collect the slot ports, state a demand root for each, and only then force: the core
+   marks an independent demand path from every root, so the redexes standing between them and their
+   values can be fired in ONE wave instead of one wave per operand.  `src/net.c`'s walk stops at the
+   first redex on a path, which is why width comes from the number of ROOTS and never from following
+   a path further -- so an observer that knows several ports at once is the only way a wave widens,
+   and this is such an observer.  Declaring is not speculative the other way either: an operand that
+   turns out not to be needed cannot exist here, since a fold that declined is re-offered the redex
+   rather than consuming it. */
 static void force_spine(Net *n, Port argp) {
   int slots = net_spine_slots(n, argp);
-  for (int i = 0; i < slots && i < 8; i++) {
+  if (slots > 8) slots = 8;
+  Port ops[8]; int nops = 0;
+  if (slots > 0) {
     Port cur = net_dhop(n, net_force_val(n, argp));
-    for (int k = 0; k <= i; k++) {
+    for (int k = 0; k < slots; k++) {
       Port head, next;
       if (!net_read_cell(n, cur, &head, &next)) break;
-      if (k == i) { net_force(n, head); break; }
+      ops[nops++] = head;                 /* the slot port: read, NOT forced (io.c's cell_layer) */
       cur = next;
     }
+    for (int i = 0; i < nops; i++) lin_demand(n, ops[i]);
   }
+  for (int i = 0; i < nops; i++) net_force(n, ops[i]);
 }
 
 /* ---- LinDriver hooks ---- */
@@ -434,7 +449,12 @@ static void force_spine(Net *n, Port argp) {
    tag order, so normalise LAM-first here.  `reduce` disposes of everything claimed (fold it, or hand
    it back to the core's β), so claiming is always safe -- which is what lets this claim on the head's
    shape alone and leave "is this an op the table has a row for" to `reduce`, where forcing the
-   operand list is legal. */
+   operand list is legal.
+   THE TWO SHAPES ARE DISJOINT, and they cost very differently: `lin_pat_op_head` is a tag test on the
+   head's body, while `head_is_ffi` runs the `_ffi` pattern matcher over it.  Asking the cheap one
+   FIRST is the same disjunction and removes almost every matcher run: measured on
+   test/bench_runtime.lin (BENCH_N=8, 895 `head_is_ffi` calls in the old order), 800 of the 895 calls
+   disappear and the run goes 291 ms -> 285 ms. */
 static int arith_claim(const Net *ncn, Port p1, Port p2) {
   Net *n = (Net *)ncn;
   if (p1.port || p2.port) return 0;
@@ -446,8 +466,8 @@ static int arith_claim(const Net *ncn, Port p1, Port p2) {
   if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) lam = p1.node;
   else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) lam = p2.node;
   else return 0;
-  if (head_is_ffi(n, lam)) return 1;
-  return lin_pat_op_head(n, (Port){lam, 0}, NULL);
+  if (lin_pat_op_head(n, (Port){lam, 0}, NULL)) return 1;
+  return head_is_ffi(n, lam);
 }
 
 /* reduce: fold each claimed redex.  The ABI hands a slice of PAIRS: `nred` counts pairs,

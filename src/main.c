@@ -119,11 +119,10 @@ static void def_precompile(Def *d) {
   if (d->rec) return;
   char err[512]; Net src; net_init(&src, 1 << 14);
   long full = reduce_term(d->term, &src, 0, DEPTH_PRECOMPILE, STEP_LIMIT, NULL, err, sizeof err);
-  /* `act` is what net_reduce could NOT fire because nothing demanded it, and only live pairs go back
-     in -- so a non-empty list means the body still has unreduced work.  Under needed order that is
-     the normal case (and `(fact 5)` bakes no value at all until something asks for it), so caching
-     would store the term, not a value -- and it would ALSO hide the body from the e-graph pass,
-     which is measured on the expanded term (`test/aot_equiv.py`). */
+  /* `act` is what net_reduce could NOT fire because nothing demanded it, so a non-empty list means the body
+     still has unreduced work.  Under needed order that is the normal case (and `(fact 5)` bakes no value at
+     all until something asks for it), so caching would store the term, not a value -- and it would ALSO hide
+     the body from the e-graph pass, which is measured on the expanded term (`test/aot_equiv.py`). */
   if (full < 0 || full >= STEP_LIMIT || src.atop > 0) { net_free(&src); return; }
   d->compiled = net_copy(&src); net_free(&src);
 }
@@ -521,18 +520,16 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   aot_apply_cand(c);
   aot_reset_defs();
   Net net; net_init(&net, 1 << 16);
-  /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  Needed order
-     stops at the first effect or observation, so the artifact keeps only what genuinely needs the
-     runtime, and a Y-knot is left as the cycle it is instead of being unrolled to a guessed bound.
-     AN OBSERVING BUILD KEEPS THE WORK IT DID, and what it observed is not made here: the fold that
-     needs the observation declines (src/io.c's one gate) and the redex it declined STAYS in the net
-     (std/drivers/arith.c, the rule a precompiled def's free operands already had), so the artifact folds
-     it at run time after the observation its own environment makes -- one pass, and the partial
-     evaluation ships.  Measured without the gate: `lin build` of test/runtime_ffi.lin ran the program's
-     own `getenv` and froze the answer -- built with N=2 the artifact printed 3 for every N, built without
-     N it printed 1 where the interpreter prints 7.  Measured against discarding the whole net and
-     recompiling (this rule's previous form): test/runtime_ffi.lin 483 ms -> 204 ms with the artifact's
-     own work falling from 106 reduce steps to 1, and test/build_observe.lin 5953 ms -> 193 ms with
+  /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  Needed order stops at the
+     first effect or observation, so the artifact keeps only what genuinely needs the runtime, and a Y-knot is left
+     as the cycle it is instead of being unrolled to a guessed bound.  AN OBSERVING BUILD KEEPS THE WORK IT DID, and
+     what it observed is not made here: the fold that needs it declines (io.c's one gate) and the redex it declined
+     STAYS in the net (std/drivers/arith.c, the rule a precompiled def's free operands already had), so the artifact
+     folds it at run time, after the observation its own environment makes -- one pass, and the partial evaluation
+     ships.  Measured without the gate: `lin build` of test/runtime_ffi.lin ran the program's own `getenv` and froze
+     the answer (built with N=2 the artifact printed 3 for every N; built without N it printed 1 where the
+     interpreter prints 7).  Against discarding the whole net and recompiling: test/runtime_ffi.lin 483 -> 204 ms
+     with the artifact's own work falling from 106 reduce steps to 1, and test/build_observe.lin 5953 -> 193 ms with
      498739 steps -> 1. */
   lin_build_observed = 0;
   long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, AOT_STEP_LIMIT, &st->compiled, err, sizeof err);

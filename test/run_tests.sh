@@ -232,6 +232,46 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Tier 5.8: run-time work a build must NOT do
+#   Every other suite here is CLOSED, so `lin build` evaluates it and ships an artifact
+#   that reduces in ~1 step -- which is why a measurement of what a driver spends on
+#   RECOGNISING structure at run time, taken over the corpus, measures almost nothing.
+#   test/bench_runtime.lin reads N from the environment: the observation stops needed
+#   order, the residual ships, and the artifact does the loop in its own process.
+#   test/bench_runtime.sh pins that (answer from data size, per-run environment, and
+#   under forced slot recycling, which is the hazard any node-keyed derivation has).
+#   See that file's header for what it holds and why.
+# ----------------------------------------------------------------------------
+BR_LOG=$(mktemp)
+if bash test/bench_runtime.sh "$LIN_BIN" "$STD_DIR" >"$BR_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 17)); echo "PASS test/bench_runtime.sh (17 checks: build/run differential + LIN_GC=200)"
+  rm -f "$BR_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/bench_runtime.sh"; cat "$BR_LOG"; rm -f "$BR_LOG"
+fi
+
+# ----------------------------------------------------------------------------
+# Tier 5.5: the THREADED wave path (test/wave_parallel.sh).
+#   Needed order fires one pair a wave, so the OpenMP dispatcher never runs in this
+#   corpus by itself -- not even in test/stress_wavefront.lin, the "64-way wavefront"
+#   test, whose wavefront is the PROGRAM's, not the reducer's (measured width 1).  A
+#   wave is as wide as the demand frontier, and the one way a caller may widen it is to
+#   declare demand roots (`lin_demand`), so the suite compiles a probe driver that
+#   observes several independent redexes at once.  It requires the width to stay 1 and
+#   no thread to be dispatched WITHOUT such a caller, then that the wave really does
+#   widen and the threaded path really runs at -t 2/4/8 -- exactly where `np >= 4*nth`
+#   says it may, -t 8 included, on a program whose frontier reaches 32 pairs -- and that
+#   every run is byte-identical to -t 1.  See that file's header for what it holds.
+# ----------------------------------------------------------------------------
+WP_LOG=$(mktemp)
+if bash test/wave_parallel.sh "$LIN_BIN" "$STD_DIR" >"$WP_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 13)); echo "PASS test/wave_parallel.sh (13 checks: width, dispatch gate, -t 1 identity)"
+  rm -f "$WP_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/wave_parallel.sh"; cat "$WP_LOG"; rm -f "$WP_LOG"
+fi
+
+# ----------------------------------------------------------------------------
 # Tier 6: Budget, Command Line Interface & Flag Invariants
 # ----------------------------------------------------------------------------
 if bash test/test_cli_flags.sh "$LIN_BIN" >/dev/null 2>&1; then

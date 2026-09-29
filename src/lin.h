@@ -183,10 +183,9 @@ enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC
 #define LIN_WANT_ALL      (LIN_WANT_STATE | LIN_WANT_RECYCLE | LIN_WANT_CARRY | LIN_WANT_VALUES | \
                            LIN_WANT_MATCH | LIN_WANT_HELD | LIN_WANT_READBACK | LIN_WANT_AOT)
 
-/* The interface is EXTENSIBLE BY SIZE (the point of this ABI): a plugin sets `size` to the struct
-   as it was built, the core reads only fields that fit, so appending a hook is not a break.  The
-   ABI number moves only when an existing field's MEANING changes. */
-
+/* The interface is EXTENSIBLE BY SIZE (the point of this ABI): a plugin sets `size` to the struct as it was
+   built, the core reads only fields that fit, so appending a hook is not a break.  The ABI number moves only
+   when an existing field's MEANING changes. */
 
 struct LinDriver {
   uint32_t magic;                                /* must be LIN_DRIVER_MAGIC  */
@@ -277,7 +276,7 @@ int  lin_driver_carry_legacy(Net *n, int domain, const void *blob, size_t len);
    the generic primitive a value provider builds its own boxes with.  Net structure, not policy. */
 Port net_box_index(Net *n, long i);
 long net_peel_index(Net *n, Port p);
-int wave_snapshot(Net *n, Port **out, int *cap);
+int wave_snapshot(Net *n, Port **out, int *cap);  /* this wave's DEMANDED pairs; the rest stay queued */
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
@@ -351,10 +350,8 @@ long net_run_io(Net *n, long limit);
    or -1 when the type is unknown), so readback decodes with the meaning the compiler computed
    instead of guessing one off a node. */
 int net_print(Net *n, int domain);
-/* One value observed at `p`, which the caller states the DOMAIN of: a slot's expectation is what it
-   MEANS (num / bool / float / string / closure), and the registry above says what shape that is.
-   The decoder is the READBACK provider's (net_read_value); the reading primitives above are net
-   structure and stay in the core. */
+/* One value observed at `p`, whose DOMAIN the caller states (num / bool / float / string / closure): the
+   registry above says what shape that is, and the decoder is the READBACK provider's. */
 int net_read_value(Net *n, Port p, int domain, Val *v);
 /* where readback writes; NULL = stdout.  A prelude load points it at a sink so that the effects its
    top-level forms perform still run (FFI dispatch happens in readback) without joining the output. */
