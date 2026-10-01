@@ -404,6 +404,8 @@ slot but accepts the fresh node that replaced it. */
    decline.  Reaping is sound here because every class pair_boundary sees is accounted for: a class needs s-1 edges to be
    connected, has at most `i` internal wires plus 2 correspondence edges and s-2i-u outside ends, so `ne >= 4` would need more
    correspondence edges than beta or delta-delta have: ne is 0, 1 or 2 (joined). */
+/* Env switches a hot path must not re-read: fixed for the process (the core never changes its own env) and `getenv` scans all of it -- per reducer entry it measured 1.07-1.46x of a run.  Latch idiom as lin_wstats. */
+static long gcenv = -2; static int noret = -1;
 static void retire(Net *n, int a, int b) {
   n->dead[a] = 1; n->dead[b] = 1; act_drop(n, a); act_drop(n, b);      /* both ends of the pair go together, so neither owns the other */
   /* A demand root is a permanent claim, so it goes with its node -- here, where the node dies.  net_gc's sweep is a
@@ -414,7 +416,8 @@ static void retire(Net *n, int a, int b) {
    handed out while a handle still names it.  The readback walk is the same case from the other side -- net_print pins the
    walk and the reduce it enters is the OUTERMOST one (depth == 1), which `pins` catches and the depth test does not
    (measured: with this guard removed, test/ffi.lin prints its closure unreduced). */
-  if (reduce_depth > 1 || n->pins || in_parallel || getenv("LIN_NORETIRE")) return;
+  if (noret < 0) noret = getenv("LIN_NORETIRE") != NULL;
+  if (reduce_depth > 1 || n->pins || in_parallel || noret) return;
   release_now(n, a); release_now(n, b);
 }
 
@@ -1045,10 +1048,10 @@ static int fw_cap;
    invisible in the program's output, so the report is the only way to see the WIDTH -- and the only way
    a test can know the threaded path was taken. */
 static int lin_wstats = -1;
-static long wv_waves, wv_fired, wv_max, wv_batch, wv_par;
+static long wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width;
 static void wv_report(void) {
-  fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld\n",
-          wv_waves, wv_fired, wv_max, wv_batch, wv_par);
+  fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld width=%ld\n",
+          wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width);
 }
 
 /* A set of NODE ids, open-addressed and emptied by GENERATION, so nothing memsets a table sized to
@@ -1183,13 +1186,14 @@ static long net_reduce_body(Net *n, long limit) {
      `act`, so it is still there when something needs it.  A wave firing nothing means WHNF: stop. */
   Port *curr = NULL, *base_rx = NULL; int curr_cap = 0, base_cap = 0;
   /* When reclamation runs: the mark is DERIVED (garbage outgrowing what is live is what pays), never chosen; LIN_GC forces it on. */
-  long gcmark = getenv("LIN_GC") ? atol(getenv("LIN_GC")) : ((long)(n->nn - n->nfree) * 2 + 64);
+  if (gcenv == -2) { const char *g = getenv("LIN_GC"); gcenv = g ? atol(g) : -1; }
+  long gcmark = gcenv >= 0 ? gcenv : ((long)(n->nn - n->nfree) * 2 + 64);
   if (lin_wstats < 0) { lin_wstats = getenv("LIN_WAVE_STATS") != NULL; if (lin_wstats) atexit(wv_report); }
   int nsl = ndrv > 0 ? ndrv : 1;   /* the pipeline's OWN size: one scratch slot per registered driver, never a fixed table */
   Port *slices[nsl]; int scaps[nsl], scnts[nsl]; unsigned char have[nsl];
-  memset(slices, 0, sizeof slices); memset(scaps, 0, sizeof scaps); memset(scnts, 0, sizeof scnts); memset(have, 0, sizeof have);
+  memset(slices, 0, sizeof slices); memset(scaps, 0, sizeof scaps); memset(have, 0, sizeof have);
   Port *cand = NULL; int cand_cap = 0, cand_cnt = 0; int *owned = NULL; int own_cap = 0;   /* offered / per-pair ownership */
-  LinClaim *claimed = calloc((size_t)nsl, sizeof(LinClaim));
+  LinClaim claimed[nsl];   /* a VLA like its neighbours: a force enters here once per observation (net_force), so a malloc/free per force is pure per-entry cost, and `have[]` already gates every read of it */
   while (n->steps < limit) {
     int changed = 0;
     while (n->atop > 0 && n->steps < limit) {
@@ -1288,19 +1292,21 @@ static long net_reduce_body(Net *n, long limit) {
         }
       }
 
+      int wtotal = base_cnt / 2;   /* what this wave CONSUMED: base + every driver slice + every claim acted on (`max` above is the BASE share only, so a driver's width was invisible) */
       /* a claim owns a region, so it acts; a legacy driver consumes its slice; base gets the rest */
       for (int di = 0; di < ndrv; di++) {
         LinDriver *d = drv[di];
         if (have[di]) {
           have[di] = 0;
           if (DRV_HAS(d, act) && d->act) changed += d->act(n, n->drv[d->slot], &claimed[di]);
+          wtotal += claimed[di].npairs;
           claimed[di].npairs = 0;
         }
-        if (scnts[di]) d->reduce(n, slices[di], scnts[di]/2, limit, &changed);
+        if (scnts[di]) { wtotal += scnts[di] / 2; d->reduce(n, slices[di], scnts[di] / 2, limit, &changed); }
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
-      if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (base_cnt / 2 > wv_max) wv_max = base_cnt / 2; }
+      if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (base_cnt / 2 > wv_max) wv_max = base_cnt / 2; if (wtotal > wv_width) wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);
       if (changed == before) break;
@@ -1317,7 +1323,7 @@ static long net_reduce_body(Net *n, long limit) {
     if (changed == 0) break;
   }
   net_flush_free(n);
-  free(curr); free(base_rx); free(cand); free(owned); free(claimed);   /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation -- measured, 47x the resident memory on test/queue.lin */
+  free(curr); free(base_rx); free(cand); free(owned);   /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation -- measured, 47x the resident memory on test/queue.lin */
   for (int di = 0; di < ndrv; di++) free(slices[di]);
   return n->steps;
 }
