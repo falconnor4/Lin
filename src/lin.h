@@ -257,7 +257,8 @@ int lin_claim_check(Net *n, LinClaim *c, char *why, int whysz);
    work is what unrolls a Y-knot, so it defers instead (LIN_CLAIM_HELD). */
 int lin_demanded(const Net *n, Port p);
 
-void lin_driver_add(LinDriver *d); void lin_driver_clear(void); LinDriver *lin_get_driver(void);
+/* Register a driver: 1 accepted, 0 REFUSED (reason on stderr), so a caller asking for an accelerator never reports a driver the core dropped. */
+int lin_driver_add(LinDriver *d); void lin_driver_clear(void); LinDriver *lin_get_driver(void);
 /* The first registered driver providing `want`, or NULL: found by the HOOK the want names, never by a
    driver's name, so the core can reach a capability without knowing who supplies it. */
 LinDriver *lin_driver_wanting(uint64_t want);

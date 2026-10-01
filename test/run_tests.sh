@@ -129,7 +129,8 @@ rm -f "$OPT_LOG"
 # ----------------------------------------------------------------------------
 NC_LOG=$(mktemp)
 if python3 test/no_caps.py >"$NC_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 83)); echo "PASS test/no_caps.py ($(sed -n 2p "$NC_LOG"))"
+  n=$(sed -n 's/.*: \([0-9]*\) findings.*/\1/p' "$NC_LOG" | head -1)
+  pass=$((pass+1)); total_checks=$((total_checks + ${n:-0})); echo "PASS test/no_caps.py ($(sed -n 2p "$NC_LOG"))"
 else
   fail=$((fail+1)); echo "FAIL test/no_caps.py"; cat "$NC_LOG"
 fi
@@ -155,12 +156,28 @@ rm -f "$DA_LOG"
 #   call must be REFUSED -- not forwarded with the wrong count, which is what it used to do.
 # ----------------------------------------------------------------------------
 FA_LOG=$(mktemp)
-if ./test/ffi_arity.sh >"$FA_LOG" 2>&1; then
+if ./test/ffi_arity.sh "$LIN_BIN" >"$FA_LOG" 2>&1; then
   pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/ffi_arity.sh ($(tail -1 "$FA_LOG"))"
 else
   fail=$((fail+1)); echo "FAIL test/ffi_arity.sh"; cat "$FA_LOG"
 fi
 rm -f "$FA_LOG"
+
+# ----------------------------------------------------------------------------
+# Tier 2.95: the driver ABI fails CLOSED (test/driver_abi.sh).
+#   A plugin IS what it declares: a driver whose declared struct cannot reach the hooks it registers
+#   must be refused OUT LOUD -- never registered as a strategy that then reduces nothing.  (gpu.c set
+#   no `.size`, so every hook of it read back absent while `(get_driver)` still answered `gpu`.)
+#   The check count is read from the test's own summary, so it cannot drift from the assertions.
+# ----------------------------------------------------------------------------
+DAB_LOG=$(mktemp)
+if ./test/driver_abi.sh "$LIN_BIN" "$STD_DIR" >"$DAB_LOG" 2>&1; then
+  n=$(sed -n 's/.*(\([0-9]*\) checks.*/\1/p' "$DAB_LOG" | tail -1)
+  pass=$((pass+1)); total_checks=$((total_checks + ${n:-0})); echo "PASS test/driver_abi.sh ($(tail -1 "$DAB_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/driver_abi.sh"; cat "$DAB_LOG"
+fi
+rm -f "$DAB_LOG"
 
 printf "[Tier 3: Constraint Satisfaction & Term Rewriting]\n"
 for f in test/sat.lin test/sat_verify.lin test/tseitin.lin test/tsp.lin test/egraph.lin; do

@@ -523,6 +523,7 @@ gpu_done:
 
 LinDriver lin_gpu_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
+  .size = (uint32_t)sizeof(LinDriver),   /* the ABI contract in BOTH directions: the core reads only these, and a plugin that does not reach `slot` is REFUSED (a missing `.size` read every hook as absent and made this driver inert while it reported itself the active strategy) */
   .name = "gpu", .description = "Vulkan compute: fixed-rule interaction reduction",
   .caps = LIN_CAP_FIXED, .priority = 20,
   .claim = gpu_claim, .reduce = gpu_reduce,

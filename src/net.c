@@ -16,9 +16,9 @@ static int in_parallel;   /* a wave is running threaded: no interning there (see
 static int reduce_depth;  /* how deep the reducer is; only the outermost may publish or reclaim */
 static int nested_reduce; /* a driver's reducer ran inside the wave being dispatched (see net_flush_free) */
 
-/* The driver table (declared here because net_alloc and net_free both consult it).  Sorted by
-   priority ascending, and a driver with a lower priority number pre-empts. */
-static LinDriver *drv[16]; static int ndrv;
+/* The driver table, here because net_alloc/net_free consult it: as long as it has drivers, priority-ordered, lower pre-empts. */
+static LinDriver **drv; static int ndrv, drvcap;
+#define DN(d) ((d)->name ? (d)->name : "?")   /* every rejection prints the name the plugin registered under */
 /* Slot ownership is permanent: a cleared driver keeps its slot, so nets holding its state can
    still release it. */
 static LinDriver *dslot[N_OF(((Net *)0)->drv)];   /* as many slots as a net can hold driver states -- derived from the net, not chosen */
@@ -638,32 +638,26 @@ void net_gc(Net *n) {
 }
 
 typedef struct { Port p1, p2; } Pair;
-/* Driver registration; the table is declared near the top of this file. */
-void lin_driver_add(LinDriver *d) {
-  if (!d || ndrv >= 16) return;
+/* Driver registration; the table is declared near the top of this file.  1 = accepted, 0 = refused. */
+int lin_driver_add(LinDriver *d) {
+  if (!d) return 0;
   if (d->magic != LIN_DRIVER_MAGIC || d->abi != LIN_DRIVER_ABI) {
-    fprintf(stderr, "driver '%s': rejected (bad ABI magic 0x%x/abi %u, core wants %u)\n",
-            d->name ? d->name : "?", d->magic, d->abi, LIN_DRIVER_ABI);
-    return;
+    fprintf(stderr, "driver '%s': rejected (bad ABI magic 0x%x/abi %u, core wants %u)\n", DN(d), d->magic, d->abi, LIN_DRIVER_ABI);
+    return 0;
   }
-  /* A plugin reads the Net it is handed directly, so its layout must match -- for the fields it can
-     reach.  Net grows by APPENDING (lin.h), which leaves existing offsets alone: a plugin built against
-     a SMALLER Net still reads the right memory, so only a LARGER one is rejected here (see the ABI #). */
-  if (d->net_size > (uint32_t)sizeof(Net)) {
-    fprintf(stderr, "driver '%s': rejected (built against a %u-byte Net, this core has %u) -- "
-                    "rebuild the plugin\n", d->name ? d->name : "?", d->net_size, (unsigned)sizeof(Net));
-    return;
+  /* What the plugin was BUILT with, both ways: `net_size` sizes the layout it reads, `size` says its struct
+     reaches its own fields (the core WRITES `slot` in there); both grow by APPENDING (lin.h), so an older
+     plugin reads what it knows.  A LARGER Net would name the wrong fields, and a `size` short of the hooks
+     it registers means the field was never set -- measured: gpu.c, hooks ABSENT, driver reported ACTIVE. */
+  if (d->net_size > (uint32_t)sizeof(Net) || d->size < (uint32_t)(offsetof(LinDriver, slot) + sizeof d->slot)) {
+    fprintf(stderr, "driver '%s': rejected (net %u/%u, driver %u/needs %u) -- rebuild the plugin with `.size = sizeof(LinDriver)`\n", DN(d), d->net_size, (unsigned)sizeof(Net), d->size, (unsigned)(offsetof(LinDriver, slot) + sizeof d->slot));
+    return 0;
   }
   /* What the plugin was built with, and what it cannot do without.  A `wants` bit the core does
      not know is refused: running a plugin without the capability it asked for is exactly the
      silent-misbehaviour class this check exists to prevent. */
   uint64_t unknown = d->wants & ~(uint64_t)LIN_WANT_ALL;
-  if (unknown) {
-    fprintf(stderr, "driver '%s': rejected (requires capability 0x%llx, this core has 0x%x) -- "
-                    "rebuild the plugin or the core\n", d->name ? d->name : "?",
-            (unsigned long long)unknown, (unsigned)LIN_WANT_ALL);
-    return;
-  }
+  if (unknown) { fprintf(stderr, "driver '%s': rejected (requires capability 0x%llx, core has 0x%x) -- rebuild plugin or core\n", DN(d), (unsigned long long)unknown, (unsigned)LIN_WANT_ALL); return 0; }
   if ((d->wants & LIN_WANT_STATE) && (!DRV_HAS(d, state_new) || !d->state_new)) goto missing;
   if ((d->wants & LIN_WANT_RECYCLE) && (!DRV_HAS(d, node_recycled) || !d->node_recycled)) goto missing;
   if ((d->wants & LIN_WANT_CARRY) && (!DRV_HAS(d, carry_save) || !d->carry_save)) goto missing;
@@ -678,11 +672,7 @@ void lin_driver_add(LinDriver *d) {
     int slot = -1;
     for (int i = 0; i < N_OF(dslot); i++) if (dslot[i] == d) { slot = i; break; }
     if (slot < 0) for (int i = 0; i < N_OF(dslot); i++) if (!dslot[i]) { slot = i; break; }
-    if (slot < 0) {
-      fprintf(stderr, "driver '%s': rejected (no free state slot; the net holds %d)\n",
-              d->name ? d->name : "?", N_OF(dslot));
-      return;
-    }
+    if (slot < 0) { fprintf(stderr, "driver '%s': rejected (no free state slot; the net holds %d)\n", DN(d), N_OF(dslot)); return 0; }
     d->slot = slot; dslot[slot] = d;
     if (DRV_HAS(d, node_recycled) && d->node_recycled) any_recycle = 1;
     if (DRV_HAS(d, state_new) && d->state_new) any_state = 1;
@@ -690,14 +680,15 @@ void lin_driver_add(LinDriver *d) {
   /* already dispatching: registration is idempotent, because a plugin's constructor registers it
      when the .so is dlopen'd and `(set_driver "<its own name>")` would add it again -- leaving the
      same reducer to claim every wave twice. */
-  for (int i = 0; i < ndrv; i++) if (drv[i] == d) return;
+  for (int i = 0; i < ndrv; i++) if (drv[i] == d) return 1;
+  if (ndrv >= drvcap) drv = realloc(drv, (size_t)(drvcap = drvcap ? drvcap * 2 : 8) * sizeof *drv);   /* as long as it has drivers */
   int i = ndrv;
   while (i > 0 && drv[i-1]->priority > d->priority) { drv[i] = drv[i-1]; i--; }
   drv[i] = d; ndrv++;
-  return;
+  return 1;
 missing:
-  fprintf(stderr, "driver '%s': rejected (wants 0x%llx but does not implement it: size %u)\n",
-          d->name ? d->name : "?", (unsigned long long)d->wants, d->size);
+  fprintf(stderr, "driver '%s': rejected (wants 0x%llx, does not implement it: size %u)\n", DN(d), (unsigned long long)d->wants, d->size);
+  return 0;
 }
 /* `(set_driver ...)`/`driver_clear` selects a *strategy*; pre-emptors are a reduction pre-pass that
    composes with whichever strategy is chosen, so clearing must not silently disable native folding.
@@ -1018,9 +1009,8 @@ static inline int demanded(const Net *n, Port p) {
    lambdas.  Anything else gets a real (wave-wide) reduction: guessing "already in WHNF" more
    aggressively than this is what silently skipped the reductions readback needed. */
 static int port_whnf(Net *n, Port p) {
-  int u = p.node;
-  if (u < 0 || u >= n->nn || n->dead[u]) return 1;
-  if (n->tag[u] != LAM || p.port != 0) return 0;      /* not a bare lambda: let the reducer decide */
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node]) return 1;
+  if (n->tag[p.node] != LAM || p.port != 0) return 0;   /* not a bare lambda: let the reducer decide */
   Port q = WIRE(n, p);
   return !(q.node >= 0 && q.node < n->nn && q.port == 0 && !n->dead[q.node] &&
            (n->tag[q.node] == APP || n->tag[q.node] == DUP));
@@ -1189,20 +1179,17 @@ long net_reduce(Net *n, long limit) {
 }
 
 static long net_reduce_body(Net *n, long limit) {
-  /* Each wave re-marks demand and fires only the pairs the walk reached; one off that path never
-     leaves `act`, so it is still there when something needs it.  A wave that fires nothing on the
-     demand path means the observed ports are already in WHNF: stop, rather than spin on the queue. */
+  /* Each wave re-marks demand and fires only the pairs the walk reached; one off that path never leaves
+     `act`, so it is still there when something needs it.  A wave firing nothing means WHNF: stop. */
   Port *curr = NULL, *base_rx = NULL; int curr_cap = 0, base_cap = 0;
-    /* When reclamation runs: live nodes above this and no reusable slot left.  The mark is DERIVED, not chosen -- a
-     collection pays once the garbage outgrows what is live -- and the update below applies the same rule after every
-     collection.  LIN_GC forces the collector on; the rule itself is "reclaim WITHOUT moving", never a threshold. */
+  /* When reclamation runs: the mark is DERIVED (garbage outgrowing what is live is what pays), never chosen; LIN_GC forces it on. */
   long gcmark = getenv("LIN_GC") ? atol(getenv("LIN_GC")) : ((long)(n->nn - n->nfree) * 2 + 64);
   if (lin_wstats < 0) { lin_wstats = getenv("LIN_WAVE_STATS") != NULL; if (lin_wstats) atexit(wv_report); }
-  Port *slices[16] = {0}; int scaps[16] = {0}, scnts[16] = {0};
-  /* per-wave claim scratch: candidates offered, per-pair ownership, claims (one per driver) */
-  Port *cand = NULL; int cand_cap = 0, cand_cnt = 0;   /* offered */
-  int *owned = NULL; int own_cap = 0;                  /* per-pair ownership */
-  LinClaim *claimed = calloc(ndrv ? (size_t)ndrv : 1, sizeof(LinClaim)); unsigned char have[16] = {0};
+  int nsl = ndrv > 0 ? ndrv : 1;   /* the pipeline's OWN size: one scratch slot per registered driver, never a fixed table */
+  Port *slices[nsl]; int scaps[nsl], scnts[nsl]; unsigned char have[nsl];
+  memset(slices, 0, sizeof slices); memset(scaps, 0, sizeof scaps); memset(scnts, 0, sizeof scnts); memset(have, 0, sizeof have);
+  Port *cand = NULL; int cand_cap = 0, cand_cnt = 0; int *owned = NULL; int own_cap = 0;   /* offered / per-pair ownership */
+  LinClaim *claimed = calloc((size_t)nsl, sizeof(LinClaim));
   while (n->steps < limit) {
     int changed = 0;
     while (n->atop > 0 && n->steps < limit) {
@@ -1235,8 +1222,7 @@ static long net_reduce_body(Net *n, long limit) {
             owned[i] = 0;
             act_push(n, curr[2 * i], curr[2 * i + 1]);
           }
-        for (int di = 0; di < ndrv; di++)
-          if (drv[di] == d && di < 16) { claimed[di] = *hc; have[di] = 1; }
+        for (int di = 0; di < ndrv; di++) if (drv[di] == d) { claimed[di] = *hc; have[di] = 1; }
         h++;
       }
 
@@ -1248,8 +1234,8 @@ static long net_reduce_body(Net *n, long limit) {
       }
 
       /* ONE CALL PER DRIVER, before any slice exists -- which is what lets a claim be exact: a matcher may
-         inspect and force what it must read, where a per-pair predicate could not. */
-      /* Nothing offered, nothing held: no driver can claim or act. */
+         inspect and force what it must read, where a per-pair predicate could not.  Nothing offered and
+         nothing held means no driver can claim or act. */
       int offer = cand_cnt > 0 || n->nheld > 0, steps_before = n->steps;
       for (int di = 0; offer && di < ndrv; di++) {
         LinDriver *d = drv[di];
@@ -1331,7 +1317,7 @@ static long net_reduce_body(Net *n, long limit) {
     if (changed == 0) break;
   }
   net_flush_free(n);
-  free(curr); free(base_rx);
+  free(curr); free(base_rx); free(cand); free(owned); free(claimed);   /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation -- measured, 47x the resident memory on test/queue.lin */
   for (int di = 0; di < ndrv; di++) free(slices[di]);
   return n->steps;
 }

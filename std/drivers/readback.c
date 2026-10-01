@@ -302,8 +302,8 @@ static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val
     void *s = resolve_driver(dn);
     if (strcmp(dn, "cpu") && !s) { v.kind = 1; v.iv = 0; return v; }
     if (strcmp(fn, "driver_add")) lin_driver_clear();   /* set resets first; add appends */
-    if (s) lin_driver_add((LinDriver *)s);
-    v.kind = 1; v.iv = 1; return v;
+    v.kind = 1; v.iv = s ? lin_driver_add((LinDriver *)s) : 1;   /* a REFUSED driver must not report itself active */
+    return v;
   }
   /* Delegate to the core's registry of callable providers (e.g. arith.so); the first provider that owns
      `fn` supplies it, the registry pulls std/drivers/arith.so in on its first ask, and each provider

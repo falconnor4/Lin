@@ -62,7 +62,7 @@ Port net_dup_hop(Net *n, Port p) { N = n; return dup_hop(n, p); }
    where the port is re-aimed; without this, forcing during readback destroyed what it was forcing.
    FORCING IS REDUCTION, which is why the primitive is the core's. */
 Port net_force_val(Net *n, Port p) {
-  for (int i = 0; i < 32; i++) {
+  for (int i = 0; i < n->nn; i++) {   /* a walk of DISTINCT nodes: the net's own count is the only bound, and the p==v check closes a cycle */
     if (p.node < 0 || p.node >= n->nn) return p;
     Port s = wr(n, p);
     if (!n->dead[p.node]) net_force(n, p);
@@ -480,8 +480,12 @@ int lin_driver_load(const char *name) {
   if (dlsym(RTLD_DEFAULT, sym)) return 1;               /* already loaded */
   const char *dir = getenv("LIN_STD_DIR");
   const char *path = lin_internf("%s/drivers/%s.so", dir ? dir : "std", name);
-  if (!dlopen(path, RTLD_NOW | RTLD_GLOBAL)) return 0;
-  return dlsym(RTLD_DEFAULT, sym) != NULL;
+  if (dlopen(path, RTLD_NOW | RTLD_GLOBAL) && dlsym(RTLD_DEFAULT, sym)) return 1;
+  /* An absent driver must SAY so -- a program asked for an accelerator and ran on the base engine in silence
+     -- and only once per NAME, because a reader asks again at every observation it makes. */
+  static const char *said; const char *nm = lin_intern(name, strlen(name));
+  if (said != nm) { said = nm; fprintf(stderr, "warning: driver plugin '%s' not available (looked for '%s')\n", name, path); }
+  return 0;
 }
 
 /* The native scalar table is a REGISTRY the plugins write into (arith.so registers lin_arith_scalar at
