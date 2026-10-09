@@ -5,13 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-typedef struct {
-  const char *name;
-  Port bind;
-  int count;
-  Port *extra;
-  int nextra, mextra;
-} CVar;
+typedef struct { const char *name; Port bind; int count; Port *extra; int nextra, mextra; } CVar;
 
 static CVar *cstack;
 static int csp, ccsp;
@@ -231,9 +225,10 @@ int compile(Term *t, Net *n, char *err, int errsz) {
 }
 
 /* ---------------- E-Graph AOT Optimizer ----------------
-   Whole-program equality saturation over the expanded term, with sharing-aware extraction.  A PASS,
-   not part of the calculus: it may be wrong or absent and every program still compiles and runs
-   (`egraph_optimize` falls back to the term it was given). */
+   Whole-program equality saturation over the expanded term, with sharing-aware extraction.  A PASS and
+   CORE: optimal reduction is an engine goal, and this is the optimizer that establishes sharing -- the
+   driver-side optimizations add SEMANTICS, not optimality.  Not part of the calculus either: it may be
+   wrong or absent and every program still compiles and runs (`egraph_optimize` falls back to its input). */
 typedef struct { int type; const char *name; int l, r; } ENode;
 typedef struct { int parent, best_node, cost; } EClass;
 typedef struct {

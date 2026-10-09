@@ -324,7 +324,18 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   if (!ffi_header(n, lam, &a1, &argp)) return EV_WAIT;         /* closure header not formed yet */
   if (!IN_NET(n, a1.node) || a1.port != 1 || n->tag[a1.node] != APP) return EV_WAIT;
   const char *fn;
-  if (net_read_string_arena(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, &fn) < 0) return EV_WAIT;
+  /* A NAME FIELD THAT IS NOT A STRING CAN NEVER BECOME ONE -- this is a TERMINAL decline (EV_NO), not
+     "not ready yet" (EV_WAIT).  The `_ffi` closure's header IS the language's own cons cell: dec_arg
+     records that `\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)` are ONE NET, so every list-spine
+     cell the claim accepts (the claim's pattern is that same three-hop shape) arrives here with its
+     HEAD where the fn name belongs.  Reporting that as EV_WAIT told `reduce` the operands were not
+     concrete yet, and it responded by forcing the operand spine and running the WHOLE dispatch a second
+     time before handing the pair to beta: two failed dispatch attempts plus a force_spine per ordinary
+     cons cell.  Measured (min of 7, counts from the same runs): map.lin 418 of them, 483.7 -> 120.4ms;
+     nqueens 1289, 123.8 -> 90.9ms; bench_runtime 12 and sudoku 0, both unchanged.  A name that is
+     merely not readable YET still returns EV_WAIT through the header test above, which is where a
+     not-yet-reduced name is caught. */
+  if (net_read_string_arena(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, &fn) < 0) return EV_NO;
   /* TWO QUESTIONS, BOTH ANSWERED BEFORE ANY OPERAND IS READ -- because reading a spine is what FORCES
      it, and a call that is not this fold's must not have its operands forced to find that out (measured:
      decoding every closure's spine to classify it took test/sat_verify.lin from 295 ms to 82 s).
@@ -651,6 +662,7 @@ static void __attribute__((constructor)) arith_load(void) {
   static int registered = 0;
   if (registered) return;                               /* constructors can run once per load, never twice */
   registered = 1;
+  lin_pair_fold_register(lin_pat_fold_shape);   /* LIN_CAP_FOLD: offer this driver only fold-shaped pairs */
   lin_driver_add(&lin_arith_driver);
 }
 
@@ -658,7 +670,7 @@ LinDriver lin_arith_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
   .size = (uint32_t)sizeof(LinDriver),   /* the ABI-5 extension contract: the core reads only these fields */
   .name = "arith", .description = "native scalar arithmetic table + `_op`/`_ffi` fold pre-emptor",
-  .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_PREEMPT, .priority = 5,   /* before simd(10): claim folds first */
+  .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_FOLD | LIN_CAP_PREEMPT, .priority = 5,   /* before simd(10): claim folds first */
   .claim = arith_claim, .reduce = arith_reduce,
   .wants = LIN_WANT_AOT, .aot = arith_aot,   /* the driver's own build-time pass, offered by the core */
 };

@@ -171,6 +171,7 @@ enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC
 /* Supplies storage or semantics the runtime depends on (a value domain's table, an encoding).
    Like a pre-emptor it is not a *strategy*, so `(set_driver ...)` must not drop it. */
 #define LIN_CAP_PROVIDER   0x10u
+#define LIN_CAP_FOLD       0x20u   /* claims only what a registered fold-shape predicate accepts */
 
 /* Hooks a driver cannot work without.  A `wants` bit the core cannot satisfy -- including one it
    does not know -- refuses the plugin rather than running it without it: the ABI-4 lesson applied
@@ -371,6 +372,7 @@ Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) ch
 Port net_dup_hop(Net *n, Port p);                       /* deref it the way an arriving port implies */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_header(Net *n, Port lam, Port *fnp, Port *argp); /* dig \_ffi.\_ret.((_ffi fn) args) */
+void lin_pair_fold_register(uint32_t (*shape)(const Net *n, Port p1, Port p2)); /* a fold driver's own notion, so `_op`/`_ffi` shapes stay out of the core */
 /* The operand list of a saturated closure.  `doms[i]` is the DOMAIN slot i is expected to be (the last
    entry repeats): the caller states it, and a slot that is not in that domain -- including one that is
    not concrete YET -- is left undecoded, which is how a fold tells "not ready" from "not my redex".  The
@@ -404,7 +406,7 @@ Port net_alloc_float(Net *n, double d);
 long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
-typedef struct { const char *name; Term *term, *expanded; Scheme sch; int typed, rec;
+typedef struct { const char *name; Term *term, *expanded, *raw; Scheme sch; int typed, rec;
                  Net *compiled; int comp_tried; } Def;
 extern Def *defs;
 extern int ndefs, lin_threads;

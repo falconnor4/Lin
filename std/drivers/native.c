@@ -561,16 +561,25 @@ static int fold_via_table(Net *n, const char *fn, Val *v, Port argp) {
    net out from under the wave). */
 static int native_claim(const Net *ncn, Port p1, Port p2) {
   Net *n = (Net *)ncn;
-  LinMatch m;
-  /* The pair is recognized BY SHAPE and the WHICH is left to `reduce`: the whitelist lives in the
-     operand list, which is an unbuilt application until something walks it, so gating the claim on
-     it would either force the net out from under the wave (illegal here) or decline every freshly
-     compiled redex -- the fold would never fire at all.  `reduce` disposes of everything claimed
-     (compile it, fold it through the table, or hand it to β), which is what makes this safe. */
-  if (!lin_pat_match_pair(n, p1, p2, P_OP_PAIR, LIN_PAT_BUDGET_FOR(n), &m)) return 0;
-  int lam = m.bind[0].node;
-  if (head_is_ffi(n, lam)) return 0;      /* an `_ffi` closure is the arith driver's fold */
-  return lin_pat_op_head(n, (Port){lam, 0}, NULL);
+  /* CHEAPEST TEST FIRST -- the one ordering rule every driver's `claim` has to obey.  The wave consults
+     `claim` for EVERY unevaluated pair of EVERY wave (src/net.c, the legacy dispatch), so whatever stands
+     first is paid at that rate: a `lin_pat_match_pair` here cost 1.2-1.6x on the whole program (measured:
+     test/bench_runtime.lin 469.7 -> 291.8ms, nqueens 157.7 -> 122.8ms, tseitin 96.9 -> 77.8ms), because a
+     MATCHER ran per pair where arith runs a TAG test.  The pair is still recognized BY SHAPE and the WHICH
+     is still left to `reduce` -- the whitelist lives in the operand list, an unbuilt application until
+     something walks it, so gating the claim on it would force the net out from under the wave; `reduce`
+     disposes of everything claimed (compile it, fold it through the table, or hand it to β). */
+  if (p1.port || p2.port) return 0;
+  if (!NAT_IN(n, p1.node) || !NAT_IN(n, p2.node)) return 0;
+  if (n->dead[p1.node] || n->dead[p2.node]) return 0;
+  if (net_wire(n, p1).node != p2.node || net_wire(n, p1).port != p2.port) return 0;
+  if (net_wire(n, p2).node != p1.node || net_wire(n, p2).port != p1.port) return 0;
+  int lam;
+  if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) lam = p1.node;
+  else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) lam = p2.node;
+  else return 0;
+  if (!lin_pat_op_head(n, (Port){lam, 0}, NULL)) return 0;   /* the TAG test first: an `_op` head */
+  return !head_is_ffi(n, lam);   /* the MATCHER only here: an `_ffi` closure is the arith driver's fold */
 }
 
 /* reduce: fold every claimed pair, one way or another.  A claimed-but-unhandled pair
@@ -659,6 +668,7 @@ static void __attribute__((constructor)) native_load(void) {
   if (registered) return;
   registered = 1;
   DBG("registered (priority %d)\n", lin_native_driver.priority);
+  lin_pair_fold_register(lin_pat_fold_shape);   /* LIN_CAP_FOLD: offer this driver only fold-shaped pairs */
   lin_driver_add(&lin_native_driver);
 }
 
@@ -666,6 +676,6 @@ LinDriver lin_native_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
   .size = (uint32_t)sizeof(LinDriver),   /* the ABI-5 extension contract: the core reads only these fields */
   .name = "native", .description = "C-emitting driver: compiles an arithmetic cone into one call",
-  .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_PREEMPT, .priority = 4,   /* ahead of arith(5): claim the cone */
+  .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_FOLD | LIN_CAP_PREEMPT, .priority = 4,   /* ahead of arith(5): claim the cone */
   .claim = native_claim, .reduce = native_reduce,
 };

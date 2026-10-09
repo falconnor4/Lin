@@ -286,10 +286,14 @@ static int simd_reduce(Net *n, Port *redexes, int nred, long limit, int *changed
   return consumed;
 }
 
+/* The fold-shape predicate the core gates `LIN_CAP_FOLD` on (registered like the scalar table, so nothing
+   tells the core what an `_op` or an `_ffi` closure looks like).  This file has no other constructor. */
+__attribute__((constructor)) static void simd_register(void) { lin_pair_fold_register(lin_pat_fold_shape); }
+
 LinDriver lin_simd_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
   .size = (uint32_t)sizeof(LinDriver),   /* the ABI-5 extension contract: the core reads only these fields */
   .name = "simd", .description = "native scalar (`_op`/`_ffi`) arithmetic fold",
-  .caps = LIN_CAP_NATIVE_NUM, .priority = 10,
+  .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_FOLD, .priority = 10,
   .claim = simd_claim, .reduce = simd_reduce,
 };

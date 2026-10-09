@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static jmp_buf TJ;
+static jmp_buf TJB; static jmp_buf *TJ = &TJB;   /* a pointer: a deferred def check runs INSIDE another check */
 static char TMSG[256];
 static int next_id;
 
@@ -13,7 +13,7 @@ static void tfail(const char *fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(TMSG, sizeof TMSG, fmt, ap);
   va_end(ap);
-  longjmp(TJ, 1);
+  longjmp(*TJ, 1);
 }
 
 /* nominal-type registry: a declared user data type (ADT/struct), optionally with a fixed number of type
@@ -95,17 +95,10 @@ static void unify(Type *x, Type *y) {
   tfail("type mismatch");
 }
 
-/* Environment entries come in two kinds, and the distinction is what makes generalization both
-   order-independent and cheap:
-     - a DEFINITION scheme is closed and never mutated after registration, so its type variables are
-       fixed and are kept incrementally in a refcount table (`envrc`) rather than recomputed by walking
-       every scheme on every `generalize` (that walk was 160k entry scans / 11.9M node visits per std
-       load -- 372 of its 421 ms);
-     - a BINDER entry (`\x.` and the self-recursive `f : a` slot) holds a fresh variable unification may
-       LINK LATER, so its contribution cannot be cached at push time: `(\x (x 5))` pushes `a`, then
-       `unify(a, num -> c)` makes `c` free in the environment through `x`.  Those are resolved when
-       `generalize` runs -- O(1) while the root is a bare variable, a walk only if it was linked. */
-typedef struct { const char *name; Scheme s; int isdef; } TEnv;
+/* ONLY binders live here (`\x.` and the self-recursive `f : a` slot): such an entry is a fresh variable
+   unification may LINK LATER, so it cannot be cached at push time.  A def's scheme is closed, is reached
+   through `def_find`'s hash, and has its free variables counted once in `envrc` (below). */
+typedef struct { const char *name; Scheme s; } TEnv;
 static TEnv *env;
 static int envn, envcap;
 
@@ -113,13 +106,15 @@ static void env_push(const char *name, Scheme s) {
   if (envn >= envcap)
     env = realloc(env, (size_t)(envcap = envcap ? envcap * 2 : 128) * sizeof(TEnv));
   env[envn].name = name;
-  env[envn].s = s; env[envn].isdef = 0;
+  env[envn].s = s;
   envn++;
 }
 
+static void def_type(Def *d);
 static Scheme *env_find(const char *name) {
   for (int i = envn - 1; i >= 0; i--) if (!strcmp(env[i].name, name)) return &env[i].s;
   Def *d = def_find(name);
+  if (d && !d->typed) def_type(d);             /* lazily: the first reference is what types a def */
   return (d && d->typed) ? &d->sch : NULL;
 }
 
@@ -180,7 +175,6 @@ static Scheme generalize(Type *t) {
   IL f = {0}; fv(t, &f);
   IL dyn = {0};   /* binder entries first: O(1) each while the pushed variable is still bare, so only an entry whose variable was linked needs the walk */
   for (int i = 0; i < envn; i++) {
-    if (env[i].isdef) continue;
     Type *u = find(env[i].s.t);
     if (u->kind == TVR) il_push(&dyn, u->id);
     else fv(env[i].s.t, &dyn);
@@ -239,35 +233,42 @@ static Type *infer(Term *t) {
   return NULL;
 }
 
-/* Registering a def scheme's free variables happens ONCE PER DEF, not once per check.
-   The old code walked all 319 schemes on each of the 512 checks (160k walks, 11.9M node
-   visits) purely to rediscover an unchanging answer.  Loading the array itself stays
-   per-call but is only a copy, so `env_find` still sees every def. */
+/* A def scheme's free variables are counted ONCE PER DEF, not once per check: walking every scheme on every
+   check rediscovered an unchanging answer (160k walks), and the lookup must go through `def_find`'s hash --
+   pushing the defs into a scan array made it a linear strcmp walk (9.4M entries scanned for the prelude). */
+static void count_free(Scheme *s) {
+  IL f = {0}; fv(s->t, &f);
+  for (int j = 0; j < f.n; j++) { rc_grow(f.v[j]); envrc[f.v[j]]++; }
+  free(f.v);
+}
 static void env_load_defs(void) {
   static int reg_n = 0;                     /* defs whose free variables are already counted */
-  for (int i = reg_n; i < ndefs; i++) {
-    if (!defs[i].typed) continue;
-    IL f = {0}; fv(defs[i].sch.t, &f);
-    for (int j = 0; j < f.n; j++) { rc_grow(f.v[j]); envrc[f.v[j]]++; }
-    free(f.v);
-  }
+  for (int i = reg_n; i < ndefs; i++) if (defs[i].typed) count_free(&defs[i].sch);
   reg_n = ndefs;
-  envn = 0;
-  for (int i = 0; i < ndefs; i++) if (defs[i].typed) {
-    env_push(defs[i].name, defs[i].sch);
-    env[envn - 1].isdef = 1;                /* its contribution is already in envrc */
-  }
+  if (TJ == &TJB) envn = 0;                 /* the reset is leak recovery, and only the outermost check may do it */
+}
+
+/* DEFERRED to the first reference: defs precede their uses, so the graph is a DAG; typing the 591 prelude defs is
+   28.7ms of the 61.6ms startup and a program touches a fraction of them.  A scheme typed after `env_load_defs`' watermark has gone by is counted here. */
+static void def_type(Def *d) {
+  char err[512]; Scheme sch; int sav = envn; const char *nm = strrchr(d->name, '.'); Term *b = d->raw ? d->raw : d->term;
+  int ok = d->rec ? type_check_rec(nm ? nm + 1 : d->name, b, &sch, err, sizeof err) : type_check(b, &sch, err, sizeof err);
+  envn = sav;
+  if (!ok) { printf("error: %s\n", err); return; }   /* an ill-typed def reports at its first use */
+  d->sch = sch; d->typed = 1; count_free(&sch);
 }
 
 int type_check(Term *t, Scheme *out, char *err, int errsz) {
-  if (setjmp(TJ)) { snprintf(err, errsz, "%s", TMSG); return 0; }
-  env_load_defs(); *out = generalize(infer(t)); return 1;
+  jmp_buf jb, *sav = TJ; TJ = &jb;
+  if (setjmp(jb)) { TJ = sav; snprintf(err, errsz, "%s", TMSG); return 0; }
+  env_load_defs(); *out = generalize(infer(t)); TJ = sav; return 1;
 }
 
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz) {
-  if (setjmp(TJ)) { snprintf(err, errsz, "%s", TMSG); return 0; }
+  jmp_buf jb, *sav = TJ; TJ = &jb;
+  if (setjmp(jb)) { TJ = sav; snprintf(err, errsz, "%s", TMSG); return 0; }
   env_load_defs(); Type *a = tvar(); env_push(name, (Scheme){.nq = 0, .t = a});
-  unify(a, infer(body)); envn--; *out = generalize(a); return 1;
+  unify(a, infer(body)); envn--; *out = generalize(a); TJ = sav; return 1;
 }
 
 static void print_rec(Type *t, int par) {

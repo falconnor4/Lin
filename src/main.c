@@ -110,8 +110,8 @@ static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, 
    recursive def is a Y-knot and is spliced textually: its net IS a cycle, so baking a copy would
    only duplicate the knot. */
 static void def_precompile(Def *d) {
-  /* A build-time decision, not a rule: a candidate may ask for every define to stay textual. */
-  if (getenv("LIN_PRECOMPILE") && !strcmp(getenv("LIN_PRECOMPILE"), "0")) return;
+  /* A build-time decision, not a rule -- OFF unless asked for: eager reduce_term per define costs more than the splice saves. */
+  if (!getenv("LIN_PRECOMPILE") || strcmp(getenv("LIN_PRECOMPILE"), "1")) return;
   if (d->comp_tried) return;
   d->comp_tried = 1;
   if (d->rec) return;
@@ -300,12 +300,9 @@ static void process_datatype(Term *t) {
 
 static void process_def(Term *t) {
   if (ndefs >= defcap) defs = realloc(defs, (size_t)(defcap = defcap ? defcap * 2 : 128) * sizeof(Def));
-  char err[512]; Scheme sch;
+  Scheme sch; sch.nq = 0; sch.t = NULL;   /* TDEF's scheme is inferred on first reference; TDEFX's IS the annotation */
   int rec = term_refs(t->l, t->name);
-  int ok = (t->type == TDEFX) ? (sch = scheme_all((Type *)t->annot), 1)
-           : rec ? type_check_rec(t->name, t->l, &sch, err, sizeof err)
-                 : type_check(t->l, &sch, err, sizeof err);
-  if (!ok) { printf("error: %s\n", err); return; }
+  if (t->type == TDEFX) sch = scheme_all((Type *)t->annot);
   Guard b = {0}; qualify_free(t->l, &b); free(b.names);
   Def *d = &defs[ndefs++];
   if (curr_ns[0] && !strchr(t->name, '.')) {
@@ -314,11 +311,11 @@ static void process_def(Term *t) {
   } else {
     d->name = t->name;
   }
-  d->sch = sch; d->typed = 1; d->rec = rec;
+  d->sch = sch; d->typed = (t->type == TDEFX); d->rec = rec; d->raw = NULL;
   /* A self-referential body becomes the standard fixpoint `Y (\name. body)`.  The binder carries
      `t->name` and NOT the namespace-qualified `d->name`: qualify_free runs before this def exists,
      so the body's self-references are still spelled the unqualified way. */
-  if (rec) { d->term = term_fix(t->name, t->l); term_free(t->l); }
+  if (rec) { d->raw = t->l; d->term = term_fix(t->name, t->l); }   /* the fix consumes nothing: the unfixed body stays for the deferred check */
   else d->term = t->l;
   t->l = NULL;
   d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;

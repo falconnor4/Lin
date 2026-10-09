@@ -18,6 +18,8 @@ static int nested_reduce; /* a driver's reducer ran inside the wave being dispat
 
 /* The driver table, here because net_alloc/net_free consult it: as long as it has drivers, priority-ordered, lower pre-empts. */
 static LinDriver **drv; static int ndrv, drvcap;
+static uint32_t (*pair_fold_shape)(const Net *, Port, Port);
+void lin_pair_fold_register(uint32_t (*f)(const Net *, Port, Port)) { pair_fold_shape = f; }
 #define DN(d) ((d)->name ? (d)->name : "?")   /* every rejection prints the name the plugin registered under */
 /* Slot ownership is permanent: a cleared driver keeps its slot, so nets holding its state can
    still release it. */
@@ -981,7 +983,8 @@ static void net_mark_demand(Net *n) {
          leads to permanently un-demanded (measured: a Y-knot that stops reducing at depth 4). */
       unsigned char bit = (unsigned char)(1u << p.port);
       if (n->dem[u] == stamp) { if (n->vport[u] & bit) break; n->vport[u] |= bit; }
-      else { n->dem[u] = stamp; n->vport[u] = bit; dem_put(n, u); }
+      /* dem_put's own first test is `act_of[u] < 0`: hoisting it here skips 99.86M of 99.95M calls on map.lin */
+      else { n->dem[u] = stamp; n->vport[u] = bit; if (n->act_of[u] >= 0) dem_put(n, u); }
       int t = n->tag[u];
       if (t == ROOT) { p = WIRE(n, p); continue; }
       if (t == ERA) break;
@@ -994,7 +997,7 @@ static void net_mark_demand(Net *n) {
       if (q.node >= 0 && q.node < n->nn && q.port == 0 && !n->dead[q.node]) {
         int qt = n->tag[q.node];
         if ((t == LAM && (qt == APP || qt == DUP)) || (t != LAM && (qt == LAM || qt == DUP))) {
-          if (n->dem[q.node] != stamp) { n->vport[q.node] = 0; dem_put(n, q.node); }
+          if (n->dem[q.node] != stamp) { n->vport[q.node] = 0; if (n->act_of[q.node] >= 0) dem_put(n, q.node); }
           n->dem[q.node] = stamp;
         }
       }
@@ -1163,7 +1166,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
 /* The wave's pairs: the demanded ones `net_mark_demand` emitted and took out of `act`, not a scan of the queue. */
 int wave_snapshot(Net *n, Port **out, int *cap) {
   int cnt = n->dem_cnt;
-  if (cnt > *cap) { free(*out); *out = malloc((size_t)(*cap = cnt) * sizeof(Port)); }
+  if (cnt > *cap) { if (*out) free(*out); *out = malloc((size_t)(*cap = cnt) * sizeof(Port)); }
   memcpy(*out, n->dem_out, (size_t)cnt * sizeof(Port));
   return cnt;
 }
@@ -1200,7 +1203,7 @@ static long net_reduce_body(Net *n, long limit) {
       int before = changed;
       if (reduce_depth == 1) nested_reduce = 0;
       net_mark_demand(n);
-      int cnt = wave_snapshot(n, &curr, &curr_cap);
+      int cnt = n->dem_cnt ? wave_snapshot(n, &curr, &curr_cap) : 0;   /* 98% of waves emit nothing: skip the (exported, un-inlinable) call */
       int np = cnt / 2, base_cnt = 0; cand_cnt = 0; memset(scnts, 0, sizeof scnts);
 
       if (np > own_cap) { own_cap = np * 2 + 64; owned = realloc(owned, (size_t)own_cap * sizeof(int)); }
@@ -1279,8 +1282,10 @@ static long net_reduce_body(Net *n, long limit) {
         Port p1 = curr[i * 2], p2 = curr[i * 2 + 1];
         if (!demanded(n, p1) || !demanded(n, p2)) continue;
         int assigned = 0;
+        uint32_t fold_shape = pair_fold_shape ? pair_fold_shape(n, p1, p2) : LIN_CAP_FOLD;   /* classified once, not per driver */
         for (int di = 0; di < ndrv && !assigned; di++) {
           LinDriver *d = drv[di];
+          if ((d->caps & LIN_CAP_FOLD) && !fold_shape) continue;
           if (have[di] || !DRV_HAS(d, claim) || !d->claim || !d->claim(n, p1, p2)) continue;
           if (scnts[di] + 2 > scaps[di]) { scaps[di] = scaps[di] ? scaps[di]*2 : 256; slices[di] = realloc(slices[di], (size_t)scaps[di]*sizeof(Port)); }
           slices[di][scnts[di]++] = p1; slices[di][scnts[di]++] = p2;
@@ -1323,8 +1328,11 @@ static long net_reduce_body(Net *n, long limit) {
     if (changed == 0) break;
   }
   net_flush_free(n);
-  free(curr); free(base_rx); free(cand); free(owned);   /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation -- measured, 47x the resident memory on test/queue.lin */
-  for (int di = 0; di < ndrv; di++) free(slices[di]);
+  /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation
+     (measured: 47x the resident memory on queue.lin).  Each free is GUARDED -- 98% of waves emit no pair, so nearly all are free(NULL). */
+  void *heap[] = {curr, base_rx, cand, owned};
+  for (int i = 0; i < N_OF(heap); i++) if (heap[i]) free(heap[i]);
+  for (int di = 0; di < ndrv; di++) if (slices[di]) free(slices[di]);
   return n->steps;
 }
 

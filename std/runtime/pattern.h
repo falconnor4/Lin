@@ -1025,6 +1025,34 @@ static inline int lin_pat_op_head(const Net *n, Port p, void *ctx) {
    wherever it is nested (`P_NOT(P_OP_HEAD)`), which is exactly how it first failed to compile. */
 #define P_OP_HEAD (P_PRED(lin_pat_op_head, NULL))
 
+/* The `_ffi` closure header read as TAGS -- the sibling of `lin_pat_op_head`, same idiom as `lin_pat_cell`:
+   no force, no allocation, no match record.  The `lin_pat_enc_ffi` pattern and this must agree; they do
+   (measured: swapping `head_is_ffi`'s matcher for this changes nothing on the 56-program corpus). */
+static inline int lin_pat_ffi_head(const Net *n, Port p) {
+  if (!n || p.port != 0 || !lin_pat_live(n, p.node) || n->tag[p.node] != LAM) return 0;
+  Port r = net_dhop((Net *)n, net_wire(n, (Port){p.node, 2}));
+  if (r.port != 0 || !lin_pat_live(n, r.node) || n->tag[r.node] != LAM) return 0;
+  Port a2 = net_dhop((Net *)n, net_wire(n, (Port){r.node, 2}));
+  if (a2.port != 1 || !lin_pat_live(n, a2.node) || n->tag[a2.node] != APP) return 0;
+  Port fn = net_dhop((Net *)n, net_wire(n, (Port){a2.node, 0}));
+  return fn.port == 1 && lin_pat_live(n, fn.node) && n->tag[fn.node] == APP;
+}
+
+/* WHAT A FOLD DRIVER COULD WANT, registered with the core as `LIN_CAP_FOLD`'s predicate: the shapes every
+   fold driver claims by -- an `_op` head (`lin_pat_op_head`) or the `_ffi` closure header.  It MUST stay a
+   SUPERSET of each fold driver's own claim test, because a pair it declines is never offered to one.  It
+   lives HERE, beside those tests, so the core never learns what an `_op` or an `_ffi` closure looks like
+   (lin.h's rule: fold machinery does not live in the core) -- it asks, the drivers answer -- and so the
+   core can classify a pair ONCE per wave instead of every driver re-testing it. */
+static inline uint32_t lin_pat_fold_shape(const Net *n, Port p1, Port p2) {
+  if (!n || p1.port || p2.port || !lin_pat_live(n, p1.node) || !lin_pat_live(n, p2.node)) return 0;
+  Port lam = (Port){-1, 0};
+  if (n->tag[p1.node] == LAM && n->tag[p2.node] == APP) lam = p1;
+  else if (n->tag[p2.node] == LAM && n->tag[p1.node] == APP) lam = p2;
+  if (lam.node < 0) return 0;
+  return (lin_pat_op_head(n, lam, NULL) || lin_pat_ffi_head(n, lam)) ? LIN_CAP_FOLD : 0;
+}
+
 /* PURE: the operator index a saturated `_op` at `app` states, or -1 when it states none.  The index
    is the head of the operand list's first cell; the OPERANDS are that cell's tail. */
 static inline int lin_pat_op_code(const Net *n, int app) {
