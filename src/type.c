@@ -241,11 +241,11 @@ static void count_free(Scheme *s) {
   for (int j = 0; j < f.n; j++) { rc_grow(f.v[j]); envrc[f.v[j]]++; }
   free(f.v);
 }
-static void env_load_defs(void) {
+static void env_load_defs(int top) {
   static int reg_n = 0;                     /* defs whose free variables are already counted */
   for (int i = reg_n; i < ndefs; i++) if (defs[i].typed) count_free(&defs[i].sch);
   reg_n = ndefs;
-  if (TJ == &TJB) envn = 0;                 /* the reset is leak recovery, and only the outermost check may do it */
+  if (top) envn = 0;                        /* the reset is leak recovery, and only the outermost check may do it */
 }
 
 /* DEFERRED to the first reference: defs precede their uses, so the graph is a DAG; typing the 591 prelude defs is
@@ -259,15 +259,15 @@ static void def_type(Def *d) {
 }
 
 int type_check(Term *t, Scheme *out, char *err, int errsz) {
-  jmp_buf jb, *sav = TJ; TJ = &jb;
+  jmp_buf jb, *sav = TJ; int top = TJ == &TJB; TJ = &jb;   /* only the OUTERMOST check may reset the binder stack */
   if (setjmp(jb)) { TJ = sav; snprintf(err, errsz, "%s", TMSG); return 0; }
-  env_load_defs(); *out = generalize(infer(t)); TJ = sav; return 1;
+  env_load_defs(top); *out = generalize(infer(t)); TJ = sav; return 1;
 }
 
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz) {
-  jmp_buf jb, *sav = TJ; TJ = &jb;
+  jmp_buf jb, *sav = TJ; int top = TJ == &TJB; TJ = &jb;   /* only the OUTERMOST check may reset the binder stack */
   if (setjmp(jb)) { TJ = sav; snprintf(err, errsz, "%s", TMSG); return 0; }
-  env_load_defs(); Type *a = tvar(); env_push(name, (Scheme){.nq = 0, .t = a});
+  env_load_defs(top); Type *a = tvar(); env_push(name, (Scheme){.nq = 0, .t = a});
   unify(a, infer(body)); envn--; *out = generalize(a); TJ = sav; return 1;
 }
 

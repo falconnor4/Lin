@@ -31,16 +31,24 @@
 #include "../../src/lin.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 static double *tab;
 static int ntab, ctab;
+static atomic_flag vlock = ATOMIC_FLAG_INIT;
 
+/* This driver is reachable from a PARALLEL reduction: the wave path fires disjoint interactions on
+   several threads, so one worker can box a float (append -> growth) while another unboxes one.  Growth
+   therefore ALLOCATES A FRESH BLOCK and leaves the old one alive, and only the append takes the lock:
+   readers stay lock-free -- the pointer they read can be superseded but never freed, which is what a
+   `realloc` that MOVES the table would do to the block a reader is about to read. */
 static int reserve(int need) {
   if (need <= ctab) return 1;
   int c = ctab ? ctab : 64;
   while (c < need) c *= 2;
-  double *t = realloc(tab, (size_t)c * sizeof(double));
+  double *t = malloc((size_t)c * sizeof(double));
   if (!t) return 0;
+  if (tab && ntab) memcpy(t, tab, (size_t)ntab * sizeof(double));
   tab = t; ctab = c;
   return 1;
 }
@@ -49,10 +57,14 @@ static int reserve(int need) {
    a spliced one) must keep meaning what it meant. */
 static int append(const double *d, int n) {
   if (n <= 0) return ntab;
-  if (!reserve(ntab + n)) return -1;
-  int first = ntab;
-  memcpy(tab + ntab, d, (size_t)n * sizeof(double));
-  ntab += n;
+  while (atomic_flag_test_and_set(&vlock)) { }
+  int first = -1;
+  if (reserve(ntab + n)) {
+    first = ntab;
+    memcpy(tab + ntab, d, (size_t)n * sizeof(double));
+    ntab += n;
+  }
+  atomic_flag_clear(&vlock);
   return first;
 }
 

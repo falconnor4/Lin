@@ -6,6 +6,9 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#include <pthread.h>
+#include <stdatomic.h>
+#include <sched.h>
 
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
 #define NONE ((Port){-1, 0})
@@ -269,6 +272,7 @@ void lin_fold_bump(void) { __atomic_add_fetch(&fold_count, 1, __ATOMIC_RELAXED);
 long lin_fold_total(void) { return fold_count; }
 
 typedef struct { Port *p; int top, cap; } ActBuf;
+static __thread int my_tid;   /* 0 = a caller thread, i = pool worker i (the pool is not OpenMP) */
 static ActBuf *t_act;
 static int n_tact;
 
@@ -429,7 +433,7 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
   if (enqueue && a.port == 0 && b.port == 0) {
 #ifdef _OPENMP
     if (in_parallel) {
-      int tid = omp_get_thread_num();
+      int tid = my_tid;
       if (t_act[tid].top + 2 > t_act[tid].cap)
         t_act[tid].p = realloc(t_act[tid].p, (size_t)(t_act[tid].cap = t_act[tid].cap ? t_act[tid].cap * 2 : 256) * sizeof(Port));
       t_act[tid].p[t_act[tid].top++] = a; t_act[tid].p[t_act[tid].top++] = b;
@@ -588,19 +592,13 @@ int net_interact(Net *n, Port p1, Port p2) {
   return 0; /* era or stuck gauge pair: dropped, as in the reference */
 }
 
-/* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING.  A `.line` container
-   stores ALL nodes and an evaluation leaves far more dead intermediates than live ones: without this the
-   baked artifact came out ~2x LARGER than the un-evaluated one (474 KB vs 224 KB).
-   Reachability starts from ALL the anchors, not ROOT alone: under needed order the result is often nowhere
-   near node 0 (readback registers the port it is forcing as a demand root, and a wave's queued pairs are
-   live work whether anything demands them yet) -- measured on test/sudoku.lin, 3 of 14426 live nodes are
-   reachable from ROOT alone.  The unreachable nodes go on a free list reused by net_alloc, so an index stays
-   valid and an external handle (a memo key, a port readback holds, a driver's reference) stays safe
-   -- AND THAT IS WHY IT IS SOUND: wires are the only pointers and the mark follows them out of every
-   reachable node, so an unreachable node is pointed at by NOTHING reachable, and a stale one-sided wire
-   ("dangle") is merely conservative here where compaction rewrote it to NONE, destroying what it
-   expressed.  SAFEPOINT: reclaiming only when reduce_depth == 1 and nothing is pinned keeps "no handle is
-   held" true by construction (see net_reduce_body for both measurements). */
+/* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING.  Reachability starts
+   from ALL the anchors, not ROOT alone: under needed order the result is often nowhere near node 0, and a
+   wave's queued pairs are live work whether anything demands them yet.  The unreachable nodes go on a free
+   list reused by net_alloc, so an index stays valid and a handle (a memo key, a port readback holds, a
+   driver's reference) stays safe -- wires are the only pointers and the mark follows them out of every
+   reachable node.  SAFEPOINT: reclaiming only when reduce_depth == 1 and nothing is pinned keeps "no handle
+   is held" true by construction. */
 void net_gc(Net *n) {
   if (n->nn <= 1) return;
   unsigned char *reach = calloc((size_t)n->nn + 1, 1);
@@ -946,20 +944,11 @@ int lin_driver_aot(Net *n, const Term *t, const Scheme *sch) {
 }
 
 /* ---------------- needed order ----------------
-   A redex is reduced only when the value the caller observes needs it: `net_mark_demand` walks from the
-   demand roots -- ROOT plus every port lin_demand/net_force registered -- along the paths a weak head
-   normal form of those ports runs through:
-
-     ROOT          -> its wire (the result)
-     APP   port 1  -> port 0 (a demanded result demands its function)
-     APP   port 2  -> its wire (a demanded application's argument)
-     DUP   port 1/2-> port 0 (a use of a shared value demands the sharing point)
-     LAM   port 0  -> WHNF: stop, UNLESS a principal faces it, which is the redex to fire
-     APP/DUP p. 0  -> same: a facing principal is a redex, otherwise stop
-     LAM   port 2  -> stop: a lambda's body is a thunk until it is applied
-
-   No rule changes: the filter decides WHICH active pairs are in a wave, and a pair off the demand path
-   stays queued in `act`, which is what makes a cycle reduce when the recursive call is demanded. */
+   A redex is reduced only when the value the caller observes needs it: `net_mark_demand` walks from the demand
+   roots (ROOT plus every port lin_demand/net_force registered) along the paths a weak head normal form of
+   those ports runs through: APP 1->0 and 2->its wire; DUP 1/2->0; LAM/APP/DUP port 0 stops unless a principal
+   faces it (that facing pair is the redex).  No rule changes: a pair off the demand path stays queued in
+   `act`, which is what makes a cycle reduce when the recursive call is demanded. */
 /* `v` just became marked: if the pair it is queued in has its other end marked too, this wave demands it -- emit
    it out of `act`.  MUST be queued: the walk reaches thunk interiors, where firing a never-enqueued pair unrolls a knot. */
 static void dem_put(Net *n, int v) {
@@ -1046,6 +1035,40 @@ static inline int redex_live(Net *n, Port p1, Port p2) {
 /* Frontier scratch: grown, never freed per wave (a driver may hold a wave for a long time). */
 static Pair *inter, *bound;
 static int fw_cap;
+static int redex_live(Net *n, Port a, Port b);
+int net_interact(Net *n, Port p1, Port p2);
+
+/* A PERSISTENT pool for the wave's vetted-disjoint pairs: the footprint test still picks mutually disjoint
+   pairs, so no two workers touch a node -- it IS the node claim.  Started only when a wave passes the gate. */
+static pthread_t *wpool; static int wpool_n;
+static Pair *wq; static int wq_cap; static Net *wq_net;
+static atomic_int wq_n, wq_tail, wq_done, wq_changed, wq_gen;
+
+static void *wave_worker(void *arg) {
+  my_tid = (int)(intptr_t)arg;
+  int seen = 0, i;
+  for (;;) {
+    if (atomic_load_explicit(&wq_gen, memory_order_acquire) == seen) {
+      for (int r = 0; r < 64; r++) __asm__ __volatile__("pause");
+      sched_yield();
+      continue;
+    }
+    seen = atomic_load(&wq_gen);
+    while ((i = atomic_fetch_add(&wq_tail, 1)) < atomic_load(&wq_n)) {
+      Net *n = wq_net;
+      if (redex_live(n, wq[i].p1, wq[i].p2) && net_interact(n, wq[i].p1, wq[i].p2)) atomic_fetch_add(&wq_changed, 1);
+      atomic_fetch_add(&wq_done, 1);
+    }
+  }
+  return NULL;
+}
+static void wave_pool_start(int want) {
+  if (wpool_n || want < 2) return;
+  wpool_n = want - 1;
+  ensure_tact();
+  wpool = calloc((size_t)wpool_n, sizeof *wpool);
+  for (int i = 0; i < wpool_n; i++) pthread_create(&wpool[i], NULL, wave_worker, (void *)(intptr_t)(i + 1));
+}
 
 /* `LIN_WAVE_STATS` reports what the wave layer did.  A wave that fires nothing on the demand path is
    invisible in the program's output, so the report is the only way to see the WIDTH -- and the only way
@@ -1098,7 +1121,8 @@ static int pair_nb(const Net *n, Port p1, Port p2, int *o) {
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
 #ifdef _OPENMP
   ensure_tact();
-  int nth = omp_get_max_threads();
+  int want = omp_get_max_threads();
+  int nth = wpool_n ? wpool_n + 1 : want;
   int np = wave_cnt / 2;
 
 /* The threaded path pays only if the wave can GIVE as well as take.  A fork/join costs 2.4 us at 4
@@ -1107,6 +1131,8 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
    the join is repaid.  `wave_cnt >= 512` -- the old gate -- asked for 256 pairs and nothing in the
    corpus comes near it (the widest wave is ONE pair), which made the whole path dead code. */
   if (nth > 1 && np >= 4 * nth) {
+    wave_pool_start(want);   /* lazy: only a wave that reaches the gate pays for threads */
+    nth = wpool_n ? wpool_n + 1 : nth;
     /* grow-only scratch, so a wave performs no allocation at all */
     if (np > fw_cap) {
       fw_cap = np;
@@ -1133,15 +1159,17 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
     if (n_int > 0) {
       net_ensure_cap(n, n->nn + n_int * 4);
       in_parallel = 1; int batch_changed = 0;
-      /* Every pair here is disjoint from every other, so ANY schedule is correct; `dynamic` hands
-         the first `nth` iterations to `nth` different workers, which is the point -- the sector form
-         put a whole bucket (up to a dozen accepted pairs) on one worker, as little as 0.12 effective
-         sectors a wave. */
-      #pragma omp parallel for reduction(+:batch_changed) schedule(dynamic)
-      for (int i = 0; i < n_int; i++)
-        if (redex_live(n, inter[i].p1, inter[i].p2))
-          if (net_interact(n, inter[i].p1, inter[i].p2)) batch_changed++;
-      in_parallel = 0; n->steps += n_int; *changed += batch_changed;
+      /* Disjoint pairs: any schedule is correct -- publish, take the next index (caller included), drain. */
+      if (n_int > wq_cap) { wq_cap = n_int; wq = realloc(wq, (size_t)wq_cap * sizeof *wq); }
+      memcpy(wq, inter, (size_t)n_int * sizeof *wq);
+      wq_net = n; atomic_store(&wq_n, n_int); atomic_store(&wq_changed, 0); atomic_store(&wq_done, 0); atomic_store(&wq_tail, 0);
+      atomic_fetch_add_explicit(&wq_gen, 1, memory_order_release);
+      for (int i = 0; (i = atomic_fetch_add(&wq_tail, 1)) < n_int; ) {
+        if (redex_live(n, wq[i].p1, wq[i].p2) && net_interact(n, wq[i].p1, wq[i].p2)) batch_changed++;
+        atomic_fetch_add(&wq_done, 1);
+      }
+      while (atomic_load(&wq_done) < n_int) sched_yield();
+      in_parallel = 0; n->steps += n_int; *changed += batch_changed + atomic_exchange(&wq_changed, 0);
       for (int t = 0; t < nth; t++) {
         for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
         t_act[t].top = 0;

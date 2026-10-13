@@ -13,52 +13,24 @@ static long long modpow(long long a, long long e) {
   return r;
 }
 
-/* GoI invariant: det(2I - A) mod p over the node-port adjacency */
+#define NXT(y) (n->wire[y].node < 0 ? -1 : n->wire[y].node * 3 + n->wire[y].port)
 long long goi_det(Net *n) {
   int d = n->nn * 3;
-  /* No node-count cap: the only real bound is the matrix itself, so ask for it and say so if the machine says no. */
-  long long *m = calloc((size_t)d * d, sizeof(long long));
-  if (!m) return -1;
-  for (int i = 0; i < d; i++) m[(size_t)i * d + i] = 2;
-  for (int i = 0; i < n->nn; i++)
-    for (int p = 0; p < 3; p++) {
-      Port w = n->wire[i * 3 + p];
-      if (w.node < 0) continue;
-      size_t rc = (size_t)(i * 3 + p) * d + w.node * 3 + w.port;
-      m[rc] = (m[rc] - 1 + MOD) % MOD;
-    }
-  long long det = 1;
+  int *mark = calloc((size_t)d, sizeof *mark);
+  long long det = 1; int tid = 0;
   for (int i = 0; i < d; i++) {
-    int piv = -1;
-    for (int j = i; j < d; j++)
-      if (m[(size_t)j * d + i]) {
-        piv = j;
-        break;
-      }
-    if (piv < 0) {
-      free(m);
-      return 0;
-    }
-    if (piv != i) {
-      for (int k = 0; k < d; k++) {
-        long long t = m[(size_t)i * d + k];
-        m[(size_t)i * d + k] = m[(size_t)piv * d + k];
-        m[(size_t)piv * d + k] = t;
-      }
-      det = (MOD - det) % MOD;
-    }
-    long long pv = m[(size_t)i * d + i];
-    det = det * pv % MOD;
-    long long inv = modpow(pv, MOD - 2);
-    for (int j = i + 1; j < d; j++) {
-      long long f = m[(size_t)j * d + i] * inv % MOD;
-      if (!f) continue;
-      for (int k = i; k < d; k++)
-        m[(size_t)j * d + k] =
-            (m[(size_t)j * d + k] - f * m[(size_t)i * d + k] % MOD + MOD) %
-            MOD;
+    if (mark[i]) continue;
+    tid++;
+    int k = 0, x = i;
+    while (x >= 0 && mark[x] == 0) { mark[x] = tid; k++; x = NXT(x); }
+    if (x >= 0 && mark[x] == tid) {                    /* this trail closes on itself: a cycle of length c */
+      int c = 1; for (int y = NXT(x); y != x; y = NXT(y)) c++;
+      for (int y = x; ; ) { mark[y] = -1; y = NXT(y); if (y == x) break; }
+      det = det * modpow(2, k - c) % MOD * ((modpow(2, c) - 1 + MOD) % MOD) % MOD;
+    } else {
+      det = det * modpow(2, k) % MOD;                  /* a path, or a chain merging into a counted part */
     }
   }
-  free(m);
+  free(mark);
   return det;
 }
