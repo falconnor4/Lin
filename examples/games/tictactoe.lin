@@ -1,0 +1,85 @@
+; ==============================================================================
+; tictactoe.lin  —  a game with a live opponent, played out square by square
+; ------------------------------------------------------------------------------
+; Property:  the whole game is a fold over immutable state, and the opponent is
+; pure.  The board is nine numerals (0 empty, 1 X, 2 O) in a flat list; the
+; referee reads the eight winning lines out of the board; the opponent tests
+; each line's three cells directly -- take the win, else block, else take the
+; first free square in preference order (centre, corners, edges).  Nothing is
+; mutated, nothing is random, and X's moves are fixed, so the game below is one
+; normal form that examples/run_verifier.sh checks line by line.
+;
+;   Run it:  ./lin examples/games/tictactoe.lin
+;
+; Shape notes, learned the hard way:
+;   * The numeral 0 prints as `(\a (\b a))`, not `0`.  Numerals 1..n print as
+;     digits.  So anything that can be zero is named before printing: cells go
+;     through `g_sym`, the verdict through `g_name`, and square numbers are
+;     printed 1-based with `(add sq 1)`.
+;   * A def whose result type is an IO effect cannot be self-recursive
+;     (`error: infinite type`), so the game is a chain of plies, not a loop.
+;   * The opponent is instant on a board built from a few chained `g_put`s, but on
+;     one five or more deep it does not finish -- a lazy-chain blow-up.  The open
+;     item is to hand the opponent a flat literal board (or fold the position),
+;     which is why the transcript below stops after the block, one ply short of
+;     the win O is setting up on its diagonal.
+;   * The opponent must not rebuild the board per candidate square: a scan that
+;     calls the referee on `(put b i v)` for every i hangs.  Testing each line's
+;     cells directly, with list scans that return an index, is instant.
+; ==============================================================================
+(load "std/std.lin")
+
+(define g_empty (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 (cons 0 nil))))))))))
+(define g_put (\b (\i (\v (if (eq i 0) (cons v (tail b)) (cons (head b) (g_put (tail b) (sub i 1) v)))))))
+(define g_map (\f (\l (if (is_empty l) nil (cons (f (head l)) (g_map f (tail l)))))))
+(define g_firstnz (\l (if (is_empty l) 0 (if (eq (head l) 0) (g_firstnz (tail l)) (head l)))))
+(define g_lines (cons (list3 0 1 2) (cons (list3 3 4 5) (cons (list3 6 7 8) (cons (list3 0 3 6) (cons (list3 1 4 7) (cons (list3 2 5 8) (cons (list3 0 4 8) (cons (list3 2 4 6) nil)))))))))
+(define g_same3v (\b (\l (if (eq (nth (nth 0 l) b) (nth (nth 1 l) b)) (if (eq (nth (nth 1 l) b) (nth (nth 2 l) b)) (nth (nth 0 l) b) 0) 0))))
+(define g_winner (\b (g_firstnz (g_map (g_same3v b) g_lines))))
+(define g_sym (\c (if (eq c 0) "." (if (eq c 1) "X" "O"))))
+(define g_name (\c (if (eq c 0) "nobody" (if (eq c 1) "X" "O"))))
+(define g_cell (\b (\i (str_concat " " (str_concat (g_sym (nth i b)) " ")))))
+(define g_row (\b (\i (\j (\k (str_concat (g_cell b i) (str_concat (g_cell b j) (str_concat (g_cell b k) "\n"))))))))
+(define g_board (\b (str_concat (g_row b 0 1 2) (str_concat (g_row b 3 4 5) (g_row b 6 7 8)))))
+; the opponent reads each line's three cells directly -- no board is rebuilt
+(define g_win_sq (\b (\v (\l (if (eq (nth (nth 0 l) b) v) (if (eq (nth (nth 1 l) b) v) (if (eq (nth (nth 2 l) b) 0) (nth 2 l) 9) (if (eq (nth (nth 2 l) b) v) (if (eq (nth (nth 1 l) b) 0) (nth 1 l) 9) 9)) (if (eq (nth (nth 1 l) b) v) (if (eq (nth (nth 2 l) b) v) (if (eq (nth (nth 0 l) b) 0) (nth 0 l) 9) 9) 9))))))
+(define g_first_sq (\b (\v (\l (if (is_empty l) 9 (if (eq (g_win_sq b v (head l)) 9) (g_first_sq b v (tail l)) (g_win_sq b v (head l))))))))
+(define g_prefs (cons 4 (cons 0 (cons 2 (cons 6 (cons 8 (cons 1 (cons 3 (cons 5 (cons 7 nil))))))))))
+(define g_free (\b (\l (if (is_empty l) 9 (if (eq (nth (head l) b) 0) (head l) (g_free b (tail l)))))))
+(define g_ai (\b (\me (\you (if (lt (g_first_sq b me g_lines) 9) (g_first_sq b me g_lines) (if (lt (g_first_sq b you g_lines) 9) (g_first_sq b you g_lines) (g_free b g_prefs)))))))
+; X plays 1, 2, 8; the last is a blunder and O takes its diagonal
+(define b1 (g_put g_empty 0 1))
+(define o1 (g_ai b1 2 1))
+(define b2 (g_put b1 o1 2))
+(define b3 (g_put b2 1 1))
+(define o2 (g_ai b3 2 1))
+(define b4 (g_put b3 o2 2))
+(define b5 (g_put b4 7 1))
+
+(io_print "X opens on square 1:\n" (io_print (g_board b1) io_done))
+(io_print "O answers on square " (io_print (add o1 1) (io_print ":\n" (io_print (g_board b2) io_done))))
+(io_print "X threatens the top row from square 2:\n" (io_print (g_board b3) io_done))
+(io_print "O blocks on square " (io_print (add o2 1) (io_print ":\n" (io_print (g_board b4) io_done))))
+(io_print "X blunders on square 8 -- O now owns two of the diagonal:\n" (io_print (g_board b5) io_done))
+
+; --- the transcript above, machine-checked -- one expect per non-empty stdout line
+; expect X opens on square 1:
+; expect  X  .  . 
+; expect  .  .  . 
+; expect  .  .  . 
+; expect O answers on square 5:
+; expect  X  .  . 
+; expect  .  O  . 
+; expect  .  .  . 
+; expect X threatens the top row from square 2:
+; expect  X  X  . 
+; expect  .  O  . 
+; expect  .  .  . 
+; expect O blocks on square 3:
+; expect  X  X  O 
+; expect  .  O  . 
+; expect  .  .  . 
+; expect X blunders on square 8 -- O now owns two of the diagonal:
+; expect  X  X  O 
+; expect  .  O  . 
+; expect  .  X  . 
