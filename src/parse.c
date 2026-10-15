@@ -95,13 +95,12 @@ static int isfloat(const char *s) {
 }
 
 static Term *scott(long k) { int w = 1; while ((k >> w) != 0 && w < 62) w++;
-  Term *nil = term_new(TLAM, "c", term_new(TLAM, "n", term_new(TLAM, "x", term_new(TVAR, "x", 0, 0), 0), 0), 0), *cur = nil;
-  for (int b = w - 1; b >= 0; b--) {
-    Term *bit = term_new(TLAM, "t", term_new(TLAM, "f", term_new(TVAR, ((k >> b) & 1) ? "t" : "f", 0, 0), 0), 0);
-    Term *cell = term_new(TLAM, "h", term_new(TLAM, "t", term_new(TLAM, "c", term_new(TLAM, "n", term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "c", 0, 0), term_new(TVAR, "h", 0, 0)), term_new(TVAR, "t", 0, 0)), 0), 0), 0), 0);
-    cur = term_new(TAPP, "", term_new(TAPP, "", cell, bit), cur);
-  }
-  return cur; }
+  Term *cur = term_new(TVAR, "list.nil", 0, 0);
+  for (int b = w - 1; b >= 0; b--)
+    cur = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "list.cons", 0, 0),
+          term_new(TVAR, ((k >> b) & 1) ? "bool.true" : "bool.false", 0, 0)), cur);
+  return cur;
+}
 
 static Term *parse_term(void);
 
