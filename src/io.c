@@ -219,17 +219,17 @@ int net_read_float(Net *n, Port p, double *out) {
 
 /* ---------------- the encodings' builders (net structure, not policy) ---------------- */
 static Port alloc_scott(Net *n, long k) {
-  Scope sc = scope_nil(); Port cur = (Port){-1, 0};
-  for (long i = 0; i <= k; i++) {
-    Port sz = net_alloc(n, LAM, sc), ss = net_alloc(n, LAM, sc);
-    net_link(n, (Port){sz.node, 2}, (Port){ss.node, 0}, 0);
-    if (i == 0) net_link(n, (Port){ss.node, 2}, (Port){sz.node, 1}, 0);
-    else {
-      Port app = net_alloc(n, APP, sc);
-      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0); net_link(n, (Port){app.node, 2}, cur, 0);
-      net_link(n, (Port){ss.node, 2}, (Port){app.node, 1}, 0);
-    }
-    cur = (Port){sz.node, 0};
+  Scope sc = scope_nil();
+  Port nl = net_alloc(n, LAM, sc), n2 = net_alloc(n, LAM, sc), cur;
+  net_link(n, (Port){nl.node, 2}, (Port){n2.node, 0}, 0); cur = (Port){nl.node, 0};
+  int w = 1; while ((k >> w) != 0 && w < 62) w++;
+  for (int b = w - 1; b >= 0; b--) {
+    Port bit = net_alloc_bool(n, (int)((k >> b) & 1));
+    Port h = net_alloc(n, LAM, sc), t = net_alloc(n, LAM, sc), in = net_alloc(n, APP, sc), ou = net_alloc(n, APP, sc);
+    net_link(n, (Port){h.node, 2}, (Port){t.node, 0}, 0);   net_link(n, (Port){t.node, 2}, (Port){ou.node, 1}, 0);
+    net_link(n, (Port){ou.node, 0}, (Port){in.node, 1}, 0); net_link(n, (Port){ou.node, 2}, cur, 0);
+    net_link(n, (Port){in.node, 0}, bit, 0);                net_link(n, (Port){in.node, 2}, (Port){t.node, 1}, 0);
+    cur = (Port){h.node, 0};
   }
   return cur;
 }
