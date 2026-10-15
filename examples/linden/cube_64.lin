@@ -1,0 +1,31 @@
+; ==============================================================================
+; linden/cube.lin  —  Linden: a 3D wireframe renderer
+; ------------------------------------------------------------------------------
+; Eight vertices, twelve edges, and ONE call for the whole run.  `lin_fs<name>` is the bulk-call
+; convention stated in std/drivers/readback.c beside the `lin_f` float family: every operand a
+; float, the result a string.  The mesh is parsed once (it is data, and it does not change per
+; frame); the rasteriser then renders N frames per dispatch, so the per-frame cost is the
+; driver's compiled work and nothing else -- the marshalling that made this 87 ms/frame when a
+; frame was a call is gone.
+;
+; The four goals:
+;   1. core LOC         -- no core line changed; the rasteriser is a driver (std/drivers/linden.c).
+;   2. parallel/optimal -- the mesh is one net and nothing is re-derived per frame; a frame is an
+;                         independent term, so the machinery may reduce them in any order.
+;   3. pure core        -- the core knows nothing of meshes, pixels or cameras: a call by name
+;                         convention, a string back.
+;   4. drivers          -- all of the rendering, compiled, with the per-row edge rejection the
+;                         naive C reference does not have.
+;
+;   Run it:  LIN_STD_DIR=$PWD/std ./lin linden/cube.lin
+; ==============================================================================
+(set_driver "linden")
+
+(define l_head (cons (float "32.0") (cons (float "16.0") (cons (float "8.0") (cons (float "12.0") (cons (float "0.0") (cons (float "0.3") (cons (float "64.0") nil))))))))
+(define l_mesh (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "0.0") (cons (float "1.0") (cons (float "0.0") (cons (float "2.0") (cons (float "1.0") (cons (float "3.0") (cons (float "2.0") (cons (float "3.0") (cons (float "4.0") (cons (float "5.0") (cons (float "4.0") (cons (float "6.0") (cons (float "5.0") (cons (float "7.0") (cons (float "6.0") (cons (float "7.0") (cons (float "0.0") (cons (float "4.0") (cons (float "1.0") (cons (float "5.0") (cons (float "2.0") (cons (float "6.0") (cons (float "3.0") (cons (float "7.0") nil)))))))))))))))))))))))))))))))))))))))))))))))))
+(define l_app (\a (\b (if (is_empty a) b (cons (head a) (l_app (tail a) b))))))
+
+(io_print (ccall "lin_fs_linden_frame" (l_app l_head l_mesh)) io_done)
+(define l_args (cons (float "32.0") (cons (float "16.0") (cons (float "8.0") (cons (float "12.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "0.0") (cons (float "1.0") (cons (float "0.0") (cons (float "2.0") (cons (float "1.0") (cons (float "3.0") (cons (float "2.0") (cons (float "3.0") (cons (float "4.0") (cons (float "5.0") (cons (float "4.0") (cons (float "6.0") (cons (float "5.0") (cons (float "7.0") (cons (float "6.0") (cons (float "7.0") (cons (float "0.0") (cons (float "4.0") (cons (float "1.0") (cons (float "5.0") (cons (float "2.0") (cons (float "6.0") (cons (float "3.0") (cons (float "7.0") (cons (float "0.0") (cons (float "0.3") (cons (float "64.0") nil))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+(io_print (ccall "lin_fs_linden_frame" l_args) io_done)

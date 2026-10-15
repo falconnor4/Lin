@@ -1,0 +1,9 @@
+; Linden - the engine as a plugin of its own, loaded BY PATH and registered.
+; load_lib dlopens it (RTLD_GLOBAL); set_driver then finds its lin_linden_driver and registers it.
+(load "std/std.lin")
+(load_lib "./linden/linden.so")
+(set_driver "linden")
+; one frame, no window (entry: ... t0 dt frames at)
+(define s_args (cons (float "320.0") (cons (float "240.0") (cons (float "8.0") (cons (float "12.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "-1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "1.0") (cons (float "0.0") (cons (float "1.0") (cons (float "0.0") (cons (float "2.0") (cons (float "1.0") (cons (float "3.0") (cons (float "2.0") (cons (float "3.0") (cons (float "4.0") (cons (float "5.0") (cons (float "4.0") (cons (float "6.0") (cons (float "5.0") (cons (float "7.0") (cons (float "6.0") (cons (float "7.0") (cons (float "0.0") (cons (float "4.0") (cons (float "1.0") (cons (float "5.0") (cons (float "2.0") (cons (float "6.0") (cons (float "3.0") (cons (float "7.0") (cons (float "0") (cons (float "0") (cons (float "1.0") (cons (float "0.9") nil)))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+(ccall "lin_fp_linden_ppm" s_args)

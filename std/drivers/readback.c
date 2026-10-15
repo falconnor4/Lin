@@ -337,6 +337,16 @@ static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val
     if (!strcmp(fn, "getenv") && argc > 0) { char *ev = getenv((char *)c_args[0]); v.kind = 2; v.sv = ev ? ev : "(null)"; return v; }
   }
   if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
+  /* A `lin_fs` call: like the `lin_f` float family above (its operands are floats), except the
+     result is a STRING -- the caller's own buffer, which a bulk call needs to answer a whole
+     frame/table/scan in ONE dispatch instead of a fold per element.  The name states the
+     signature, exactly as `lin_f` does; nothing here knows what the call means. */
+  if (!strncmp(fn, "lin_fs", 6)) {
+    void *bsym = dlsym(RTLD_DEFAULT, fn);
+    if (!bsym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
+    v.kind = 2; v.sv = (char *)(intptr_t)dyn_call(bsym, argc, c_args, fargs);
+    return v;
+  }
   fflush(stdout); void *sym = dlsym(RTLD_DEFAULT, fn);
   if (!sym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
   v.kind = 1; v.iv = dyn_call(sym, argc, c_args, fargs);

@@ -169,15 +169,17 @@ static int enc_layer(Net *n, Port p, int enc, Layer *out) {
 
 /* How many INDUCTIVE layers from `p` down to the encoding's terminal: a numeral's value, a list's
    length, and for BOOL 1 (select-first, TRUE) or 0 (select-second).  -1 when `p` is not that encoding. */
+/* A numeral is one of two ways, told by structure: a cons spine of raw booleans (a bit-chain, O(log n)) or a lambda tower (the Scott numeral, O(n)). Cells mean bits. */
+long net_read_bits(Net *n, Port p) { long a = 0; int k = 0; Layer L; while (k < n->nn && cons_layer(n, p, &L) && L.layer == L_INDUCTIVE) { long b = net_read_int(n, L.head, LIN_ENC_BOOL); if (b < 0) break; a |= (b & 1) << k++; p = L.tail; } return k ? a : -1; }
 long net_read_int(Net *n, Port p, int enc) {
+  if (enc == LIN_ENC_NUM) { long v = net_read_bits(n, p); if (v >= 0) return v; }   /* bit-chain, else the tower */
   long count = 0;
   for (int step = 0; step < n->nn; step++) {
     Layer L;
     if (!enc_layer(n, p, enc, &L)) return -1;
     if (enc == LIN_ENC_BOOL) return L.layer == L_TERMINAL;
     if (L.layer != L_INDUCTIVE) return count;
-    count++;
-    p = L.tail;
+    count++; p = L.tail;
   }
   return -1;
 }
@@ -224,8 +226,7 @@ static Port alloc_scott(Net *n, long k) {
     if (i == 0) net_link(n, (Port){ss.node, 2}, (Port){sz.node, 1}, 0);
     else {
       Port app = net_alloc(n, APP, sc);
-      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0);
-      net_link(n, (Port){app.node, 2}, cur, 0);
+      net_link(n, (Port){app.node, 0}, (Port){ss.node, 1}, 0); net_link(n, (Port){app.node, 2}, cur, 0);
       net_link(n, (Port){ss.node, 2}, (Port){app.node, 1}, 0);
     }
     cur = (Port){sz.node, 0};
@@ -272,8 +273,7 @@ long net_peel_index(Net *n, Port p) {
 
 Port net_alloc_bool(Net *n, int val) {
   Scope sc = scope_nil(); Port bt = net_alloc(n, LAM, sc), bf = net_alloc(n, LAM, sc);
-  net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0);
-  net_link(n, (Port){bf.node, 2}, (Port){val ? bt.node : bf.node, 1}, 0);
+  net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0); net_link(n, (Port){bf.node, 2}, (Port){val ? bt.node : bf.node, 1}, 0);
   return (Port){bt.node, 0};
 }
 

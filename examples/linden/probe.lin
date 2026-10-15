@@ -1,0 +1,66 @@
+; ==============================================================================
+; linden/cube.lin  —  Linden: a 3D wireframe renderer for the terminal
+; ------------------------------------------------------------------------------
+; Linden is a 3D engine written in Lin, so it inherits the four properties the
+; engine is built for:
+;
+;   1. The maths is the language: vertices, the rotation, the projection and the
+;      mask are terms, not an interpreter -- there is no scene graph to walk and
+;      no per-pixel loop over an array.  The frame is a fold from geometry to a
+;      string of characters.
+;   2. It is inherently parallel: each of the twelve edges' cell tests is an
+;      independent term, and the engine's own wave machinery may reduce them in
+;      any order -- the shared camera constants are one net, so the rotation and
+;      the projection happen once per vertex however many cells read them.
+;   3. The core stays pure: no floats, no screen, no Z-buffer live in Lin's core;
+;      the projection is multiplexing of the primitives the core already had.
+;   4. Every optimisation is a driver's: `fadd`, `fmul`, `fdiv`, `fsin`, `fcos`
+;      and `flt` are FFI calls folded by the float driver, so the whole pipeline
+;      runs at the driver's speed with the core untouched.
+;
+;   Run it:  ./lin linden/cube.lin
+;
+; The cube is eight vertices and twelve edges; the camera is a rotation about Y
+; by `t` with a fixed tilt, and a perspective divide.  A cell lights up when it
+; is within half a pixel of some edge's segment -- no raster loop, no state.
+; ==============================================================================
+(load "std/std.lin")
+(define l_verts (cons (list3 (float "-1.0") (float "-1.0") (float "-1.0")) (cons (list3 (float "1.0") (float "-1.0") (float "-1.0")) (cons (list3 (float "-1.0") (float "1.0") (float "-1.0")) (cons (list3 (float "1.0") (float "1.0") (float "-1.0")) (cons (list3 (float "-1.0") (float "-1.0") (float "1.0")) (cons (list3 (float "1.0") (float "-1.0") (float "1.0")) (cons (list3 (float "-1.0") (float "1.0") (float "1.0")) (cons (list3 (float "1.0") (float "1.0") (float "1.0")) nil)))))))))
+(define l_edges (cons (list2 0 1) (cons (list2 0 2) (cons (list2 1 3) (cons (list2 2 3) (cons (list2 4 5) (cons (list2 4 6) (cons (list2 5 7) (cons (list2 6 7) (cons (list2 0 4) (cons (list2 1 5) (cons (list2 2 6) (cons (list2 3 7) nil)))))))))))))
+(define l_xs (cons 0 (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 (cons 6 (cons 7 (cons 8 (cons 9 (cons 10 (cons 11 (cons 12 (cons 13 (cons 14 (cons 15 (cons 16 (cons 17 (cons 18 (cons 19 (cons 20 (cons 21 (cons 22 (cons 23 (cons 24 (cons 25 (cons 26 (cons 27 (cons 28 (cons 29 (cons 30 (cons 31 nil)))))))))))))))))))))))))))))))))
+(define l_ys (cons 0 (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 (cons 6 (cons 7 (cons 8 (cons 9 (cons 10 (cons 11 (cons 12 (cons 13 (cons 14 (cons 15 nil)))))))))))))))))
+(define l_app (\a (\b (if (is_empty a) b (cons (head a) (l_app (tail a) b))))))
+(define l_map (\f (\l (if (is_empty l) nil (cons (f (head l)) (l_map f (tail l)))))))
+(define l_zero (float "0.0"))
+(define l_one (float "1.0"))
+(define l_q (float "0.25"))
+(define l_d (float "4.0"))
+(define l_sc (float "26.0"))
+(define l_asp (float "2.0"))
+(define l_cx (float "16.0"))
+(define l_cy (float "8.0"))
+(define l_proj (\p (list2 (fadd (fdiv (fmul (nth 0 p) l_sc) (fadd (nth 2 p) l_d)) l_cx) (fsub l_cy (fdiv (fmul (fmul (nth 1 p) l_sc) l_asp) (fadd (nth 2 p) l_d))))))
+(define l_ct (fcos (float "0.45")))
+(define l_st (fsin (float "0.45")))
+(define l_ry (\t (\v (list3 (fadd (fmul (nth 0 v) (fcos t)) (fmul (nth 2 v) (fsin t))) (nth 1 v) (fsub (fmul (nth 2 v) (fcos t)) (fmul (nth 0 v) (fsin t)))))))
+(define l_rx (\v (list3 (nth 0 v) (fsub (fmul (nth 1 v) l_ct) (fmul (nth 2 v) l_st)) (fadd (fmul (nth 1 v) l_st) (fmul (nth 2 v) l_ct)))))
+(define l_pts (\t (l_map (\v (l_proj (l_rx (l_ry t v)))) l_verts)))
+(define l_t (\x (\y (\ax (\ay (\bx (\by (fdiv (fadd (fmul (fsub x ax) (fsub bx ax)) (fmul (fsub y ay) (fsub by ay))) (fadd (fmul (fsub bx ax) (fsub bx ax)) (fmul (fsub by ay) (fsub by ay)))))))))))
+(define l_d2 (\x (\y (\ax (\ay (\bx (\by (fadd (fmul (fsub x (fadd ax (fmul (l_t x y ax ay bx by) (fsub bx ax)))) (fsub x (fadd ax (fmul (l_t x y ax ay bx by) (fsub bx ax))))) (fmul (fsub y (fadd ay (fmul (l_t x y ax ay bx by) (fsub by ay)))) (fsub y (fadd ay (fmul (l_t x y ax ay bx by) (fsub by ay)))))))))))))
+(define l_hit (\x (\y (\ax (\ay (\bx (\by (if (fleq l_zero (l_t x y ax ay bx by)) (if (fleq (l_t x y ax ay bx by) l_one) (if (flt (l_d2 x y ax ay bx by) l_q) 1 0) 0) 0))))))))
+(define l_ehit (\x (\y (\pts (\e (l_hit x y (nth 0 (nth (nth 0 e) pts)) (nth 1 (nth (nth 0 e) pts)) (nth 0 (nth (nth 1 e) pts)) (nth 1 (nth (nth 1 e) pts))))))))
+(define l_cell (\x (\y (\pts (\es (if (is_empty es) 0 (if (eq (l_ehit x y pts (head es)) 0) (l_cell x y pts (tail es)) 1)))))))
+(define l_ch (\x (\y (\pts (if (eq (l_cell x y pts l_edges) 0) 46 35)))))
+(define l_row (\y (\pts (\xs (if (is_empty xs) nil (cons (l_ch (head xs) y pts) (l_row y pts (tail xs))))))))
+(define l_rows (\ys (\pts (if (is_empty ys) nil (l_app (l_row (head ys) pts l_xs) (cons 10 (l_rows (tail ys) pts)))))))
+(define l_frame (\pts (l_rows l_ys pts)))
+
+
+(io_print "flt=" (io_print (flt l_zero l_one) (io_print "\n" io_done)))
+(io_print "if-flt=" (io_print (if (flt l_zero l_one) 1 0) (io_print "\n" io_done)))
+(io_print "proj0x=" (io_print (nth 0 (nth 0 (l_pts (float "0.0")))) (io_print "\n" io_done)))
+(io_print "proj0y=" (io_print (nth 1 (nth 0 (l_pts (float "0.0")))) (io_print "\n" io_done)))
+(io_print "proj4x=" (io_print (nth 0 (nth 4 (l_pts (float "0.0")))) (io_print "\n" io_done)))
+(io_print "e0ax=" (io_print (nth 0 (nth (nth 0 (head l_edges)) (l_pts (float "0.0")))) (io_print "\n" io_done)))
+(io_print "hit00=" (io_print (l_hit (float "16.0") (float "8.0") (float "1.0") (float "1.0") (float "5.0") (float "5.0")) (io_print "\n" io_done)))
+(io_print "cell=" (io_print (l_cell (float "10.0") (float "8.0") (l_pts (float "0.0")) l_edges) (io_print "\n" io_done)))

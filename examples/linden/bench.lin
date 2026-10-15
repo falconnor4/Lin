@@ -1,0 +1,5 @@
+(load "std/std.lin")
+(define b_one (float "1.0"))
+(define b_ops (cons (fadd b_one b_one) (cons (fmul b_one b_one) (cons (fdiv b_one b_one) (cons (fsin b_one) (cons (flt b_one b_one) nil))))))
+(define b_nth (\l (\i (if (eq i 0) (head l) (b_nth (tail l) (sub i 1)))))
+(io_print (b_nth b_ops 0) (io_print "\n" io_done))
