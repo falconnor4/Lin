@@ -27,12 +27,20 @@
 
 ; --- Core Scott Numeral Constructors & Destructors ---
 (define! zero num 0)
-(define succ (\n (ifl (list.is_empty n) (\_ (list.cons bool.true list.nil))
-  (\_ (ifl (list.head n) (\_ (list.cons bool.false (succ (list.tail n)))) (\_ (list.cons bool.true (list.tail n))))))))
-(define pred (\n (ifl (list.is_empty n) (\_ list.nil)
-  (\_ (ifl (list.head n) (\_ (list.cons bool.false (list.tail n)))
-    (\_ (ifl (list.is_empty (list.tail n)) (\_ n) (\_ (list.cons bool.true (pred (list.tail n)))))))))))
-(define is_zero (\n (ifl (list.is_empty n) (\_ bool.true) (\_ (ifl (list.head n) (\_ bool.false) (\_ (list.is_empty (list.tail n))))))))
+; The encoding's OWN projections -- the same shapes std/list.lin uses, without its typed
+; surface: a numeral is a chain of booleans, so it reads itself rather than borrowing the list API.
+(define hd     (\l ((l (\h (\t h))) 0)))
+(define tl     (\l ((l (\h (\t t))) 0)))
+(define empty? (\l ((l (\h (\t bool.false))) bool.true)))
+(define cons_  (\h (\t (\c (\n ((c h) t))))))
+(define nil_   (\c (\n bool.true)))
+
+(define succ (\n (ifl (empty? n) (\_ (cons_ bool.true nil_))
+  (\_ (ifl (hd n) (\_ (cons_ bool.false (succ (tl n)))) (\_ (cons_ bool.true (tl n))))))))
+(define pred (\n (ifl (empty? n) (\_ nil_)
+  (\_ (ifl (hd n) (\_ (cons_ bool.false (tl n)))
+    (\_ (ifl (empty? (tl n)) (\_ n) (\_ (cons_ bool.true (pred (tl n)))))))))))
+(define is_zero (\n (ifl (empty? n) (\_ bool.true) (\_ (ifl (hd n) (\_ bool.false) (\_ (empty? (tl n))))))))
 
 ; --- Church Numerals & Self-Iterating Folds ---
 (define c_zero (\f (\x x)))

@@ -86,14 +86,6 @@ static int lv_up(Net *n, int l) { return l ? n->lv_parent[l] : 0; }
 
 Scope scope_app(Net *n, Scope s, int bit) { return (Scope)lv_intern(n, (int)s, bit & 1); }
 /* is `a` a proper ancestor of `b`?  Used only for the nested-level case below. */
-static int scope_within(Net *n, Scope a, Scope b) {
-  if (!a || a == b) return 0;
-  int d = lv_depth(n, b) - lv_depth(n, a);
-  if (d <= 0) return 0;
-  int x = (int)b;
-  while (d-- > 0) x = lv_up(n, x);
-  return (Scope)x == a;
-}
 /* A deliberate divergence from `wave-opt-reduction`: main.hs labels a commuting copy with the two
    paths CONCATENATED, where this trie takes their lowest common ancestor.  Porting the concatenation
    changed no result and inflated the .line artifacts to 656 KB and 1.76 MB against their 300 KB bound
@@ -524,6 +516,30 @@ static void link_copies(Net *n, int n1, int n2, const Port *t, const int *cp) {
   for (int k = 0; k < 4; k++) if (!inside[k]) net_link(n, (Port){cp[k], 0}, t[k], 1);
 }
 
+/* The reference's commutation labels: path = [gen] ++ path(node) ++ path(dup), i.e. `1 : sLam ++ sDup`. */
+/* Is gauge a an ancestor-or-equal of gauge b?  The classical safety condition a duplication must satisfy:
+   a fan may only duplicate structure that lies INSIDE it (its gauge a prefix of the node's). */
+static int lvl_prefix_of(Net *n, Scope a, Scope b) {
+  int da = lv_depth(n, a), db = lv_depth(n, b), x = (int)b;
+  if (da > db) return 0;
+  for (int i = db; i > da; i--) x = n->lv_parent[x];
+  return x == (int)a;
+}
+static int lvl_path(Net *n, Scope s, unsigned char *out) {
+  int d = lv_depth(n, s), l = (int)s;
+  for (int i = d - 1; i >= 0; i--) { out[i] = n->lv_bit[l]; l = n->lv_parent[l]; }
+  return d;
+}
+static int lvl_prefix2(Net *n, int gen, Scope a, Scope b) {
+  int da = lv_depth(n, a), db = lv_depth(n, b), cur = lv_intern(n, 0, gen);
+  unsigned char *pa = malloc((size_t)(da > 0 ? da : 1)), *pb = malloc((size_t)(db > 0 ? db : 1));
+  if (!pa || !pb) { free(pa); free(pb); return (int)a; }   /* no room: keep the gauge rather than alias one */
+  lvl_path(n, a, pa); lvl_path(n, b, pb);
+  for (int i = 0; i < da; i++) cur = lv_intern(n, cur, pa[i]);
+  for (int i = 0; i < db; i++) cur = lv_intern(n, cur, pb[i]);
+  free(pa); free(pb);
+  return cur;
+}
 /* the four rules of the scope-gauge calculus; ERA is inert (era pairs are dropped) */
 static int lin_trace = -1; /* cached LIN_TRACE */
 
@@ -546,29 +562,8 @@ int net_interact(Net *n, Port p1, Port p2) {
   }
 
   if (t1 == DUP && t2 == DUP) {
-    if (!scope_eq(n, n->scope[n1], n->scope[n2])) {
-      /* Two fans with distinct levels meet: fans are copied by each other (the only alternatives
-         are annihilating two unrelated fans -- a wrong value -- or stranding the pair).  What differs
-         is the LEVEL the copies carry: d1,d2 split n1's value between n2's two uses and carry sb,
-         while m1,m2 carry sa.  Labels are compared only for equality, so a wrong one cannot
-         re-duplicate work -- but it can merge two distinct sharing points. */
-      Scope sa = n->scope[n1], sb = n->scope[n2];
-      Scope qa = sa, qb = sb;
-      /* NESTED levels -- one gauge a proper prefix of the other -- are the RECURSIVE sharing point
-         and take the ANCESTOR's level.  Without this case the fan duplicates the structure it came
-         from for ever (measured: no value in 16M steps), because it is the mechanism by which a
-         self-referential sharing point SHARES instead of unrolling. */
-      if (scope_within(n, sa, sb)) { qa = qb = sa; }
-      else if (scope_within(n, sb, sa)) { qa = qb = sb; }
-      Port t[4] = { WIRE(n, ((Port){n1, 1})), WIRE(n, ((Port){n1, 2})),
-                    WIRE(n, ((Port){n2, 1})), WIRE(n, ((Port){n2, 2})) };
-      int m1, m2, d1, d2;
-      split2(n, DUP, qa, qa, DUP, qb, &m1, &m2, &d1, &d2);
-      const int cp[4] = {d1, d2, m1, m2};
-      link_copies(n, n1, n2, t, cp);
-      retire(n, n1, n2);
-      return 1;
-    }
+    /* REFERENCE-FAITHFUL (main.hs has no other case): two fans whose gauges DIFFER are not a redex --
+       no rule fires, the pair is left as it is.  Only EQUAL gauges annihilate. */
     /* Annihilation is the correspondence {a1~b1, a2~b2} (1~4, 2~5) -- the same rewire, so the four
        branches that used to special-case two fans wired to each other are gone. */
     const int cor_a[2] = {1, 2}, cor_b[2] = {4, 5};
@@ -579,11 +574,11 @@ int net_interact(Net *n, Port p1, Port p2) {
 
   if ((t1 == LAM || t1 == APP) && t2 == DUP) {
     Scope sn = n->scope[n1], sd = n->scope[n2];
-    Scope sm = scope_meet(n, sn, sd);        /* the level the two histories share */
+    if (!lvl_prefix_of(n, sd, sn)) return 0;   /* SAFETY: a fan copies only what is inside it */
     Port t[4] = { WIRE(n, ((Port){n1, 1})), WIRE(n, ((Port){n1, 2})),
                   WIRE(n, ((Port){n2, 1})), WIRE(n, ((Port){n2, 2})) };
     int m1, m2, d1, d2;
-    split2(n, t1, scope_app(n, sm, 1), scope_app(n, sm, 2), DUP, sd, &m1, &m2, &d1, &d2);
+    split2(n, t1, lvl_prefix2(n, 1, sn, sd), lvl_prefix2(n, 2, sn, sd), DUP, sd, &m1, &m2, &d1, &d2);
     const int cp[4] = {d1, d2, m1, m2};
     link_copies(n, n1, n2, t, cp);
     retire(n, n1, n2);
@@ -1035,8 +1030,6 @@ static inline int redex_live(Net *n, Port p1, Port p2) {
 /* Frontier scratch: grown, never freed per wave (a driver may hold a wave for a long time). */
 static Pair *inter, *bound;
 static int fw_cap;
-static int redex_live(Net *n, Port a, Port b);
-int net_interact(Net *n, Port p1, Port p2);
 
 /* A PERSISTENT pool for the wave's vetted-disjoint pairs: the footprint test still picks mutually disjoint
    pairs, so no two workers touch a node -- it IS the node claim.  Started only when a wave passes the gate. */

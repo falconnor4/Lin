@@ -94,13 +94,6 @@ static int isfloat(const char *s) {
   return 1;
 }
 
-static Term *scott(long k) { int w = 1; while ((k >> w) != 0 && w < 62) w++;
-  Term *cur = term_new(TVAR, "list.nil", 0, 0);
-  for (int b = w - 1; b >= 0; b--)
-    cur = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "list.cons", 0, 0),
-          term_new(TVAR, ((k >> b) & 1) ? "bool.true" : "bool.false", 0, 0)), cur);
-  return cur;
-}
 
 static Term *parse_term(void);
 
@@ -166,7 +159,7 @@ static Term *parse_tail(Term *f) {
 }
 
 static Term *parse_atom(const char *kw) {
-  if (isnum(kw)) return scott(atol(kw));
+  if (isnum(kw)) { Term *t = term_new(TNUM, kw, NULL, NULL); return t; }
   if (isfloat(kw)) { Term *t = term_new(TFLOAT, kw, NULL, NULL); return t; }
   return term_new(TVAR, kw, NULL, NULL);
 }
@@ -196,7 +189,7 @@ static Term *parse_term(void) {
     P++;
     Term *body = term_new(TVAR, "list.nil", NULL, NULL);
     for (int i = dlen - 1; i >= 0; i--) {
-      Term *ch = scott(dec[i]);
+      char cb[8]; snprintf(cb, sizeof cb, "%d", dec[i]); Term *ch = term_new(TNUM, lin_intern(cb, strlen(cb)), NULL, NULL);
       body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "list.cons", NULL, NULL), ch), body);
     }
     return body;

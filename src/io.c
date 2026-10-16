@@ -172,7 +172,7 @@ static int enc_layer(Net *n, Port p, int enc, Layer *out) {
 /* A numeral is one of two ways, told by structure: a cons spine of raw booleans (a bit-chain, O(log n)) or a lambda tower (the Scott numeral, O(n)). Cells mean bits. */
 long net_read_bits(Net *n, Port p) { long a = 0; int k = 0; Layer L; while (k < n->nn && cons_layer(n, p, &L) && L.layer == L_INDUCTIVE) { long b = net_read_int(n, L.head, LIN_ENC_BOOL); if (b < 0) break; a |= (b & 1) << k++; p = L.tail; } return k ? a : -1; }
 long net_read_int(Net *n, Port p, int enc) {
-  if (enc == LIN_ENC_NUM) { long v = net_read_bits(n, p); if (v >= 0) return v; }   /* bit-chain, else the tower */
+  if (enc == LIN_ENC_NUM) return net_read_bits(n, p);   /* a numeral is a bit-chain; there is no tower to fall back to */
   long count = 0;
   for (int step = 0; step < n->nn; step++) {
     Layer L;
@@ -218,22 +218,26 @@ int net_read_float(Net *n, Port p, double *out) {
 }
 
 /* ---------------- the encodings' builders (net structure, not policy) ---------------- */
-static Port alloc_scott(Net *n, long k) {
-  Scope sc = scope_nil();
-  Port nl = net_alloc(n, LAM, sc), n2 = net_alloc(n, LAM, sc), cur;
+static Port alloc_scott(Net *n, long k, Scope lvl) {
+  Scope bl = scope_app(n, lvl, 1);
+  Port nl = net_alloc(n, LAM, lvl), n2 = net_alloc(n, LAM, bl), cur;
   net_link(n, (Port){nl.node, 2}, (Port){n2.node, 0}, 0); cur = (Port){nl.node, 0};
+  net_link(n, (Port){n2.node, 2}, net_alloc_bool(n, 1), 0);   /* NIL = `\c.\n.<value>`; the value is TRUE */
   int w = 1; while ((k >> w) != 0 && w < 62) w++;
   for (int b = w - 1; b >= 0; b--) {
+    Scope f = scope_app(n, lvl, 1), a = scope_app(n, lvl, 2);
     Port bit = net_alloc_bool(n, (int)((k >> b) & 1));
-    Port h = net_alloc(n, LAM, sc), t = net_alloc(n, LAM, sc), in = net_alloc(n, APP, sc), ou = net_alloc(n, APP, sc);
-    net_link(n, (Port){h.node, 2}, (Port){t.node, 0}, 0);   net_link(n, (Port){t.node, 2}, (Port){ou.node, 1}, 0);
-    net_link(n, (Port){ou.node, 0}, (Port){in.node, 1}, 0); net_link(n, (Port){ou.node, 2}, cur, 0);
-    net_link(n, (Port){in.node, 0}, bit, 0);                net_link(n, (Port){in.node, 2}, (Port){t.node, 1}, 0);
-    cur = (Port){h.node, 0};
+    Port c = net_alloc(n, LAM, f), nn = net_alloc(n, LAM, scope_app(n, f, 1));
+    Port in = net_alloc(n, APP, f), ou = net_alloc(n, APP, a);
+    net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 0);   net_link(n, (Port){nn.node, 2}, (Port){ou.node, 1}, 0);
+    net_link(n, (Port){ou.node, 0}, (Port){in.node, 1}, 0);  net_link(n, (Port){ou.node, 2}, cur, 0);
+    net_link(n, (Port){in.node, 0}, (Port){c.node, 1}, 0);   net_link(n, (Port){in.node, 2}, bit, 0);
+    cur = (Port){c.node, 0};
   }
   return cur;
 }
-Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k); }
+Port net_alloc_scott_at(Net *n, long k, Scope lvl) { return alloc_scott(n, k, lvl); }
+Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k, scope_nil()); }
 
 /* A BOXED INDEX: `\b0.\b1.(b0 (b1 i))` -- deliberately NOT the number encoding, which is what makes a
    box readable with no expectation at all (a numeral applies ONE binder per layer, a box BOTH). */
@@ -241,7 +245,7 @@ Port net_box_index(Net *n, long i) {
   Scope sc = scope_nil();
   Port a = net_alloc(n, LAM, sc), b = net_alloc(n, LAM, sc);
   Port ia = net_alloc(n, APP, sc), oa = net_alloc(n, APP, sc);
-  Port idx = alloc_scott(n, i);
+  Port idx = alloc_scott(n, i, scope_nil());
   net_link(n, (Port){a.node, 2}, (Port){b.node, 0}, 0);      /* a's body IS the second binder */
   net_link(n, (Port){b.node, 2}, (Port){oa.node, 1}, 0);     /* b's body is the outer application */
   net_link(n, (Port){oa.node, 0}, (Port){a.node, 1}, 0);     /* ... whose function is a's binder */

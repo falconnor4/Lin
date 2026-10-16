@@ -113,6 +113,7 @@ Port lin_node_of(void *ctx, const Term *t) {
 static Port ct_in(Term *t, Scope sc) {
   switch (t->type) {
   case TFLOAT: return net_alloc_float(N, strtod(t->name, NULL));
+  case TNUM: return net_alloc_scott_at(N, atol(t->name), fan_lvl());
   case TVAR: {
     for (int i = csp - 1; i >= 0; i--) {
       if (strcmp(cstack[i].name, t->name)) continue;
@@ -251,6 +252,7 @@ static int eg_opaque(int type) {
   case TDEF:
   case TDEFX:
   case TFLOAT:
+  case TNUM:
     return 1;
   default:
     return 0;

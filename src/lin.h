@@ -9,7 +9,7 @@
 enum { TVAR, TLAM, TAPP, TDEF, TDEFX, TLOAD, TNS, TOPEN, TDATATYPE, TFLOAT, TEXPORT,
        /* (let ((n v)) b): ONE net shared by every use of `n`, value included, so a use of
           `n` inside `v` closes a cycle.  That is recursion, and it needs no unrolling. */
-       TLET };
+       TLET , TNUM };
 typedef struct Type { int kind, id; struct Type *a, *b; const char *name; } Type;
 /* type-kinds (shared: type.c and the datatype processor in main.c use these) */
 enum { TVR, TARROW, TLINK, TNOM, TARG, TPARAM };
@@ -396,7 +396,7 @@ extern int lin_build_depth;
    naming the symbol. */
 int lin_build_gate(const char *fn, int pure);
 extern int lin_build_observed;
-Port net_alloc_scott(Net *n, long k); Port net_alloc_bool(Net *n, int v);
+Port net_alloc_scott(Net *n, long k); Port net_alloc_scott_at(Net *n, long k, Scope lvl); Port net_alloc_bool(Net *n, int v);
 Port net_alloc_float(Net *n, double d);
 /* Float boxes are net structure like any other; the TABLE behind the index is a driver's
    (std/drivers/values.c, the DT_FLOAT provider), reached through net_box_value /

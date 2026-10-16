@@ -229,6 +229,7 @@ static Type *infer(Term *t) {
   }
   case TDEFX: return infer(t->l);
   case TFLOAT: return tvar();   /* float literal: fresh polymorphic type */
+  case TNUM: return tvar();   /* numeral literal: fresh polymorphic type, as TFLOAT */
   }
   return NULL;
 }

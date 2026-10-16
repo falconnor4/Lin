@@ -637,8 +637,8 @@ static void print_port(Port p, int depth, int dom) {
   }
   size_t key = (size_t)p.node * 3 + (size_t)p.port;
   int in_vis = (size_t)p.node < vis_cap, in_txt = key < vis_cap * 3;
-  if (viz_txt && in_txt && viz_txt[key] && viz_depth[key] == pp_top) { ob_puts(viz_txt[key]); return; }
-  if (vis_print && in_vis && vis_print[p.node]) { ob_putc('?'); qmarks++; return; }
+  if (viz_txt && viz_txt[key] && viz_depth[key] == pp_top) { ob_puts(viz_txt[key]); return; }
+  if (vis_print && vis_print[p.node]) { ob_putc('?'); qmarks++; return; }
   if (vis_print && in_vis) vis_print[p.node] = 1;
   long q0 = qmarks; size_t o0 = ob_len;
   switch (N->tag[p.node]) {
