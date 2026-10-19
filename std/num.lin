@@ -29,18 +29,18 @@
 (define! zero num 0)
 ; The encoding's OWN projections -- the same shapes std/list.lin uses, without its typed
 ; surface: a numeral is a chain of booleans, so it reads itself rather than borrowing the list API.
-(define hd     (\l ((l (\h (\t h))) 0)))
-(define tl     (\l ((l (\h (\t t))) 0)))
-(define empty? (\l ((l (\h (\t bool.false))) bool.true)))
 (define cons_  (\h (\t (\c (\n ((c h) t))))))
 (define nil_   (\c (\n bool.true)))
+(define hd     (\l ((l (\h (\t h))) bool.false)))
+(define tl     (\l ((l (\h (\t t))) nil_)))
+(define empty? (\l ((l (\h (\t bool.false))) bool.true)))
 
-(define succ (\n (ifl (empty? n) (\_ (cons_ bool.true nil_))
+(define! succ (num -> num) (\n (ifl (empty? n) (\_ (cons_ bool.true nil_))
   (\_ (ifl (hd n) (\_ (cons_ bool.false (succ (tl n)))) (\_ (cons_ bool.true (tl n))))))))
-(define pred (\n (ifl (empty? n) (\_ nil_)
+(define! pred (num -> num) (\n (ifl (empty? n) (\_ nil_)
   (\_ (ifl (hd n) (\_ (cons_ bool.false (tl n)))
     (\_ (ifl (empty? (tl n)) (\_ n) (\_ (cons_ bool.true (pred (tl n)))))))))))
-(define is_zero (\n (ifl (empty? n) (\_ bool.true) (\_ (ifl (hd n) (\_ bool.false) (\_ (empty? (tl n))))))))
+(define! is_zero (num -> bool) (\n (ifl (empty? n) (\_ bool.true) (\_ (ifl (hd n) (\_ bool.false) (\_ (is_zero (tl n))))))))
 
 ; --- Church Numerals & Self-Iterating Folds ---
 (define c_zero (\f (\x x)))

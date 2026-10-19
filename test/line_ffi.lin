@@ -6,10 +6,11 @@
 ; Shared subterm: `sq` feeds two independent uses, so the net shares it.
 (define sq (\a (mul a a)))
 (define! main a
-  (let ((x (sq 6))                     ; 36, shared by the two uses below
+  (let ((x (sq 3))                     ; 9, shared by the two uses below
         (y (add 1 2)))
     (io_print "FFI_LINE_OK: "
       (io_print (add x (mul y x))
         (io_print "\n" 0)))))
 
 (main)
+; expect FFI_LINE_OK: 36

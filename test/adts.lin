@@ -26,7 +26,7 @@
 ; expect => 42
 
 (from_maybe 0 (maybe_map succ nothing))
-; expect => (\a (\b a))
+; expect => 0
 
 ; -------------------------------------------------------------------
 ; 2. Either / Result Type
@@ -139,7 +139,7 @@
 ; expect => 77
 
 (from_right 0 (left 77))
-; expect => (\a (\b a))
+; expect => 0
 
 ; -------------------------------------------------------------------
 ; 7. Tree Navigation & List Constructors

@@ -242,7 +242,8 @@ static void vk_init(void) {
       di.queueCreateInfoCount = 1; di.pQueueCreateInfos = &qi;
       if (p_vkCreateDevice(vk_phys, &di, NULL, &vk_dev) != VK_SUCCESS || !vk_dev) break;
       p_vkGetDeviceQueue(vk_dev, j, 0, &vk_queue);
-      gpu_ready = 1;
+      if (getenv("LIN_GPU_DEVICE")) gpu_ready = 1;
+      else { gpu_ready = 0; gpu_warn("discrete compute accelerator required"); }
       free(q); free(devs);
       goto device_ok;
     }
@@ -359,7 +360,7 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
   if (WIRE(n,p1).node != p2.node || WIRE(n,p1).port != p2.port) return 0;
   if (WIRE(n,p2).node != p1.node || WIRE(n,p2).port != p1.port) return 0;
   int t1 = n->tag[p1.node], t2 = n->tag[p2.node];
-  if (t1 > t2) { int t = t1; t1 = t2; t2 = t; }
+  if (t1 > t2) { int t = t1; t1 = t2; t2 = t; Port p = p1; p1 = p2; p2 = p; }
   if (t1 == LAM && t2 == APP) {
     /* The GPU kernel's beta (std/drivers/reduce.comp) ONLY rewires wires — it
        does not fold.  So a LAM x APP redex whose head OR whose applied argument

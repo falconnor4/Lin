@@ -238,6 +238,7 @@ Port net_alloc(Net *n, int tag, Scope sc) {
 }
 
 static void act_push(Net *n, Port a, Port b) {
+  if (n->act_of[a.node] >= 0 || n->act_of[b.node] >= 0) return;   /* a principal faces ONE other: this pair is already queued; a second entry would outlive its act_of slot and name a recycled node */
   if (n->atop + 2 > n->actcap)
     n->act = realloc(n->act, (size_t)(n->actcap = n->actcap ? n->actcap * 2 : 256) * sizeof(Port));
   n->act[n->atop++] = a; n->act[n->atop++] = b;
@@ -517,14 +518,6 @@ static void link_copies(Net *n, int n1, int n2, const Port *t, const int *cp) {
 }
 
 /* The reference's commutation labels: path = [gen] ++ path(node) ++ path(dup), i.e. `1 : sLam ++ sDup`. */
-/* Is gauge a an ancestor-or-equal of gauge b?  The classical safety condition a duplication must satisfy:
-   a fan may only duplicate structure that lies INSIDE it (its gauge a prefix of the node's). */
-static int lvl_prefix_of(Net *n, Scope a, Scope b) {
-  int da = lv_depth(n, a), db = lv_depth(n, b), x = (int)b;
-  if (da > db) return 0;
-  for (int i = db; i > da; i--) x = n->lv_parent[x];
-  return x == (int)a;
-}
 static int lvl_path(Net *n, Scope s, unsigned char *out) {
   int d = lv_depth(n, s), l = (int)s;
   for (int i = d - 1; i >= 0; i--) { out[i] = n->lv_bit[l]; l = n->lv_parent[l]; }
@@ -562,10 +555,17 @@ int net_interact(Net *n, Port p1, Port p2) {
   }
 
   if (t1 == DUP && t2 == DUP) {
-    /* REFERENCE-FAITHFUL (main.hs has no other case): two fans whose gauges DIFFER are not a redex --
-       no rule fires, the pair is left as it is.  Only EQUAL gauges annihilate. */
-    /* Annihilation is the correspondence {a1~b1, a2~b2} (1~4, 2~5) -- the same rewire, so the four
-       branches that used to special-case two fans wired to each other are gone. */
+    if (!scope_eq(n, n->scope[n1], n->scope[n2])) {
+      Scope sa = n->scope[n1], sb = n->scope[n2];
+      Port t[4] = { WIRE(n, ((Port){n1, 1})), WIRE(n, ((Port){n1, 2})),
+                    WIRE(n, ((Port){n2, 1})), WIRE(n, ((Port){n2, 2})) };
+      int m1, m2, d1, d2;
+      split2(n, DUP, sa, sa, DUP, sb, &m1, &m2, &d1, &d2);
+      const int cp[4] = {d1, d2, m1, m2};
+      link_copies(n, n1, n2, t, cp);
+      retire(n, n1, n2);
+      return 1;
+    }
     const int cor_a[2] = {1, 2}, cor_b[2] = {4, 5};
     pair_boundary(n, n1, n2, cor_a, cor_b, 2, 1, NULL);
     retire(n, n1, n2);
@@ -574,7 +574,8 @@ int net_interact(Net *n, Port p1, Port p2) {
 
   if ((t1 == LAM || t1 == APP) && t2 == DUP) {
     Scope sn = n->scope[n1], sd = n->scope[n2];
-    if (!lvl_prefix_of(n, sd, sn)) return 0;   /* SAFETY: a fan copies only what is inside it */
+    /* No side condition (as main.hs): copies are labelled INSIDE the fan, so they are well nested
+       wherever the node sat.  Requiring it to be lexically inside (measured) stranded every ARGUMENT. */
     Port t[4] = { WIRE(n, ((Port){n1, 1})), WIRE(n, ((Port){n1, 2})),
                   WIRE(n, ((Port){n2, 1})), WIRE(n, ((Port){n2, 2})) };
     int m1, m2, d1, d2;
@@ -1171,7 +1172,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
     }
     for (int i = 0; i < n_bnd; i++) {
       Port p1 = bound[i].p1, p2 = bound[i].p2;
-      if (redex_live(n, p1, p2)) { if (net_interact(n, p1, p2)) *changed += 1; n->steps++; }
+      if (redex_live(n, p1, p2)) { if (net_interact(n, p1, p2)) *changed += 1; else if (!n->dead[p1.node] && !n->dead[p2.node]) act_push(n, p1, p2); n->steps++; }
     }
     return;
   }
@@ -1180,6 +1181,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
     Port p1 = curr[i], p2 = curr[i + 1];
     if (!redex_live(n, p1, p2)) continue;
     if (net_interact(n, p1, p2)) *changed += 1;
+    else if (!n->dead[p1.node] && !n->dead[p2.node]) act_push(n, p1, p2);   /* a rule that declined leaves the pair queued: it is a redex that cannot fire YET, not one to discard */
     n->steps++;
   }
 }
@@ -1223,7 +1225,7 @@ static long net_reduce_body(Net *n, long limit) {
     while (n->atop > 0 && n->steps < limit) {
       int before = changed;
       if (reduce_depth == 1) nested_reduce = 0;
-      net_mark_demand(n);
+      net_mark_demand(n); unsigned int dsnap = n->dem_stamp;   /* the snapshot's stamp: a driver's force bumps the live one */
       int cnt = n->dem_cnt ? wave_snapshot(n, &curr, &curr_cap) : 0;   /* 98% of waves emit nothing: skip the (exported, un-inlinable) call */
       int np = cnt / 2, base_cnt = 0; cand_cnt = 0; memset(scnts, 0, sizeof scnts);
 
@@ -1301,7 +1303,7 @@ static long net_reduce_body(Net *n, long limit) {
       for (int i = 0; offer && i < np; i++) {
         if (owned[i] >= 0) continue;
         Port p1 = curr[i * 2], p2 = curr[i * 2 + 1];
-        if (!demanded(n, p1) || !demanded(n, p2)) continue;
+        if (n->dem[p1.node] != dsnap || n->dem[p2.node] != dsnap) continue;   /* demanded AS OF the snapshot */
         int assigned = 0;
         uint32_t fold_shape = pair_fold_shape ? pair_fold_shape(n, p1, p2) : LIN_CAP_FOLD;   /* classified once, not per driver */
         for (int di = 0; di < ndrv && !assigned; di++) {

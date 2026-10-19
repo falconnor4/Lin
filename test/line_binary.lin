@@ -9,3 +9,4 @@
         (io_print "\n" 0)))))
 
 (main)
+; expect LINE_BINARY_OK: 43

@@ -156,7 +156,7 @@ static Val value_any(Net *n, Port p) {
   double d;
   if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; return v; }
   long k = net_read_int(n, p, LIN_ENC_NUM);
-  if (k > 0) { v.iv = k; v.kind = 1; return v; }
+  if (k >= 0) { v.iv = k; v.kind = 1; return v; }
   { const char *s = str_determined(n, p); if (s) { v.sv = s; v.kind = 2; return v; } }
   return v;                                            /* kind 0: the caller writes the net */
 }
@@ -637,8 +637,8 @@ static void print_port(Port p, int depth, int dom) {
   }
   size_t key = (size_t)p.node * 3 + (size_t)p.port;
   int in_vis = (size_t)p.node < vis_cap, in_txt = key < vis_cap * 3;
-  if (viz_txt && viz_txt[key] && viz_depth[key] == pp_top) { ob_puts(viz_txt[key]); return; }
-  if (vis_print && vis_print[p.node]) { ob_putc('?'); qmarks++; return; }
+  if (viz_txt && in_txt && viz_txt[key] && viz_depth[key] == pp_top) { ob_puts(viz_txt[key]); return; }   /* in_txt: printing FORCES, which grows the net, so a key can outrun the table */
+  if (vis_print && in_vis && vis_print[p.node]) { ob_putc('?'); qmarks++; return; }
   if (vis_print && in_vis) vis_print[p.node] = 1;
   long q0 = qmarks; size_t o0 = ob_len;
   switch (N->tag[p.node]) {

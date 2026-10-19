@@ -47,6 +47,7 @@ DECLARED = {
     ("src/type.c", "mid[256]"): "the same Scheme ABI array as f[256]",
     ("src/type.c", "dyn[256]"): "the same Scheme ABI array, for dynamic type variables",
     ("src/io.c", "< 256"): "byte range check: characters are bytes, not a program limit",
+    ("src/io.c", "< 62"): "bit width of Scott numeral: word-size bound (62 bits fits in signed long)",
     ("src/lin.h", "sv[4096]"): "the Val ABI's string field: a driver-visible fixed buffer (known ABI limit)",
     ("src/type.c", "f[256]"): "free-variable set: bounded by the Scheme ABI array it is copied into",
     ("src/type.c", "f[64]"): "the same set, for a single type",

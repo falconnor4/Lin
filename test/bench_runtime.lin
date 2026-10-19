@@ -45,3 +45,4 @@
 ; test/runtime_ffi.lin pins for exactly this reason, and it is what makes the build
 ; decline: the artifact has to ask its OWN environment.
 (sumto (ccall "lin_ffloor" (cons (float.float (ffi.getenv "BENCH_N")) nil)))
+; expect => 0

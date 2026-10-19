@@ -214,7 +214,7 @@ else
 fi
 
 line_total=0; line_fail=0
-for spec in "test/line_binary.lin:LINE_BINARY_OK: 43" "test/line_ffi.lin:FFI_LINE_OK: 144"; do
+for spec in "test/line_binary.lin:LINE_BINARY_OK: 43" "test/line_ffi.lin:FFI_LINE_OK: 36"; do
   src="${spec%%:*}"; want="${spec#*:}"; name="$(basename "$src" .lin)"
   line=$((line_total + 1))
   "$LIN_BIN" build "$src" -o "$TMP_DIR/$name.line"

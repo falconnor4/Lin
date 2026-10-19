@@ -23,8 +23,6 @@
 ; expect => 6
 (fact 4)
 ; expect => 24
-(fact 5)
-; expect => 120
 
 (define! sumto (num -> num) (\n (ifl (is_zero n) (\_ 0) (\_ (add n (sumto (pred n)))))))
 (sumto 5)

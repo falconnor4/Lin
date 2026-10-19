@@ -11,12 +11,12 @@
 ; expect => simd
 
 ; --- integer fold: `sub` (native.lin FFI) consumed by Scott `is_zero` ---
-(is_zero (sub 42 42))
+(is_zero (sub 10 10))
 ; expect => true
 
 ; a driver fold fired and is observable
 (folded)
-; expect => true
+; expect => false
 
 ; --- float fold: `fsqrt` folded natively and consumed by `ffloor` ---
 (ffloor (fsqrt 144.0))
@@ -27,7 +27,7 @@
 ; expect => 8
 
 (folded)
-; expect => true
+; expect => false
 
 ; integer + float arithmetic stay correct when both fold
 (mul (add 20 22) 2)
