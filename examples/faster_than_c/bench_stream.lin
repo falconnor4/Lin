@@ -1,0 +1,23 @@
+; ==============================================================================
+; Benchmark 2: Lazy Observation / Demand-Driven Execution
+; Lin interaction net implementation.
+;
+; In Lin, a stream is an infinite generator sequence. Because the interaction net
+; reduces strictly by need (demand-driven from the root observation), generating an
+; infinite stream and observing the first k elements evaluates in O(k) time and O(1)
+; space, requiring zero buffer allocations.
+; ==============================================================================
+(load "std/std.lin")
+
+(define transform (\i (add (mul i i) (add (mul 3 i) 7))))
+
+(define my_stream (stream_create 0 (\i (succ i))))
+
+; Observe the prefix: elements 0 through 4
+(define e0 (transform (stream_nth0 my_stream)))
+(define e1 (transform (stream_nth1 my_stream)))
+(define e2 (transform (stream_nth2 my_stream)))
+(define e3 (transform (stream_nth3 my_stream)))
+(define e4 (transform (stream_head (stream_drop_c (\f (\x (f (f (f (f x)))))) my_stream))))
+
+(add (add (add (add e0 e1) e2) e3) e4)

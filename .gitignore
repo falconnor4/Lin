@@ -11,4 +11,6 @@ result-*
 *.spv
 .nixcache/
 *.line.cand*
-*.line.cand*
+examples/faster_than_c/bench_branch
+examples/faster_than_c/bench_linden
+examples/faster_than_c/bench_stream

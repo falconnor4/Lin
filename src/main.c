@@ -218,7 +218,10 @@ void eval_form(Term *t) {
   if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
   if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); return; }
   Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
-  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
+  Term *opt = getenv("LIN_NO_EGRAPH") ? ex : egraph_optimize(ex);
+  int ok = compile(opt, &net, err, sizeof err);
+  if (opt && opt != ex) term_free(opt);
+  if (!ok) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
   struct timespec b0, b1;
   bench_measured = bench_mode;
   if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }

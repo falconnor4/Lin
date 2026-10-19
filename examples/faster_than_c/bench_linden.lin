@@ -1,0 +1,24 @@
+; ==============================================================================
+; Benchmark 3: Linden 3D Wireframe Rendering Engine
+; Lin implementation (using linden accelerator driver).
+;
+; Renders 65,536 frames in parallel via Lin's OpenMP driver dispatch
+; with reciprocal edge precomputation and row-filtering.
+; ==============================================================================
+(load "std/std.lin")
+(load_lib "std/drivers/linden.so")
+(set_driver "linden")
+
+(define l_args
+  (cons 32.0 (cons 16.0 (cons 8.0 (cons 12.0
+  (cons -1.0 (cons -1.0 (cons -1.0 (cons 1.0 (cons -1.0 (cons -1.0
+  (cons -1.0 (cons 1.0 (cons -1.0 (cons 1.0 (cons 1.0 (cons -1.0
+  (cons -1.0 (cons -1.0 (cons 1.0 (cons 1.0 (cons -1.0 (cons 1.0
+  (cons -1.0 (cons 1.0 (cons 1.0 (cons 1.0 (cons 1.0 (cons 1.0
+  (cons 0.0 (cons 1.0 (cons 0.0 (cons 2.0 (cons 1.0 (cons 3.0
+  (cons 2.0 (cons 3.0 (cons 4.0 (cons 5.0 (cons 4.0 (cons 6.0
+  (cons 5.0 (cons 7.0 (cons 6.0 (cons 7.0 (cons 0.0 (cons 4.0
+  (cons 1.0 (cons 5.0 (cons 2.0 (cons 6.0 (cons 3.0 (cons 7.0
+  (cons 0.0 (cons 0.3 (cons 65536.0 nil))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+(ccall "lin_fp_linden_frame" l_args)

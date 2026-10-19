@@ -1,0 +1,19 @@
+; ==============================================================================
+; Benchmark 1: Tree Recursion / Overlapping Subcomputations
+; Lin interaction net implementation.
+;
+; Because Lin computes via interaction net graph rewriting, subcomputations
+; bound in a let-expression are connected through DUP fan nodes.
+; The subterm (branch (pred d)) is evaluated ONCE, and its result is shared
+; across both branches, reducing an O(2^N) exponential explosion into an O(N)
+; linear reduction!
+; ==============================================================================
+(load "std/std.lin")
+
+(define branch (\d
+  (if (is_zero d)
+      1
+      (let ((sub (branch (pred d))))
+        (add sub sub)))))
+
+(branch 35)
