@@ -52,26 +52,41 @@ static void ld_project(int W, int H, int nv, const double *v, double t, double *
   }
 }
 
-/* Is this cell on the wireframe?  One pass over the edges, each rejected per row first. */
-static int ld_cell(int x, int y, int ne, const int *e, const double *px, const double *py) {
+typedef struct { double ax, ay, dx, dy, inv_den, lo, hi; } LdEdge;
+
+static inline void ld_prep_edges(int ne, const int *e, const double *px, const double *py, LdEdge *ep) {
   for (int k = 0; k < ne; k++) {
     double ax = px[e[2*k]], ay = py[e[2*k]], bx = px[e[2*k+1]], by = py[e[2*k+1]];
-    double lo = ay < by ? ay : by, hi = ay < by ? by : ay;
-    if (y < lo - 0.5 || y > hi + 0.5) continue;
-    double dx = bx - ax, dy = by - ay, den = dx*dx + dy*dy;
-    double u = den > 0 ? ((x - ax)*dx + (y - ay)*dy) / den : 0;
-    if (u < 0 || u > 1) continue;
-    double qx = ax + u*dx, qy = ay + u*dy;
-    if ((x - qx)*(x - qx) + (y - qy)*(y - qy) < 0.25) return 1;
+    ep[k].ax = ax; ep[k].ay = ay;
+    ep[k].dx = bx - ax; ep[k].dy = by - ay;
+    ep[k].lo = (ay < by ? ay : by) - 0.5;
+    ep[k].hi = (ay < by ? by : ay) + 0.5;
+    double den = ep[k].dx * ep[k].dx + ep[k].dy * ep[k].dy;
+    ep[k].inv_den = den > 0.0 ? 1.0 / den : 0.0;
   }
-  return 0;
 }
 
 static void ld_ascii(int W, int H, int nv, int ne, const double *v, const int *e, double t, char *out) {
   double px[nv], py[nv];
   ld_project(W, H, nv, v, t, px, py);
+  LdEdge ep[ne];
+  ld_prep_edges(ne, e, px, py, ep);
   for (int y = 0; y < H; y++) {
-    for (int x = 0; x < W; x++) out[y*(W+1) + x] = ld_cell(x, y, ne, e, px, py) ? '#' : '.';
+    int act[ne], nact = 0;
+    for (int k = 0; k < ne; k++)
+      if (y >= ep[k].lo && y <= ep[k].hi) act[nact++] = k;
+    for (int x = 0; x < W; x++) {
+      int hit = 0;
+      for (int i = 0; i < nact; i++) {
+        int k = act[i];
+        double dx = ep[k].dx, dy = ep[k].dy;
+        double u = ((x - ep[k].ax)*dx + (y - ep[k].ay)*dy) * ep[k].inv_den;
+        if (u < 0.0 || u > 1.0) continue;
+        double qx = ep[k].ax + u*dx, qy = ep[k].ay + u*dy;
+        if ((x - qx)*(x - qx) + (y - qy)*(y - qy) < 0.25) { hit = 1; break; }
+      }
+      out[y*(W+1) + x] = hit ? '#' : '.';
+    }
     out[y*(W+1) + W] = '\n';
   }
   out[(size_t)(W+1) * (size_t)H] = 0;
@@ -82,16 +97,31 @@ static void ld_ascii(int W, int H, int nv, int ne, const double *v, const int *e
 static void ld_grey(int W, int H, int nv, int ne, const double *v, const int *e, double t, unsigned char *buf) {
   double px[nv], py[nv];
   ld_project(W, H, nv, v, t, px, py);
+  LdEdge ep[ne];
+  ld_prep_edges(ne, e, px, py, ep);
   memset(buf, 0, (size_t)W * (size_t)H * 4);
-  for (int y = 0; y < H; y++)
+  for (int y = 0; y < H; y++) {
+    int act[ne], nact = 0;
+    for (int k = 0; k < ne; k++)
+      if (y >= ep[k].lo && y <= ep[k].hi) act[nact++] = k;
     for (int x = 0; x < W; x++) {
-      if (!ld_cell(x, y, ne, e, px, py)) continue;
+      int hit = 0;
+      for (int i = 0; i < nact; i++) {
+        int k = act[i];
+        double dx = ep[k].dx, dy = ep[k].dy;
+        double u = ((x - ep[k].ax)*dx + (y - ep[k].ay)*dy) * ep[k].inv_den;
+        if (u < 0.0 || u > 1.0) continue;
+        double qx = ep[k].ax + u*dx, qy = ep[k].ay + u*dy;
+        if ((x - qx)*(x - qx) + (y - qy)*(y - qy) < 0.25) { hit = 1; break; }
+      }
+      if (!hit) continue;
       double dx = (x - W/2.0) / (W/2.0), dy = (y - H/2.0) / (H/2.0);
       double r = dx*dx + dy*dy; if (r > 1) r = 1;
       unsigned char c = (unsigned char)(255 * (1.0 - 0.7*r));
       unsigned char *p4 = buf + ((size_t)y * (size_t)W + (size_t)x) * 4;
       p4[0] = c; p4[1] = c; p4[2] = c; p4[3] = 0;
     }
+  }
 }
 
 static int ld_write_ppm(const char *path, int W, int H, const unsigned char *buf) {
@@ -130,6 +160,28 @@ int lin_fp_linden_frame(double w, double h, double nvd, double ned, ...) {
   fflush(stdout);
   free(all);
   return nf;
+}
+
+static char *lin_fs_buf = NULL;
+static size_t lin_fs_cap = 0;
+
+char *lin_fs_linden_frame(double w, double h, double nvd, double ned, ...) {
+  va_list ap; va_start(ap, ned);
+  LD_ARGS(ap);
+  va_end(ap);
+  size_t fsz = (size_t)(W+1) * (size_t)H + 1;
+  size_t total = fsz * (size_t)nf;
+  if (total + 1 > lin_fs_cap) {
+    char *nb = realloc(lin_fs_buf, total + 1);
+    if (!nb) return "";
+    lin_fs_buf = nb; lin_fs_cap = total + 1;
+  }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (int f = 0; f < nf; f++) ld_ascii(W, H, nv, ne, vv, ei, t0 + dt*f, lin_fs_buf + fsz*(size_t)f);
+  lin_fs_buf[total] = 0;
+  return lin_fs_buf;
 }
 
 /* ---- window: X11, one PutImage per frame, last frame dumped as a PPM -------------- */
