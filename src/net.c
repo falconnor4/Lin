@@ -1038,51 +1038,51 @@ static pthread_t *wpool; static int wpool_n;
 static Pair *wq; static int wq_cap; static Net *wq_net;
 static atomic_int wq_n, wq_tail, wq_done, wq_changed, wq_gen;
 
+static int wq_drain(Net *n, int chunk) {
+  int changed = 0, n_int = atomic_load_explicit(&wq_n, memory_order_relaxed);
+  for (;;) {
+    int idx = atomic_fetch_add_explicit(&wq_tail, chunk, memory_order_relaxed);
+    if (idx >= n_int) break;
+    int end = idx + chunk < n_int ? idx + chunk : n_int;
+    for (int i = idx; i < end; i++)
+      if (redex_live(n, wq[i].p1, wq[i].p2) && net_interact(n, wq[i].p1, wq[i].p2)) changed++;
+    atomic_fetch_add_explicit(&wq_done, end - idx, memory_order_release);
+  }
+  return changed;
+}
+
 static void *wave_worker(void *arg) {
   my_tid = (int)(intptr_t)arg;
-  int seen = 0, i;
+  int seen = 0;
   for (;;) {
     if (atomic_load_explicit(&wq_gen, memory_order_acquire) == seen) {
-      for (int r = 0; r < 64; r++) __asm__ __volatile__("pause");
-      sched_yield();
+      for (int r = 0; r < 512; r++) { __asm__ __volatile__("pause"); if (atomic_load_explicit(&wq_gen, memory_order_acquire) != seen) break; }
+      if (atomic_load_explicit(&wq_gen, memory_order_acquire) == seen) sched_yield();
       continue;
     }
-    seen = atomic_load(&wq_gen);
-    while ((i = atomic_fetch_add(&wq_tail, 1)) < atomic_load(&wq_n)) {
-      Net *n = wq_net;
-      if (redex_live(n, wq[i].p1, wq[i].p2) && net_interact(n, wq[i].p1, wq[i].p2)) atomic_fetch_add(&wq_changed, 1);
-      atomic_fetch_add(&wq_done, 1);
-    }
+    seen = atomic_load_explicit(&wq_gen, memory_order_acquire);
+    int n_int = atomic_load_explicit(&wq_n, memory_order_relaxed), chunk = (n_int > 256) ? 16 : ((n_int > 64) ? 8 : 1);
+    int c = wq_drain(wq_net, chunk);
+    if (c) atomic_fetch_add_explicit(&wq_changed, c, memory_order_relaxed);
   }
   return NULL;
 }
 static void wave_pool_start(int want) {
   if (wpool_n || want < 2) return;
-  wpool_n = want - 1;
-  ensure_tact();
-  wpool = calloc((size_t)wpool_n, sizeof *wpool);
+  wpool_n = want - 1; ensure_tact(); wpool = calloc((size_t)wpool_n, sizeof *wpool);
   for (int i = 0; i < wpool_n; i++) pthread_create(&wpool[i], NULL, wave_worker, (void *)(intptr_t)(i + 1));
 }
 
-/* `LIN_WAVE_STATS` reports what the wave layer did.  A wave that fires nothing on the demand path is
-   invisible in the program's output, so the report is the only way to see the WIDTH -- and the only way
-   a test can know the threaded path was taken. */
-static int lin_wstats = -1;
-static long wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width;
+static int lin_wstats = -1; static long wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width;
 static void wv_report(void) {
-  fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld width=%ld\n",
-          wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width);
+  fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld width=%ld\n", wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width);
 }
 
-/* A set of NODE ids, open-addressed and emptied by GENERATION, so nothing memsets a table sized to
-   the net every wave -- the reason the old form bucketed by 64-node sector instead: it holds the nodes
-   a parallel batch has claimed, and is emptied by generation. */
 static int *fw_tkey; static unsigned *fw_tgen; static int fw_tcap; static unsigned fw_gen;
 static void fw_reset(int entries) {
   int need = 8; while (need < entries * 8) need *= 2;
   if (need > fw_tcap) {
-    fw_tcap = need;
-    fw_tkey = realloc(fw_tkey, (size_t)need * sizeof(int));
+    fw_tcap = need; fw_tkey = realloc(fw_tkey, (size_t)need * sizeof(int));
     fw_tgen = realloc(fw_tgen, (size_t)need * sizeof(unsigned));
     memset(fw_tgen, 0, (size_t)need * sizeof(unsigned)); fw_gen = 1;
   }
@@ -1098,40 +1098,24 @@ static void fw_put(int v) {
   while (fw_tgen[h] == fw_gen) { if (fw_tkey[h] == v) return; h = (h + 1) & (unsigned)(fw_tcap - 1); }
   fw_tgen[h] = fw_gen; fw_tkey[h] = v;
 }
-/* A pair's CLOSED NEIGHBOURHOOD: its two nodes and the nodes its four auxiliaries lead to -- the whole
-   of what two interactions could race on, since a rule writes its own six ports and the ports they lead
-   to (pair_boundary relinks the outside ends).  Two pairs may run on two workers exactly when their
-   neighbourhoods do not meet.  This is the EXACT test the old >>6 form approximated: it rejected pairs
-   that merely shared a 64-node sector (28-92% of a real wave) and accepted pairs that shared one. */
+
 static int pair_nb(const Net *n, Port p1, Port p2, int *o) {
-  int m = 0;
-  o[m++] = p1.node; o[m++] = p2.node;
+  int m = 0; o[m++] = p1.node; o[m++] = p2.node;
   for (int k = 1; k <= 2; k++) { Port w = WIRE(n, ((Port){p1.node, k})); if (NAT_IN(n, w.node)) o[m++] = w.node; }
   for (int k = 1; k <= 2; k++) { Port w = WIRE(n, ((Port){p2.node, k})); if (NAT_IN(n, w.node)) o[m++] = w.node; }
   return m;
 }
-/* Reduce one wave of `act`-form pairs (an even count): pairs whose neighbourhoods do not meet run
-   concurrently via OpenMP, the rest serially; exposed so a driver's reducer fans out a real wave. */
+
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
 #ifdef _OPENMP
   ensure_tact();
   int want = omp_get_max_threads();
-  int nth = wpool_n ? wpool_n + 1 : want;
-  int np = wave_cnt / 2;
+  int nth = wpool_n ? wpool_n + 1 : want, np = wave_cnt / 2;
 
-/* The threaded path pays only if the wave can GIVE as well as take.  A fork/join costs 2.4 us at 4
-   threads and 3.6 at 8 (measured, best of 20 on an empty `parallel for`; the clock's own granularity is
-   1.19 us) while one interaction is a few hundred ns, so a batch needs several pairs per worker before
-   the join is repaid.  `wave_cnt >= 512` -- the old gate -- asked for 256 pairs and nothing in the
-   corpus comes near it (the widest wave is ONE pair), which made the whole path dead code. */
   if (nth > 1 && np >= 4 * nth) {
-    wave_pool_start(want);   /* lazy: only a wave that reaches the gate pays for threads */
-    nth = wpool_n ? wpool_n + 1 : nth;
-    /* grow-only scratch, so a wave performs no allocation at all */
+    wave_pool_start(want); nth = wpool_n ? wpool_n + 1 : nth;
     if (np > fw_cap) {
-      fw_cap = np;
-      inter = realloc(inter, (size_t)np * sizeof(Pair));
-      bound = realloc(bound, (size_t)np * sizeof(Pair));
+      fw_cap = np; inter = realloc(inter, (size_t)np * sizeof(Pair)); bound = realloc(bound, (size_t)np * sizeof(Pair));
     }
     fw_reset(np * 6);            /* <= 0.75 full: at most six ids a pair */
     int n_int = 0, n_bnd = 0;
@@ -1156,14 +1140,16 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       /* Disjoint pairs: any schedule is correct -- publish, take the next index (caller included), drain. */
       if (n_int > wq_cap) { wq_cap = n_int; wq = realloc(wq, (size_t)wq_cap * sizeof *wq); }
       memcpy(wq, inter, (size_t)n_int * sizeof *wq);
-      wq_net = n; atomic_store(&wq_n, n_int); atomic_store(&wq_changed, 0); atomic_store(&wq_done, 0); atomic_store(&wq_tail, 0);
+      wq_net = n; atomic_store_explicit(&wq_n, n_int, memory_order_relaxed);
+      atomic_store_explicit(&wq_changed, 0, memory_order_relaxed); atomic_store_explicit(&wq_done, 0, memory_order_relaxed);
+      atomic_store_explicit(&wq_tail, 0, memory_order_relaxed);
       atomic_fetch_add_explicit(&wq_gen, 1, memory_order_release);
-      for (int i = 0; (i = atomic_fetch_add(&wq_tail, 1)) < n_int; ) {
-        if (redex_live(n, wq[i].p1, wq[i].p2) && net_interact(n, wq[i].p1, wq[i].p2)) batch_changed++;
-        atomic_fetch_add(&wq_done, 1);
+      int chunk = (n_int > 256) ? 16 : ((n_int > 64) ? 8 : 1);
+      batch_changed = wq_drain(n, chunk);
+      for (int spin = 0; atomic_load_explicit(&wq_done, memory_order_acquire) < n_int; spin++) {
+        if (spin < 512) __asm__ __volatile__("pause"); else { sched_yield(); spin = 0; }
       }
-      while (atomic_load(&wq_done) < n_int) sched_yield();
-      in_parallel = 0; n->steps += n_int; *changed += batch_changed + atomic_exchange(&wq_changed, 0);
+      in_parallel = 0; n->steps += n_int; *changed += batch_changed + atomic_load_explicit(&wq_changed, memory_order_relaxed);
       for (int t = 0; t < nth; t++) {
         for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
         t_act[t].top = 0;

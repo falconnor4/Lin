@@ -237,7 +237,6 @@ typedef struct {
   EClass *classes; int nc, ccap;
   int *node_cls;
   int *slot, hcap;        /* (type,name,children) -> e-node, so insertion is not quadratic */
-  int *uses;              /* how many e-nodes reference each class: the sharing the pass found */
   int capture;            /* set by eg_subst when a rewrite would capture: the rule then declines */
 } EGraph;
 
@@ -337,11 +336,9 @@ static int eg_add(EGraph *g, int type, const char *name, int l, int r) {
     g->nodes = realloc(g->nodes, (size_t)(g->ncap = g->ncap ? g->ncap * 2 : 128) * sizeof(ENode));
     g->node_cls = realloc(g->node_cls, (size_t)g->ncap * sizeof(int));
   }
-  if (g->nc >= g->ccap)
-    g->classes = realloc(g->classes, (size_t)(g->ccap = g->ccap ? g->ccap * 2 : 128) * sizeof(EClass));
+  if (g->nc >= g->ccap) g->classes = realloc(g->classes, (size_t)(g->ccap = g->ccap ? g->ccap * 2 : 128) * sizeof(EClass));
   int nid = g->nn++, cid = g->nc++;
-  g->nodes[nid] = (ENode){.type = type, .l = l, .r = r};
-  g->nodes[nid].name = name ? name : "";
+  g->nodes[nid] = (ENode){.type = type, .l = l, .r = r, .name = name ? name : ""};
   g->node_cls[nid] = cid;
   g->classes[cid] = (EClass){.parent = cid, .best_node = nid, .cost = eg_cost(g, &g->nodes[nid])};
   eg_insert(g, nid);
@@ -353,10 +350,8 @@ static int eg_add_term(EGraph *g, Term *t) {
   if (t->type == TVAR) return eg_add(g, TVAR, t->name, -1, -1);
   if (t->type == TLAM) return eg_add(g, TLAM, t->name, eg_add_term(g, t->l), -1);
   if (t->type == TAPP) return eg_add(g, TAPP, "", eg_add_term(g, t->l), eg_add_term(g, t->r));
-  /* TLET is structural, like TAPP: it must keep both children, since they are the whole binding. */
   if (t->type == TLET) return eg_add(g, TLET, t->name, eg_add_term(g, t->l), eg_add_term(g, t->r));
-  if (eg_opaque(t->type)) return eg_add(g, t->type, t->name, -1, -1);
-  return eg_add_term(g, t->l);
+  return eg_opaque(t->type) ? eg_add(g, t->type, t->name, -1, -1) : eg_add_term(g, t->l);
 }
 
 static int eg_has_var(EGraph *g, int c, const char *name) {
@@ -444,21 +439,44 @@ static void eg_saturate(EGraph *g) {
   }
 }
 
-static Term *eg_extract(EGraph *g, int c, int d, int lim) {
-  if (d > lim) return NULL;   /* as in eg_subst: the graph's own depth, snapshotted at entry */
+typedef struct BoundVar { const char *name; struct BoundVar *next; } BoundVar;
+static int eg_has_free(EGraph *g, int c, BoundVar *b, int d, int lim) {
+  if (d > lim) return 1;
   c = eg_find(g, c); ENode n = g->nodes[g->classes[c].best_node];
+  if (n.type == TVAR) {
+    for (BoundVar *cur = b; cur; cur = cur->next) if (!strcmp(cur->name, n.name)) return 0;
+    return 1;
+  }
+  if (eg_opaque(n.type)) return 0;
+  if (n.type == TLAM) { BoundVar nb = {n.name, b}; return eg_has_free(g, n.l, &nb, d + 1, lim); }
+  if (n.type == TAPP) return eg_has_free(g, n.l, b, d + 1, lim) || eg_has_free(g, n.r, b, d + 1, lim);
+  if (n.type == TLET) { BoundVar nb = {n.name, b}; return eg_has_free(g, n.l, &nb, d + 1, lim) || eg_has_free(g, n.r, &nb, d + 1, lim); }
+  return 0;
+}
+
+static void eg_count_uses(EGraph *g, int c, int *uses, int *vis, int d, int lim) {
+  if (d > lim) return;
+  c = eg_find(g, c); uses[c]++;
+  if (vis[c]) return;
+  vis[c] = 1;
+  ENode n = g->nodes[g->classes[c].best_node];
+  if (eg_opaque(n.type) || n.type == TVAR) return;
+  if (n.l >= 0) eg_count_uses(g, n.l, uses, vis, d + 1, lim);
+  if (n.r >= 0) eg_count_uses(g, n.r, uses, vis, d + 1, lim);
+}
+
+static Term *eg_extract(EGraph *g, int c, int d, int lim, const int *cse) {
+  if (d > lim) return NULL;   /* as in eg_subst: the graph's own depth, snapshotted at entry */
+  c = eg_find(g, c);
+  if (cse && cse[c]) return term_new(TVAR, lin_internf("_cse%d", c), NULL, NULL);
+  ENode n = g->nodes[g->classes[c].best_node];
   if (n.type == TVAR) return term_new(TVAR, n.name, NULL, NULL);
   if (eg_opaque(n.type)) return term_new(n.type, n.name, NULL, NULL);
-  if (n.type == TLAM) { Term *l = eg_extract(g, n.l, d + 1, lim); return l ? term_new(TLAM, n.name, l, NULL) : NULL; }
-  if (n.type == TAPP) {
-    Term *l = eg_extract(g, n.l, d + 1, lim), *r = eg_extract(g, n.r, d + 1, lim);
+  if (n.type == TLAM) { Term *l = eg_extract(g, n.l, d + 1, lim, cse); return l ? term_new(TLAM, n.name, l, NULL) : NULL; }
+  if (n.type == TAPP || n.type == TLET) {
+    Term *l = eg_extract(g, n.l, d + 1, lim, cse), *r = eg_extract(g, n.r, d + 1, lim, cse);
     if (!l || !r) { term_free(l); term_free(r); return NULL; }
-    return term_new(TAPP, "", l, r);
-  }
-  if (n.type == TLET) {
-    Term *l = eg_extract(g, n.l, d + 1, lim), *r = eg_extract(g, n.r, d + 1, lim);
-    if (!l || !r) { term_free(l); term_free(r); return NULL; }
-    return term_new(TLET, n.name, l, r);
+    return term_new(n.type, n.name, l, r);
   }
   return NULL;
 }
@@ -467,28 +485,47 @@ Term *egraph_optimize(Term *t) {
   if (!t) return NULL;
   if (getenv("LIN_NO_EGRAPH")) return term_copy(t);
   EGraph g = {0}; int root = eg_add_term(&g, t); eg_saturate(&g);
-  /* how much sharing did saturation expose?  an e-node field pointing at a class is a parent,
-     so a class with several parents is a value the program computes more than once */
-  g.uses = calloc((size_t)g.nc + 1, sizeof(int));
-  int shared = 0;
-  if (g.uses) {
-    for (int i = 0; i < g.nn; i++) {
-      if (g.nodes[i].l >= 0) g.uses[eg_find(&g, g.nodes[i].l)]++;
-      if (g.nodes[i].r >= 0) g.uses[eg_find(&g, g.nodes[i].r)]++;
+  if (root < 0) { free(g.nodes); free(g.classes); free(g.node_cls); free(g.slot); return NULL; }
+  root = eg_find(&g, root);
+
+  int *uses = calloc((size_t)g.nc + 1, sizeof(int)), *vis = calloc((size_t)g.nc + 1, sizeof(int));
+  int *cse = calloc((size_t)g.nc + 1, sizeof(int));
+  Term **vals = calloc((size_t)g.nc + 1, sizeof(Term*));
+  int ncse = 0;
+
+  if (uses && vis && cse && vals && !getenv("LIN_NO_CSE")) {
+    eg_count_uses(&g, root, uses, vis, 0, g.nc);
+    for (int c = 0; c < g.nc; c++)
+      if (c != root && eg_find(&g, c) == c && uses[c] >= 2 && g.classes[c].cost >= 4 &&
+          g.nodes[g.classes[c].best_node].type == TAPP && !eg_has_free(&g, c, NULL, 0, g.nc))
+        cse[c] = 1;
+    for (int c = 0; c < g.nc; c++) {
+      if (!cse[c]) continue;
+      vals[c] = eg_extract(&g, c, 0, g.nc, NULL);
+      if (!vals[c]) cse[c] = 0; else ncse++;
     }
-    for (int c = 0; c < g.nc; c++) if (g.uses[c] >= 2) shared++;
   }
-  Term *res = (root < 0) ? NULL : eg_extract(&g, root, 0, g.nc);
+
+  Term *res = eg_extract(&g, root, 0, g.nc, cse);
+  if (res && vals && cse) {
+    for (int c = g.nc - 1; c >= 0; c--) {
+      if (cse[c] && vals[c]) res = term_new(TLET, lin_internf("_cse%d", c), vals[c], res);
+      else if (vals[c]) term_free(vals[c]);
+    }
+  } else if (vals) {
+    for (int c = 0; c < g.nc; c++) if (vals[c]) term_free(vals[c]);
+  }
+
   if (getenv("LIN_PASSES")) {
-    fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d shared classes, rules:",
-            g.nc, g.nn, shared);
+    fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d CSE lifted, rules:", g.nc, g.nn, ncse);
     for (int r = 0; r < EG_NRULES; r++) {
       fprintf(stderr, " %s=%s/%ld", eg_rules[r].name, eg_rules[r].on ? "on" : "off", eg_rules[r].fires);
       if (eg_rules[r].declines) fprintf(stderr, "(+%ld capture-declined)", eg_rules[r].declines);
     }
     fprintf(stderr, "\n");
   }
-  free(g.nodes); free(g.classes); free(g.node_cls); free(g.slot); free(g.uses);
+  free(g.nodes); free(g.classes); free(g.node_cls); free(g.slot);
+  free(uses); free(vis); free(cse); free(vals);
   return res ? res : term_copy(t);
 }
 

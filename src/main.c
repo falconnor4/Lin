@@ -8,6 +8,9 @@
 #include <sys/resource.h>
 #ifdef _OPENMP
 #include <omp.h>
+static inline void set_omp_th(int t) { if (t > 0) omp_set_num_threads(t); }
+#else
+static inline void set_omp_th(int t) { (void)t; }
 #endif
 
 static void bump_stack(void) {
@@ -706,25 +709,15 @@ int main(int argc, char **argv) {
   lin_set_self_path(argv[0]);
   if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
   if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
-#ifdef _OPENMP
-  if (lin_threads > 0) omp_set_num_threads(lin_threads); else if (!getenv("OMP_NUM_THREADS")) omp_set_num_threads(1); /* default serial; -t/LIN_THREADS/OMP_NUM_THREADS fan out */
-#endif
+  set_omp_th(lin_threads); if (!lin_threads && !getenv("OMP_NUM_THREADS")) set_omp_th(1);
 
   if (argc > 1 && (!strcmp(argv[1], "build") || !strcmp(argv[1], "--build"))) {
     load_std();
     if (argc < 3) { fprintf(stderr, "usage: lin build <file.lin> [-o <file.line>]\n"); return 1; }
     const char *in_f = argv[2], *out_f = NULL;
-    /* `-t` is documented as "number of OpenMP worker threads" with no mode restriction, and a build
-       reduces heavily (every def_precompile, then the AOT build-time reduction), so ignoring it
-       here silently made a documented flag a no-op.  LIN_THREADS already reached this path. */
     for (int i = 3; i < argc; i++) {
       if (!strcmp(argv[i], "-o") && i + 1 < argc) out_f = argv[++i];
-      else if (!strcmp(argv[i], "-t") && i + 1 < argc) {
-        lin_threads = atoi(argv[++i]);
-#ifdef _OPENMP
-        omp_set_num_threads(lin_threads);
-#endif
-      }
+      else if (!strcmp(argv[i], "-t") && i + 1 < argc) set_omp_th(lin_threads = atoi(argv[++i]));
     }
     char auto_out[PATH_MAX];
     if (!out_f) {
@@ -746,10 +739,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[i], "-b") || !strcmp(argv[i], "--bench")) { bench_mode = 1; continue; }
     if (!strcmp(argv[i], "-t") || !strcmp(argv[i], "--threads")) {
       if (++i >= argc) { fprintf(stderr, "error: -t requires an argument\n"); return 1; }
-      lin_threads = atoi(argv[i]);
-#ifdef _OPENMP
-      omp_set_num_threads(lin_threads);
-#endif
+      set_omp_th(lin_threads = atoi(argv[i]));
       continue;
     }
     if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--eval")) {

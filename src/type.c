@@ -21,10 +21,7 @@ static void tfail(const char *fmt, ...) {
    chains, so two values of the same declared type unify (parameter-wise) and different types do not. */
 typedef struct { const char *name; int arity; } NomDecl;
 static NomDecl *noms; static int n_nom = 0, nom_cap = 0;
-int nominal_arity(const char *name) {
-  for (int i = 0; i < n_nom; i++) if (!strcmp(noms[i].name, name)) return noms[i].arity;
-  return -1;
-}
+int nominal_arity(const char *name) { for (int i = 0; i < n_nom; i++) if (!strcmp(noms[i].name, name)) return noms[i].arity; return -1; }
 int nominal_lookup(const char *name) { return nominal_arity(name) >= 0; }
 int nominal_register(const char *name, int arity) {
   if (nominal_lookup(name)) return 0;
@@ -36,10 +33,8 @@ static Type *tvar(void) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TVR, 
 static Type *tarrow(Type *a, Type *b) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARROW, .id = -1, .a = a, .b = b}; return t; }
 /* type-argument chain node: {a = the arg type, b = next TARG or NULL} */
 static Type *targ(Type *arg, Type *next) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TARG, .id = -1, .a = arg, .b = next}; return t; }
-/* nominal type: `name` copied; `*argp` is a TARG chain of arity type args (or NULL). */
 static Type *tnom(const char *name, Type *args) {
-  Type *t = malloc(sizeof *t); char *p = malloc(strlen(name) + 1); strcpy(p, name);
-  *t = (Type){.kind = TNOM, .id = -1, .name = p, .a = args}; return t;
+  char *p = malloc(strlen(name) + 1); strcpy(p, name); Type *t = malloc(sizeof *t); *t = (Type){.kind = TNOM, .id = -1, .name = p, .a = args}; return t;
 }
 static Type *tnom0(const char *name) { return tnom(name, NULL); }
 /* transient reference to a datatype's k-th type parameter (only used while
@@ -47,27 +42,17 @@ static Type *tnom0(const char *name) { return tnom(name, NULL); }
    process_datatype).  `id` = parameter index. */
 static Type *tparam(int idx) { Type *t = malloc(sizeof *t); *t = (Type){.kind = TPARAM, .id = idx}; return t; }
 
-static Type *find(Type *t) {
-  while (t->kind == TLINK) {
-    if (t->a->kind == TLINK) t->a = t->a->a;
-    t = t->a;
-  }
-  return t;
-}
+static Type *find(Type *t) { while (t->kind == TLINK) { if (t->a->kind == TLINK) t->a = t->a->a; t = t->a; } return t; }
 
 static int occurs(Type *v, Type *t) {
-  t = find(t);
-  if (t == v) return 1;
+  t = find(t); if (t == v) return 1;
   if (t->kind == TARROW) return occurs(v, t->a) || occurs(v, t->b);
   if (t->kind == TNOM) return t->a && occurs(v, t->a);     /* arg chain */
-  if (t->kind == TARG) return occurs(v, t->a) || (t->b && occurs(v, t->b));
-  return 0;
+  return (t->kind == TARG) && (occurs(v, t->a) || (t->b && occurs(v, t->b)));
 }
 
 static void unify(Type *x, Type *y) {
-  x = find(x);
-  y = find(y);
-  if (x == y) return;
+  x = find(x); y = find(y); if (x == y) return;
   if (x->kind == TARROW && y->kind == TARROW) { unify(x->a, y->a); unify(x->b, y->b); return; }
   /* nominal: equal only when both are the SAME declared type; then unify type
      arguments pairwise.  A nominal value may also be APPLIED as its
@@ -103,11 +88,8 @@ static TEnv *env;
 static int envn, envcap;
 
 static void env_push(const char *name, Scheme s) {
-  if (envn >= envcap)
-    env = realloc(env, (size_t)(envcap = envcap ? envcap * 2 : 128) * sizeof(TEnv));
-  env[envn].name = name;
-  env[envn].s = s;
-  envn++;
+  if (envn >= envcap) env = realloc(env, (size_t)(envcap = envcap ? envcap * 2 : 128) * sizeof(TEnv));
+  env[envn++] = (TEnv){name, s};
 }
 
 static void def_type(Def *d);
@@ -124,13 +106,11 @@ static void il_push(IL *l, int id) { if (l->n == l->cap) l->v = realloc(l->v, (s
 static void fv(Type *t, IL *f) {
   t = find(t);
   if (t->kind == TVR) {
-    for (int i = 0; i < f->n; i++)
-      if (f->v[i] == t->id) return;
-    il_push(f, t->id);
-    return;
+    for (int i = 0; i < f->n; i++) if (f->v[i] == t->id) return;
+    il_push(f, t->id); return;
   }
   if (t->kind == TARROW) { fv(t->a, f); fv(t->b, f); }
-  if (t->kind == TNOM) { if (t->a) fv(t->a, f); }
+  if (t->kind == TNOM && t->a) fv(t->a, f);
   if (t->kind == TARG) { fv(t->a, f); if (t->b) fv(t->b, f); }
 }
 
@@ -209,23 +189,15 @@ static Type *infer(Term *t) {
     unify(f, tarrow(x, r)); return r;
   }
   case TLET: {
-    /* The compiler's scope rule, so the two agree: an already-bound name means the value still sees
-       the OUTER binding (checked before the new one exists); a new name is in scope for its own
-       value -- recursion -- checked monomorphically, which is what keeps that rule sound, and
-       generalised for the body. */
     if (env_find(t->name)) {
-      Type *v = infer(t->l);
-      env_push(t->name, generalize(v));
-      Type *b = infer(t->r);
-      envn--; return b;
+      env_push(t->name, generalize(infer(t->l)));
+      Type *b = infer(t->r); envn--; return b;
     }
     Type *a = tvar();
     env_push(t->name, (Scheme){.nq = 0, .t = a});
-    unify(a, infer(t->l));
-    envn--;
+    unify(a, infer(t->l)); envn--;
     env_push(t->name, generalize(a));
-    Type *b = infer(t->r);
-    envn--; return b;
+    Type *b = infer(t->r); envn--; return b;
   }
   case TDEFX: return infer(t->l);
   case TFLOAT: return tvar();   /* float literal: fresh polymorphic type */
