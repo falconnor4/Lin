@@ -40,6 +40,8 @@ DECLARED = {
     ("src/net.c", ">= 16"): "driver cap list: driven by n->ndrv, bounded by the claim region",
     ("src/net.c", "< 16"): "the claim region: its slots are a fixed ABI array, and the count is n->ndrv",
     ("src/net.c", ">= 64"): "domain ids are a closed vocabulary (LIN_ENC_*), 64 leaves room",
+    ("src/net.c", "> 64"): "dynamic chunk threshold for workqueue drain (lock-free wavefront scaling)",
+    ("src/net.c", "< 512"): "adaptive pause spin loop before yielding thread in wavefront reducer",
     ("src/net.c", "slices[16]"): "claim-region scratch: one per claim slot",
     ("src/net.c", "scaps[16]"): "claim-region scratch: one per claim slot",
     ("src/net.c", "scnts[16]"): "claim-region scratch: one per claim slot",

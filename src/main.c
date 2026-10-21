@@ -146,8 +146,10 @@ static Term *expand(Term *t, Guard *g) {
   /* TLET binds in both children: the value may refer to itself, which is the recursion. */
   int bound = (t->type == TLAM || t->type == TDEF || t->type == TLET);
   if (bound) guard_push(g, t->name);
-  c->l = expand(t->l, g); if (bound) g->count--;
-  c->r = expand(t->r, g); return c;
+  c->l = expand(t->l, g);
+  c->r = expand(t->r, g);
+  if (bound) g->count--;
+  return c;
 }
 
 Term *expand_defs(Term *t) {

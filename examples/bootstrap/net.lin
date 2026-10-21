@@ -1,0 +1,275 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: Interaction Net Topology & Rules
+; ==============================================================================
+; Implements the 5 pure interaction calculus node reduction rules:
+; 1. Beta Reduction:       LAM x APP  (function application)
+; 2. Annihilation:         DUP x DUP  (same scope - identity annihilation)
+; 3. Commutation:          DUP x DUP  (different scope - 2x2 grid split)
+; 4. Duplication:          DUP x NODE (duplicates LAM or APP)
+; 5. Erasure:              ERA x NODE (erases binary nodes)
+; ==============================================================================
+
+(load "types.lin")
+
+(namespace boot_net)
+
+(define! empty_net boot_types.Net
+  (let ((root_node (boot_types.mk_node boot_types.tag_root boot_types.scope_nil
+                                       boot_types.port_none boot_types.port_none boot_types.port_none
+                                       bool.false))
+        (nodes (((boot_types.nl_put boot_types.pz) root_node) boot_types.nl_nil)))
+    (boot_types.mk_net nodes (boot_types.ps boot_types.pz) boot_types.rnil 0)))
+
+(define! get_node (boot_types.Net -> boot_types.PNum -> boot_types.Node)
+  (\net (\id
+    (((boot_types.nl_get boot_types.dummy_node) id) (boot_types.net_nodes net)))))
+
+(define! put_node (boot_types.Net -> boot_types.PNum -> boot_types.Node -> boot_types.Net)
+  (\net (\id (\node
+    (match net ((boot_types.mk_net nodes next_id redexes steps)
+      (boot_types.mk_net (((boot_types.nl_put id) node) nodes) next_id redexes steps)))))))
+
+(define! alloc_node (boot_types.Net -> boot_types.Tag -> boot_types.List -> boot_types.AllocRes)
+  (\net (\tag (\scope
+    (match net ((boot_types.mk_net nodes next_id redexes steps)
+      (let ((n (boot_types.mk_node tag scope
+                                   boot_types.port_none boot_types.port_none boot_types.port_none
+                                   bool.false))
+            (new_nodes (((boot_types.nl_put next_id) n) nodes))
+            (new_net (boot_types.mk_net new_nodes (boot_types.ps next_id) redexes steps)))
+        ((boot_types.mk_alloc_res new_net) (boot_types.mk_port next_id boot_types.p0)))))))))
+
+(define! retire_node (boot_types.Net -> boot_types.PNum -> boot_types.Net)
+  (\net (\id
+    (let ((node ((get_node net) id)))
+      (((put_node net) id) (boot_types.mk_node (boot_types.node_tag node)
+                                               (boot_types.node_scope node)
+                                               boot_types.port_none boot_types.port_none boot_types.port_none
+                                               bool.true))))))
+
+(define! wire_of (boot_types.Net -> boot_types.Port -> boot_types.Port)
+  (\net (\p
+    (match p
+      ((boot_types.port_none) boot_types.port_none)
+      ((boot_types.mk_port n idx)
+        (let ((node ((get_node net) n)))
+          ((boot_types.node_port_wire node) idx)))))))
+
+(define! link (boot_types.Net -> boot_types.Port -> boot_types.Port -> boot_types.Net)
+  (\net (\p1 (\p2
+    (match p1
+      ((boot_types.port_none) net)
+      ((boot_types.mk_port n1 i1)
+        (match p2
+          ((boot_types.port_none) net)
+          ((boot_types.mk_port n2 i2)
+            (let ((node1 ((get_node net) n1))
+                  (node2 ((get_node net) n2))
+                  (up1 (((boot_types.node_set_wire node1) i1) p2))
+                  (net1 (((put_node net) n1) up1))
+                  (node2_curr ((get_node net1) n2))
+                  (up2 (((boot_types.node_set_wire node2_curr) i2) p1))
+                  (net2 (((put_node net1) n2) up2)))
+              (match i1
+                ((boot_types.p0)
+                  (match i2
+                    ((boot_types.p0)
+                      (match n1
+                        ((boot_types.pz) net2)
+                        ((boot_types.ps _)
+                          (match n2
+                            ((boot_types.pz) net2)
+                            ((boot_types.ps _)
+                              (match net2 ((boot_types.mk_net nodes next_id redexes steps)
+                                (boot_types.mk_net nodes next_id ((boot_types.rcons (boot_types.mk_redex p1 p2)) redexes) steps))))))))
+                    ((boot_types.p1) net2)
+                    ((boot_types.p2) net2)))
+                ((boot_types.p1) net2)
+                ((boot_types.p2) net2)))))))))))
+
+(define! redex_live (boot_types.Net -> boot_types.Port -> boot_types.Port -> bool)
+  (\net (\p1 (\p2
+    (let ((n1 (boot_types.port_node p1))
+          (n2 (boot_types.port_node p2))
+          (node1 ((get_node net) n1))
+          (node2 ((get_node net) n2)))
+      (match n1
+        ((boot_types.pz) bool.false)
+        ((boot_types.ps _)
+          (match n2
+            ((boot_types.pz) bool.false)
+            ((boot_types.ps _)
+              (((bool.ifl (bool.or (boot_types.node_dead node1) (boot_types.node_dead node2)))
+                 (\_ bool.false))
+                 (\_ (bool.and ((boot_types.port_eq (boot_types.node_w0 node1)) p2)
+                               ((boot_types.port_eq (boot_types.node_w0 node2)) p1)))))))))))))
+
+(define! rule_beta (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
+  (\net (\n_lam (\n_app
+    (let ((lam_n ((get_node net) n_lam))
+          (app_n ((get_node net) n_app))
+          (param (boot_types.node_w1 lam_n))
+          (body  (boot_types.node_w2 lam_n))
+          (caller (boot_types.node_w1 app_n))
+          (arg    (boot_types.node_w2 app_n))
+          (net1 ((retire_node net) n_lam))
+          (net2 ((retire_node net1) n_app)))
+      (((bool.ifl (bool.or ((boot_types.peq (boot_types.port_node param)) n_lam)
+                           ((boot_types.peq (boot_types.port_node body)) n_lam)))
+         (\_ (((link net2) caller) arg)))
+         (\_ (let ((net3 (((link net2) param) arg))
+                   (net4 (((link net3) caller) body)))
+               net4))))))))
+
+(define! rule_dup_annihilate (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
+  (\net (\n1 (\n2
+    (let ((node1 ((get_node net) n1))
+          (node2 ((get_node net) n2))
+          (a1 (boot_types.node_w1 node1))
+          (a2 (boot_types.node_w2 node1))
+          (b1 (boot_types.node_w1 node2))
+          (b2 (boot_types.node_w2 node2))
+          (net1 ((retire_node ((retire_node net) n1)) n2))
+          (net2 (((link net1) a1) b1))
+          (net3 (((link net2) a2) b2)))
+      net3)))))
+
+(define! split_copies (boot_types.Net -> boot_types.Tag -> boot_types.List -> boot_types.List -> boot_types.Tag -> boot_types.List -> boot_types.SplitRes)
+  (\net (\tag_m (\scope_m1 (\scope_m2 (\tag_d (\scope_d
+    (match (((alloc_node net) tag_m) scope_m1)
+      ((boot_types.mk_alloc_res net1 p_m1)
+        (match (((alloc_node net1) tag_m) scope_m2)
+          ((boot_types.mk_alloc_res net2 p_m2)
+            (match (((alloc_node net2) tag_d) scope_d)
+              ((boot_types.mk_alloc_res net3 p_d1)
+                (match (((alloc_node net3) tag_d) scope_d)
+                  ((boot_types.mk_alloc_res net4 p_d2)
+                    (let ((m1 (boot_types.port_node p_m1))
+                          (m2 (boot_types.port_node p_m2))
+                          (d1 (boot_types.port_node p_d1))
+                          (d2 (boot_types.port_node p_d2))
+                          (net_a (((link net4) (boot_types.mk_port d1 boot_types.p1)) (boot_types.mk_port m1 boot_types.p1)))
+                          (net_b (((link net_a) (boot_types.mk_port d1 boot_types.p2)) (boot_types.mk_port m2 boot_types.p1)))
+                          (net_c (((link net_b) (boot_types.mk_port d2 boot_types.p1)) (boot_types.mk_port m1 boot_types.p2)))
+                          (net_d (((link net_c) (boot_types.mk_port d2 boot_types.p2)) (boot_types.mk_port m2 boot_types.p2))))
+                      (((((boot_types.mk_split_res net_d) m1) m2) d1) d2)))))))))))))))))
+
+(define! rule_dup_node (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
+  (\net (\n_dup (\n_m
+    (let ((node_d ((get_node net) n_dup))
+          (node_m ((get_node net) n_m))
+          (tag_m  (boot_types.node_tag node_m))
+          (sc_m   (boot_types.node_scope node_m))
+          (sc_d   (boot_types.node_scope node_d))
+          (d_w1   (boot_types.node_w1 node_d))
+          (d_w2   (boot_types.node_w2 node_d))
+          (m_w1   (boot_types.node_w1 node_m))
+          (m_w2   (boot_types.node_w2 node_m))
+          (sc_m1  ((boot_types.scope_app sc_m) 1))
+          (sc_m2  ((boot_types.scope_app sc_m) 2)))
+      (match ((((((split_copies net) tag_m) sc_m1) sc_m2) boot_types.tag_dup) sc_d)
+        ((boot_types.mk_split_res net1 m1 m2 d1 d2)
+          (let ((net2 ((retire_node ((retire_node net1) n_dup)) n_m)))
+            (((bool.ifl (bool.or ((boot_types.peq (boot_types.port_node m_w1)) n_m)
+                                 ((boot_types.peq (boot_types.port_node m_w2)) n_m)))
+              (\_ (let ((net3 (((link net2) (boot_types.mk_port d1 boot_types.p0)) (boot_types.mk_port d2 boot_types.p0)))
+                        (net4 (((link net3) (boot_types.mk_port m1 boot_types.p0)) d_w1))
+                        (net5 (((link net4) (boot_types.mk_port m2 boot_types.p0)) d_w2)))
+                    net5))
+              (\_ (let ((net3 (((link net2) (boot_types.mk_port d1 boot_types.p0)) m_w1))
+                        (net4 (((link net3) (boot_types.mk_port d2 boot_types.p0)) m_w2))
+                        (net5 (((link net4) (boot_types.mk_port m1 boot_types.p0)) d_w1))
+                        (net6 (((link net5) (boot_types.mk_port m2 boot_types.p0)) d_w2)))
+                    net6))))))))))))
+
+(define! rule_dup_commute (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
+  (\net (\n1 (\n2
+    (let ((node1  ((get_node net) n1))
+          (node2  ((get_node net) n2))
+          (sc1    (boot_types.node_scope node1))
+          (sc2    (boot_types.node_scope node2))
+          (w1_1   (boot_types.node_w1 node1))
+          (w1_2   (boot_types.node_w2 node1))
+          (w2_1   (boot_types.node_w1 node2))
+          (w2_2   (boot_types.node_w2 node2)))
+      (match ((((((split_copies net) boot_types.tag_dup) sc1) sc1) boot_types.tag_dup) sc2)
+        ((boot_types.mk_split_res net1 m1 m2 d1 d2)
+          (let ((net2   ((retire_node ((retire_node net1) n1)) n2))
+                (net3   (((link net2) (boot_types.mk_port d1 boot_types.p0)) w1_1))
+                (net4   (((link net3) (boot_types.mk_port d2 boot_types.p0)) w1_2))
+                (net5   (((link net4) (boot_types.mk_port m1 boot_types.p0)) w2_1))
+                (net6   (((link net5) (boot_types.mk_port m2 boot_types.p0)) w2_2)))
+            net6))))))))
+
+(define! erase_binary (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
+  (\net (\n_era (\n_m
+    (let ((node_m ((get_node net) n_m))
+          (w1 (boot_types.node_w1 node_m))
+          (w2 (boot_types.node_w2 node_m))
+          (net1 ((retire_node ((retire_node net) n_era)) n_m)))
+      (((bool.ifl (bool.or ((boot_types.peq (boot_types.port_node w1)) n_m)
+                           ((boot_types.peq (boot_types.port_node w2)) n_m)))
+         (\_ net1))
+         (\_ (match (((alloc_node net1) boot_types.tag_era) boot_types.scope_nil)
+               ((boot_types.mk_alloc_res net2 p_e1)
+                 (match (((alloc_node net2) boot_types.tag_era) boot_types.scope_nil)
+                   ((boot_types.mk_alloc_res net3 p_e2)
+                     (let ((net4 (((link net3) p_e1) w1))
+                           (net5 (((link net4) p_e2) w2)))
+                       net5))))))))))))
+
+(define! rule_era (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
+  (\net (\n_era (\n_m
+    (let ((node_m ((get_node net) n_m))
+          (tag_m  (boot_types.node_tag node_m)))
+      (match tag_m
+        ((boot_types.tag_lam)  (((erase_binary net) n_era) n_m))
+        ((boot_types.tag_app)  (((erase_binary net) n_era) n_m))
+        ((boot_types.tag_dup)  (((erase_binary net) n_era) n_m))
+        ((boot_types.tag_era)  ((retire_node ((retire_node net) n_era)) n_m))
+        ((boot_types.tag_root) net)))))))
+
+(define! interact (boot_types.Net -> boot_types.Port -> boot_types.Port -> boot_types.Net)
+  (\net (\p1 (\p2
+    (let ((n1 (boot_types.port_node p1))
+          (n2 (boot_types.port_node p2))
+          (node1 ((get_node net) n1))
+          (node2 ((get_node net) n2))
+          (t1 (boot_types.node_tag node1))
+          (t2 (boot_types.node_tag node2)))
+      (match t1
+        ((boot_types.tag_lam)
+          (match t2
+            ((boot_types.tag_lam) net)
+            ((boot_types.tag_app) (((rule_beta net) n1) n2))
+            ((boot_types.tag_dup) (((rule_dup_node net) n2) n1))
+            ((boot_types.tag_era) (((rule_era net) n2) n1))
+            ((boot_types.tag_root) net)))
+        ((boot_types.tag_app)
+          (match t2
+            ((boot_types.tag_lam) (((rule_beta net) n2) n1))
+            ((boot_types.tag_app) net)
+            ((boot_types.tag_dup) (((rule_dup_node net) n2) n1))
+            ((boot_types.tag_era) (((rule_era net) n2) n1))
+            ((boot_types.tag_root) net)))
+        ((boot_types.tag_dup)
+          (match t2
+            ((boot_types.tag_lam) (((rule_dup_node net) n1) n2))
+            ((boot_types.tag_app) (((rule_dup_node net) n1) n2))
+            ((boot_types.tag_dup)
+              (((bool.ifl ((boot_types.scope_eq (boot_types.node_scope node1)) (boot_types.node_scope node2)))
+                 (\_ (((rule_dup_annihilate net) n1) n2)))
+                 (\_ (((rule_dup_commute net) n1) n2))))
+            ((boot_types.tag_era) (((rule_era net) n2) n1))
+            ((boot_types.tag_root) net)))
+        ((boot_types.tag_era)
+          (match t2
+            ((boot_types.tag_lam) (((rule_era net) n1) n2))
+            ((boot_types.tag_app) (((rule_era net) n1) n2))
+            ((boot_types.tag_dup) (((rule_era net) n1) n2))
+            ((boot_types.tag_era) (((rule_era net) n1) n2))
+            ((boot_types.tag_root) net)))
+        ((boot_types.tag_root) net)))))))
+
+(namespace _)
+(export boot_net)

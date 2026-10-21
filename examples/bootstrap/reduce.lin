@@ -1,0 +1,57 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: Graph Reducer
+; ==============================================================================
+; Evaluates interaction nets to normal form by processing the redex list
+; until no active pairs remain or fuel is exhausted.
+; ==============================================================================
+
+(load "types.lin")
+(load "net.lin")
+
+(namespace boot_reduce)
+
+(define! reduce_step (boot_types.Net -> boot_types.StepResult)
+  (\net
+    (let ((redexes (boot_types.net_redexes net)))
+      (match redexes
+        ((boot_types.rnil) ((boot_types.mk_step_res net) bool.false))
+        ((boot_types.rcons pair_head rest_redexes)
+          (let ((p1 (boot_types.redex_p1 pair_head))
+                (p2 (boot_types.redex_p2 pair_head))
+                (net_rest (boot_types.mk_net (boot_types.net_nodes net)
+                                             (boot_types.net_next_id net)
+                                             rest_redexes
+                                             (boot_types.net_steps net))))
+            (((bool.ifl (((boot_net.redex_live net) p1) p2))
+               (\_ (let ((net_interacted (((boot_net.interact net_rest) p1) p2)))
+                     ((boot_types.mk_step_res net_interacted) bool.true))))
+               (\_ ((boot_types.mk_step_res net_rest) bool.true)))))))))
+
+(define fuel20
+  (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps
+  (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps
+  (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps
+  (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps (boot_types.ps
+  boot_types.pz)))))))))))))))))))))
+
+(define! reduce_fuel (boot_types.Net -> boot_types.PNum -> boot_types.Net)
+  (\net (\fuel
+    (match fuel
+      ((boot_types.pz) net)
+      ((boot_types.ps f)
+        (match (boot_types.net_redexes net)
+          ((boot_types.rnil) net)
+          ((boot_types.rcons _ _)
+            (let ((step_res (reduce_step net))
+                  (next_net (boot_types.step_next step_res))
+                  (has_stepped (boot_types.step_has step_res)))
+              (((bool.ifl has_stepped)
+                (\_ ((reduce_fuel next_net) f)))
+                (\_ next_net))))))))))
+
+(define! net_reduce (boot_types.Net -> boot_types.Net)
+  (\net
+    ((reduce_fuel net) fuel20)))
+
+(namespace _)
+(export boot_reduce)

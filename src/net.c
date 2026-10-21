@@ -1289,7 +1289,7 @@ static long net_reduce_body(Net *n, long limit) {
       for (int i = 0; offer && i < np; i++) {
         if (owned[i] >= 0) continue;
         Port p1 = curr[i * 2], p2 = curr[i * 2 + 1];
-        if (n->dem[p1.node] != dsnap || n->dem[p2.node] != dsnap) continue;   /* demanded AS OF the snapshot */
+        if (n->dem[p1.node] < dsnap || n->dem[p2.node] < dsnap) continue;   /* demanded AS OF the snapshot */
         int assigned = 0;
         uint32_t fold_shape = pair_fold_shape ? pair_fold_shape(n, p1, p2) : LIN_CAP_FOLD;   /* classified once, not per driver */
         for (int di = 0; di < ndrv && !assigned; di++) {

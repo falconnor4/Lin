@@ -1,0 +1,73 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: Verification & Validation Test Suite
+; ==============================================================================
+; Tests the pure Lin interaction calculus core against mathematical oracle specs:
+;
+; 1. Identity Reduction:
+;    ((\x x) (\y y)) => (\v0 v0)
+; 2. Church Numeral 1 Readback:
+;    (\f (\x (f x))) => 1
+; 3. Church Numeral 2 Readback:
+;    (\f (\x (f (f x)))) => 2
+; 4. Token S-Expression Parsing:
+;    (\x x) token stream parses to AST (\v0 v0)
+; 5. Full End-to-End Pipeline:
+;    Tokens -> Parse -> Compile Net -> Reduce -> Readback Term => (\v0 v0)
+; ==============================================================================
+
+(load "lin.lin")
+(open boot_types)
+(open boot_readback)
+(open boot_parse)
+(open lin_core)
+
+; --- Test 1: Identity Evaluation ---
+(define id1 ((t_lam 0) (t_var 0)))
+(define id2 ((t_lam 1) (t_var 1)))
+(define app_id ((t_app id1) id2))
+(define res_id (eval_term app_id))
+(define pass_id (is_id res_id))
+
+; --- Test 2: Church Numeral One Readback ---
+(define c1 ((t_lam 0) ((t_lam 1) ((t_app (t_var 0)) (t_var 1)))))
+(define pass_c1 (num_eq (term_to_num c1) 1))
+
+; --- Test 3: Church Numeral Two Readback ---
+(define c2 ((t_lam 0) ((t_lam 1) ((t_app (t_var 0)) ((t_app (t_var 0)) (t_var 1))))))
+(define pass_c2 (num_eq (term_to_num c2) 2))
+
+; --- Test 4: Token S-Expression Parsing ---
+(define id_toks (list.cons tok_lparen (list.cons tok_lam (list.cons (tok_var 0) (list.cons (tok_var 0) (list.cons tok_rparen list.nil))))))
+(define parsed_id (parse_tokens id_toks))
+(define pass_parse (is_id parsed_id))
+
+; --- Test 5: Full End-to-End Pipeline ---
+(define app_toks (list.cons tok_lparen (list.cons tok_lparen (list.cons tok_lam (list.cons (tok_var 0) (list.cons (tok_var 0) (list.cons tok_rparen (list.cons tok_lparen (list.cons tok_lam (list.cons (tok_var 1) (list.cons (tok_var 1) (list.cons tok_rparen (list.cons tok_rparen list.nil)))))))))))))
+(define res_pipe (eval_tokens app_toks))
+(define pass_pipe (is_id res_pipe))
+
+; --- Test 6: Church Numeral Three Readback ---
+(define c3 ((t_lam 0) ((t_lam 1) ((t_app (t_var 0)) ((t_app (t_var 0)) ((t_app (t_var 0)) (t_var 1)))))))
+(define pass_c3 (num_eq (term_to_num c3) 3))
+
+; --- Test 7: AST Structural Equality Verification ---
+(define pass_eq (term_eq id1 id1))
+(define pass_neq (bool.not (term_eq id1 id2)))
+
+; --- Test 8: Identity Predicate Verification ---
+(define pass_is_id (is_id id1))
+(define pass_not_id (bool.not (is_id c1)))
+
+; Overall verification: all tests must pass
+(define all_pass
+  (bool.and pass_id
+  (bool.and pass_c1
+  (bool.and pass_c2
+  (bool.and pass_c3
+  (bool.and pass_parse
+  (bool.and pass_pipe
+  (bool.and pass_eq
+  (bool.and pass_neq
+  (bool.and pass_is_id pass_not_id))))))))))
+
+all_pass

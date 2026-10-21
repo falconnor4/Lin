@@ -1,0 +1,99 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: S-Expression Tokenizer & Parser
+; ==============================================================================
+; Tokenizes and parses S-expressions into mathematical Term ASTs.
+; Supports:
+; - Variables: (\x x)
+; - Applications: ((f x) y) or (f x)
+; - Multi-term bodies and Scott numerals
+; ==============================================================================
+
+(load "types.lin")
+
+(namespace boot_parse)
+
+; --- Token Definition ---
+(datatype Token
+  (tok_lparen)
+  (tok_rparen)
+  (tok_lam)
+  (tok_var name)
+  (tok_num n))
+
+; Token accessors in exact definition order
+(define is_tok_lpar  (\t (match t ((tok_lparen) bool.true) ((tok_rparen) bool.false) ((tok_lam) bool.false) ((tok_var _) bool.false) ((tok_num _) bool.false))))
+(define is_tok_rpar  (\t (match t ((tok_lparen) bool.false) ((tok_rparen) bool.true) ((tok_lam) bool.false) ((tok_var _) bool.false) ((tok_num _) bool.false))))
+(define is_tok_lam   (\t (match t ((tok_lparen) bool.false) ((tok_rparen) bool.false) ((tok_lam) bool.true) ((tok_var _) bool.false) ((tok_num _) bool.false))))
+(define tok_var_name (\t (match t ((tok_lparen) 0) ((tok_rparen) 0) ((tok_lam) 0) ((tok_var n) n) ((tok_num _) 0))))
+(define tok_num_val  (\t (match t ((tok_lparen) 0) ((tok_rparen) 0) ((tok_lam) 0) ((tok_var _) 0) ((tok_num n) n))))
+
+; Parser Result: term + remaining tokens
+(datatype ParseRes
+  (mk_pres term rem))
+
+(define pres_term (\r (match r ((mk_pres t rem) t))))
+(define pres_rem  (\r (match r ((mk_pres t rem) rem))))
+
+(define is_space (\c (bool.or (eq c 32) (bool.or (eq c 10) (eq c 9)))))
+
+; Pure character-by-character tokenizer
+(define! tokenize (list num -> list Token)
+  (\s
+    ((((bool.ifl (list.is_empty s))
+       (\_ list.nil))
+       (\_ (let ((c (list.head s))
+                 (rest (list.tail s)))
+             ((((bool.ifl (is_space c))
+                (\_ (tokenize rest)))
+                (\_ ((((bool.ifl (eq c 40)) ; '('
+                       (\_ (list.cons tok_lparen (tokenize rest))))
+                       (\_ ((((bool.ifl (eq c 41)) ; ')'
+                              (\_ (list.cons tok_rparen (tokenize rest))))
+                              (\_ ((((bool.ifl (eq c 92)) ; '\'
+                                     (\_ (list.cons tok_lam (tokenize rest))))
+                                     (\_ (list.cons (tok_var c) (tokenize rest))))))))))))))))))))
+
+; Recursive S-expression parser
+(define! parse_expr (list Token -> ParseRes)
+  (\toks
+    (let ((h (list.head toks))
+          (rest (list.tail toks)))
+      ((((bool.ifl (is_tok_lpar h))
+         (\_ (let ((next (list.head rest)))
+               ((((bool.ifl (is_tok_lam next))
+                  (\_ (let ((tail2 (list.tail rest))
+                            (var_tok (list.head tail2))
+                            (v (tok_var_name var_tok))
+                            (tail3 (list.tail tail2))
+                            (res_body (parse_expr tail3))
+                            (body (pres_term res_body))
+                            (rem (pres_rem res_body))
+                            (tail4 (list.tail rem)))
+                        ((mk_pres ((boot_types.t_lam v) body)) tail4))))
+                  (\_ (let ((res_fn (parse_expr rest))
+                            (fn_term (pres_term res_fn))
+                            (rem_fn (pres_rem res_fn))
+                            (res_arg (parse_expr rem_fn))
+                            (arg_term (pres_term res_arg))
+                            (rem_arg (pres_rem res_arg))
+                            (tail_after (list.tail rem_arg)))
+                        ((mk_pres ((boot_types.t_app fn_term) arg_term)) tail_after))))))))
+         (\_ (match h
+               ((tok_lparen) ((mk_pres (boot_types.t_var 0)) rest))
+               ((tok_rparen) ((mk_pres (boot_types.t_var 0)) rest))
+               ((tok_lam)    ((mk_pres (boot_types.t_var 0)) rest))
+               ((tok_var n)  ((mk_pres (boot_types.t_var n)) rest))
+               ((tok_num n)  ((mk_pres (boot_types.t_num n)) rest)))))))))
+
+; Top-level parser from token list
+(define! parse_tokens (list Token -> boot_types.Term)
+  (\toks
+    (pres_term (parse_expr toks))))
+
+; Top-level parser from source string
+(define! parse_string (list num -> boot_types.Term)
+  (\s
+    (parse_tokens (tokenize s))))
+
+(namespace _)
+(export boot_parse)

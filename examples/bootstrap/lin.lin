@@ -1,0 +1,60 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: Top-Level Oracle & Drop-in Replacement
+; ==============================================================================
+; Mathematical Interaction Calculus Core Engine written purely in Lin.
+; 
+; Architecture Pipeline:
+;   Source String / Tokens
+;             |
+;       [boot_parse]
+;             v
+;          Term AST
+;             |
+;      [boot_compile]
+;             v
+;     Interaction Net (LAM, APP, DUP, ERA, ROOT)
+;             |
+;       [boot_reduce]
+;             v
+;      Reduced Net (Normal Form)
+;             |
+;      [boot_readback]
+;             v
+;      Term AST / Result Numeral
+; ==============================================================================
+
+(load "types.lin")
+(load "net.lin")
+(load "reduce.lin")
+(load "compile.lin")
+(load "readback.lin")
+(load "parse.lin")
+
+(namespace lin_core)
+
+; Pipeline stages
+(define compile  boot_compile.compile_net)
+(define reduce   boot_reduce.net_reduce)
+(define readback boot_readback.read_net)
+(define parse    boot_parse.parse_tokens)
+(define parse_s  boot_parse.parse_string)
+
+; End-to-end evaluators
+(define! eval_term (boot_types.Term -> boot_types.Term)
+  (\term
+    (readback (reduce (compile term)))))
+
+(define! eval_tokens (list boot_parse.Token -> boot_types.Term)
+  (\toks
+    (eval_term (parse toks))))
+
+(define! eval_str (list num -> boot_types.Term)
+  (\str
+    (eval_term (parse_s str))))
+
+(define! eval_num (boot_types.Term -> num)
+  (\term
+    (boot_readback.term_to_num (eval_term term))))
+
+(namespace _)
+(export lin_core)

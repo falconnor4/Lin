@@ -1,0 +1,198 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: AST to Net Compiler
+; ==============================================================================
+; Compiles Term AST into mathematical interaction calculus nets.
+; Handles variable scopes, DUP fan tree construction, and ERA for unused binders.
+; ==============================================================================
+
+(load "types.lin")
+(load "net.lin")
+
+(namespace boot_compile)
+
+(define env_push
+  (\env (\name (\ports
+    (boot_types.lcons (pair name ports) env)))))
+
+(define env_pop
+  (\env
+    (match env
+      ((boot_types.lnil) boot_types.lnil)
+      ((boot_types.lcons _ rest) rest))))
+
+(datatype EnvRes
+  (mk_env_res port env))
+
+(define env_res_port (\r (match r ((mk_env_res port env) port))))
+(define env_res_env  (\r (match r ((mk_env_res port env) env))))
+
+(define! env_lookup_consume (boot_types.List -> num -> EnvRes)
+  (\env (\name
+    (match env
+      ((boot_types.lnil) ((mk_env_res boot_types.port_none) boot_types.lnil))
+      ((boot_types.lcons p rest)
+        (let ((v (fst p))
+              (ports (snd p)))
+          (((bool.ifl (eq v name))
+             (\_ (match ports
+                   ((boot_types.lnil) ((mk_env_res boot_types.port_none) env))
+                   ((boot_types.lcons head_port tail_ports)
+                     ((mk_env_res head_port) (boot_types.lcons (pair v tail_ports) rest))))))
+             (\_ (let ((rec ((env_lookup_consume rest) name)))
+                   ((mk_env_res (env_res_port rec)) (boot_types.lcons p (env_res_env rec))))))))))))
+
+; Occurrence counter for binder analysis (returns PNum)
+(define! count_var (num -> boot_types.Term -> boot_types.PNum)
+  (\name (\t
+    (match t
+      ((boot_types.t_var v)
+        (((bool.ifl (eq v name))
+           (\_ (boot_types.ps boot_types.pz)))
+           (\_ boot_types.pz)))
+      ((boot_types.t_lam v body)
+        (((bool.ifl (eq v name))
+           (\_ boot_types.pz))
+           (\_ ((count_var name) body))))
+      ((boot_types.t_app fn arg)
+        ((boot_types.padd ((count_var name) fn)) ((count_var name) arg)))
+      ((boot_types.t_let v val body)
+        ((boot_types.padd ((count_var name) val))
+             (((bool.ifl (eq v name))
+                (\_ boot_types.pz))
+                (\_ ((count_var name) body)))))
+      ((boot_types.t_num _) boot_types.pz)
+      ((boot_types.t_float _) boot_types.pz)))))
+
+(datatype DupTreeRes
+  (mk_dup_res net leaves))
+
+(define dup_res_net    (\r (match r ((mk_dup_res net leaves) net))))
+(define dup_res_leaves (\r (match r ((mk_dup_res net leaves) leaves))))
+
+; Builds a tree of k-1 DUP nodes connecting root_p to k leaf ports
+(define! build_dup_tree (boot_types.Net -> boot_types.Port -> boot_types.PNum -> boot_types.List -> DupTreeRes)
+  (\net (\root_p (\k (\scope
+    (match k
+      ((boot_types.pz) ((mk_dup_res net) boot_types.lnil))
+      ((boot_types.ps k1)
+        (match k1
+          ((boot_types.pz) ((mk_dup_res net) (boot_types.lcons root_p boot_types.lnil)))
+          ((boot_types.ps k2)
+            (match k2
+              ((boot_types.pz)
+                (let ((alloc_d (((boot_net.alloc_node net) boot_types.tag_dup) scope))
+                      (net1 (boot_types.alloc_net alloc_d))
+                      (p_dup (boot_types.alloc_port alloc_d))
+                      (d_id (boot_types.port_node p_dup))
+                      (net2 (((boot_net.link net1) root_p) (boot_types.mk_port d_id boot_types.p0)))
+                      (leaves (boot_types.lcons (boot_types.mk_port d_id boot_types.p1)
+                                                (boot_types.lcons (boot_types.mk_port d_id boot_types.p2) boot_types.lnil))))
+                  ((mk_dup_res net2) leaves)))
+              ((boot_types.ps _)
+                (let ((alloc_d (((boot_net.alloc_node net) boot_types.tag_dup) scope))
+                      (net1 (boot_types.alloc_net alloc_d))
+                      (p_dup (boot_types.alloc_port alloc_d))
+                      (d_id (boot_types.port_node p_dup))
+                      (net2 (((boot_net.link net1) root_p) (boot_types.mk_port d_id boot_types.p0)))
+                      (rec_res ((((build_dup_tree net2) (boot_types.mk_port d_id boot_types.p2)) k1) scope))
+                      (net3 (dup_res_net rec_res))
+                      (rec_leaves (dup_res_leaves rec_res)))
+                  ((mk_dup_res net3) (boot_types.lcons (boot_types.mk_port d_id boot_types.p1) rec_leaves))))))))))))))
+
+(define! num_body (num -> boot_types.Term)
+  (\n ((((bool.ifl (eq n 0)) (\_ (boot_types.t_var 0))) (\_ ((boot_types.t_app (boot_types.t_var 1)) (num_body (pred n))))))))
+
+(define make_scott_num (\n ((boot_types.t_lam 0) ((boot_types.t_lam 1) (num_body n)))))
+
+(datatype CompileRes
+  (mk_cres net env port))
+
+(define cres_net  (\r (match r ((mk_cres net env port) net))))
+(define cres_env  (\r (match r ((mk_cres net env port) env))))
+(define cres_port (\r (match r ((mk_cres net env port) port))))
+
+(define! compile_term (boot_types.Net -> boot_types.List -> boot_types.List -> boot_types.Term -> CompileRes)
+  (\net (\env (\scope (\term
+    (match term
+      ((boot_types.t_var name)
+        (let ((res ((env_lookup_consume env) name)))
+          (((mk_cres net) (env_res_env res)) (env_res_port res))))
+      ((boot_types.t_lam var body)
+        (let ((cnt ((count_var var) body))
+              (alloc_lam (((boot_net.alloc_node net) boot_types.tag_lam) scope))
+              (net1 (boot_types.alloc_net alloc_lam))
+              (p_lam (boot_types.alloc_port alloc_lam))
+              (lam_id (boot_types.port_node p_lam))
+              (p_param (boot_types.mk_port lam_id boot_types.p1))
+              (p_body  (boot_types.mk_port lam_id boot_types.p2))
+              (scope_body (boot_types.scope_app scope 1)))
+          (match cnt
+            ((boot_types.pz)
+              (let ((alloc_era (((boot_net.alloc_node net1) boot_types.tag_era) scope))
+                    (net2 (boot_types.alloc_net alloc_era))
+                    (p_era (boot_types.alloc_port alloc_era))
+                    (net3 (((boot_net.link net2) p_param) p_era))
+                    (cres ((((compile_term net3) env) scope_body) body))
+                    (net4 (cres_net cres))
+                    (env4 (cres_env cres))
+                    (body_p (cres_port cres))
+                    (net5 (((boot_net.link net4) p_body) body_p)))
+                (((mk_cres net5) env4) p_lam)))
+            ((boot_types.ps cnt_tail)
+              (match cnt_tail
+                ((boot_types.pz)
+                  (let ((env1 (((env_push env) var) (boot_types.lcons p_param boot_types.lnil)))
+                        (cres ((((compile_term net1) env1) scope_body) body))
+                        (net2 (cres_net cres))
+                        (env2 (cres_env cres))
+                        (body_p (cres_port cres))
+                        (net3 (((boot_net.link net2) p_body) body_p))
+                        (env3 (env_pop env2)))
+                    (((mk_cres net3) env3) p_lam)))
+                ((boot_types.ps _)
+                  (let ((dup_res ((((build_dup_tree net1) p_param) cnt) scope))
+                        (net2 (dup_res_net dup_res))
+                        (leaves (dup_res_leaves dup_res))
+                        (env1 (((env_push env) var) leaves))
+                        (cres ((((compile_term net2) env1) scope_body) body))
+                        (net3 (cres_net cres))
+                        (env3 (cres_env cres))
+                        (body_p (cres_port cres))
+                        (net4 (((boot_net.link net3) p_body) body_p))
+                        (env4 (env_pop env3)))
+                    (((mk_cres net4) env4) p_lam))))))))
+      ((boot_types.t_app fn arg)
+        (let ((alloc_app (((boot_net.alloc_node net) boot_types.tag_app) scope))
+              (net1 (boot_types.alloc_net alloc_app))
+              (p_app (boot_types.alloc_port alloc_app))
+              (app_id (boot_types.port_node p_app))
+              (p_fn (boot_types.mk_port app_id boot_types.p0))
+              (p_caller (boot_types.mk_port app_id boot_types.p1))
+              (p_arg (boot_types.mk_port app_id boot_types.p2))
+              (cres_fn ((((compile_term net1) env) (boot_types.scope_app scope 1)) fn))
+              (net2 (cres_net cres_fn))
+              (env2 (cres_env cres_fn))
+              (port_fn (cres_port cres_fn))
+              (net3 (((boot_net.link net2) p_fn) port_fn))
+              (cres_arg ((((compile_term net3) env2) (boot_types.scope_app scope 2)) arg))
+              (net4 (cres_net cres_arg))
+              (env3 (cres_env cres_arg))
+              (port_arg (cres_port cres_arg))
+              (net5 (((boot_net.link net4) p_arg) port_arg)))
+          (((mk_cres net5) env3) p_caller)))
+      ((boot_types.t_let var val body)
+        ((((compile_term net) env) scope) ((boot_types.t_app ((boot_types.t_lam var) body)) val)))
+      ((boot_types.t_num n)
+        (let ((scott_term (make_scott_num n)))
+          ((((compile_term net) env) scope) scott_term)))
+      ((boot_types.t_float _)
+        (((mk_cres net) env) boot_types.port_none))))))))
+
+(define! compile_net (boot_types.Term -> boot_types.Net)
+  (\term
+    (let ((net boot_net.empty_net)
+          (cres ((((compile_term net) boot_types.lnil) boot_types.scope_nil) term)))
+      (((boot_net.link (cres_net cres)) (boot_types.mk_port boot_types.pz boot_types.p0)) (cres_port cres)))))
+
+(namespace _)
+(export boot_compile)

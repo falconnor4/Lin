@@ -1,0 +1,153 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: Net to Term Readback
+; ==============================================================================
+; Reconstructs normal-form Term ASTs by traversing interaction net wires
+; from the ROOT node principal port.
+; ==============================================================================
+
+(load "types.lin")
+(load "net.lin")
+
+(namespace boot_readback)
+
+(define! env_find (boot_types.List -> boot_types.PNum -> num)
+  (\env (\id
+    (match env
+      ((boot_types.lnil) 0)
+      ((boot_types.lcons p rest)
+        (((bool.ifl ((boot_types.peq (fst p)) id))
+           (\_ (snd p)))
+           (\_ ((env_find rest) id))))))))
+
+(define! read_port (boot_types.Net -> boot_types.Port -> boot_types.List -> num -> boot_types.Term)
+  (\net (\p (\env (\depth
+    (let ((tgt ((boot_net.wire_of net) p))
+          (nid (boot_types.port_node tgt))
+          (idx (boot_types.port_idx tgt)))
+      (match nid
+        ((boot_types.pz) (boot_types.t_var 999))
+        ((boot_types.ps _)
+          (let ((node ((boot_net.get_node net) nid))
+                (tag (boot_types.node_tag node)))
+            (match tag
+              ((boot_types.tag_lam)
+                (match idx
+                  ((boot_types.p0)
+                    (let ((new_env (boot_types.lcons (pair nid depth) env))
+                          (body ((((read_port net) (boot_types.mk_port nid boot_types.p2)) new_env) (succ depth))))
+                      ((boot_types.t_lam depth) body)))
+                  ((boot_types.p1) (boot_types.t_var ((env_find env) nid)))
+                  ((boot_types.p2) (boot_types.t_var ((env_find env) nid)))))
+              ((boot_types.tag_app)
+                (let ((f ((((read_port net) (boot_types.mk_port nid boot_types.p0)) env) depth))
+                      (a ((((read_port net) (boot_types.mk_port nid boot_types.p2)) env) depth)))
+                  ((boot_types.t_app f) a)))
+              ((boot_types.tag_dup)
+                ((((read_port net) (boot_types.mk_port nid boot_types.p0)) env) depth))
+              ((boot_types.tag_era) (boot_types.t_var 888))
+              ((boot_types.tag_root) (boot_types.t_var 999))))))))))))
+
+; Main readback function: starts at ROOT node port 0
+(define! read_net (boot_types.Net -> boot_types.Term)
+  (\net
+    ((((read_port net) (boot_types.mk_port boot_types.pz boot_types.p0)) boot_types.lnil) 0)))
+
+; Term inspection accessors
+(define is_lam  (\t (match t ((boot_types.t_var _) bool.false) ((boot_types.t_lam _ _) bool.true) ((boot_types.t_app _ _) bool.false) ((boot_types.t_let _ _ _) bool.false) ((boot_types.t_num _) bool.false) ((boot_types.t_float _) bool.false))))
+(define is_app  (\t (match t ((boot_types.t_var _) bool.false) ((boot_types.t_lam _ _) bool.false) ((boot_types.t_app _ _) bool.true) ((boot_types.t_let _ _ _) bool.false) ((boot_types.t_num _) bool.false) ((boot_types.t_float _) bool.false))))
+(define is_var  (\t (match t ((boot_types.t_var _) bool.true) ((boot_types.t_lam _ _) bool.false) ((boot_types.t_app _ _) bool.false) ((boot_types.t_let _ _ _) bool.false) ((boot_types.t_num _) bool.false) ((boot_types.t_float _) bool.false))))
+
+(define lam_var  (\t (match t ((boot_types.t_var _) 0) ((boot_types.t_lam v _) v) ((boot_types.t_app _ _) 0) ((boot_types.t_let _ _ _) 0) ((boot_types.t_num _) 0) ((boot_types.t_float _) 0))))
+(define lam_body (\t (match t ((boot_types.t_var _) (boot_types.t_var 0)) ((boot_types.t_lam _ b) b) ((boot_types.t_app _ _) (boot_types.t_var 0)) ((boot_types.t_let _ _ _) (boot_types.t_var 0)) ((boot_types.t_num _) (boot_types.t_var 0)) ((boot_types.t_float _) (boot_types.t_var 0)))))
+(define app_fn   (\t (match t ((boot_types.t_var _) (boot_types.t_var 0)) ((boot_types.t_lam _ _) (boot_types.t_var 0)) ((boot_types.t_app f _) f) ((boot_types.t_let _ _ _) (boot_types.t_var 0)) ((boot_types.t_num _) (boot_types.t_var 0)) ((boot_types.t_float _) (boot_types.t_var 0)))))
+(define app_arg  (\t (match t ((boot_types.t_var _) (boot_types.t_var 0)) ((boot_types.t_lam _ _) (boot_types.t_var 0)) ((boot_types.t_app _ a) a) ((boot_types.t_let _ _ _) (boot_types.t_var 0)) ((boot_types.t_num _) (boot_types.t_var 0)) ((boot_types.t_float _) (boot_types.t_var 0)))))
+(define var_name (\t (match t ((boot_types.t_var v) v) ((boot_types.t_lam _ _) 0) ((boot_types.t_app _ _) 0) ((boot_types.t_let _ _ _) 0) ((boot_types.t_num _) 0) ((boot_types.t_float _) 0))))
+
+(define num_eq num._peq)
+
+(define! is_id (boot_types.Term -> bool)
+  (\t
+    (match t
+      ((boot_types.t_var _) bool.false)
+      ((boot_types.t_lam v b)
+        (match b
+          ((boot_types.t_var bv) (num_eq bv v))
+          ((boot_types.t_lam _ _) bool.false)
+          ((boot_types.t_app _ _) bool.false)
+          ((boot_types.t_let _ _ _) bool.false)
+          ((boot_types.t_num _) bool.false)
+          ((boot_types.t_float _) bool.false)))
+      ((boot_types.t_app _ _) bool.false)
+      ((boot_types.t_let _ _ _) bool.false)
+      ((boot_types.t_num _) bool.false)
+      ((boot_types.t_float _) bool.false))))
+
+; Recursive structural equality check for Term ASTs
+(define! term_eq (boot_types.Term -> boot_types.Term -> bool)
+  (\t1 (\t2
+    (match t1
+      ((boot_types.t_var v1)
+        (match t2
+          ((boot_types.t_var v2) (eq v1 v2))
+          ((boot_types.t_lam _ _) bool.false)
+          ((boot_types.t_app _ _) bool.false)
+          ((boot_types.t_let _ _ _) bool.false)
+          ((boot_types.t_num _) bool.false)
+          ((boot_types.t_float _) bool.false)))
+      ((boot_types.t_lam v1 b1)
+        (match t2
+          ((boot_types.t_var _) bool.false)
+          ((boot_types.t_lam v2 b2) (bool.and (eq v1 v2) ((term_eq b1) b2)))
+          ((boot_types.t_app _ _) bool.false)
+          ((boot_types.t_let _ _ _) bool.false)
+          ((boot_types.t_num _) bool.false)
+          ((boot_types.t_float _) bool.false)))
+      ((boot_types.t_app f1 a1)
+        (match t2
+          ((boot_types.t_var _) bool.false)
+          ((boot_types.t_lam _ _) bool.false)
+          ((boot_types.t_app f2 a2) (bool.and ((term_eq f1) f2) ((term_eq a1) a2)))
+          ((boot_types.t_let _ _ _) bool.false)
+          ((boot_types.t_num _) bool.false)
+          ((boot_types.t_float _) bool.false)))
+      ((boot_types.t_let _ _ _) bool.false)
+      ((boot_types.t_num n1)
+        (match t2
+          ((boot_types.t_var _) bool.false)
+          ((boot_types.t_lam _ _) bool.false)
+          ((boot_types.t_app _ _) bool.false)
+          ((boot_types.t_let _ _ _) bool.false)
+          ((boot_types.t_num n2) (eq n1 n2))
+          ((boot_types.t_float _) bool.false)))
+      ((boot_types.t_float _) bool.false)))))
+
+; Converts Church numeral term (\f. \x. f (f ... x)) to integer num
+(define! count_church_apps (boot_types.Term -> num)
+  (\t
+    (match t
+      ((boot_types.t_var _) 0)
+      ((boot_types.t_lam _ _) 0)
+      ((boot_types.t_app _ a) (succ (count_church_apps a)))
+      ((boot_types.t_let _ _ _) 0)
+      ((boot_types.t_num n) n)
+      ((boot_types.t_float _) 0))))
+
+(define! term_to_num (boot_types.Term -> num)
+  (\t
+    (match t
+      ((boot_types.t_var _) 0)
+      ((boot_types.t_lam _ b1)
+        (match b1
+          ((boot_types.t_var _) 0)
+          ((boot_types.t_lam _ b2) (count_church_apps b2))
+          ((boot_types.t_app _ _) 0)
+          ((boot_types.t_let _ _ _) 0)
+          ((boot_types.t_num n) n)
+          ((boot_types.t_float _) 0)))
+      ((boot_types.t_app _ _) 0)
+      ((boot_types.t_let _ _ _) 0)
+      ((boot_types.t_num n) n)
+      ((boot_types.t_float _) 0))))
+
+(namespace _)
+(export boot_readback)

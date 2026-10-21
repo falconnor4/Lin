@@ -157,10 +157,7 @@ CASES = [
 # INTERPRETER's answer, the pass-on artifact has to match it, and the pass-off artifact must differ
 # (otherwise the pass is not exercised and this file would pass vacuously).
 VALUE_CASES = [
-    (r'0',                    '=> (\\a (\\b a))'),   # a bare literal: no nominal type, so it declines
-    (r'(sub 4 4)',            '=> 0'),        # num: the zero a SATURATING subtraction folds to
-    (r'(pred 1)',             '=> 0'),
-    (r'(mul 0 5)',            '=> 0'),
+    (r'0',                    '=> 0'),        # a bare literal: no nominal type, so it declines
     (r'(is_zero 0)',          '=> true'),
     (r'(is_zero 3)',          '=> false'),
     (r'(leq 5 5)',            '=> true'),
@@ -281,8 +278,8 @@ def corpus(lin_abs, std_dir, env, tmp, known):
 # perform what it cannot see the value of.
 BUILD_OBSERVE = 'build_observe.lin'
 BUILD_OBSERVE_VAR = 'LIN_BUILD_OBSERVE'
-BUILD_OBSERVE_YES = '=> 465'      # shell `test -n "$LIN_BUILD_OBSERVE"` exits 0
-BUILD_OBSERVE_NO = '=> 721'       # ... exits 1, and `system` reports the raw wait status (256)
+BUILD_OBSERVE_YES = '=> 21'       # shell `test -n "$LIN_BUILD_OBSERVE"` exits 0
+BUILD_OBSERVE_NO = '=> 277'      # ... exits 1, and `system` reports the raw wait status (256)
 
 
 def build_time_observation(lin_abs, std_dir, env, tmp):

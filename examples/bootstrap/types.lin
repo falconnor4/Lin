@@ -1,0 +1,204 @@
+; ==============================================================================
+; Lin Bootstrapped Core Engine: Types & Data Representations
+; ==============================================================================
+; Drop-in replacement for Lin's interaction calculus core, written in pure Lin.
+; Mathematical interaction net with exactly 5 node tags: LAM, APP, DUP, ERA, ROOT.
+; Pure Peano indexing & zero-arithmetic constructors for maximum performance.
+; ==============================================================================
+
+(load "std/std.lin")
+
+(namespace boot_types)
+
+; Internal list representation for engine scopes, envs, and leaves
+(datatype List
+  (lnil)
+  (lcons head tail))
+
+; Pure Peano numerals for O(1) allocation IDs and step limits
+(datatype PNum
+  (pz)
+  (ps p))
+
+(define! peq (PNum -> PNum -> bool)
+  (\a (\b
+    (match a
+      ((pz) (match b ((pz) bool.true) ((ps _) bool.false)))
+      ((ps pa) (match b ((pz) bool.false) ((ps pb) ((peq pa) pb))))))))
+
+(define! padd (PNum -> PNum -> PNum)
+  (\a (\b
+    (match a
+      ((pz) b)
+      ((ps pa) (ps ((padd pa) b)))))))
+
+; 3-port indexing per node
+(datatype PortIdx
+  (p0)
+  (p1)
+  (p2))
+
+(define idx_eq
+  (\i1 (\i2
+    (match i1
+      ((p0) (match i2 ((p0) bool.true) ((p1) bool.false) ((p2) bool.false)))
+      ((p1) (match i2 ((p0) bool.false) ((p1) bool.true) ((p2) bool.false)))
+      ((p2) (match i2 ((p0) bool.false) ((p1) bool.false) ((p2) bool.true)))))))
+
+; Exactly the 5 pure interaction calculus node tags
+(datatype Tag
+  (tag_lam)   ; 0: Lambda abstraction (\x. body)
+  (tag_app)   ; 1: Application (f x)
+  (tag_dup)   ; 2: Duplication fan / sharing node
+  (tag_era)   ; 3: Erasure node
+  (tag_root)) ; 4: Root observation clamp
+
+; Port identifier: port_none or (mk_port node_id port_idx)
+; port_idx: p0 = principal port, p1 = auxiliary port 1, p2 = auxiliary port 2
+(datatype Port
+  (port_none)
+  (mk_port node idx))
+
+(define is_port_none (\p (match p ((port_none) bool.true) ((mk_port n i) bool.false))))
+(define port_node    (\p (match p ((port_none) pz) ((mk_port n i) n))))
+(define port_idx     (\p (match p ((port_none) p0) ((mk_port n i) i))))
+
+(define! port_eq (Port -> Port -> bool)
+  (\p1 (\p2
+    (match p1
+      ((port_none) (is_port_none p2))
+      ((mk_port n1 i1)
+        (match p2
+          ((port_none) bool.false)
+          ((mk_port n2 i2)
+            (bool.and ((peq n1) n2) ((idx_eq i1) i2)))))))))
+
+; Node structure:
+; tag: Tag
+; scope: List of bits representing level trie path
+; w0, w1, w2: target ports wired to ports 0, 1, 2
+; dead: boolean flag indicating if node has been retired/recycled
+(datatype Node
+  (mk_node tag scope w0 w1 w2 dead))
+
+(define node_tag   (\n (match n ((mk_node t sc w0 w1 w2 d) t))))
+(define node_scope (\n (match n ((mk_node t sc w0 w1 w2 d) sc))))
+(define node_w0    (\n (match n ((mk_node t sc w0 w1 w2 d) w0))))
+(define node_w1    (\n (match n ((mk_node t sc w0 w1 w2 d) w1))))
+(define node_w2    (\n (match n ((mk_node t sc w0 w1 w2 d) w2))))
+(define node_dead  (\n (match n ((mk_node t sc w0 w1 w2 d) d))))
+
+(define node_port_wire (\n (\idx
+  (match idx
+    ((p0) (node_w0 n))
+    ((p1) (node_w1 n))
+    ((p2) (node_w2 n))))))
+
+(define node_set_wire (\n (\idx (\target_port
+  (match n ((mk_node t sc w0 w1 w2 d)
+    (match idx
+      ((p0) (mk_node t sc target_port w1 w2 d))
+      ((p1) (mk_node t sc w0 target_port w2 d))
+      ((p2) (mk_node t sc w0 w1 target_port d)))))))))
+
+; Node list: linear sequence indexed by PNum
+(datatype NodeList
+  (nl_nil)
+  (nl_cons node rest))
+
+(define dummy_node
+  (mk_node tag_era lnil port_none port_none port_none bool.true))
+
+(define! nl_get (Node -> PNum -> NodeList -> Node)
+  (\def_node (\id (\l
+    (match l
+      ((nl_nil) def_node)
+      ((nl_cons n rest)
+        (match id
+          ((pz) n)
+          ((ps prev) (((nl_get def_node) prev) rest)))))))))
+
+(define! nl_put (PNum -> Node -> NodeList -> NodeList)
+  (\id (\new_node (\l
+    (match l
+      ((nl_nil) (nl_cons new_node nl_nil))
+      ((nl_cons n rest)
+        (match id
+          ((pz) (nl_cons new_node rest))
+          ((ps prev) (nl_cons n (((nl_put prev) new_node) rest))))))))))
+
+; Redex and RedexList for active pairs
+(datatype Redex
+  (mk_redex p1 p2))
+
+(datatype RedexList
+  (rnil)
+  (rcons r rest))
+
+(define redex_p1 (\r (match r ((mk_redex p1 p2) p1))))
+(define redex_p2 (\r (match r ((mk_redex p1 p2) p2))))
+
+(define rl_is_nil (\rl (match rl ((rnil) bool.true) ((rcons _ _) bool.false))))
+(define rl_head   (\rl (match rl ((rnil) (mk_redex port_none port_none)) ((rcons r _) r))))
+(define rl_tail   (\rl (match rl ((rnil) rnil) ((rcons _ rest) rest))))
+
+; StepResult: result of a single reduction step
+(datatype StepResult
+  (mk_step_res next_net has_stepped))
+
+(define step_next (\res (match res ((mk_step_res n h) n))))
+(define step_has  (\res (match res ((mk_step_res n h) h))))
+
+; Allocation result: (mk_alloc_res net port)
+(datatype AllocRes
+  (mk_alloc_res net port))
+
+(define alloc_net  (\ar (match ar ((mk_alloc_res n p) n))))
+(define alloc_port (\ar (match ar ((mk_alloc_res n p) p))))
+
+; Split copies result for commutation rules
+(datatype SplitRes
+  (mk_split_res net m1 m2 d1 d2))
+
+; Scope / Level: represented as List of integers (0 or 1 bits)
+(define scope_nil lnil)
+(define scope_app (\sc (\bit (lcons bit sc))))
+(define! scope_eq (List -> List -> bool)
+  (\s1 (\s2
+    (match s1
+      ((lnil)
+        (match s2
+          ((lnil) bool.true)
+          ((lcons _ _) bool.false)))
+      ((lcons h1 t1)
+        (match s2
+          ((lnil) bool.false)
+          ((lcons h2 t2)
+            (((bool.ifl (eq h1 h2))
+               (\_ ((scope_eq t1) t2)))
+               (\_ bool.false)))))))))
+
+; Abstract Syntax Tree (Term)
+(datatype Term
+  (t_var name)
+  (t_lam var body)
+  (t_app fn arg)
+  (t_let var val body)
+  (t_num n)
+  (t_float f))
+
+; Net structure:
+; nodes: NodeList of PNum -> Node
+; next_id: next PNum id to assign
+; redexes: RedexList of active pairs
+; steps: count of interactions performed
+(datatype Net
+  (mk_net nodes next_id redexes steps))
+
+(define net_nodes   (\n (match n ((mk_net nodes next_id redexes steps) nodes))))
+(define net_next_id (\n (match n ((mk_net nodes next_id redexes steps) next_id))))
+(define net_redexes (\n (match n ((mk_net nodes next_id redexes steps) redexes))))
+(define net_steps   (\n (match n ((mk_net nodes next_id redexes steps) steps))))
+
+(namespace _)
+(export boot_types)
