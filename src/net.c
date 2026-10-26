@@ -423,7 +423,7 @@ static void retire(Net *n, int a, int b) {
 void net_link(Net *n, Port a, Port b, int enqueue) {
   if (a.node < 0 || b.node < 0) return;
   WIRE(n, a) = b; WIRE(n, b) = a;
-  if (enqueue && a.port == 0 && b.port == 0) {
+  if (enqueue && a.port == 0 && b.port == 0 && n->tag[a.node] != ROOT && n->tag[b.node] != ROOT) {
 #ifdef _OPENMP
     if (in_parallel) {
       int tid = my_tid;
@@ -1306,7 +1306,10 @@ static long net_reduce_body(Net *n, long limit) {
         }
       }
 
-      int wtotal = base_cnt / 2;   /* what this wave CONSUMED: base + every driver slice + every claim acted on (`max` above is the BASE share only, so a driver's width was invisible) */
+      int real_base = 0;
+      for (int i = 0; i < base_cnt; i += 2)
+        if (n->tag[base_rx[i].node] != ROOT && n->tag[base_rx[i+1].node] != ROOT) real_base++;
+      int wtotal = real_base;   /* what this wave CONSUMED: base + every driver slice + every claim acted on (`max` above is the BASE share only, so a driver's width was invisible) */
       /* a claim owns a region, so it acts; a legacy driver consumes its slice; base gets the rest */
       for (int di = 0; di < ndrv; di++) {
         LinDriver *d = drv[di];
@@ -1320,7 +1323,7 @@ static long net_reduce_body(Net *n, long limit) {
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
-      if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (base_cnt / 2 > wv_max) wv_max = base_cnt / 2; if (wtotal > wv_width) wv_width = wtotal; }
+      if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (wtotal > wv_max) wv_max = wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);
       if (changed == before) break;
@@ -1335,6 +1338,14 @@ static long net_reduce_body(Net *n, long limit) {
          unnecessary, and it re-enqueued pairs the demand filter set aside (test/map.lin hung). */
     }
     if (changed == 0) break;
+  }
+  if (reduce_depth == 1) {
+    LinView view = {0}; LinClaim c;
+    for (int di = 0; di < ndrv; di++) {
+      LinDriver *d = drv[di];
+      if ((d->wants & LIN_WANT_STATE) && DRV_HAS(d, match) && d->match)
+        d->match(n, n->drv[d->slot], &view, &c);
+    }
   }
   net_flush_free(n);
   /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation

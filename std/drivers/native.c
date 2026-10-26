@@ -319,7 +319,8 @@ static int emit_cone(Net *n, Port p, Buf *b, int budget) {
     return emit_redex(n, m.bind[1].node, b, budget - 1);
   if (lin_pat_match(n, p, P_CONE_PRINCIPAL, LIN_PAT_BUDGET_FOR(n), &m))
     return emit_redex(n, m.bind[1].node, b, budget - 1);
-  DBG("    cone: no op redex at %d.%d\n", p.node, p.port);
+  Port w = wire_at(n, p.node, p.port);
+  DBG("    cone: no op redex at %d.%d (tag %d, wire %d.%d tag %d)\n", p.node, p.port, NAT_IN(n, p.node) ? n->tag[p.node] : -1, w.node, w.port, NAT_IN(n, w.node) ? n->tag[w.node] : -1);
   return 0;
 }
 

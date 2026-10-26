@@ -5,8 +5,9 @@
 ; iterate UNARY f n times over x (n a runtime Church numeral):
 ;   loop n f x = f^n x   (n f x = f^n x, so `loop` is \n \f \x. n f x)
 (define loop (\n (\f (\x (n f x)))))
-; count converts a runtime Church numeral to its native Scott value
-(define count (\n (loop.loop n num.succ 0)))
+; count converts a runtime Church numeral to its Scott value (O(1) successor step)
+(define! _c_succ (num -> num) (\n (\sz (\ss (ss n)))))
+(define count (\n (n _c_succ 0)))
 
 (namespace _)
 (export loop)

@@ -172,13 +172,16 @@ static int enc_layer(Net *n, Port p, int enc, Layer *out) {
 /* A numeral is one of two ways, told by structure: a cons spine of raw booleans (a bit-chain, O(log n)) or a lambda tower (the Scott numeral, O(n)). Cells mean bits. */
 long net_read_bits(Net *n, Port p) { long a = 0; int k = 0; Layer L; while (k < n->nn && cons_layer(n, p, &L) && L.layer == L_INDUCTIVE) { long b = net_read_int(n, L.head, LIN_ENC_BOOL); if (b < 0) break; a |= (b & 1) << k++; p = L.tail; } return k ? a : -1; }
 long net_read_int(Net *n, Port p, int enc) {
-  if (enc == LIN_ENC_NUM) return net_read_bits(n, p);   /* a numeral is a bit-chain; there is no tower to fall back to */
+  if (enc == LIN_ENC_NUM) { long b = net_read_bits(n, p); if (b >= 0) return b; }
   long count = 0;
   for (int step = 0; step < n->nn; step++) {
     Layer L;
-    if (!enc_layer(n, p, enc, &L)) return -1;
+    if (!enc_layer(n, p, enc, &L)) {
+      if (enc == LIN_ENC_NUM && count > 0) { long base = net_read_bits(n, p); if (base >= 0) return count + base; }
+      return -1;
+    }
     if (enc == LIN_ENC_BOOL) return L.layer == L_TERMINAL;
-    if (L.layer != L_INDUCTIVE) return count;
+    if (L.layer != L_INDUCTIVE) return (enc == LIN_ENC_NUM && count == 0) ? -1 : count;
     count++; p = L.tail;
   }
   return -1;

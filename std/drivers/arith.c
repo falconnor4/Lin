@@ -467,7 +467,6 @@ static void force_spine(Net *n, Port argp) {
     ops[nops++] = head;                   /* the slot port: read, NOT forced (io.c's cell_layer) */
     cur = next;
   }
-  for (int i = 0; i < nops; i++) lin_demand(n, ops[i]);
   for (int i = 0; i < nops; i++) net_force(n, ops[i]);
   free(ops);
 }

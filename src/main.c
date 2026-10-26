@@ -146,10 +146,7 @@ static Term *expand(Term *t, Guard *g) {
   /* TLET binds in both children: the value may refer to itself, which is the recursion. */
   int bound = (t->type == TLAM || t->type == TDEF || t->type == TLET);
   if (bound) guard_push(g, t->name);
-  c->l = expand(t->l, g);
-  c->r = expand(t->r, g);
-  if (bound) g->count--;
-  return c;
+  c->l = expand(t->l, g); c->r = expand(t->r, g); if (bound) g->count--; return c;
 }
 
 Term *expand_defs(Term *t) {
@@ -201,9 +198,7 @@ static void run_and_report(Net *net, int domain) {
       net_reduce(net, STEP_LIMIT);
     }
   }
-  clock_gettime(CLOCK_MONOTONIC, &t0);
   int no_io = !net_run_io(net, STEP_LIMIT);
-  clock_gettime(CLOCK_MONOTONIC, &t1);
   /* net_print is what OBSERVES the value -- FFI dispatch (and so a prelude's `(set_driver ...)`)
      happens there -- so it always runs; only the `=> ` line is suppressed for the prelude. */
   if (no_io && !quiet_forms) printf("=> ");
@@ -223,10 +218,7 @@ void eval_form(Term *t) {
   if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
   if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); return; }
   Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
-  Term *opt = getenv("LIN_NO_EGRAPH") ? ex : egraph_optimize(ex);
-  int ok = compile(opt, &net, err, sizeof err);
-  if (opt && opt != ex) term_free(opt);
-  if (!ok) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
+  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
   struct timespec b0, b1;
   bench_measured = bench_mode;
   if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
