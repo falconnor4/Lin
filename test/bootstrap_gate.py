@@ -76,6 +76,20 @@ CASES = [
      '(define! r1 (list num -> num -> num) (\\s (\\i (let ((e (tbend s i))) '
      '(if e 7 (r1 s (add i 1)))))))\n'
      '(io_print (r1 "abc" 2) (io_print "\\n" 0))\n', "7"),
+    # The same defect WITHOUT recursion: a lambda reached through a fan.  A `let`-bound lambda used
+    # twice is copied, and a fold inside the copy cannot read a parameter operand -- the pure-Lin
+    # fallback does not take over either (an `_op` with a parameter operand HANGS: (mul n n) in this
+    # shape is >60s, 7ms at top level).  These four are the minimal reproducers.
+    ("shared lambda, ffi operand", "share",
+     '(let ((f (\\s (\\i (if (eq (tget s i) 97) 7 0))))) '
+     '(io_print (f "abcd" 0) (io_print (f "abcd" 1) (io_print "\\n" 0))))\n', "70"),
+    ("shared lambda, ffi operand, one use (control)", "share",
+     '(let ((f (\\s (\\i (if (eq (tget s i) 97) 7 0))))) '
+     '(io_print (f "abcd" 0) (io_print "\\n" 0)))\n', "7"),
+    ("shared lambda, op on a parameter", "share",
+     '(let ((f (\\n (eq (mul n n) 400)))) (io_print (f 20) (io_print (f 20) (io_print "\\n" 0))))\n', "a))"),
+    ("shared lambda, op on a parameter, one use (control)", "share",
+     '(let ((f (\\n (eq (mul n n) 400)))) (io_print (f 20) (io_print "\\n" 0)))\n', "a))"),
     ("ffi boolean as a condition, non-recursive (control)", "ffi/cond",
      '(define! d2 (list num -> num -> num) (\\s (\\i (if (tbend s i) 9 0))))\n'
      '(io_print (d2 "abc" 3) (io_print "\\n" 0))\n', "9"),
