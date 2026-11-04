@@ -100,6 +100,23 @@ class Net:
             else:
                 p = self.wire[p[0]][p[1]]
 
+    def check(self):
+        """Structural invariants a live net must satisfy.  A wire from a live node to a DEAD one is
+        the shape that makes a reader print `_` and a fold decline for ever; the engine has no test
+        for it (the last count in the source is a comment), so it is checked here, per dump."""
+        bad = []
+        for v in range(self.nn):
+            if self.dead[v]:
+                continue
+            for k, q in enumerate(self.wire[v]):
+                if q[0] == NONE:
+                    continue
+                if not (0 <= q[0] < self.nn):
+                    bad.append((v, k, q, "out of net"))
+                elif self.dead[q[0]]:
+                    bad.append((v, k, q, "points at a dead node"))
+        return bad
+
     def ffi_closures(self):
         """Every closure std/drivers/arith.c's ffi_header accepts, with its operand spine."""
         def hop(p):
@@ -135,9 +152,15 @@ def main():
     ap.add_argument("--depth", type=int, default=2)
     ap.add_argument("--chain", default="")
     ap.add_argument("--ffi", action="store_true", help="show every `_ffi`-shaped closure and its spine")
+    ap.add_argument("--check", action="store_true", help="report live wires that point at dead nodes")
     a = ap.parse_args()
     net = Net(a.file)
-    if a.node:
+    if a.check:
+        bad = net.check()
+        print("dangling wires: %d" % len(bad))
+        for (v, k, q, why) in bad[:20]:
+            print("  %d.%d -> %d.%d (%s)" % (v, k, q[0], q[1], why))
+    elif a.node:
         net.show(int(a.node), a.depth)
     elif a.chain:
         n, p = a.chain.split(".")
