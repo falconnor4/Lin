@@ -1,0 +1,10 @@
+#!/bin/sh
+set -u
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+if [ $# -lt 1 ]; then
+  echo "usage: lin-boot FILE.lin" >&2
+  exit 64
+fi
+LIN_BOOT_SRC=$1
+export LIN_BOOT_SRC
+exec "$ROOT/lin" "$ROOT/examples/bootstrap/boot.lin"

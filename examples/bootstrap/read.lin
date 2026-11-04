@@ -1,0 +1,55 @@
+; ==============================================================================
+; Bootstrapped Lin compiler -- reader, stage 1: tokens
+; ==============================================================================
+; Turns Lin source (a list of char codes) into tokens.  A token is its own text,
+; so a symbol keeps its spelling and a number keeps its digits; the parser above
+; this turns the token list into the term AST.
+;
+; Covered: whitespace, `;` comments to end of line, the two parens, string
+; literals (quotes kept, spaces allowed inside), and atoms.
+;
+; OBSERVING THE RESULT: this engine's printer reads a LIST OF STRINGS as an
+; `_ffi` call shape and answers "ffi: symbol 'ab' not found", so a token list is
+; inspected by counting and comparing (`ntokens`, `streq`), never by printing it.
+; ==============================================================================
+
+(load "std/std.lin")
+
+(namespace boot_read)
+
+(define! rev_acc (list a -> list a -> list a) (\l (\acc (if (list.is_empty l) acc (rev_acc (list.tail l) (list.cons (list.head l) acc))))))
+
+(define! rev (list a -> list a) (\l (rev_acc l list.nil)))
+
+(define! is_space (num -> bool) (\c (if (eq c 32) bool.true (if (eq c 10) bool.true (if (eq c 9) bool.true (eq c 13))))))
+
+(define! skip_line (list num -> list num) (\s (if (list.is_empty s) list.nil (if (eq (list.head s) 10) (list.tail s) (skip_line (list.tail s))))))
+
+(define! flush (list num -> list (list num) -> list (list num)) (\tok (\acc (ifl (list.is_empty tok) (\_ acc) (\_ (list.cons (rev tok) acc))))))
+
+(define! str_acc (list num -> list num -> list num) (\s (\acc (if (list.is_empty s) (list.cons 34 acc) (if (eq (list.head s) 34) (list.cons 34 acc) (str_acc (list.tail s) (list.cons (list.head s) acc)))))))
+
+(define! str_tail (list num -> list num) (\s (if (list.is_empty s) list.nil (if (eq (list.head s) 34) (list.tail s) (str_tail (list.tail s))))))
+
+(define! lex (list num -> list num -> list (list num) -> list (list num))
+  (\s (\tok (\acc
+    (if (list.is_empty s)
+      (rev (flush tok acc))
+      (if (eq (list.head s) 59)
+        (lex (skip_line (list.tail s)) tok acc)
+        (if (is_space (list.head s))
+          (lex (list.tail s) list.nil (flush tok acc))
+          (if (eq (list.head s) 40)
+            (lex (list.tail s) list.nil (list.cons "(" (flush tok acc)))
+            (if (eq (list.head s) 41)
+              (lex (list.tail s) list.nil (list.cons ")" (flush tok acc)))
+              (if (eq (list.head s) 34)
+                (lex (str_tail (list.tail s)) list.nil (list.cons (rev (str_acc (list.tail s) list.nil)) (flush tok acc)))
+                (lex (list.tail s) (list.cons (list.head s) tok) acc)))))))))))
+
+(define! tokenize (list num -> list (list num)) (\s (lex s list.nil list.nil)))
+
+(define! ntokens (list (list num) -> num) (\l (if (list.is_empty l) 0 (num.succ (ntokens (list.tail l))))))
+
+(namespace _)
+(export boot_read)

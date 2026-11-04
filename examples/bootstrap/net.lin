@@ -12,6 +12,9 @@
 (load "types.lin")
 
 (namespace boot_net)
+(open boot_types)
+(open bool)
+(open num)
 
 (define! empty_net boot_types.Net
   (let ((root_node (boot_types.mk_node boot_types.tag_root boot_types.scope_nil
@@ -37,7 +40,7 @@
                                    bool.false))
             (new_nodes (((boot_types.nl_put next_id) n) nodes))
             (new_net (boot_types.mk_net new_nodes (boot_types.ps next_id) redexes steps)))
-        ((boot_types.mk_alloc_res new_net) (boot_types.mk_port next_id boot_types.p0)))))))))
+        ((boot_types.mk_alloc_res new_net) (boot_types.mk_port next_id boot_types.idx0)))))))))
 
 (define! retire_node (boot_types.Net -> boot_types.PNum -> boot_types.Net)
   (\net (\id
@@ -56,24 +59,24 @@
           ((boot_types.node_port_wire node) idx)))))))
 
 (define! link (boot_types.Net -> boot_types.Port -> boot_types.Port -> boot_types.Net)
-  (\net (\p1 (\p2
-    (match p1
+  (\net (\pt1 (\pt2
+    (match pt1
       ((boot_types.port_none) net)
       ((boot_types.mk_port n1 i1)
-        (match p2
+        (match pt2
           ((boot_types.port_none) net)
           ((boot_types.mk_port n2 i2)
             (let ((node1 ((get_node net) n1))
                   (node2 ((get_node net) n2))
-                  (up1 (((boot_types.node_set_wire node1) i1) p2))
+                  (up1 (((boot_types.node_set_wire node1) i1) pt2))
                   (net1 (((put_node net) n1) up1))
                   (node2_curr ((get_node net1) n2))
-                  (up2 (((boot_types.node_set_wire node2_curr) i2) p1))
+                  (up2 (((boot_types.node_set_wire node2_curr) i2) pt1))
                   (net2 (((put_node net1) n2) up2)))
               (match i1
-                ((boot_types.p0)
+                ((boot_types.idx0)
                   (match i2
-                    ((boot_types.p0)
+                    ((boot_types.idx0)
                       (match n1
                         ((boot_types.pz) net2)
                         ((boot_types.ps _)
@@ -81,16 +84,16 @@
                             ((boot_types.pz) net2)
                             ((boot_types.ps _)
                               (match net2 ((boot_types.mk_net nodes next_id redexes steps)
-                                (boot_types.mk_net nodes next_id ((boot_types.rcons (boot_types.mk_redex p1 p2)) redexes) steps))))))))
-                    ((boot_types.p1) net2)
-                    ((boot_types.p2) net2)))
-                ((boot_types.p1) net2)
-                ((boot_types.p2) net2)))))))))))
+                                (boot_types.mk_net nodes next_id ((boot_types.rcons (boot_types.mk_redex pt1 pt2)) redexes) steps))))))))
+                    ((boot_types.idx1) net2)
+                    ((boot_types.idx2) net2)))
+                ((boot_types.idx1) net2)
+                ((boot_types.idx2) net2)))))))))))
 
 (define! redex_live (boot_types.Net -> boot_types.Port -> boot_types.Port -> bool)
-  (\net (\p1 (\p2
-    (let ((n1 (boot_types.port_node p1))
-          (n2 (boot_types.port_node p2))
+  (\net (\pt1 (\pt2
+    (let ((n1 (boot_types.port_node pt1))
+          (n2 (boot_types.port_node pt2))
           (node1 ((get_node net) n1))
           (node2 ((get_node net) n2)))
       (match n1
@@ -101,8 +104,8 @@
             ((boot_types.ps _)
               (((bool.ifl (bool.or (boot_types.node_dead node1) (boot_types.node_dead node2)))
                  (\_ bool.false))
-                 (\_ (bool.and ((boot_types.port_eq (boot_types.node_w0 node1)) p2)
-                               ((boot_types.port_eq (boot_types.node_w0 node2)) p1)))))))))))))
+                 (\_ (bool.and ((boot_types.port_eq (boot_types.node_w0 node1)) pt2)
+                               ((boot_types.port_eq (boot_types.node_w0 node2)) pt1)))))))))))))
 
 (define! rule_beta (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
   (\net (\n_lam (\n_app
@@ -148,10 +151,10 @@
                           (m2 (boot_types.port_node p_m2))
                           (d1 (boot_types.port_node p_d1))
                           (d2 (boot_types.port_node p_d2))
-                          (net_a (((link net4) (boot_types.mk_port d1 boot_types.p1)) (boot_types.mk_port m1 boot_types.p1)))
-                          (net_b (((link net_a) (boot_types.mk_port d1 boot_types.p2)) (boot_types.mk_port m2 boot_types.p1)))
-                          (net_c (((link net_b) (boot_types.mk_port d2 boot_types.p1)) (boot_types.mk_port m1 boot_types.p2)))
-                          (net_d (((link net_c) (boot_types.mk_port d2 boot_types.p2)) (boot_types.mk_port m2 boot_types.p2))))
+                          (net_a (((link net4) (boot_types.mk_port d1 boot_types.idx1)) (boot_types.mk_port m1 boot_types.idx1)))
+                          (net_b (((link net_a) (boot_types.mk_port d1 boot_types.idx2)) (boot_types.mk_port m2 boot_types.idx1)))
+                          (net_c (((link net_b) (boot_types.mk_port d2 boot_types.idx1)) (boot_types.mk_port m1 boot_types.idx2)))
+                          (net_d (((link net_c) (boot_types.mk_port d2 boot_types.idx2)) (boot_types.mk_port m2 boot_types.idx2))))
                       (((((boot_types.mk_split_res net_d) m1) m2) d1) d2)))))))))))))))))
 
 (define! rule_dup_node (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
@@ -172,14 +175,14 @@
           (let ((net2 ((retire_node ((retire_node net1) n_dup)) n_m)))
             (((bool.ifl (bool.or ((boot_types.peq (boot_types.port_node m_w1)) n_m)
                                  ((boot_types.peq (boot_types.port_node m_w2)) n_m)))
-              (\_ (let ((net3 (((link net2) (boot_types.mk_port d1 boot_types.p0)) (boot_types.mk_port d2 boot_types.p0)))
-                        (net4 (((link net3) (boot_types.mk_port m1 boot_types.p0)) d_w1))
-                        (net5 (((link net4) (boot_types.mk_port m2 boot_types.p0)) d_w2)))
+              (\_ (let ((net3 (((link net2) (boot_types.mk_port d1 boot_types.idx0)) (boot_types.mk_port d2 boot_types.idx0)))
+                        (net4 (((link net3) (boot_types.mk_port m1 boot_types.idx0)) d_w1))
+                        (net5 (((link net4) (boot_types.mk_port m2 boot_types.idx0)) d_w2)))
                     net5))
-              (\_ (let ((net3 (((link net2) (boot_types.mk_port d1 boot_types.p0)) m_w1))
-                        (net4 (((link net3) (boot_types.mk_port d2 boot_types.p0)) m_w2))
-                        (net5 (((link net4) (boot_types.mk_port m1 boot_types.p0)) d_w1))
-                        (net6 (((link net5) (boot_types.mk_port m2 boot_types.p0)) d_w2)))
+              (\_ (let ((net3 (((link net2) (boot_types.mk_port d1 boot_types.idx0)) m_w1))
+                        (net4 (((link net3) (boot_types.mk_port d2 boot_types.idx0)) m_w2))
+                        (net5 (((link net4) (boot_types.mk_port m1 boot_types.idx0)) d_w1))
+                        (net6 (((link net5) (boot_types.mk_port m2 boot_types.idx0)) d_w2)))
                     net6))))))))))))
 
 (define! rule_dup_commute (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
@@ -195,10 +198,10 @@
       (match ((((((split_copies net) boot_types.tag_dup) sc1) sc1) boot_types.tag_dup) sc2)
         ((boot_types.mk_split_res net1 m1 m2 d1 d2)
           (let ((net2   ((retire_node ((retire_node net1) n1)) n2))
-                (net3   (((link net2) (boot_types.mk_port d1 boot_types.p0)) w1_1))
-                (net4   (((link net3) (boot_types.mk_port d2 boot_types.p0)) w1_2))
-                (net5   (((link net4) (boot_types.mk_port m1 boot_types.p0)) w2_1))
-                (net6   (((link net5) (boot_types.mk_port m2 boot_types.p0)) w2_2)))
+                (net3   (((link net2) (boot_types.mk_port d1 boot_types.idx0)) w1_1))
+                (net4   (((link net3) (boot_types.mk_port d2 boot_types.idx0)) w1_2))
+                (net5   (((link net4) (boot_types.mk_port m1 boot_types.idx0)) w2_1))
+                (net6   (((link net5) (boot_types.mk_port m2 boot_types.idx0)) w2_2)))
             net6))))))))
 
 (define! erase_binary (boot_types.Net -> boot_types.PNum -> boot_types.PNum -> boot_types.Net)
@@ -230,9 +233,9 @@
         ((boot_types.tag_root) net)))))))
 
 (define! interact (boot_types.Net -> boot_types.Port -> boot_types.Port -> boot_types.Net)
-  (\net (\p1 (\p2
-    (let ((n1 (boot_types.port_node p1))
-          (n2 (boot_types.port_node p2))
+  (\net (\pt1 (\pt2
+    (let ((n1 (boot_types.port_node pt1))
+          (n2 (boot_types.port_node pt2))
           (node1 ((get_node net) n1))
           (node2 ((get_node net) n2))
           (t1 (boot_types.node_tag node1))

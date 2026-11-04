@@ -1,0 +1,46 @@
+; ==============================================================================
+; Lin Standard Library: the TEXT domain -- O(1) access to a source string
+; ==============================================================================
+; A Lin string is a cons chain, so `(list.head (list.tail ...))` costs one reduction per
+; character skipped: reading source in Lin at that rate is ~0.28 s per character (measured,
+; examples/bootstrap/read.lin).  A string already has a C form wherever it is interned, and
+; these rows are exactly the C string primitives -- strcspn, strspn, strchr, memcpy -- reached
+; through the driver ABI (std/drivers/text.c).  Nothing here knows what the text IS.
+;
+; Index units are BYTES, and a negative index or a -1 result is "not there": that is the one
+; convention every row shares, so a reader can spell its loop as `(tfind s i stop)`.
+; ==============================================================================
+
+(load "std/drivers/text.lin")
+
+(namespace text)
+
+; Byte length of the source.
+(define! tlen (list num -> num) (\s (ccall "lin_tlen" (cons s nil))))
+
+; Byte at `i`, or -1 past the end.
+(define! tget (list num -> num -> num) (\s (\i (ccall "lin_tget" (cons s (cons i nil))))))
+
+; First `ch` at or after `i`, or -1.
+(define! tfind (list num -> num -> num -> num) (\s (\i (\ch (ccall "lin_tfind" (cons s (cons i (cons ch nil))))))))
+
+; First byte at or after `i` that is in `stops` (strcspn), or -1 at the end of the text.
+(define! tfindany (list num -> num -> list num -> num) (\s (\i (\stops (ccall "lin_tfindany" (cons s (cons i (cons stops nil))))))))
+
+; First byte at or after `i` that is NOT in `accept` (strspn).
+(define! trun (list num -> num -> list num -> num) (\s (\i (\accept (ccall "lin_trun" (cons s (cons i (cons accept nil))))))))
+
+; Does the text at `i` begin with `lit`?  1 or 0 -- a keyword test with no slice built.
+(define! tmatch (list num -> num -> list num -> num) (\s (\i (\lit (ccall "lin_tmatch" (cons s (cons i (cons lit nil))))))))
+
+; Is `i` at or past the end of the text?  BOOLEAN, so a reader's loop head branches with no compare.
+(define! tbend (list num -> num -> bool) (\s (\i (ccall "lin_tbend" (cons s (cons i nil))))))
+
+; Does the text at `i` begin with `lit`?  BOOLEAN, same reason: a paren, a quote, a comment.
+(define! tbhas (list num -> num -> list num -> bool) (\s (\i (\lit (ccall "lin_tbhas" (cons s (cons i (cons lit nil))))))))
+
+; The slice [i, i+n), as a string.
+(define! tsub (list num -> num -> num -> list num) (\s (\i (\n (ccall "lin_tsub" (cons s (cons i (cons n nil))))))))
+
+(namespace _)
+(export text)

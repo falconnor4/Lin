@@ -102,6 +102,7 @@ static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, 
   /* Needed order leaves a term's un-demanded thunks alone, which is exactly right at RUN time and
      useless to a build: what a build wants to bake is the VALUE, so it observes the root itself. */
   if (depth != DEPTH_RUN) net_force(net, (Port){0, 0});
+  if (depth == DEPTH_BUILD) lin_driver_aot(net, opt, build_sch);
   if (depth == DEPTH_PRECOMPILE) lin_precompile_depth--;
   else if (depth == DEPTH_BUILD) lin_build_depth--;
   if (opt != ex) term_free(opt);
@@ -146,7 +147,8 @@ static Term *expand(Term *t, Guard *g) {
   /* TLET binds in both children: the value may refer to itself, which is the recursion. */
   int bound = (t->type == TLAM || t->type == TDEF || t->type == TLET);
   if (bound) guard_push(g, t->name);
-  c->l = expand(t->l, g); c->r = expand(t->r, g); if (bound) g->count--; return c;
+  c->l = expand(t->l, g); if (bound) g->count--;
+  c->r = expand(t->r, g); return c;
 }
 
 Term *expand_defs(Term *t) {
@@ -188,6 +190,7 @@ static int type_domain(Type *t) {
 
 static void run_and_report(Net *net, int domain) {
   struct timespec t0, t1;
+  { const char *dp = getenv("LIN_DUMP_NET"); if (dp) net_save_line(net, dp); }   /* test/netdump.py reads the dump */
   if (!bench_measured) {                 /* nobody reduced this net yet: do it here */
     if (bench_mode) {
       bench_goi0 = goi_det(net); clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -198,7 +201,9 @@ static void run_and_report(Net *net, int domain) {
       net_reduce(net, STEP_LIMIT);
     }
   }
+  clock_gettime(CLOCK_MONOTONIC, &t0);
   int no_io = !net_run_io(net, STEP_LIMIT);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
   /* net_print is what OBSERVES the value -- FFI dispatch (and so a prelude's `(set_driver ...)`)
      happens there -- so it always runs; only the `=> ` line is suppressed for the prelude. */
   if (no_io && !quiet_forms) printf("=> ");

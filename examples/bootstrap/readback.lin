@@ -9,6 +9,9 @@
 (load "net.lin")
 
 (namespace boot_readback)
+(open boot_types)
+(open bool)
+(open num)
 
 (define! env_find (boot_types.List -> boot_types.PNum -> num)
   (\env (\id
@@ -32,25 +35,25 @@
             (match tag
               ((boot_types.tag_lam)
                 (match idx
-                  ((boot_types.p0)
+                  ((boot_types.idx0)
                     (let ((new_env (boot_types.lcons (pair nid depth) env))
-                          (body ((((read_port net) (boot_types.mk_port nid boot_types.p2)) new_env) (succ depth))))
+                          (body ((((read_port net) (boot_types.mk_port nid boot_types.idx2)) new_env) (add depth 1))))
                       ((boot_types.t_lam depth) body)))
-                  ((boot_types.p1) (boot_types.t_var ((env_find env) nid)))
-                  ((boot_types.p2) (boot_types.t_var ((env_find env) nid)))))
+                  ((boot_types.idx1) (boot_types.t_var ((env_find env) nid)))
+                  ((boot_types.idx2) (boot_types.t_var ((env_find env) nid)))))
               ((boot_types.tag_app)
-                (let ((f ((((read_port net) (boot_types.mk_port nid boot_types.p0)) env) depth))
-                      (a ((((read_port net) (boot_types.mk_port nid boot_types.p2)) env) depth)))
+                (let ((f ((((read_port net) (boot_types.mk_port nid boot_types.idx0)) env) depth))
+                      (a ((((read_port net) (boot_types.mk_port nid boot_types.idx2)) env) depth)))
                   ((boot_types.t_app f) a)))
               ((boot_types.tag_dup)
-                ((((read_port net) (boot_types.mk_port nid boot_types.p0)) env) depth))
-              ((boot_types.tag_era) (boot_types.t_var 888))
+                ((((read_port net) (boot_types.mk_port nid boot_types.idx0)) env) depth))
+              ((boot_types.tag_era) (boot_types.t_var (match nid ((boot_types.pz) 1000) ((boot_types.ps p) (match p ((boot_types.pz) 1001) ((boot_types.ps p2) (match p2 ((boot_types.pz) 1002) ((boot_types.ps p3) 1003))))))))
               ((boot_types.tag_root) (boot_types.t_var 999))))))))))))
 
 ; Main readback function: starts at ROOT node port 0
 (define! read_net (boot_types.Net -> boot_types.Term)
   (\net
-    ((((read_port net) (boot_types.mk_port boot_types.pz boot_types.p0)) boot_types.lnil) 0)))
+    ((((read_port net) (boot_types.mk_port boot_types.pz boot_types.idx0)) boot_types.lnil) 0)))
 
 ; Term inspection accessors
 (define is_lam  (\t (match t ((boot_types.t_var _) bool.false) ((boot_types.t_lam _ _) bool.true) ((boot_types.t_app _ _) bool.false) ((boot_types.t_let _ _ _) bool.false) ((boot_types.t_num _) bool.false) ((boot_types.t_float _) bool.false))))
@@ -127,7 +130,7 @@
     (match t
       ((boot_types.t_var _) 0)
       ((boot_types.t_lam _ _) 0)
-      ((boot_types.t_app _ a) (succ (count_church_apps a)))
+      ((boot_types.t_app _ a) (add (count_church_apps a) 1))
       ((boot_types.t_let _ _ _) 0)
       ((boot_types.t_num n) n)
       ((boot_types.t_float _) 0))))

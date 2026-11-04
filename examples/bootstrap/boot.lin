@@ -1,0 +1,17 @@
+; ==============================================================================
+; Bootstrapped Lin compiler -- entry point
+; ==============================================================================
+; Stage 1 of the self-host: this program is the compiler.  The C engine runs it
+; (see bin/lin-boot); the only services it takes from the host are the ones a
+; program is entitled to -- reading its input and printing -- and the source text
+; arrives in LIN_BOOT_SRC because the language has no argv accessor yet.
+;
+; NOT YET A COMPILER.  What is here today is the entry point and the contract;
+; the front end (reader -> AST -> net) and the .line emitter are the work in
+; docs/BOOTSTRAP-PARITY.md.  It exits non-zero with nothing on stdout so
+; test/parity.py reports BOOT-DIFF instead of mistaking silence for agreement.
+; ==============================================================================
+
+(load "std/std.lin")
+
+(ffi.exit 70)

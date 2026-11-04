@@ -523,18 +523,18 @@ static int lvl_path(Net *n, Scope s, unsigned char *out) {
   for (int i = d - 1; i >= 0; i--) { out[i] = n->lv_bit[l]; l = n->lv_parent[l]; }
   return d;
 }
+/* A commutation's copies are labelled INSIDE THE FAN: `[gen] ++ path(dup)`.  Concatenating the node's
+   path too makes a level's depth the SUM of its parents' -- doubling per generation: measured path
+   length 385 and 21.5 M `lv_intern` calls (72 % of a 20-step recursive countdown).  The generation bit
+   still separates the two copies and the node's path adds nothing for well-nesting (see above). */
 static int lvl_prefix2(Net *n, int gen, Scope a, Scope b) {
-  int da = lv_depth(n, a), db = lv_depth(n, b), cur = lv_intern(n, 0, gen);
-  unsigned char *pa = malloc((size_t)(da > 0 ? da : 1)), *pb = malloc((size_t)(db > 0 ? db : 1));
-  if (!pa || !pb) { free(pa); free(pb); return (int)a; }   /* no room: keep the gauge rather than alias one */
-  lvl_path(n, a, pa); lvl_path(n, b, pb);
-  for (int i = 0; i < da; i++) cur = lv_intern(n, cur, pa[i]);
-  for (int i = 0; i < db; i++) cur = lv_intern(n, cur, pb[i]);
-  free(pa); free(pb);
-  return cur;
+  unsigned char *pb = malloc((size_t)lv_depth(n, b) + 1); int db = lv_depth(n, b), cur = lv_intern(n, 0, gen);
+  (void)a; if (!pb) return (int)b;                    /* no room: keep the gauge rather than alias one */
+  lvl_path(n, b, pb); for (int i = 0; i < db; i++) cur = lv_intern(n, cur, pb[i]);
+  free(pb); return cur;
 }
 /* the four rules of the scope-gauge calculus; ERA is inert (era pairs are dropped) */
-static int lin_trace = -1; /* cached LIN_TRACE */
+static int lin_trace = -1; static long dump_at = -2; static const char *dump_path;   /* LIN_TRACE; LIN_DUMP_AT_STEP x LIN_DUMP_NET dumps mid-reduction */
 
 /* Driver pipeline: sorted by priority (ascending); core waves fan out to each in priority order, each
    *claiming* the redexes it handles, so drivers compose.  A driver only ever pre-empts a redex class;
@@ -546,6 +546,8 @@ int net_interact(Net *n, Port p1, Port p2) {
   if (lin_trace < 0) lin_trace = getenv("LIN_TRACE") != NULL;
   if (lin_trace)
     fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
+  if (dump_at == -2) { dump_at = getenv("LIN_DUMP_AT_STEP") ? atol(getenv("LIN_DUMP_AT_STEP")) : -1; dump_path = getenv("LIN_DUMP_AT_PATH"); }
+  if (dump_at >= 0 && n->steps == dump_at && dump_path) net_save_line(n, dump_path);
 
   if (t1 == LAM && t2 == APP) {
     const int cor_a[2] = {1, 2}, cor_b[2] = {5, 4};
@@ -1323,7 +1325,7 @@ static long net_reduce_body(Net *n, long limit) {
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
-      if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (wtotal > wv_max) wv_max = wv_width = wtotal; }
+      if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (real_base > wv_max) wv_max = real_base; if (wtotal > wv_width) wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);
       if (changed == before) break;

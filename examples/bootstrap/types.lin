@@ -6,9 +6,17 @@
 ; Pure Peano indexing & zero-arithmetic constructors for maximum performance.
 ; ==============================================================================
 
-(load "std/std.lin")
-
 (namespace boot_types)
+(open bool)
+(open num)
+
+; Internal pair representation
+(datatype Pair
+  (mk_pair p_fst p_snd))
+
+(define pair mk_pair)
+(define fst (\p (match p ((mk_pair a b) a))))
+(define snd (\p (match p ((mk_pair a b) b))))
 
 ; Internal list representation for engine scopes, envs, and leaves
 (datatype List
@@ -34,16 +42,16 @@
 
 ; 3-port indexing per node
 (datatype PortIdx
-  (p0)
-  (p1)
-  (p2))
+  (idx0)
+  (idx1)
+  (idx2))
 
 (define idx_eq
   (\i1 (\i2
     (match i1
-      ((p0) (match i2 ((p0) bool.true) ((p1) bool.false) ((p2) bool.false)))
-      ((p1) (match i2 ((p0) bool.false) ((p1) bool.true) ((p2) bool.false)))
-      ((p2) (match i2 ((p0) bool.false) ((p1) bool.false) ((p2) bool.true)))))))
+      ((idx0) (match i2 ((idx0) bool.true) ((idx1) bool.false) ((idx2) bool.false)))
+      ((idx1) (match i2 ((idx0) bool.false) ((idx1) bool.true) ((idx2) bool.false)))
+      ((idx2) (match i2 ((idx0) bool.false) ((idx1) bool.false) ((idx2) bool.true)))))))
 
 ; Exactly the 5 pure interaction calculus node tags
 (datatype Tag
@@ -54,21 +62,21 @@
   (tag_root)) ; 4: Root observation clamp
 
 ; Port identifier: port_none or (mk_port node_id port_idx)
-; port_idx: p0 = principal port, p1 = auxiliary port 1, p2 = auxiliary port 2
+; port_idx: idx0 = principal port, idx1 = auxiliary port 1, idx2 = auxiliary port 2
 (datatype Port
   (port_none)
   (mk_port node idx))
 
 (define is_port_none (\p (match p ((port_none) bool.true) ((mk_port n i) bool.false))))
 (define port_node    (\p (match p ((port_none) pz) ((mk_port n i) n))))
-(define port_idx     (\p (match p ((port_none) p0) ((mk_port n i) i))))
+(define port_idx     (\p (match p ((port_none) idx0) ((mk_port n i) i))))
 
 (define! port_eq (Port -> Port -> bool)
-  (\p1 (\p2
-    (match p1
-      ((port_none) (is_port_none p2))
+  (\pt1 (\pt2
+    (match pt1
+      ((port_none) (is_port_none pt2))
       ((mk_port n1 i1)
-        (match p2
+        (match pt2
           ((port_none) bool.false)
           ((mk_port n2 i2)
             (bool.and ((peq n1) n2) ((idx_eq i1) i2)))))))))
@@ -90,16 +98,16 @@
 
 (define node_port_wire (\n (\idx
   (match idx
-    ((p0) (node_w0 n))
-    ((p1) (node_w1 n))
-    ((p2) (node_w2 n))))))
+    ((idx0) (node_w0 n))
+    ((idx1) (node_w1 n))
+    ((idx2) (node_w2 n))))))
 
 (define node_set_wire (\n (\idx (\target_port
   (match n ((mk_node t sc w0 w1 w2 d)
     (match idx
-      ((p0) (mk_node t sc target_port w1 w2 d))
-      ((p1) (mk_node t sc w0 target_port w2 d))
-      ((p2) (mk_node t sc w0 w1 target_port d)))))))))
+      ((idx0) (mk_node t sc target_port w1 w2 d))
+      ((idx1) (mk_node t sc w0 target_port w2 d))
+      ((idx2) (mk_node t sc w0 w1 target_port d)))))))))
 
 ; Node list: linear sequence indexed by PNum
 (datatype NodeList
@@ -129,14 +137,14 @@
 
 ; Redex and RedexList for active pairs
 (datatype Redex
-  (mk_redex p1 p2))
+  (mk_redex r_p1 r_p2))
 
 (datatype RedexList
   (rnil)
   (rcons r rest))
 
-(define redex_p1 (\r (match r ((mk_redex p1 p2) p1))))
-(define redex_p2 (\r (match r ((mk_redex p1 p2) p2))))
+(define redex_p1 (\r (match r ((mk_redex rx1 rx2) rx1))))
+(define redex_p2 (\r (match r ((mk_redex rx1 rx2) rx2))))
 
 (define rl_is_nil (\rl (match rl ((rnil) bool.true) ((rcons _ _) bool.false))))
 (define rl_head   (\rl (match rl ((rnil) (mk_redex port_none port_none)) ((rcons r _) r))))

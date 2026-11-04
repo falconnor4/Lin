@@ -9,6 +9,9 @@
 (load "net.lin")
 
 (namespace boot_reduce)
+(open boot_types)
+(open bool)
+(open num)
 
 (define! reduce_step (boot_types.Net -> boot_types.StepResult)
   (\net
@@ -16,14 +19,14 @@
       (match redexes
         ((boot_types.rnil) ((boot_types.mk_step_res net) bool.false))
         ((boot_types.rcons pair_head rest_redexes)
-          (let ((p1 (boot_types.redex_p1 pair_head))
-                (p2 (boot_types.redex_p2 pair_head))
+          (let ((rx_p1 (boot_types.redex_p1 pair_head))
+                (rx_p2 (boot_types.redex_p2 pair_head))
                 (net_rest (boot_types.mk_net (boot_types.net_nodes net)
                                              (boot_types.net_next_id net)
                                              rest_redexes
                                              (boot_types.net_steps net))))
-            (((bool.ifl (((boot_net.redex_live net) p1) p2))
-               (\_ (let ((net_interacted (((boot_net.interact net_rest) p1) p2)))
+            (((bool.ifl (((boot_net.redex_live net) rx_p1) rx_p2))
+               (\_ (let ((net_interacted (((boot_net.interact net_rest) rx_p1) rx_p2)))
                      ((boot_types.mk_step_res net_interacted) bool.true))))
                (\_ ((boot_types.mk_step_res net_rest) bool.true)))))))))
 

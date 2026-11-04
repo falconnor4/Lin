@@ -31,6 +31,13 @@ all: lin plugins
 # uncommitted edits - no dirty-tree staleness.
 test: all
 	LIN_BIN=./lin test/run_tests.sh
+	python3 test/parity.py
+
+test-boot: all
+	LIN_BIN=./bin/lin-boot test/run_tests.sh
+
+parity: all
+	python3 test/parity.py
 
 # Nix repro/CI path (committed tree only).
 nix-test:
@@ -42,4 +49,4 @@ bench:
 clean:
 	rm -rf lin result test/line_binary.line std/drivers/*.so
 
-.PHONY: build test nix-test bench clean all plugins
+.PHONY: build test test-boot parity nix-test bench clean all plugins

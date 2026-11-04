@@ -1,0 +1,10 @@
+; ==============================================================================
+; lin standard library: the TEXT driver (source-string indexing)
+; ==============================================================================
+; std/drivers/text.c is a driver for ONE reason: the core loads NO plugin, and a driver's
+; `(add_driver "<name>")` is how a plugin's symbols reach the process.  It holds no strategy,
+; no state and no claim -- every row is a pure function of the text handed to it.
+; ==============================================================================
+(load "driver.lin")
+
+(add_driver "text")
