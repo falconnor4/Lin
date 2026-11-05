@@ -829,15 +829,11 @@ static LinDriver *driver_by_name(const char *name) {
   return NULL;
 }
 
-/* Is this driver's PRESENCE part of what the net means?  A driver that supplies SEMANTICS -- a fold
-   pre-emptor giving an `_op`/`_ffi` closure its value, the scalar table behind it, a value domain's
-   storage -- is not an accelerator the artifact can do without: with it gone the same net is a different
-   program.  Measured: `test/runtime_ffi.lin`, whose runtime `getenv` leaves the fold of
-   `(add <closure> 1)` to the artifact, never folded it while the interpreter answered 7 -- `arith` has no
-   state, so no section named it and the artifact ran with no fold pre-emptor.  These are the caps
-   `lin_driver_clear` refuses to drop, plus the scalar-table providers; a PURE STRATEGY (FIXED/COMMUTE
-   only, e.g. gpu) is NOT carried: a container runs prelude-free, so naming one would bake the host's
-   choice in. */
+/* Is this driver's PRESENCE part of what the net means?  One that supplies SEMANTICS -- a fold
+   pre-emptor, the scalar table behind it, a value domain's storage -- is not an accelerator: with it
+   gone the same net is a different program (measured: a runtime `getenv` fold only `arith` can take).
+   The caps `lin_driver_clear` refuses to drop; a PURE STRATEGY (e.g. gpu) is NOT carried: a container
+   runs prelude-free, so naming one would bake the host's choice in. */
 static int carries_presence(const LinDriver *d) {
   return (d->caps & (LIN_CAP_PREEMPT | LIN_CAP_PROVIDER | LIN_CAP_NATIVE_NUM)) != 0;
 }
@@ -1040,6 +1036,9 @@ static pthread_t *wpool; static int wpool_n;
 static Pair *wq; static int wq_cap; static Net *wq_net;
 static atomic_int wq_n, wq_tail, wq_done, wq_changed, wq_gen;
 
+/* GRAIN, DERIVED: one slice per consumer, oversubscribed so an early finisher can steal; a batch
+   shorter than the consumers drains pair by pair, which the atomic tail costs anyway. */
+static int wq_grain(int n_int) { int g = n_int / ((wpool_n + 1) * 2); return g > 0 ? g : 1; }
 static int wq_drain(Net *n, int chunk) {
   int changed = 0, n_int = atomic_load_explicit(&wq_n, memory_order_relaxed);
   for (;;) {
@@ -1058,12 +1057,14 @@ static void *wave_worker(void *arg) {
   int seen = 0;
   for (;;) {
     if (atomic_load_explicit(&wq_gen, memory_order_acquire) == seen) {
-      for (int r = 0; r < 512; r++) { __asm__ __volatile__("pause"); if (atomic_load_explicit(&wq_gen, memory_order_acquire) != seen) break; }
+      /* The published batch's own length is the spin budget: a big batch keeps the worker hot. */
+      for (int r = 0, spin = atomic_load_explicit(&wq_n, memory_order_relaxed); r < spin; r++) {
+        __asm__ __volatile__("pause"); if (atomic_load_explicit(&wq_gen, memory_order_acquire) != seen) break; }
       if (atomic_load_explicit(&wq_gen, memory_order_acquire) == seen) sched_yield();
       continue;
     }
     seen = atomic_load_explicit(&wq_gen, memory_order_acquire);
-    int n_int = atomic_load_explicit(&wq_n, memory_order_relaxed), chunk = (n_int > 256) ? 16 : ((n_int > 64) ? 8 : 1);
+    int n_int = atomic_load_explicit(&wq_n, memory_order_relaxed), chunk = wq_grain(n_int);
     int c = wq_drain(wq_net, chunk);
     if (c) atomic_fetch_add_explicit(&wq_changed, c, memory_order_relaxed);
   }
@@ -1074,7 +1075,6 @@ static void wave_pool_start(int want) {
   wpool_n = want - 1; ensure_tact(); wpool = calloc((size_t)wpool_n, sizeof *wpool);
   for (int i = 0; i < wpool_n; i++) pthread_create(&wpool[i], NULL, wave_worker, (void *)(intptr_t)(i + 1));
 }
-
 static int lin_wstats = -1; static long wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width;
 static void wv_report(void) {
   fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld width=%ld\n", wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width);
@@ -1146,10 +1146,10 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       atomic_store_explicit(&wq_changed, 0, memory_order_relaxed); atomic_store_explicit(&wq_done, 0, memory_order_relaxed);
       atomic_store_explicit(&wq_tail, 0, memory_order_relaxed);
       atomic_fetch_add_explicit(&wq_gen, 1, memory_order_release);
-      int chunk = (n_int > 256) ? 16 : ((n_int > 64) ? 8 : 1);
+      int chunk = wq_grain(n_int);
       batch_changed = wq_drain(n, chunk);
       for (int spin = 0; atomic_load_explicit(&wq_done, memory_order_acquire) < n_int; spin++) {
-        if (spin < 512) __asm__ __volatile__("pause"); else { sched_yield(); spin = 0; }
+        if (spin < wpool_n + 1) __asm__ __volatile__("pause"); else { sched_yield(); spin = 0; }
       }
       in_parallel = 0; n->steps += n_int; *changed += batch_changed + atomic_load_explicit(&wq_changed, memory_order_relaxed);
       for (int t = 0; t < nth; t++) {
