@@ -20,38 +20,39 @@ FILE *lin_out = NULL;
 
 static inline int live(const Net *n, Port p) { return p.node >= 0 && p.node < n->nn && !n->dead[p.node]; }
 static inline Port wr(const Net *n, Port p) { return n->wire[p.node * 3 + p.port]; }
-
 void lin_domains_init(void) {
-  /* The builtin scalar domains are also nominal TYPES: parse_type_atom resolves bool/num/float/list to
-     distinct TNOM heads, and the compiler can hand readback the expected domain of the result.  Nothing
-     here is keyed by a carrier name any more. */
+  /* The builtin domains are nominal TYPES too: nothing here is keyed by a carrier name any more. */
   nominal_register("bool", 0);
   nominal_register("num", 0);
   nominal_register("float", 0);
   nominal_register("list", 1);
 }
 
-/* ---------------- fan walks ---------------- */
-/* Follow principal-to-principal through any chain of fans: `dup_hop` is the crossing walk (it reads
-   whichever auxiliary the arriving port implies), `skip_dup` the plain one readback uses when a shared
-   subterm stands for one value.  Both are bounded by the net's size, because a fan chain may be
-   CYCLIC (two fans whose principals face each other are an un-contracted DUPxDUP redex) and an
-   unguarded walk then spins with no step count advancing; on overflow they return the DUP port they
-   stopped on, and callers check the tag they need, so it degrades to "not a value". */
-static inline Port dup_hop(Net *n, Port p) {
-  for (int step = 0; step < n->nn && live(n, p) && n->tag[p.node] == DUP; step++)
-    p = p.port == 0 ? wr(n, (Port){p.node, 1}) : wr(n, (Port){p.node, 0});
-  return p;
+/* ---------------- fan walks ----------------  Fan chains: `dup_hop` is the crossing walk, `skip_dup` the plain one.  A CHAIN MAY CYCLE and the bound
+   is the net's size, so one such walk used to cost the whole net (7.7k walks = 17.7 of 18.6s); Floyd
+   finds the cycle and the walk takes the same last step by arithmetic, so the port is unchanged. */
+#define FSTEP(q) (cross ? wr(n, (Port){(q).node, (q).port == 0}) : wr(n, (Port){(q).node, 0}))
+static inline Port fan_walk(Net *n, Port p, int cross) {
+  Port a = p, b = p; long lim = (long)n->nn, st = 0, L = 1; int chase = 1;
+  for (; st < lim && live(n, a) && n->tag[a.node] == DUP; st++) {
+    a = FSTEP(a);
+    if (!live(n, a) || n->tag[a.node] != DUP || !chase) break;
+    if (!live(n, b) || n->tag[b.node] != DUP) { chase = 0; continue; }
+    b = FSTEP(b);
+    if (!live(n, b) || n->tag[b.node] != DUP) { chase = 0; continue; }
+    b = FSTEP(b);
+    if (a.node == b.node && a.port == b.port) break;
+  }
+  if (!chase || !live(n, a) || n->tag[a.node] != DUP || a.node != b.node || a.port != b.port) return a;
+  for (Port c = FSTEP(a); (c.node != a.node || c.port != a.port) && L < lim; L++) c = FSTEP(c);
+  for (long r = (lim - st - 1) % L; r > 0 && live(n, a) && n->tag[a.node] == DUP; r--) a = FSTEP(a);
+  return a;
 }
-static inline Port skip_dup(Net *n, Port p) {
-  for (int step = 0; step < n->nn && live(n, p) && n->tag[p.node] == DUP; step++)
-    p = wr(n, (Port){p.node, 0});
-  return p;
-}
-/* Deref a DUP (port 0) chain to the underlying wire; pure, no allocation. */
+static inline Port dup_hop(Net *n, Port p) { return fan_walk(n, p, 1); }
+static inline Port skip_dup(Net *n, Port p) { return fan_walk(n, p, 0); }
+/* Deref a DUP chain to the underlying wire; pure. */
 Port net_dhop(Net *n, Port p) { return skip_dup(n, p); }
-/* The crossing fan walk, exported for the same reason: a driver reading a shared subterm must reach
-   it exactly the way the core does, or it reads a fan instead of the value. */
+/* Exported so a driver reading a shared subterm reaches it exactly as the core does. */
 Port net_dup_hop(Net *n, Port p) { N = n; return dup_hop(n, p); }
 
 /* Force the value at `p` and return a port that still names it.

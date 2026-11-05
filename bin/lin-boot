@@ -5,6 +5,9 @@ if [ $# -lt 1 ]; then
   echo "usage: lin-boot FILE.lin" >&2
   exit 64
 fi
+# io_file cannot take a path that came from getenv (type-checked string vs list), so the
+# source is staged at a fixed path and boot.lin opens that.
+cp -- "$1" "$ROOT/.boot-src" || exit 66
 LIN_BOOT_SRC=$1
 export LIN_BOOT_SRC
 exec "$ROOT/lin" "$ROOT/examples/bootstrap/boot.lin"

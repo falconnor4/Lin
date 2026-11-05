@@ -1,0 +1,114 @@
+; Bootstrapped Lin compiler -- reader + printer.
+;
+; Two things are load-bearing here and both are language facts, not choices:
+;  1. the source arrives as a Scott list of char codes, so the reader is pure Lin;
+;  2. a datatype CONSTRUCTOR is only a value, and only matches in a pattern, INSIDE
+;     its own namespace -- so the reader (which builds Terms) lives in boot_front and
+;     the printer (which matches Terms) lives at top level, where boot_types'
+;     constructors are visible.
+
+(load "types.lin")
+(load "std/text.lin")
+
+(namespace boot_front)
+
+(define dspace (\c (bool.or (eq c 32) (bool.or (eq c 10) (bool.or (eq c 9) (eq c 13))))))
+(define ddigit (\c (bool.or (eq c 48) (bool.or (eq c 49) (bool.or (eq c 50) (bool.or (eq c 51) (bool.or (eq c 52) (bool.or (eq c 53) (bool.or (eq c 54) (bool.or (eq c 55) (bool.or (eq c 56) (eq c 57))))))))))))
+(define dparen (\c (bool.or (eq c 40) (eq c 41))))
+(define dlparen (\c (eq c 40)))
+(define drparen (\c (eq c 41)))
+(define dlam (\c (eq c 92)))
+(define dsemi (\c (eq c 59)))
+(define dsym (\c (bool.and (not (dspace c)) (bool.and (not (dparen c)) (bool.and (not (dlam c)) (not (dsemi c)))))))
+
+(datatype Token (tok_lparen) (tok_rparen) (tok_lam) (tok_var name) (tok_num n))
+
+(define! sapp (list num -> list num -> list num) (\a (\b (if (list.is_empty a) b (list.cons (list.head a) (sapp (list.tail a) b))))))
+(define! srev (list a -> list a) (\s (if (list.is_empty s) list.nil (sapp (srev (list.tail s)) (list.cons (list.head s) list.nil)))))
+(define! schars (list num -> list num -> bool) (\a (\b (if (list.is_empty a) (list.is_empty b) (if (list.is_empty b) bool.false (bool.and (eq (list.head a) (list.head b)) (schars (list.tail a) (list.tail b))))))))
+
+(datatype NR (mk_nr (v num) (rest (list num))))
+(define nr_val (\r (match r ((mk_nr v t) v))))
+(define nr_rest (\r (match r ((mk_nr v t) t))))
+(define! nums (list num -> num -> NR) (\s (\acc (if (list.is_empty s) (mk_nr acc s) (if (ddigit (list.head s)) (nums (list.tail s) (add (mul acc 10) (sub (list.head s) 48))) (mk_nr acc s))))))
+(datatype SR (mk_sr (name (list num)) (rest (list num))))
+(define sr_name (\r (match r ((mk_sr n t) n))))
+(define sr_rest (\r (match r ((mk_sr n t) t))))
+(define! syms (list num -> list num -> SR) (\s (\acc (if (list.is_empty s) (mk_sr (srev acc) s) (if (dsym (list.head s)) (syms (list.tail s) (list.cons (list.head s) acc)) (mk_sr (srev acc) s))))))
+(define! skipc (list num -> list num) (\s (if (list.is_empty s) s (if (eq (list.head s) 10) (list.tail s) (skipc (list.tail s))))))
+(define! lex (list num -> list Token) (\s (if (list.is_empty s) list.nil (if (dspace (list.head s)) (lex (list.tail s)) (if (dsemi (list.head s)) (lex (skipc (list.tail s))) (if (dlparen (list.head s)) (list.cons tok_lparen (lex (list.tail s))) (if (drparen (list.head s)) (list.cons tok_rparen (lex (list.tail s))) (if (dlam (list.head s)) (list.cons tok_lam (lex (list.tail s))) (if (ddigit (list.head s)) (list.cons (tok_num (nr_val (nums s 0))) (lex (nr_rest (nums s 0)))) (list.cons (tok_var (sr_name (syms s list.nil))) (lex (sr_rest (syms s list.nil)))))))))))))
+
+; token kinds: 0 (  1 )  2 lambda  3 symbol  4 number
+(define tkind (\t (match t ((tok_lparen) 0) ((tok_rparen) 1) ((tok_lam) 2) ((tok_var n) 3) ((tok_num v) 4))))
+(define tname (\t (match t ((tok_lparen) list.nil) ((tok_rparen) list.nil) ((tok_lam) list.nil) ((tok_var n) n) ((tok_num v) list.nil))))
+(define tnumv (\t (match t ((tok_lparen) 0) ((tok_rparen) 0) ((tok_lam) 0) ((tok_var n) 0) ((tok_num v) v))))
+
+(datatype ITEM (it_tok (t Token)) (it_node (l (list ITEM))))
+(define itok (\i (match i ((it_tok t) bool.true) ((it_node l) bool.false))))
+(define tkof (\i (match i ((it_tok t) t) ((it_node l) tok_lparen))))
+(define its  (\i (match i ((it_tok t) list.nil) ((it_node l) l))))
+(datatype NR2 (mk_nt (items (list ITEM)) (toks (list Token))))
+(define ntitems (\r (match r ((mk_nt i t) i))))
+(define ntrest  (\r (match r ((mk_nt i t) t))))
+(define! nest (list Token -> list ITEM -> NR2) (\t (\acc (if (list.is_empty t) (mk_nt (srev acc) t) (if (eq (tkind (list.head t)) 1) (mk_nt (srev acc) t) (if (eq (tkind (list.head t)) 0) (let ((r (nest (list.tail t) list.nil))) (nest (list.tail (ntrest r)) (list.cons (it_node (ntitems r)) acc))) (nest (list.tail t) (list.cons (it_tok (list.head t)) acc))))))))
+
+(datatype ENT (mk_ent (name (list num)) (id num)))
+(define ent_name (\e (match e ((mk_ent n i) n))))
+(define ent_id   (\e (match e ((mk_ent n i) i))))
+(define! env_get (list ENT -> list num -> num -> num) (\e (\k (\dflt (if (list.is_empty e) dflt (if (schars (ent_name (list.head e)) k) (ent_id (list.head e)) (env_get (list.tail e) k dflt)))))))
+
+; (term, next fresh id)
+(datatype PR (mk_pr (t boot_types.Term) (n num)))
+(define pr_t (\r (match r ((mk_pr t n) t))))
+(define pr_n (\r (match r ((mk_pr t n) n))))
+(define comb (\acc (\has (\t (if has (boot_types.t_app acc t) t)))))
+; ONE argument for the recursive call: a state record. Five-argument recursion is where
+; this parser stopped working; every function in this tree that recurses takes one or two.
+(datatype ST (mk_st (items (list ITEM)) (acc boot_types.Term) (has bool) (next num) (env (list ENT))))
+(define st_items (\r (match r ((mk_st i a h n e) i))))
+(define st_acc (\r (match r ((mk_st i a h n e) a))))
+(define st_has (\r (match r ((mk_st i a h n e) h))))
+(define st_next (\r (match r ((mk_st i a h n e) n))))
+(define st_env (\r (match r ((mk_st i a h n e) e))))
+(define! parse_list (ST -> PR) (\st (if (list.is_empty (st_items st)) (mk_pr (st_acc st) (st_next st)) (if (itok (list.head (st_items st))) (if (eq (tkind (tkof (list.head (st_items st)))) 2) (let ((nm (tname (tkof (list.head (list.tail (st_items st)))))) (id (st_next st)) (r (parse_list (mk_st (list.tail (list.tail (st_items st))) (boot_types.t_var 999999) bool.false (add (st_next st) 1) (list.cons (mk_ent nm id) (st_env st)))))) (mk_pr (boot_types.t_lam id (pr_t r)) (pr_n r))) (if (eq (tkind (tkof (list.head (st_items st)))) 1) (mk_pr (st_acc st) (st_next st)) (if (eq (tkind (tkof (list.head (st_items st)))) 3) (parse_list (mk_st (list.tail (st_items st)) (comb (st_acc st) (st_has st) (boot_types.t_var ((env_get (st_env st)) (tname (tkof (list.head (st_items st)))) 999998))) bool.true (st_next st) (st_env st))) (parse_list (mk_st (list.tail (st_items st)) (comb (st_acc st) (st_has st) (boot_types.t_num (tnumv (tkof (list.head (st_items st)))))) bool.true (st_next st) (st_env st)))))) (let ((r (parse_list (mk_st (its (list.head (st_items st))) (boot_types.t_var 999999) bool.false (st_next st) (st_env st))))) (parse_list (mk_st (list.tail (st_items st)) (comb (st_acc st) (st_has st) (pr_t r)) bool.true (pr_n r) (st_env st))))))))
+(define! form_terms (list ITEM -> list boot_types.Term) (\its (if (list.is_empty its) list.nil (list.cons (pr_t (parse_list (mk_st (list.cons (list.head its) list.nil) (boot_types.t_var 999999) bool.false 0 list.nil))) (form_terms (list.tail its))))))
+(define! read_forms (list num -> list boot_types.Term) (\s (form_terms (ntitems (nest (lex s) list.nil)))))
+(define! emit (list boot_types.Term -> num) (\ts (if (list.is_empty ts) (io_print "" (io_print "\n" 0)) (io_print "=> " (io_print (boot_types.tstr (list.head ts)) (io_print "\n" (emit (list.tail ts))))))))
+(define! read_str (list num -> boot_types.Term) (\s (pr_t (parse_list (mk_st (ntitems (nest (lex s) list.nil)) (boot_types.t_var 999999) bool.false 0 list.nil)))))
+
+
+; --- probes (temporary): inspect the reader stage by stage from outside ---
+(define! peq (num -> num) (\_ (if (eq (tkind (tok_num 5)) 1) 100 200)))
+(define! znest (list Token -> list ITEM -> NR2) (\t (\acc (if (list.is_empty t) (mk_nt acc t) (znest (list.tail t) (list.cons (it_tok (list.head t)) acc))))))
+(define! pz (num -> num) (\_ (slen (ntitems (znest (list.cons (tok_num 5) list.nil) list.nil)))))
+(define! pz2 (num -> num) (\_ (slen (ntitems (nest (list.cons (tok_num 5) list.nil) list.nil)))))
+(define! pnt (num -> num) (\_ (slen (ntrest (mk_nt (list.cons (it_tok (tok_num 1)) list.nil) (list.cons (tok_num 2) list.nil))))))
+(define! pit (num -> num) (\_ (if (itok (it_node list.nil)) 100 200)))
+(define! pit2 (num -> num) (\_ (if (itok (it_tok (tok_num 5))) 100 200)))
+(define! pout (list num -> PR) (\s (parse_list (mk_st (ntitems (nest (lex s) list.nil)) (boot_types.t_var 999999) bool.false 0 list.nil))))
+(define! pnode (list num -> num) (\s (boot_types.tprobe (pr_t (parse_list (its (list.head (ntitems (nest (lex s) list.nil)))) (boot_types.t_var 999999) bool.false 0 list.nil)))))
+(define! ptop (list num -> num) (\s (boot_types.tprobe (pr_t (parse_list (ntitems (nest (lex s) list.nil)) (boot_types.t_var 999999) bool.false 0 list.nil)))))
+(define! pcomb (num -> num) (\_ (boot_types.tprobe (comb (boot_types.t_var 999999) bool.false (boot_types.t_lam 0 (boot_types.t_var 0))))))
+(define! pbr (list num -> num) (\s (let ((i2 (ntitems (nest (lex s) list.nil)))) (boot_types.tprobe (pr_t (parse_list (its (list.head i2)) (boot_types.t_var 999999) bool.false 0 list.nil))))))
+(define! pbr2 (list num -> num) (\s (let ((i2 (ntitems (nest (lex s) list.nil)))) (let ((r (parse_list (its (list.head i2)) (boot_types.t_var 999999) bool.false 0 list.nil))) (boot_types.tprobe (pr_t (parse_list (list.tail i2) (pr_t r) bool.true (pr_n r) list.nil)))))))
+(define! pmk (num -> num) (\_ (slen (ntitems (mk_nt (list.cons (it_tok (tok_num 5)) list.nil) (list.cons (tok_num 9) list.nil))))))
+(define! pis (num -> num) (\_ (if (list.is_empty (list.cons (tok_num 5) list.nil)) 1 0)))
+(define! pn2 (num -> num) (\_ (slen (ntrest (nest (list.cons (tok_num 5) list.nil) list.nil)))))
+(define! prv (num -> num) (\_ (slen (srev (list.cons (it_tok (tok_num 5)) list.nil)))))
+(define! pk1 (num -> num) (\_ (tkind (tok_num 5))))
+(define! pk2 (num -> num) (\_ (tkind (tok_lparen))))
+(define! pk3 (num -> num) (\_ (tkind (tok_var "x"))))
+(define! psl (num -> num) (\_ (slen (list.cons (it_tok (tok_num 5)) list.nil))))
+(define! psl2 (num -> num) (\_ (slen (list.cons 7 list.nil))))
+(define! pnest (num -> num) (\_ (slen (ntitems (nest (list.cons (tok_num 5) list.nil) list.nil)))))
+(define! plen (num -> num) (\_ (slen (lex "5"))))
+(define! slen (list a -> num) (\l (if (list.is_empty l) 0 (add 1 (slen (list.tail l))))))
+(define! nicount (list num -> num) (\s (slen (ntitems (nest (lex s) list.nil)))))
+(define! nikind (list num -> num) (\s (if (itok (list.head (ntitems (nest (lex s) list.nil)))) 0 1)))
+(define! ninode (list num -> num) (\s (slen (its (list.head (ntitems (nest (lex s) list.nil)))))))
+(define! nk0 (list num -> num) (\s (tkind (tkof (list.head (its (list.head (ntitems (nest (lex s) list.nil)))))))))
+
+(namespace _)
+(export boot_front)
+
+(define! read_show (list num -> list num) (\s (boot_types.tstr (boot_front.read_str s))))

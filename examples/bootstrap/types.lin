@@ -208,5 +208,17 @@
 (define net_redexes (\n (match n ((mk_net nodes next_id redexes steps) redexes))))
 (define net_steps   (\n (match n ((mk_net nodes next_id redexes steps) steps))))
 
+(define tv_i (\t (match t ((t_var v) v) ((t_lam v b) 0) ((t_app f a) 0) ((t_let v a b) 0) ((t_num n) 0) ((t_float f) 0))))
+(define tl_v (\t (match t ((t_var v) 0) ((t_lam v b) v) ((t_app f a) 0) ((t_let v a b) 0) ((t_num n) 0) ((t_float f) 0))))
+(define tl_b (\t (match t ((t_var v) (t_var 0)) ((t_lam v b) b) ((t_app f a) (t_var 0)) ((t_let v a b) (t_var 0)) ((t_num n) (t_var 0)) ((t_float f) (t_var 0)))))
+(define ta_f (\t (match t ((t_var v) (t_var 0)) ((t_lam v b) (t_var 0)) ((t_app f a) f) ((t_let v a b) (t_var 0)) ((t_num n) (t_var 0)) ((t_float f) (t_var 0)))))
+(define ta_a (\t (match t ((t_var v) (t_var 0)) ((t_lam v b) (t_var 0)) ((t_app f a) a) ((t_let v a b) (t_var 0)) ((t_num n) (t_var 0)) ((t_float f) (t_var 0)))))
+(define tn_n (\t (match t ((t_var v) 0) ((t_lam v b) 0) ((t_app f a) 0) ((t_let v a b) 0) ((t_num n) n) ((t_float f) 0))))
+(define! psapp (list num -> list num -> list num) (\a (\b (if (list.is_empty a) b (list.cons (list.head a) (psapp (list.tail a) b))))))
+(define! dstr (num -> list num) (\n (if (eq (div n 10) 0) (list.cons (add 48 n) list.nil) (psapp (dstr (div n 10)) (list.cons (add 48 (mod n 10)) list.nil)))))
+(define! nstr (num -> list num) (\d (if (eq (div d 26) 0) (list.cons (add 97 d) list.nil) (psapp (list.cons (add 97 (mod d 26)) list.nil) (dstr (div d 26))))))
+(define! tstr (Term -> list num) (\t (if (eq (tk t) 1) (psapp "(" (psapp (psapp "\\" (nstr (tl_v t))) (psapp " " (psapp (tstr (tl_b t)) ")")))) (if (eq (tk t) 2) (psapp "(" (psapp (psapp (tstr (ta_f t)) " ") (psapp (tstr (ta_a t)) ")"))) (if (eq (tk t) 4) (dstr (tn_n t)) (nstr (tv_i t)))))))
+(define tk (\t (match t ((t_var v) 0) ((t_lam v b) 1) ((t_app f a) 2) ((t_let v a b) 3) ((t_num n) 4) ((t_float f) 5))))
+
 (namespace _)
 (export boot_types)
