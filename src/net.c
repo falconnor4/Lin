@@ -8,6 +8,7 @@
 #endif
 #include <pthread.h>
 #include <stdatomic.h>
+#include <unistd.h>
 #include <sched.h>
 
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
@@ -269,23 +270,29 @@ static __thread int my_tid;   /* 0 = a caller thread, i = pool worker i (the poo
 static ActBuf *t_act;
 static int n_tact;
 
-static void ensure_tact(void) {
+/* THE DISPATCH WIDTH: OpenMP when the build has it, else the -t setting, else one thread (the same
+   default OpenMP takes).  Pool, queue and atomics are pthreads: only the WIDTH was OpenMP's. */
+static int wave_threads(void) {
 #ifdef _OPENMP
-  int m = omp_get_max_threads();
+  return omp_get_max_threads();
+#else
+  extern int lin_threads; const char *e = getenv("OMP_NUM_THREADS");
+  return lin_threads > 0 ? lin_threads : (e ? atoi(e) : 1);
+#endif
+}
+static void ensure_tact(void) {
+  int m = wave_threads();
   if (m > n_tact) {
     t_act = realloc(t_act, (size_t)m * sizeof(ActBuf));
     for (int i = n_tact; i < m; i++) t_act[i] = (ActBuf){0};
     n_tact = m;
   }
-#endif
 }
-
-/* Cut the wire at `p`, at BOTH ends.  The calculus itself never needs this -- a rule always relinks
-   the ports it takes over -- but DISPOSING of a subgraph does: whatever is abandoned must be cut loose,
-   or a live node is left pointing into a node that no longer exists.  Cutting is also what erases: the
-   subgraph becomes unreachable, and so reclaimable.  This is what `pair_boundary` uses for a class
-   whose other end was never wired (an unused binder), and what a driver uses for the subgraph a fold
-   replaces.  It is deliberately not a "free": it removes connections and nothing else. */
+/* Cut the wire at `p`, at BOTH ends.  The calculus never needs this -- a rule relinks what it takes
+   over -- but DISPOSING of a subgraph does, or a live node points into one that no longer exists.
+   Cutting is also what erases: the subgraph becomes unreachable, and so reclaimable.  What
+   `pair_boundary` uses for a class whose other end was never wired, and a driver for a fold's
+   replaced subgraph.  Deliberately not a "free": it removes connections and nothing else. */
 void lin_pin(Net *n) { n->pins++; }
 void lin_unpin(Net *n) { if (n->pins > 0) n->pins--; }
 
@@ -424,7 +431,6 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
   if (a.node < 0 || b.node < 0) return;
   WIRE(n, a) = b; WIRE(n, b) = a;
   if (enqueue && a.port == 0 && b.port == 0 && n->tag[a.node] != ROOT && n->tag[b.node] != ROOT) {
-#ifdef _OPENMP
     if (in_parallel) {
       int tid = my_tid;
       if (t_act[tid].top + 2 > t_act[tid].cap)
@@ -432,7 +438,6 @@ void net_link(Net *n, Port a, Port b, int enqueue) {
       t_act[tid].p[t_act[tid].top++] = a; t_act[tid].p[t_act[tid].top++] = b;
       return;
     }
-#endif
     act_push(n, a, b);
   }
 }
@@ -590,13 +595,10 @@ int net_interact(Net *n, Port p1, Port p2) {
   return 0; /* era or stuck gauge pair: dropped, as in the reference */
 }
 
-/* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING.  Reachability starts
-   from ALL the anchors, not ROOT alone: under needed order the result is often nowhere near node 0, and a
-   wave's queued pairs are live work whether anything demands them yet.  The unreachable nodes go on a free
-   list reused by net_alloc, so an index stays valid and a handle (a memo key, a port readback holds, a
-   driver's reference) stays safe -- wires are the only pointers and the mark follows them out of every
-   reachable node.  SAFEPOINT: reclaiming only when reduce_depth == 1 and nothing is pinned keeps "no handle
-   is held" true by construction. */
+/* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING: reachability starts
+   from ALL anchors (a wave's queued pairs are live work), unreachable nodes go on a free list reused by
+   net_alloc, so an index stays valid and a handle stays safe.  SAFEPOINT: reclaiming only when
+   reduce_depth == 1 and nothing is pinned keeps "no handle is held" true by construction. */
 void net_gc(Net *n) {
   if (n->nn <= 1) return;
   unsigned char *reach = calloc((size_t)n->nn + 1, 1);
@@ -1109,9 +1111,8 @@ static int pair_nb(const Net *n, Port p1, Port p2, int *o) {
 }
 
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
-#ifdef _OPENMP
   ensure_tact();
-  int want = omp_get_max_threads();
+  int want = wave_threads();
   int nth = wpool_n ? wpool_n + 1 : want, np = wave_cnt / 2;
 
   if (nth > 1 && np >= 4 * nth) {
@@ -1164,7 +1165,6 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
     }
     return;
   }
-#endif
   for (int i = 0; i < wave_cnt; i += 2) {
     Port p1 = curr[i], p2 = curr[i + 1];
     if (!redex_live(n, p1, p2)) continue;
