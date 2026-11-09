@@ -43,6 +43,7 @@ static int arith_supplies(const char *fn) {
     "lin_fsqrt", "lin_fsin", "lin_fcos", "lin_ftan", "lin_fabs", "lin_fsign", "lin_ffract",
     "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_lerp", "lin_fclamp",
     "lin_add", "lin_sub", "lin_mul", "lin_div", "lin_mod", "lin_pow",
+    "lin_band", "lin_bor", "lin_bxor", "lin_shl", "lin_shr",
     "lin_eq", "lin_lt", "lin_leq", "lin_gt", "lin_geq", NULL };
   for (int i = 0; fn && rows[i]; i++) if (!strncmp(fn, rows[i], strlen(rows[i]))) return 1;
   return 0;
@@ -88,6 +89,11 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
   else if (!strncmp(fn, "lin_div", 7)) *out = lin_i64_div(a[0], a[1]);
   else if (!strncmp(fn, "lin_mod", 7)) *out = lin_i64_mod(a[0], a[1]);
   else if (!strncmp(fn, "lin_pow", 7)) *out = lin_i64_pow(a[0], a[1]);
+  else if (!strncmp(fn, "lin_band", 8)) *out = lin_i64_band(a[0], a[1]);
+  else if (!strncmp(fn, "lin_bor", 7)) *out = lin_i64_bor(a[0], a[1]);
+  else if (!strncmp(fn, "lin_bxor", 8)) *out = lin_i64_bxor(a[0], a[1]);
+  else if (!strncmp(fn, "lin_shl", 7)) *out = lin_i64_shl(a[0], a[1]);
+  else if (!strncmp(fn, "lin_shr", 7)) *out = lin_i64_shr(a[0], a[1]);
   else if (!strncmp(fn, "lin_eq", 6)) { *out = a[0] == a[1]; *outkind=3; return 1; }
   else if (!strncmp(fn, "lin_lt", 6)) { *out = a[0] <  a[1]; *outkind=3; return 1; }
   else if (!strncmp(fn, "lin_leq", 7)) { *out = a[0] <= a[1]; *outkind=3; return 1; }

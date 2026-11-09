@@ -31,7 +31,17 @@ lt 0 -1 false
 lt $MIN $MAX true
 eq -5 -5 true
 pow 2 10 1024
-pow -2 3 -8"
+pow -2 3 -8
+band 12 10 8
+band -1 5 5
+bor 12 10 14
+bxor -1 5 -6
+shl 1 62 4611686018427387904
+shl 1 63 $MIN
+shl 3 64 0
+shr -16 2 -4
+shr -1 70 -1
+shr 5 -1 0"
 : > "$TMP/p.lin"; : > "$TMP/want"
 while read -r op a b want; do
   printf '(num._p%s %s %s)\n(%s %s %s)\n' "$op" "$a" "$b" "$op" "$a" "$b" >> "$TMP/p.lin"

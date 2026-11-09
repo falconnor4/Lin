@@ -994,11 +994,12 @@ static inline void lin_pat_cache_invalidate(LinPatCache *c) {
  * the agreement: a new operator is a row here plus a definition there, never a label on a node.
  * ------------------------------------------------------------------------- */
 enum { LIN_OP_ADD = 0, LIN_OP_MUL, LIN_OP_SUB, LIN_OP_EQ, LIN_OP_LT, LIN_OP_LEQ, LIN_OP_GT,
-       LIN_OP_GEQ, LIN_OP_DIV, LIN_OP_MOD, LIN_OP_POW, LIN_OP_N };
+       LIN_OP_GEQ, LIN_OP_DIV, LIN_OP_MOD, LIN_OP_POW,
+       LIN_OP_BAND, LIN_OP_BOR, LIN_OP_BXOR, LIN_OP_SHL, LIN_OP_SHR, LIN_OP_N };
 static inline const char *lin_op_fn(int code) {
   static const char *const names[LIN_OP_N] = {
     "lin_add", "lin_mul", "lin_sub", "lin_eq", "lin_lt", "lin_leq", "lin_gt", "lin_geq",
-    "lin_div", "lin_mod", "lin_pow"
+    "lin_div", "lin_mod", "lin_pow", "lin_band", "lin_bor", "lin_bxor", "lin_shl", "lin_shr"
   };
   return (code >= 0 && code < LIN_OP_N) ? names[code] : NULL;
 }
