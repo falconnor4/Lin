@@ -102,7 +102,12 @@ static void *A(size_t sz) {
 }
 static void arena_free(void) { for (int i = 0; i < narena; i++) free(arena[i]); narena = 0; }
 
-static Net *N; static long fuel; static int failed; static int F_lam, arity;
+static Net *N; static long fuel; static int failed;
+/* THE UNIT: every function this compilation reaches.  funs[0] is the one being called; a call to another
+   recursive function (a `Y G` met while evaluating) compiles G as funs[k], once per node. */
+typedef struct { int lam, arity; Expr *body; unsigned strict; } Fun;
+static Fun *funs; static int nfun, funcap;
+static int arity;   /* funs[0]'s, which the entry point and the parallel sites are written for */
 static void fail(const char *why) { if (!failed) DBG("declined: %s\n", why); failed = 1; }
 
 static V *mkv(int k) { V *v = A(sizeof *v); v->k = k; return v; }
@@ -126,6 +131,8 @@ static V *force(Lz *l) {
 
 static Expr *to_expr(V *v);
 /* An `_op` head: \x. ((\k. B) x) with k unused, applied to its operand list (code, a, b). */
+static int compile_body(int G);
+static int is_y(const Net *n, int h);
 static int op_head(int lam) {
   Port q = W(N, (Port){lam, 2});
   if (!is(N, q, APP, 1)) return 0;
@@ -159,6 +166,13 @@ static V *apply(V *f, Lz *x) {
   switch (f->k) {
   case V_CLO: {
     if (op_head(f->lam)) return op_value(x);
+    if (is_y(N, f->lam)) {                          /* another recursive function: compile it into the unit */
+      V *g = force(x);
+      if (!g || g->k != V_CLO) { fail("a fixpoint of something that is not a function"); return NULL; }
+      int fid = compile_body(g->lam);
+      if (fid < 0) return NULL;
+      V *v = mkv(V_SELF); v->lam = fid; return v;
+    }
     Env *e = A(sizeof *e); e->lam = f->lam; e->t = x; e->next = f->env;
     return eval(W(N, (Port){f->lam, 2}), e);
   }
@@ -168,12 +182,13 @@ static V *apply(V *f, Lz *x) {
   }
   case V_C1: { V *v = mkv(V_COND); v->e = f->e; v->a = f->a; v->b = x; return v; }
   case V_COND: { V *v = mkv(V_COND); v->e = f->e; v->a = lzapp(f->a, x); v->b = lzapp(f->b, x); return v; }
-  case V_SELF: {
-    V *v = mkv(V_SELF); v->nargs = f->nargs + 1; v->args = A(sizeof(Lz *) * (size_t)v->nargs);
+  case V_SELF: {                                    /* a function of the unit (v->lam is its index), being applied */
+    int ar = funs[f->lam].arity;
+    V *v = mkv(V_SELF); v->lam = f->lam; v->nargs = f->nargs + 1; v->args = A(sizeof(Lz *) * (size_t)v->nargs);
     memcpy(v->args, f->args, sizeof(Lz *) * (size_t)f->nargs); v->args[f->nargs] = x;
-    if (v->nargs < arity) return v;
-    V *s = mkv(V_SYM); s->e = mke(E_CALL, 1); s->e->nargs = arity; s->e->args = A(sizeof(Expr *) * (size_t)arity);
-    for (int i = 0; i < arity; i++) { s->e->args[i] = to_expr(force(v->args[i])); if (!s->e->args[i]) return NULL; }
+    if (v->nargs < ar) return v;
+    V *s = mkv(V_SYM); s->e = mke(E_CALL, 1); s->e->k = f->lam; s->e->nargs = ar; s->e->args = A(sizeof(Expr *) * (size_t)ar);
+    for (int i = 0; i < ar; i++) { s->e->args[i] = to_expr(force(v->args[i])); if (!s->e->args[i]) return NULL; }
     return s;
   }
   case V_MCONS: { V *v = mkv(V_MCONS1); v->a = x; return v; }
@@ -242,14 +257,31 @@ static Expr *to_expr(V *v) {
   fail("a value with no number"); return NULL;
 }
 
-/* Strictness: the parameters certainly evaluated, as a bit set (a call is assumed strict in its arguments). */
+/* Strictness: the parameters certainly evaluated, as a bit set.  A call evaluates the arguments its callee is
+   strict in, so the sets are a fixpoint over the unit (compile_unit iterates them down from "everything"). */
 static unsigned strict(Expr *e) {
   switch (e->op) {
   case E_PARAM: return 1u << e->k;
   case E_BIN: return strict(e->a) | strict(e->b);
   case E_IF: return strict(e->a) | (strict(e->b) & strict(e->c));
-  case E_CALL: { unsigned s = 0; for (int i = 0; i < e->nargs; i++) s |= strict(e->args[i]); return s; }
+  case E_CALL: { unsigned s = 0; for (int i = 0; i < e->nargs; i++) if ((funs[e->k].strict >> i) & 1u) s |= strict(e->args[i]); return s; }
   default: return 0;
+  }
+}
+static int has_call(const Expr *e);
+/* C evaluates EVERY argument of a call, the net only the ones the callee uses.  An argument in a position the
+   callee may ignore is therefore allowed only if it cannot diverge or cost: no call inside it. */
+static int args_safe(const Expr *e) {
+  switch (e->op) {
+  case E_BIN: return args_safe(e->a) && args_safe(e->b);
+  case E_IF: return args_safe(e->a) && args_safe(e->b) && args_safe(e->c);
+  case E_CALL:
+    for (int i = 0; i < e->nargs; i++) {
+      if (!((funs[e->k].strict >> i) & 1u) && has_call(e->args[i])) return 0;
+      if (!args_safe(e->args[i])) return 0;
+    }
+    return 1;
+  default: return 1;
   }
 }
 
@@ -281,7 +313,8 @@ static int has_call(const Expr *e) {
 }
 static int nsite;
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
-static void plist(Buf *b, int typed) { for (int i = 0; i < arity; i++) put(b, typed ? "%slong p%d" : "%sp%d", i ? ", " : "", i); }
+static void plistn(Buf *b, int typed, int n) { for (int i = 0; i < n; i++) put(b, typed ? "%slong p%d" : "%sp%d", i ? ", " : "", i); }
+static void plist(Buf *b, int typed) { plistn(b, typed, arity); }
 static int emit_op(Buf *b, long k, const char *x, const char *y) {
   static const char *const fn[LIN_OP_N] = { [LIN_OP_ADD] = "lin_i64_add", [LIN_OP_MUL] = "lin_i64_mul",
     [LIN_OP_SUB] = "lin_i64_sub", [LIN_OP_EQ] = "==", [LIN_OP_LT] = "<", [LIN_OP_LEQ] = "<=", [LIN_OP_GT] = ">",
@@ -327,7 +360,8 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     put(b, " : "); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
     put(b, ")"); return 1;
   case E_CALL:
-    put(b, par ? "fp(" : "f(");
+    par = par && e->k == 0;                        /* only the entry function has a parallel version */
+    if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
     for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
     put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
     return 1;
@@ -380,44 +414,70 @@ static Compiled *compile_src(const char *src, int ar, int kind) {
   return e ? &done[ndone++] : (ndone++, NULL);
 }
 
-/* Compile F = \self.\p1..\pk. body, or return NULL. */
-static Compiled *compile_fn(Net *n, int F) {
-  N = n; failed = 0; fuel = 200000; F_lam = F; arity = 0;
-  int params[8]; Port body = W(n, (Port){F, 2});
-  for (Port q = dhop(n, body); is(n, q, LAM, 0) && arity < 8; q = dhop(n, W(n, (Port){q.node, 2}))) {
-    params[arity++] = q.node; body = W(n, (Port){q.node, 2});
+/* Evaluate G = \self.\p1..\pk. body into the unit; its index, or -1. */
+static int compile_body(int G) {
+  for (int i = 0; i < nfun; i++) if (funs[i].lam == G) return i;
+  if (nfun >= 1 + LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }   /* mutual recursion re-copies: bound it */
+  if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
+  int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u;
+  /* a parameter is one bit of a strictness set, so a function has at most that many */
+  int params[sizeof(unsigned) * 8], ar = 0; Port body = W(N, (Port){G, 2});
+  for (Port q = dhop(N, body); is(N, q, LAM, 0) && ar < N_OF(params); q = dhop(N, W(N, (Port){q.node, 2}))) {
+    params[ar++] = q.node; body = W(N, (Port){q.node, 2});
   }
-  if (arity == 0) { DBG("declined: no parameters\n"); return NULL; }
-  DBG("compile F=%d arity %d (net %d nodes)\n", F, arity, n->nn);
-  Env *env = A(sizeof *env); env->lam = F; env->t = ready(mkv(V_SELF));
-  for (int i = 0; i < arity; i++) {
+  funs[fid].arity = ar;
+  if (ar == 0) { fail("a function with no parameters"); return -1; }
+  Env *env = A(sizeof *env); env->lam = G; V *self = mkv(V_SELF); self->lam = fid; env->t = ready(self);
+  for (int i = 0; i < ar; i++) {
     Env *e = A(sizeof *e); e->lam = params[i]; V *s = mkv(V_SYM); s->e = mke(E_PARAM, 1); s->e->k = i;
     e->t = ready(s); e->next = env; env = e;
   }
   Expr *top = to_expr(eval(body, env));
+  if (failed || !top) return -1;
+  funs[fid].body = top;
+  return fid;
+}
+
+/* Compile F and everything it calls, or return NULL. */
+static Compiled *compile_fn(Net *n, int F) {
+  N = n; failed = 0; fuel = 200000; nfun = 0;
+  DBG("compile F=%d (net %d nodes)\n", F, n->nn);
   Compiled *r = NULL;
-  if (!failed && top) {
-    {
+  if (compile_body(F) == 0 && !failed) {
+    arity = funs[0].arity;
+    for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
+      changed = 0;
+      for (int i = 0; i < nfun; i++) { unsigned st = strict(funs[i].body) & funs[i].strict; if (st != funs[i].strict) { funs[i].strict = st; changed = 1; } }
+    }
+    int safe = 1;
+    for (int i = 0; i < nfun; i++) safe = safe && args_safe(funs[i].body);
+    if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
+    else {
       Buf b = nbuf(4096), pre = nbuf(1024), pb = nbuf(1024);
-      put(&b, "%s\n#include <pthread.h>\nstatic long f(", LIN_I64_SRC); plist(&b, 1); put(&b, ") { return ");
+      put(&b, "%s\n#include <pthread.h>\n", LIN_I64_SRC);
+      for (int i = 0; i < nfun; i++) { put(&b, "static long f%d(", i); plistn(&b, 1, funs[i].arity); put(&b, ");\n"); }
+      int ok = 1;
+      for (int i = 0; ok && i < nfun; i++) {
+        put(&b, "static long f%d(", i); plistn(&b, 1, funs[i].arity); put(&b, ") { return ");
+        ok = emitx(&b, &pre, funs[i].body, 0, 4096); put(&b, "; }\n");
+      }
       nsite = 0;
-      int ok = emitx(&b, &pre, top, 0, 4096) && emitx(&pb, &pre, top, 1, 4096);
+      ok = ok && emitx(&pb, &pre, funs[0].body, 1, 4096);
       if (ok) {
-        put(&b, "; }\nstatic int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
+        put(&b, "static int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
         put(&b, "%sint d);\n%sstatic long fp(", arity ? ", " : "", pre.s); plist(&b, 1);
-        put(&b, "%sint d) { if (d >= dmax) return f(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s);
+        put(&b, "%sint d) { if (d >= dmax) return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s);
         put(&b, "long lin_fn_entry(const long *a, int threads) {\n");
         for (int i = 0; i < arity; i++) put(&b, "  long p%d = a[%d];\n", i, i);
         /* the depth that keeps about four tasks per thread in flight */
         put(&b, "  if (%d && threads > 1) { int lg = 0; while ((1 << lg) < threads) lg++; dmax = lg + 2;\n", nsite);
         put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); return fp(");
-        plist(&b, 0); put(&b, "%s0); }\n  return f(", arity ? ", " : ""); plist(&b, 0); put(&b, ");\n}\n");
-        DBG("compiling (arity %d, %d parallel site%s):\n%s\n", arity, nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, arity, top->kind);
-        if (r) r->strict = strict(top);
+        plist(&b, 0); put(&b, "%s0); }\n  return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, ");\n}\n");
+        DBG("compiling (%d function%s, arity %d, %d parallel site%s):\n%s\n", nfun, nfun == 1 ? "" : "s", arity, nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
+        r = compile_src(b.s, arity, funs[0].body->kind);
+        if (r) r->strict = funs[0].strict;
       } else DBG("declined: expression too large\n");
-      free(pre.s); free(pb.s);
-      free(b.s);
+      free(b.s); free(pre.s); free(pb.s);
     }
   }
   arena_free();
