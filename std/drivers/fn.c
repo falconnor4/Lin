@@ -94,7 +94,7 @@ typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_MCONS, V_MCONS1, V_MCELL, V_MNIL };
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
-typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; } V;
+typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; } V;   /* x: to_expr's answer */
 typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int busy; } Lz;   /* 0 port, 1 application, 2 value */
 
 /* One compile attempt's memory: everything is freed together. */
@@ -126,6 +126,37 @@ static Lz *lzp(Port p, Env *e) { Lz *l = A(sizeof *l); l->state = 0; l->p = p; l
 static Lz *lzapp(Lz *f, Lz *x) { Lz *l = A(sizeof *l); l->state = 1; l->f = f; l->x = x; return l; }
 static int eid;
 static Expr *mke(int op, int kind) { Expr *e = A(sizeof *e); e->op = op; e->kind = kind; e->id = eid++; e->var = -1; return e; }
+/* HASH-CONSING: a node equal to one already built (same operation, same children -- which are themselves
+   canonical) IS that node, so a value the program computes twice along different paths is one DAG node, and
+   the region binder computes it once.  Compiled code is pure, so equal expressions are equal values. */
+static Expr **hct; static int hccap, hcn;
+static unsigned long hc_hash(const Expr *e) {
+  unsigned long h = (unsigned long)e->op * 1000003u ^ (unsigned long)e->k * 2654435761u ^ (unsigned long)e->kind * 97u
+                  ^ (unsigned long)e->nargs * 131u;
+  h = h * 31 + (uintptr_t)e->a; h = h * 31 + (uintptr_t)e->b; h = h * 31 + (uintptr_t)e->c;
+  for (int i = 0; i < e->nargs && e->args; i++) h = h * 31 + (uintptr_t)e->args[i];
+  return h ^ (h >> 29);
+}
+static int hc_eq(const Expr *x, const Expr *y) {
+  if (x->op != y->op || x->k != y->k || x->kind != y->kind || x->nargs != y->nargs || x->a != y->a || x->b != y->b || x->c != y->c) return 0;
+  if (!x->args != !y->args) return 0;
+  for (int i = 0; i < x->nargs && x->args; i++) if (x->args[i] != y->args[i]) return 0;
+  return 1;
+}
+static Expr *hc(Expr *e) {
+  if (!e) return e;
+  if (e->op == E_IF && e->b == e->c) return e->b;   /* both branches one value: the condition decides nothing */
+  if (hcn * 2 >= hccap) {
+    int oc = hccap; Expr **ot = hct;
+    hccap = hccap ? hccap * 2 : 1024; hct = calloc((size_t)hccap, sizeof *hct); hcn = 0;
+    for (int i = 0; i < oc; i++) if (ot[i]) { unsigned long j = hc_hash(ot[i]) & (unsigned long)(hccap - 1); while (hct[j]) j = (j + 1) & (unsigned long)(hccap - 1); hct[j] = ot[i]; hcn++; }
+    free(ot);
+  }
+  unsigned long j = hc_hash(e) & (unsigned long)(hccap - 1);
+  for (; hct[j]; j = (j + 1) & (unsigned long)(hccap - 1)) if (hc_eq(hct[j], e)) return hct[j];
+  hct[j] = e; hcn++; return e;
+}
+static void hc_reset(void) { if (hct) memset(hct, 0, (size_t)hccap * sizeof *hct); hcn = 0; }
 
 static V *eval(Port p, Env *env);
 static V *apply(V *f, Lz *x);
@@ -154,6 +185,19 @@ static int op_head(int lam) {
   return kb.node < 0 || (live(N, kb) && N->tag[kb.node] == ERA);
 }
 static long const_int(V *v, int *ok);
+static long fold_op(long code, long x, long y) {   /* an integer operation on known operands: the C's own rows */
+  switch (code) {
+  case LIN_OP_ADD: return lin_i64_add(x, y);   case LIN_OP_SUB: return lin_i64_sub(x, y);
+  case LIN_OP_MUL: return lin_i64_mul(x, y);   case LIN_OP_DIV: return lin_i64_div(x, y);
+  case LIN_OP_MOD: return lin_i64_mod(x, y);   case LIN_OP_POW: return lin_i64_pow(x, y);
+  case LIN_OP_BAND: return lin_i64_band(x, y); case LIN_OP_BOR: return lin_i64_bor(x, y);
+  case LIN_OP_BXOR: return lin_i64_bxor(x, y); case LIN_OP_SHL: return lin_i64_shl(x, y);
+  case LIN_OP_SHR: return lin_i64_shr(x, y);
+  case LIN_OP_EQ: return x == y; case LIN_OP_LT: return x < y; case LIN_OP_LEQ: return x <= y;
+  case LIN_OP_GT: return x > y;  case LIN_OP_GEQ: return x >= y;
+  }
+  return 0;
+}
 static V *op_value(Lz *list) {
   V *l = force(list); if (!l) return NULL;
   Expr *slot[4]; int ns = 0; long code = -1;
@@ -168,7 +212,12 @@ static V *op_value(Lz *list) {
   }
   if (ns != 3 || code < 0 || code >= LIN_OP_N) { fail("not a binary integer op"); return NULL; }
   V *v = mkv(V_SYM);
-  v->e = mke(E_BIN, (code >= LIN_OP_EQ && code <= LIN_OP_GEQ) ? 3 : 1); v->e->k = code; v->e->a = slot[0]; v->e->b = slot[1];
+  int cmp = code >= LIN_OP_EQ && code <= LIN_OP_GEQ;
+  if (slot[0]->op == E_CONST && slot[1]->op == E_CONST && slot[0]->kind == 1 && slot[1]->kind == 1) {
+    /* both operands known: the operation is its value (the same rows the emitted C calls) */
+    v->e = mke(E_CONST, cmp ? 3 : 1); v->e->k = fold_op(code, slot[0]->k, slot[1]->k); v->e = hc(v->e); return v;
+  }
+  v->e = mke(E_BIN, cmp ? 3 : 1); v->e->k = code; v->e->a = slot[0]; v->e->b = slot[1]; v->e = hc(v->e);
   return v;
 }
 
@@ -199,7 +248,9 @@ static V *apply(V *f, Lz *x) {
     if (f->e->kind != 3) { fail("an integer applied as a function"); return NULL; }
     V *v = mkv(V_C1); v->e = f->e; v->a = x; return v;
   }
-  case V_C1: { V *v = mkv(V_COND); v->e = f->e; v->a = f->a; v->b = x; return v; }
+  case V_C1:                                        /* a known condition is the branch it picks */
+    if (f->e->op == E_CONST) return force(f->e->k ? f->a : x);
+    { V *v = mkv(V_COND); v->e = f->e; v->a = f->a; v->b = x; return v; }
   case V_COND: { V *v = mkv(V_COND); v->e = f->e; v->a = lzapp(f->a, x); v->b = lzapp(f->b, x); return v; }
   case V_SELF: {                                    /* a function of the unit (v->lam is its index), being applied */
     int ar = funs[f->lam].arity;
@@ -208,7 +259,7 @@ static V *apply(V *f, Lz *x) {
     if (v->nargs < ar) return v;
     V *s = mkv(V_SYM); s->e = mke(E_CALL, 1); s->e->k = f->lam; s->e->nargs = ar; s->e->args = A(sizeof(Expr *) * (size_t)ar);
     for (int i = 0; i < ar; i++) { s->e->args[i] = to_expr(force(v->args[i])); if (!s->e->args[i]) return NULL; }
-    return s;
+    s->e = hc(s->e); return s;
   }
   case V_MCONS: { V *v = mkv(V_MCONS1); v->a = x; return v; }
   case V_MCONS1: { V *v = mkv(V_MCELL); v->a = f->a; v->b = x; return v; }
@@ -329,7 +380,7 @@ static Expr *ffi_expr(V *v) {
   if (!strcmp(name, "lin_parse_float") && argc == 1) {        /* (float "2.5"): a constant, read now */
     char lit[64];
     if (!const_str(argv[0], lit, (int)sizeof lit)) { fail("a float literal that is not a constant"); return NULL; }
-    Expr *e = mke(E_CONST, 4); e->k = lin_l(strtod(lit, NULL)); return e;
+    Expr *e = mke(E_CONST, 4); e->k = lin_l(strtod(lit, NULL)); return hc(e);
   }
   for (int k = 0; k < N_OF(FROW); k++) {
     if (strcmp(name, FROW[k].name) || argc != FROW[k].arity) continue;
@@ -338,62 +389,149 @@ static Expr *ffi_expr(V *v) {
       if (!(e->args[i] = to_expr(argv[i]))) return NULL;
       if (e->args[i]->op == E_PARAM && e->args[i]->nargs == cur_fid && FROW[k].in == 4) funs[cur_fid].fmask |= 1u << e->args[i]->k;
     }
-    return e;
+    return hc(e);
   }
   fail("an FFI call the compiler does not know"); return NULL;
 }
 
-static Expr *to_expr(V *v) {
+static Expr *to_expr_v(V *v);
+static Expr *to_expr(V *v) {                       /* one answer per value: a shared value is one node */
   if (failed || !v) return NULL;
   if (v->k == V_SYM) return v->e;
+  if (!v->x) v->x = to_expr_v(v);
+  return v->x;
+}
+static Expr *to_expr_v(V *v) {
   if (v->k == V_COND) {
     Expr *e = mke(E_IF, 1); e->a = v->e; e->b = to_expr(force(v->a)); e->c = to_expr(force(v->b));
     if (!e->b || !e->c) return NULL;
-    e->kind = e->b->kind; return e;
+    e->kind = e->b->kind; return hc(e);
   }
   if (v->k == V_CLO) {
     Expr *f = ffi_expr(v);
     if (f || failed) return f;
     double d;
-    if (net_read_float(N, (Port){v->lam, 0}, &d)) { Expr *e = mke(E_CONST, 4); e->k = lin_l(d); return e; }   /* a float box */
+    if (net_read_float(N, (Port){v->lam, 0}, &d)) { Expr *e = mke(E_CONST, 4); e->k = lin_l(d); return hc(e); }   /* a float box */
     int ok; long k = const_int(v, &ok);
-    if (ok) { Expr *e = mke(E_CONST, 1); e->k = k; return e; }
+    if (ok) { Expr *e = mke(E_CONST, 1); e->k = k; return hc(e); }
     int bk = const_bool(v, &ok);
-    if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return e; }
+    if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
     fail("a closure where a number belongs"); return NULL;
   }
   fail("a value with no number"); return NULL;
 }
 
+/* The walks below run over the evaluator's DAG, where a shared node is reached along many paths: walked as a
+   tree they are exponential (a soft-float function is a cascade of `let`s).  Each keeps one answer per node id
+   for the current GENERATION: mm_new(w) starts one, a node's answer is kept until then. */
+enum { MM_STRICT, MM_SAFE, MM_CALL, MM_SELF, MM_SITE, MM_SSTR, MM_N };
+static unsigned *mm_gen[MM_N], *mm_val[MM_N], mm_g[MM_N]; static int mm_cap[MM_N];
+static void mm_new(int w) {
+  if (mm_cap[w] < eid) {
+    int c = eid * 2 + 64;
+    mm_gen[w] = realloc(mm_gen[w], (size_t)c * sizeof **mm_gen); mm_val[w] = realloc(mm_val[w], (size_t)c * sizeof **mm_val);
+    memset(mm_gen[w] + mm_cap[w], 0, (size_t)(c - mm_cap[w]) * sizeof **mm_gen); mm_cap[w] = c;
+  }
+  mm_g[w]++;
+}
+static int mm_has(int w, const Expr *e) { return e->id < mm_cap[w] && mm_gen[w][e->id] == mm_g[w]; }
+static unsigned mm_put(int w, const Expr *e, unsigned v) {
+  if (e->id < mm_cap[w]) { mm_gen[w][e->id] = mm_g[w]; mm_val[w][e->id] = v; }
+  return v;
+}
+#define MEMO(w, e) do { if (mm_has(w, e)) return mm_val[w][(e)->id]; } while (0)
+
 /* Strictness: the parameters certainly evaluated, as a bit set.  A call evaluates the arguments its callee is
    strict in, so the sets are a fixpoint over the unit (compile_unit iterates them down from "everything"). */
-static unsigned strict(Expr *e) {
+static unsigned strict_r(Expr *e) {
+  MEMO(MM_STRICT, e);
+  unsigned s = 0;
   switch (e->op) {
-  case E_PARAM: return 1u << e->k;
-  case E_BIN: return strict(e->a) | strict(e->b);
-  case E_IF: return strict(e->a) | (strict(e->b) & strict(e->c));
-  case E_CALL: { unsigned s = 0; for (int i = 0; i < e->nargs; i++) if ((funs[e->k].strict >> i) & 1u) s |= strict(e->args[i]); return s; }
-  case E_FOP: { unsigned s = 0; for (int i = 0; i < e->nargs; i++) s |= strict(e->args[i]); return s; }
-  default: return 0;
+  case E_PARAM: s = 1u << e->k; break;
+  case E_BIN: s = strict_r(e->a) | strict_r(e->b); break;
+  case E_IF: s = strict_r(e->a) | (strict_r(e->b) & strict_r(e->c)); break;
+  case E_CALL: for (int i = 0; i < e->nargs; i++) if ((funs[e->k].strict >> i) & 1u) s |= strict_r(e->args[i]); break;
+  case E_FOP: for (int i = 0; i < e->nargs; i++) s |= strict_r(e->args[i]); break;
+  default: break;
   }
+  return mm_put(MM_STRICT, e, s);
 }
+static unsigned strict(Expr *e) { mm_new(MM_STRICT); return strict_r(e); }   /* funs[].strict changes between rounds */
 static int has_call(const Expr *e);
 /* C evaluates EVERY argument of a call, the net only the ones the callee uses.  An argument in a position the
    callee may ignore is therefore allowed only if it cannot diverge or cost: no call inside it. */
-static int args_safe(const Expr *e) {
-  switch (e->op) {
-  case E_BIN: return args_safe(e->a) && args_safe(e->b);
-  case E_IF: return args_safe(e->a) && args_safe(e->b) && args_safe(e->c);
-  case E_CALL:
-    for (int i = 0; i < e->nargs; i++) {
-      if (!((funs[e->k].strict >> i) & 1u) && has_call(e->args[i])) return 0;
-      if (!args_safe(e->args[i])) return 0;
-    }
-    return 1;
-  case E_FOP: for (int i = 0; i < e->nargs; i++) if (!args_safe(e->args[i])) return 0; return 1;
-  default: return 1;
+/* STRICTNESS AT A CALL SITE.  A parameter its function may skip can still be certainly read by THIS call: the
+   arguments the call knows (constants) decide the callee's first conditionals.  `(sqrt_loop m 54 0 0)` reads `m`
+   although the loop's last step does not, because 54 is not the last step.  So the callee's body is walked with
+   the known arguments substituted and every condition they decide folded; its recursive calls count only what
+   the fixpoint already proved.  (One step of partial evaluation: general, and never assumes more than the
+   function does on those arguments.) */
+static const Expr *const *site_args; static int site_fid;
+static long *cv_val; static int cv_cap;
+static int cval(const Expr *e, long *out) {           /* the node's value, when the known arguments decide it */
+  if (e->op == E_CONST) { *out = e->k; return e->kind == 1 || e->kind == 3; }
+  if (e->op == E_PARAM) {
+    if (e->nargs != site_fid || !site_args) return 0;
+    const Expr *a = site_args[e->k];
+    if (a->op != E_CONST || (a->kind != 1 && a->kind != 3)) return 0;
+    *out = a->k; return 1;
   }
+  if (e->op != E_BIN && e->op != E_IF) return 0;
+  if (cv_cap < mm_cap[MM_SITE]) { cv_cap = mm_cap[MM_SITE]; cv_val = realloc(cv_val, (size_t)cv_cap * sizeof *cv_val); }
+  if (mm_has(MM_SITE, e)) { unsigned m = mm_val[MM_SITE][e->id]; if (m & 2u) *out = cv_val[e->id]; return (m & 2u) != 0; }
+  long x, y, r = 0; int ok = 0;
+  if (e->op == E_BIN) { if (cval(e->a, &x) && cval(e->b, &y)) { r = fold_op(e->k, x, y); ok = 1; } }
+  else if (cval(e->a, &x)) ok = cval(x ? e->b : e->c, &r);
+  if (ok && e->id < cv_cap) cv_val[e->id] = r;
+  mm_put(MM_SITE, e, ok ? 2u : 0u);
+  if (ok) *out = r;
+  return ok;
 }
+static unsigned strict_site_r(const Expr *e) {
+  MEMO(MM_SSTR, e);
+  long c; unsigned s = 0;
+  switch (e->op) {
+  case E_PARAM: s = e->nargs == site_fid ? 1u << e->k : 0; break;
+  case E_BIN: s = strict_site_r(e->a) | strict_site_r(e->b); break;
+  case E_IF:
+    s = strict_site_r(e->a);
+    if (cval(e->a, &c)) s |= strict_site_r(c ? e->b : e->c);
+    else s |= strict_site_r(e->b) & strict_site_r(e->c);
+    break;
+  case E_CALL: for (int i = 0; i < e->nargs; i++) if ((funs[e->k].strict >> i) & 1u) s |= strict_site_r(e->args[i]); break;
+  case E_FOP: for (int i = 0; i < e->nargs; i++) s |= strict_site_r(e->args[i]); break;
+  default: break;
+  }
+  return mm_put(MM_SSTR, e, s);
+}
+static unsigned strict_site(const Expr *call) {       /* the parameters this call certainly makes its callee read */
+  unsigned s = funs[call->k].strict;
+  if (!funs[call->k].body) return s;
+  int any = 0; for (int i = 0; i < call->nargs; i++) any |= call->args[i]->op == E_CONST;
+  if (!any) return s;
+  mm_new(MM_SITE); mm_new(MM_SSTR); site_args = (const Expr *const *)call->args; site_fid = (int)call->k;
+  s |= strict_site_r(funs[call->k].body);
+  site_args = NULL; site_fid = -1;
+  return s;
+}
+static int args_safe_r(const Expr *e) {
+  MEMO(MM_SAFE, e);
+  int ok = 1;
+  switch (e->op) {
+  case E_BIN: ok = args_safe_r(e->a) && args_safe_r(e->b); break;
+  case E_IF: ok = args_safe_r(e->a) && args_safe_r(e->b) && args_safe_r(e->c); break;
+  case E_CALL: {
+    unsigned st = funs[e->k].strict;
+    for (int i = 0; i < e->nargs; i++) if (!((st >> i) & 1u) && has_call(e->args[i])) { st = strict_site(e); break; }
+    for (int i = 0; i < e->nargs && ok; i++)
+      ok = !(!((st >> i) & 1u) && has_call(e->args[i])) && args_safe_r(e->args[i]);
+    break; }
+  case E_FOP: for (int i = 0; i < e->nargs && ok; i++) ok = args_safe_r(e->args[i]); break;
+  default: break;
+  }
+  return (int)mm_put(MM_SAFE, e, (unsigned)ok);
+}
+static int args_safe(const Expr *e) { mm_new(MM_SAFE); return args_safe_r(e); }
 
 /* ---- C ------------------------------------------------------------------------------------------ */
 typedef struct { char *s; size_t len, cap; } Buf;
@@ -413,14 +551,32 @@ static void put(Buf *b, const char *fmt, ...) {
    evaluates both operands anyway, and compiled code is pure -- and it is where a tree recursion's work is.  The
    parallel version `fp` carries the recursion depth and spawns only while it is below `dmax` (derived from the
    thread count), so the leaves run the sequential `f` with no threading cost at all. */
-static int has_call(const Expr *e) {
+/* A recursive call of the ENTRY function: where a recursion's work is, so where splitting across threads pays.
+   A call to a helper (a bit count, a small loop) is not worth a thread. */
+/* (structure only, so remembered for the whole compile: compile_fn starts the generation) */
+static int has_self(const Expr *e) {
+  MEMO(MM_SELF, e);
+  int r = 0;
   switch (e->op) {
-  case E_CALL: return 1;
-  case E_BIN: return has_call(e->a) || has_call(e->b);
-  case E_IF: return has_call(e->a) || has_call(e->b) || has_call(e->c);
-  case E_FOP: for (int i = 0; i < e->nargs; i++) if (has_call(e->args[i])) return 1; return 0;
-  default: return 0;
+  case E_CALL: r = e->k == 0; for (int i = 0; i < e->nargs && !r; i++) r = has_self(e->args[i]); break;
+  case E_BIN: r = has_self(e->a) || has_self(e->b); break;
+  case E_IF: r = has_self(e->a) || has_self(e->b) || has_self(e->c); break;
+  case E_FOP: for (int i = 0; i < e->nargs && !r; i++) r = has_self(e->args[i]); break;
+  default: break;
   }
+  return (int)mm_put(MM_SELF, e, (unsigned)r);
+}
+static int has_call(const Expr *e) {
+  MEMO(MM_CALL, e);
+  int r = 0;
+  switch (e->op) {
+  case E_CALL: r = 1; break;
+  case E_BIN: r = has_call(e->a) || has_call(e->b); break;
+  case E_IF: r = has_call(e->a) || has_call(e->b) || has_call(e->c); break;
+  case E_FOP: for (int i = 0; i < e->nargs && !r; i++) r = has_call(e->args[i]); break;
+  default: break;
+  }
+  return (int)mm_put(MM_CALL, e, (unsigned)r);
 }
 static int nsite;
 static int emitting;   /* the unit function being written: a parameter of another one cannot appear in it */
@@ -452,14 +608,71 @@ static void count_uses(const Expr *e) {           /* every reference inside the 
   case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) count_uses(e->args[i]); break;
   }
 }
-static void certain(const Expr *e, const Expr ***out, int *n, int *cap) {   /* post-order: dependencies first */
+/* The nodes a region CERTAINLY evaluates: what its root reaches without entering a branch, plus what BOTH arms of
+   a conditional certainly evaluate -- cert(if c a b) = cert(c) + (cert(a) & cert(b)).  The intersection is what
+   keeps a value used in each arm of a cascade of conditionals from being written out once per arm (and, nested,
+   exponentially often), without ever hoisting work only one arm does.  Sets are sorted id arrays, memoised per
+   region by node. */
+typedef struct { int *v, n; } ISet;
+static ISet *st_cert; static unsigned *st_cstamp; static int st_ccap;
+static ISet iset_union(ISet x, ISet y, int extra) {
+  ISet r; r.v = malloc((size_t)(x.n + y.n + 1) * sizeof *r.v); r.n = 0;
+  int i = 0, j = 0, put_extra = extra >= 0;
+  while (i < x.n || j < y.n || put_extra) {
+    int c = INT_MAX;
+    if (i < x.n && x.v[i] < c) c = x.v[i];
+    if (j < y.n && y.v[j] < c) c = y.v[j];
+    if (put_extra && extra < c) c = extra;
+    if (i < x.n && x.v[i] == c) i++;
+    if (j < y.n && y.v[j] == c) j++;
+    if (put_extra && extra == c) put_extra = 0;
+    r.v[r.n++] = c;
+  }
+  return r;
+}
+static ISet iset_inter(ISet x, ISet y) {
+  ISet r; r.v = malloc((size_t)(x.n < y.n ? x.n : y.n) * sizeof *r.v + sizeof *r.v); r.n = 0;
+  for (int i = 0, j = 0; i < x.n && j < y.n;) {
+    if (x.v[i] < y.v[j]) i++; else if (x.v[i] > y.v[j]) j++; else { r.v[r.n++] = x.v[i]; i++; j++; }
+  }
+  return r;
+}
+static ISet cert(const Expr *e) {
+  if (st_ccap < eid) {
+    int c = eid * 2 + 64;
+    st_cert = realloc(st_cert, (size_t)c * sizeof *st_cert); st_cstamp = realloc(st_cstamp, (size_t)c * sizeof *st_cstamp);
+    memset(st_cstamp + st_ccap, 0, (size_t)(c - st_ccap) * sizeof *st_cstamp); st_ccap = c;
+  }
+  if (st_cstamp[e->id] == stamp) return st_cert[e->id];
+  ISet r = { NULL, 0 }, t;
+  if (bound(e)) { r.v = malloc(sizeof *r.v); r.v[0] = e->id; r.n = 1; }
+  else switch (e->op) {
+  case E_BIN: r = iset_union(cert(e->a), cert(e->b), e->id); break;
+  case E_IF: { ISet i = iset_inter(cert(e->b), cert(e->c)); r = iset_union(cert(e->a), i, e->id); free(i.v); break; }
+  case E_CALL: case E_FOP:
+    r.v = malloc(sizeof *r.v); r.v[0] = e->id; r.n = 1;
+    for (int k = 0; k < e->nargs; k++) { t = iset_union(r, cert(e->args[k]), -1); free(r.v); r = t; }
+    break;
+  default: r.v = malloc(sizeof *r.v); r.v[0] = e->id; r.n = 1;
+  }
+  if (st_cstamp[e->id]) free(st_cert[e->id].v);   /* the set of an earlier region: that region is done with it */
+  st_cstamp[e->id] = stamp; st_cert[e->id] = r;
+  return r;
+}
+static int in_set(ISet s, int id) {
+  int lo = 0, hi = s.n - 1;
+  while (lo <= hi) { int m = (lo + hi) / 2; if (s.v[m] == id) return 1; if (s.v[m] < id) lo = m + 1; else hi = m - 1; }
+  return 0;
+}
+static void certain(const Expr *e, ISet c, const Expr ***out, int *n, int *cap) {   /* post-order: dependencies first */
   if (st_need[e->id] == stamp || bound(e)) return;
   st_need[e->id] = stamp;
   switch (e->op) {
-  case E_BIN: certain(e->a, out, n, cap); certain(e->b, out, n, cap); break;
-  case E_IF: certain(e->a, out, n, cap); break;                  /* only the condition: a branch may not run */
-  case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) certain(e->args[i], out, n, cap); break;
+  case E_BIN: certain(e->a, c, out, n, cap); certain(e->b, c, out, n, cap); break;
+  case E_IF: certain(e->a, c, out, n, cap); certain(e->b, c, out, n, cap); certain(e->c, c, out, n, cap); break;
+  case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) certain(e->args[i], c, out, n, cap); break;
   }
+  if (!in_set(c, e->id)) return;
   if (*n >= *cap) *out = realloc(*out, (size_t)(*cap = *cap ? *cap * 2 : 16) * sizeof **out);
   (*out)[(*n)++] = e;
 }
@@ -467,16 +680,21 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   st_grow(); stamp += 2;
   count_uses(e);
   const Expr **cand = NULL; int nc = 0, cc = 0;
-  certain(e, &cand, &nc, &cc);
-  int nb = 0, ok = 1;
+  certain(e, cert(e), &cand, &nc, &cc);
+  int nb = 0, ok = 1, nk = 0;
+  for (int i = 0; i < nc; i++) {                   /* choose first: emitting a binding runs nested regions' passes */
+    const Expr *x = cand[i];
+    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM) cand[nk++] = x;
+  }
+  nc = nk;
   for (int i = 0; i < nc && ok; i++) {
     Expr *x = (Expr *)cand[i];
-    if (x == e || st_uses[x->id] < 2 || x->op == E_CONST || x->op == E_PARAM) continue;
     if (!nb++) put(b, "({ ");
-    put(b, "long v%d = ", nvar);
+    int k = nvar++;                                /* reserved BEFORE the value is written: a binding nested in it takes later numbers */
+    put(b, "long v%d = ", k);
     ok = emitx(b, pre, x, par, budget - 1);
     put(b, "; ");
-    x->var = nvar++; x->vscope = fscope;
+    x->var = k; x->vscope = fscope;
     cand[i] = x;                                   /* still listed, so it is unbound below */
   }
   ok = ok && emitx(b, pre, e, par, budget - 1);
@@ -503,12 +721,12 @@ static int emit_op(Buf *b, long k, const char *x, const char *y) {
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int budget) {
   int last = -1, ok = 1;
-  for (int i = 0; i < n; i++) if (has_call(xs[i])) last = i;
+  for (int i = 0; i < n; i++) if (has_self(xs[i])) last = i;
   put(b, "({ ");
   int *site = calloc((size_t)n, sizeof *site);
   for (int i = 0; ok && i < n; i++) {
     site[i] = -1;
-    if (!has_call(xs[i]) || i == last) continue;
+    if (!has_self(xs[i]) || i == last) continue;
     int k = site[i] = nsite++;
     Buf sb = nbuf(512);            /* the site: this operand as a function of the parameters */
     put(&sb, "static long site%d(", k); plist(&sb, 1); put(&sb, "%sint d) { return ", arity ? ", " : "");
@@ -552,7 +770,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   case E_BIN: {
     Buf x = nbuf(256), y = nbuf(256);
     int ok = 1;
-    if (par && has_call(e->a) && has_call(e->b)) {
+    if (par && has_self(e->a) && has_self(e->b)) {
       const Expr *xs[2] = { e->a, e->b }; Buf nm[2] = { nbuf(32), nbuf(32) };
       ok = par_group(b, pre, xs, 2, nm, budget);
       if (ok) { emit_op(b, e->k, nm[0].s, nm[1].s); put(b, "; })"); }
@@ -574,7 +792,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     put(b, ")"); return 1;
   case E_CALL:
     par = par && e->k == 0;                        /* only the entry function has a parallel version */
-    { int calls = 0; for (int i = 0; i < e->nargs; i++) calls += has_call(e->args[i]);
+    { int calls = 0; for (int i = 0; i < e->nargs; i++) calls += has_self(e->args[i]);
       if (par && calls >= 2) {                     /* independent calls among the arguments: at once */
         Buf *nm = calloc((size_t)e->nargs, sizeof *nm);
         for (int i = 0; i < e->nargs; i++) nm[i] = nbuf(32);
@@ -732,10 +950,11 @@ static int compile_body(int G, Env *outer) {
 
 /* Compile F and everything it calls, or return NULL. */
 static Compiled *compile_fn(Net *n, int F) {
-  N = n; failed = 0; fuel = 200000; nfun = 0; eid = 0; nvar = 0;
+  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset();   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)\n", F, n->nn);
   Compiled *r = NULL;
   if (compile_body(F, NULL) == 0 && !failed) {
+    mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     arity = funs[0].arity;
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
       changed = 0;
