@@ -59,9 +59,9 @@
 (define _add (\a (\b (\c (if (bool.and (_isterm a) (_isterm b))
   (_addt (_sign a) (_sign b) c)
   (cons_ (_xor3 (_hd a) (_hd b) c) (_add (_tl a) (_tl b) (_maj (_hd a) (_hd b) c))))))))
-(define! succ (num -> num) (\n (_wrap (_add n 0 bool.true))))
-(define! pred (num -> num) (\n (_wrap (_add n (_bnot 0) bool.false))))
-(define! is_zero (num -> bool) (\n (_case n (\h (\t (if h bool.false (is_zero t)))) bool.true bool.false)))
+(define! _psucc (num -> num) (\n (_wrap (_add n 0 bool.true))))
+(define! _ppred (num -> num) (\n (_wrap (_add n (_bnot 0) bool.false))))
+(define! _pis_zero (num -> bool) (\n (_case n (\h (\t (if h bool.false (_pis_zero t)))) bool.true bool.false)))
 (define! neg (num -> num) (\n (_wrap (_add (_bnot n) 0 bool.true))))
 
 ; --- Church Numerals & Self-Iterating Folds ---
@@ -86,15 +86,15 @@
 (define _mulr (\a (\b (_case b (\h (\t (_add (if h a 0) (cons_ bool.false (_mulr a t)) bool.false))) 0 (neg a)))))
 (define! _pmul (num -> num -> num) (\a (\b (_wrap (_mulr a b)))))
 (define! _plt (num -> num -> bool) (\a (\b (if (bool.xor (_sign a) (_sign b)) (_sign a) (_sign (_psub a b))))))
-(define! _peq (num -> num -> bool) (\a (\b (is_zero (_psub a b)))))
+(define! _peq (num -> num -> bool) (\a (\b (_pis_zero (_psub a b)))))
 ; unsigned long division of non-negative chains, most significant bit first (the recursion reaches it first)
 (define _divu (\a (\b (_case a
   (\h (\t ((\qr ((\r2 (if (_plt r2 b) (_pair (cons_ bool.false (_fst qr)) r2) (_pair (cons_ bool.true (_fst qr)) (_psub r2 b))))
              (cons_ h (_snd qr)))) (_divu t b))))
   (_pair 0 0) (_pair 0 0)))))
-(define! _pdiv (num -> num -> num) (\a (\b (if (is_zero b) 0
+(define! _pdiv (num -> num -> num) (\a (\b (if (_pis_zero b) 0
   ((\q (if (bool.xor (_sign a) (_sign b)) (neg q) q)) (_wrap (_fst (_divu (_abs a) (_abs b)))))))))
-(define! _pmod (num -> num -> num) (\a (\b (if (is_zero b) 0
+(define! _pmod (num -> num -> num) (\a (\b (if (_pis_zero b) 0
   ((\r (if (_sign a) (neg r) r)) (_wrap (_snd (_divu (_abs a) (_abs b)))))))))
 (define _powr (\a (\e (_case e (\h (\t (_pmul (if h a 1) (_powr (_pmul a a) t)))) 1 1))))
 (define! _ppow (num -> num -> num) (\a (\e (if (_sign e)
@@ -123,6 +123,10 @@
 (define! gt (num -> num -> bool) (\a (\b ((\_op ((\_k (_pgt a b)) _op)) (_cl_cons 6 (_cl_cons a (_cl_cons b _cl_nil)))))))
 (define! leq (num -> num -> bool) (\a (\b ((\_op ((\_k (_pleq a b)) _op)) (_cl_cons 5 (_cl_cons a (_cl_cons b _cl_nil)))))))
 (define! geq (num -> num -> bool) (\a (\b ((\_op ((\_k (_pgeq a b)) _op)) (_cl_cons 7 (_cl_cons a (_cl_cons b _cl_nil)))))))
+; succ / pred / is_zero are the ops above at a constant, so a fold driver sees them as arithmetic
+(define! succ (num -> num) (\n (add n 1)))
+(define! pred (num -> num) (\n (sub n 1)))
+(define! is_zero (num -> bool) (\n (eq n 0)))
 ; Scott aliases
 (define zero_s num.zero)
 (define succ_s num.succ)
