@@ -469,8 +469,7 @@ static Port val_port(Net *n, const Val *v) {
 
 static void nat_kill(Net *n, int v) {
   if (!NAT_IN(n, v) || n->dead[v] || n->tag[v] == DUP) return;
-  for (int p = 0; p < 3; p++) net_sever(n, (Port){v, p});
-  n->dead[v] = 1;
+  net_drop(n, v);
 }
 
 /* Inject the value where the fold injects it: into `ar`, the APP's body-slot partner,

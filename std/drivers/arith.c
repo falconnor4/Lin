@@ -219,8 +219,7 @@ static void fold_kill(Net *n, int v) {
      with the closures coming back unreduced because the copy `run_ffi` needs had been freed under it).
      Severing is the conservative form and it reclaims the same way: each cut frees whatever reaches
      zero live connections, and a shared node still has its other user, so it survives. */
-  for (int p = 0; p < 3; p++) net_sever(n, (Port){v, p});
-  n->dead[v] = 1;
+  net_drop(n, v);   /* consumed: every neighbour still wired to it is erased (a shared one sits behind a fan, which the eraser collapses) */
 }
 
 /* alloc a concrete value node (int -> Scott numeral, bool -> Church bool, float -> `_fsz` box) */

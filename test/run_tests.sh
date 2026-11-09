@@ -246,18 +246,17 @@ total_checks=$((total_checks + line_total))
 t1=$(date +%s%3N 2>/dev/null || date +%s)
 
 # ----------------------------------------------------------------------------
-# Tier 5.5: Reclamation soundness
-#   The collector never runs in a normal suite run (it needs a million live nodes),
-#   so it rotted into two independent defects without anything noticing.  This forces
-#   the threshold down until every wave is a collection point and requires the output
-#   to be byte-identical; see test/gc_forced.sh.
+# Tier 5.5: Erasure
+#   There is no collector: rules free what they consume and erasers consume what a
+#   program discards.  This pins that discarded structure is reclaimed and that no
+#   value something still needs is erased; see test/erasure.sh.
 # ----------------------------------------------------------------------------
-GC_LOG=$(mktemp)
-if bash test/gc_forced.sh "$LIN_BIN" "$STD_DIR" >"$GC_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 10)); echo "PASS test/gc_forced.sh ($(tail -1 "$GC_LOG"))"
-  rm -f "$GC_LOG"
+ER_LOG=$(mktemp)
+if bash test/erasure.sh "$LIN_BIN" "$STD_DIR" >"$ER_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 7)); echo "PASS test/erasure.sh ($(tail -1 "$ER_LOG"))"
+  rm -f "$ER_LOG"
 else
-  fail=$((fail+1)); echo "FAIL test/gc_forced.sh"; cat "$GC_LOG"; rm -f "$GC_LOG"
+  fail=$((fail+1)); echo "FAIL test/erasure.sh"; cat "$ER_LOG"; rm -f "$ER_LOG"
 fi
 
 # ----------------------------------------------------------------------------
@@ -303,7 +302,7 @@ fi
 # ----------------------------------------------------------------------------
 BR_LOG=$(mktemp)
 if bash test/bench_runtime.sh "$LIN_BIN" "$STD_DIR" >"$BR_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 17)); echo "PASS test/bench_runtime.sh (17 checks: build/run differential + LIN_GC=200)"
+  pass=$((pass+1)); total_checks=$((total_checks + 17)); echo "PASS test/bench_runtime.sh (17 checks: build/run differential + slot recycling)"
   rm -f "$BR_LOG"
 else
   fail=$((fail+1)); echo "FAIL test/bench_runtime.sh"; cat "$BR_LOG"; rm -f "$BR_LOG"

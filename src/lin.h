@@ -85,11 +85,10 @@ typedef struct {
   /* Reclaimed node slots, threaded through their own port 0.  Reclamation never moves a node, so
      every index stays valid and an external handle (a memo key, a port readback holds) is safe. */
   int free_head, nfree;
-  /* Slots freed during a wave.  They are NOT published to free_head until the wave's snapshot is
-     gone: an index the snapshot still holds would otherwise be revived as a different node. */
-  int pend_head;
+  int pend_head;   /* unused since ABI 7 (see `pend` below); kept so no later field moves */
   /* Nonzero while readback is walking the net holding ports.  A reclaimed slot is REUSED, so a
-     cursor held across a collection would silently name a different node; readback therefore pins. */
+     cursor held across a reuse would silently name a different node; readback therefore pins, and
+     neither erasure nor slot reuse runs while pinned. */
   int pins;
   unsigned int *dem, dem_stamp; unsigned char *vport;
   /* A driver's tables for THIS net: kept here so their lifetime is the net's -- created lazily,
@@ -106,6 +105,15 @@ typedef struct {
      shift every later offset and misdirect every plugin; appended here it shifts nothing.  `act_of[i]` =
      node i's queued-pair index in `act` or -1; `dem_out`/`dem_cnt`/`dem_cap` = this wave's emitted pairs. */
   int *act_of; Port *dem_out; int dem_cnt, dem_cap;
+  /* ERASERS WAITING TO ACT: every ERA whose principal port was just wired.  Erasure is the calculus's
+     own memory management -- an eraser meeting a principal consumes that node and erases what it held --
+     so there is no collector: a node is freed by the rule that consumes it, or by the eraser that reaches
+     it.  Erasure is not demand-filtered (garbage is never demanded, and must still be reclaimed). */
+  int *era; int era_top, era_cap;
+  /* Slots freed and not yet reusable (see net_flush_free).  A pending node keeps its tag and its wires:
+     a reader that held a port into a pair a rule just consumed follows the consumed node's old wire one
+     hop to where the value went (net_force_val), so wiping it at once would lose the value. */
+  int *pend; int pend_top, pend_cap;
 } Net;
 
 /* wire of a port (drivers read the graph directly) */
@@ -116,8 +124,13 @@ static inline Port net_wire(const Net *n, Port p) { return n->wire[p.node * 3 + 
    expects (LIN_ENC_* above, and the readers that take one). */
 Port net_alloc(Net *n, int tag, Scope sc);
 void net_link(Net *n, Port a, Port b, int enqueue);
-/* Cut the wire at `p` at both ends: what disposes of a subgraph, and what erases (see net.c). */
+/* Cut the wire at `p` at both ends and ERASE what was on the other side: the partner end gets an eraser,
+   so the subgraph behind it is reclaimed by the erasure rules (a shared one, behind a DUP, survives for its
+   other user -- the eraser only collapses the fan).  `p`'s own end is left unconnected. */
 void net_sever(Net *n, Port p);
+/* Consume node `v`: free it and erase every live neighbour still wired to it.  What a driver uses to
+   dispose of structure it rewrote; mark the nodes of a group dead FIRST and their mutual wires are skipped. */
+void net_drop(Net *n, int v);
 /* Readback holds ports across nested reductions, so it pins the net: no reclamation while pinned. */
 void lin_pin(Net *n); void lin_unpin(Net *n);
 void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, Port a, Port b);
@@ -131,9 +144,6 @@ Port net_force_val(Net *n, Port p);
 /* Register an extra demand root: a port whose weak head normal form the caller is about to observe. */
 void lin_demand(Net *n, Port p);
 Net *net_copy(const Net *n); Scope scope_nil(void);
-/* reclaim every node not reachable from ROOT (identity-preserving; safe at any point a
-   net is a value or a residual -- the AOT build compacts before serialising) */
-void net_gc(Net *n);
 int scope_eq(const Net *n, Scope a, Scope b);
 Scope scope_app(Net *n, Scope s, int bit);   /* one step deeper */
 Scope scope_meet(Net *n, Scope a, Scope b);   /* lowest common ancestor */
@@ -162,8 +172,10 @@ enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC
    field added to Net shifts every offset and it silently reads the wrong memory -- measured, a `fold`
    that simply stopped firing with the plugin still passing every ABI check.  ABI 6 is the ENCODING
    change: a net carries no carrier names, so `read_value`/`print` take the encoding (LIN_ENC_*) /
-   the domain (DT_*) the caller expects, and the number moves. */
-#define LIN_DRIVER_ABI   6u
+   the domain (DT_*) the caller expects, and the number moves.  ABI 7 is ERASURE: there is no collector,
+   so `net_sever` now ERASES what it cuts loose and `net_drop` consumes a node, and a driver that disposed
+   of structure by cutting it and waiting for a sweep would now leak. */
+#define LIN_DRIVER_ABI   7u
 #define LIN_CAP_NATIVE_NUM 0x01u                 /* satur `_ffi` arithmetic */
 #define LIN_CAP_FIXED      0x02u                 /* beta / annihilate / erase */
 #define LIN_CAP_COMMUTE    0x04u                 /* LAM|APP x DUP (allocating) */

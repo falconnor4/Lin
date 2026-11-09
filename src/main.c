@@ -210,8 +210,18 @@ static void run_and_report(Net *net, int domain) {
   if (no_io) net_print(net, domain);
   if (no_io && !quiet_forms) putchar('\n');
   if (bench_mode) {
-    fprintf(stderr, "[bench] %ld steps | %d nodes | %.2f ms | GoI det: %lld -> %lld\n",
-            net->steps, net->nn, bench_ms + ms_since(t0, t1), bench_goi0, bench_goi1);
+    fprintf(stderr, "[bench] %ld steps | %d nodes (%d live) | %.2f ms | GoI det: %lld -> %lld\n",
+            net->steps, net->nn, net->nn - net->nfree, bench_ms + ms_since(t0, t1), bench_goi0, bench_goi1);
+    if (getenv("LIN_LEAKCHECK")) {   /* DIAGNOSTIC ONLY: how much live structure the result still reaches */
+      unsigned char *r = calloc((size_t)net->nn, 1); int *q = malloc(sizeof(int) * (size_t)net->nn), h = 0, t = 0, era = 0, dup = 0;
+      r[0] = 1; q[t++] = 0;
+      while (h < t) { int u = q[h++]; for (int k = 0; k < 3; k++) { Port w = net->wire[u * 3 + k];
+        if (w.node >= 0 && w.node < net->nn && !net->dead[w.node] && !r[w.node]) { r[w.node] = 1; q[t++] = w.node; } } }
+      for (int i = 0; i < net->nn; i++) if (!net->dead[i] && !r[i]) { era += net->tag[i] == ERA; dup += net->tag[i] == DUP; }
+      fprintf(stderr, "[leak] %d reachable, %d live unreachable (%d ERA, %d DUP), %d queued redexes\n",
+              t, net->nn - net->nfree - t, era, dup, net->atop / 2);
+      free(r); free(q);
+    }
     bench_measured = 0;
   }
 }
@@ -530,7 +540,6 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, STEP_LIMIT, &st->compiled, err, sizeof err);
   if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
   st->aot_steps = (int)baked; st->residual = net.nn;
-  net_gc(&net);
   if (!net_save_line(&net, out_f)) { net_free(&net); return 0; }
   FILE *f = fopen(out_f, "rb");
   if (f) { fseek(f, 0, SEEK_END); st->bytes = ftell(f); fclose(f); }

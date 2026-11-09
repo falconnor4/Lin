@@ -68,15 +68,14 @@ static Port ct_splice(Def *d, Scope sc) {
   Net *s = d->compiled;
   Scope lvl = fan_lvl();
   int n = s->nn, *map = malloc(sizeof(int) * (size_t)(n ? n : 1));
-  for (int i = 0; i < n; i++) {
-    map[i] = net_alloc(N, s->tag[i], scope_rebase(N, s, lvl, s->scope[i])).node;
-  }
+  for (int i = 0; i < n; i++)   /* only LIVE nodes: a consumed one is reclaimed, never part of the value */
+    map[i] = s->dead[i] ? -1 : net_alloc(N, s->tag[i], scope_rebase(N, s, lvl, s->scope[i])).node;
   Port val = s->wire[0]; int vn = val.node;
   for (int i = 0; i < n; i++) {
     if (s->dead[i]) continue;
     for (int p = 0; p < 3; p++) {
       Port w = s->wire[i * 3 + p];
-      if (w.node < 0 || (i == 0 && p == 0) || (i == vn && p == (int)val.port)) continue;
+      if (w.node < 0 || s->dead[w.node] || (i == 0 && p == 0) || (i == vn && p == (int)val.port)) continue;
       net_link(N, (Port){map[i], p}, (Port){map[w.node], w.port}, 1);
     }
   }
@@ -140,6 +139,8 @@ static Port ct_in(Term *t, Scope sc) {
     cur_lvl = save;
     net_link(N, (Port){self.node, 2}, body, 0);
     CVar *e = &cstack[my];
+    if (e->count == 0)                                   /* an unused binder: its argument is erased */
+      net_link(N, (Port){self.node, 1}, net_alloc(N, ERA, scope_nil()), 0);
     if (e->count > 1) {
       Port *ts = use_ports(e, (Port){self.node, 1});
       net_link(N, (Port){self.node, 1}, dup_tree(ts, e->count, lvl), 0);
@@ -179,6 +180,8 @@ static Port ct_in(Term *t, Scope sc) {
     cur_lvl = save;
     CVar *e = &cstack[my];
     Port result = body;
+    if (e->count == 0 && val.node >= 0)                  /* an unused binding: its value is erased */
+      net_link(N, val, net_alloc(N, ERA, scope_nil()), 0);
     if (e->count == 1) {
       if (body.node == ph.node && body.port == 1) result = val;
       else {

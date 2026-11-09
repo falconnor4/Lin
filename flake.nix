@@ -142,8 +142,10 @@
 
       devShells = forAllSystems (system: pkgs: {
         default = pkgs.mkShell {
+          # The toolchain the package builds with -- NOT the package itself: listing it here rebuilt
+          # lin on every edit just to enter the shell, and put a stale `lin` first on PATH.
           inputsFrom = [ self.packages.${system}.lin ];
-          packages = [ self.packages.${system}.lin pkgs.gnumake pkgs.gdb pkgs.valgrind ];
+          packages = [ pkgs.gnumake pkgs.gdb pkgs.valgrind pkgs.python3 ];
           shellHook = ''
             nix() {
               if [ "$1" = "test" ]; then

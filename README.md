@@ -29,7 +29,7 @@ nix develop
 
 ### Classic Makefile Build
 
-Lin is written in C99 and uses OpenMP for lock-free parallel graph reduction:
+Lin is written in C99 and uses pthreads for lock-free parallel graph reduction:
 
 ```bash
 # Build via Nix (default)
@@ -182,7 +182,11 @@ Lin executes lambda calculus terms directly as interaction nets using non-abelia
 
 - **Wavefront Parallelism**: Redexes whose 2-hop neighborhoods do not overlap form independent sets that are contracted simultaneously across CPU hardware threads without mutexes or global locks.
 - **Lévy Optimality**: Shared subcomputations are evaluated at most once, reducing functional expressions in optimal steps.
-- **Zero Garbage Collection**: Node allocation and reclamation occur linearly as part of cut-elimination with no stop-the-world pauses.
+- **No Garbage Collector**: memory is managed by the calculus itself. A rule frees the pair it consumes, and the
+  compiler wires an eraser (`ERA`, one of the four node kinds) wherever a value goes unused; erasers consume what
+  they reach (`ERA x LAM/APP/DUP`, a discarded application's inputs) with no tracing, no reachability walk and no
+  pause. Freed slots are reused only at a safepoint, so no held index ever names a different node.
+  `LIN_LEAKCHECK=1 lin -b f.lin` reports what the result still reaches (a diagnostic, never run otherwise).
 - **Non-Resolution Graph Normalization**: Formula normalization bypasses classical $2^{\Omega(n)}$ resolution lower bounds on parity problems like Tseitin expanders ($82|E| - 3$ linear steps).
 
 ## Examples
@@ -217,7 +221,7 @@ Usage: lin [options] [file.lin]
 Options:
   -e, --eval <expr>       Evaluate expression string directly and exit
   -b, --bench [file]      Benchmark mode: report steps, nodes, time, and GoI determinant
-  -t, --threads <N>       Number of OpenMP worker threads (or LIN_THREADS env)
+  -t, --threads <N>       Number of worker threads (or LIN_THREADS env)
   -v, --version           Display version information
   -h, --help              Display help and usage information
 ```

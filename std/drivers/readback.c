@@ -426,6 +426,7 @@ static Port net_alloc_string(Net *n, const char *s) {
   Port c_nil = net_alloc(n, LAM, sc), n_nil = net_alloc(n, LAM, sc);
   net_link(n, (Port){c_nil.node, 2}, (Port){n_nil.node, 0}, 0);
   net_link(n, (Port){n_nil.node, 2}, (Port){n_nil.node, 1}, 0);      /* select-second: the nil cell */
+  net_link(n, (Port){c_nil.node, 1}, net_alloc(n, ERA, sc), 0);
   Port cur = (Port){c_nil.node, 0};
   for (long i = (long)strlen(s) - 1; i >= 0; i--) {
     Port ch = net_alloc_scott(n, (unsigned char)s[i]);
@@ -435,6 +436,7 @@ static Port net_alloc_string(Net *n, const char *s) {
     net_link(n, (Port){a1.node, 0}, (Port){c_lam.node, 1}, 0); net_link(n, (Port){a1.node, 2}, ch, 0);
     net_link(n, (Port){a2.node, 0}, (Port){a1.node, 1}, 0); net_link(n, (Port){a2.node, 2}, cur, 0);
     net_link(n, (Port){n_lam.node, 2}, (Port){a2.node, 1}, 0);
+    net_link(n, (Port){n_lam.node, 1}, net_alloc(n, ERA, sc), 0);
     cur = (Port){c_lam.node, 0};
   }
   return cur;

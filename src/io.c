@@ -227,6 +227,7 @@ static Port alloc_scott(Net *n, long k, Scope lvl) {
   Port nl = net_alloc(n, LAM, lvl), n2 = net_alloc(n, LAM, bl), cur;
   net_link(n, (Port){nl.node, 2}, (Port){n2.node, 0}, 0); cur = (Port){nl.node, 0};
   net_link(n, (Port){n2.node, 2}, net_alloc_bool(n, 1), 0);   /* NIL = `\c.\n.<value>`; the value is TRUE */
+  net_link(n, (Port){nl.node, 1}, net_alloc(n, ERA, lvl), 0); net_link(n, (Port){n2.node, 1}, net_alloc(n, ERA, lvl), 0);
   int w = 1; while ((k >> w) != 0 && w < 62) w++;
   for (int b = w - 1; b >= 0; b--) {
     Scope f = scope_app(n, lvl, 1), a = scope_app(n, lvl, 2);
@@ -236,6 +237,7 @@ static Port alloc_scott(Net *n, long k, Scope lvl) {
     net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 0);   net_link(n, (Port){nn.node, 2}, (Port){ou.node, 1}, 0);
     net_link(n, (Port){ou.node, 0}, (Port){in.node, 1}, 0);  net_link(n, (Port){ou.node, 2}, cur, 0);
     net_link(n, (Port){in.node, 0}, (Port){c.node, 1}, 0);   net_link(n, (Port){in.node, 2}, bit, 0);
+    net_link(n, (Port){nn.node, 1}, net_alloc(n, ERA, lvl), 0);   /* the cell ignores the nil case */
     cur = (Port){c.node, 0};
   }
   return cur;
@@ -282,6 +284,7 @@ long net_peel_index(Net *n, Port p) {
 Port net_alloc_bool(Net *n, int val) {
   Scope sc = scope_nil(); Port bt = net_alloc(n, LAM, sc), bf = net_alloc(n, LAM, sc);
   net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0); net_link(n, (Port){bf.node, 2}, (Port){val ? bt.node : bf.node, 1}, 0);
+  net_link(n, (Port){val ? bf.node : bt.node, 1}, net_alloc(n, ERA, sc), 0);   /* the branch not taken is erased */
   return (Port){bt.node, 0};
 }
 

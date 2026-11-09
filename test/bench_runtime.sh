@@ -19,8 +19,9 @@
 #      the shape of the bug test/build_observe.lin documents).  This is also the
 #      attestation: a suite where the build really did everything would pass a
 #      value differential vacuously.
-#   3. AGGRESSIVE SLOT RECYCLING -- the same artifact answers the same way under
-#      LIN_GC=200, where freed node indices are handed straight back out.  Any
+#   3. SLOT RECYCLING -- the same artifact answers the same way run after run while
+#      erasure hands freed node indices straight back out (there is no collector to
+#      force: every run recycles).  Any
 #      driver state keyed by node index (a match cache, a recognition table, a
 #      carried section) is wrong the moment a slot it named is reused, so this is
 #      the guard that a derived entry never becomes an ANSWER: a stale entry may
@@ -73,12 +74,12 @@ a=$(run_art BENCH_N=6); b=$(run_art BENCH_N=10)
 gc_fail=0
 for n in 1 6 10 14 20; do
   want=$(( n * (n + 1) / 2 ))
-  got=$(run_art LIN_GC=200 BENCH_N=$n)
-  [ "$got" = "=> $want" ] || { fail "LIN_GC=200 N=$n got '$got' want '=> $want'"; gc_fail=1; }
+  got=$(run_art BENCH_N=$n)
+  [ "$got" = "=> $want" ] || { fail "recycled N=$n got '$got' want '=> $want'"; gc_fail=1; }
 done
 [ "$gc_fail" = 0 ] && ok
-got=$(env -u BENCH_N LIN_GC=200 LIN_STD_DIR="$STD_DIR" timeout 300 "$BIN" "$ART" 2>/dev/null)
-[ "$got" = "=> 0" ] && ok || fail "LIN_GC=200 with BENCH_N unset got '$got' want '=> 0'"
+got=$(env -u BENCH_N LIN_STD_DIR="$STD_DIR" timeout 300 "$BIN" "$ART" 2>/dev/null)
+[ "$got" = "=> 0" ] && ok || fail "recycled run with BENCH_N unset got '$got' want '=> 0'"
 
 # ---- 4: the corpus contrast, reported and pinned --------------------------
 CLOSED="$PWD/test/numbers.lin"
@@ -99,7 +100,7 @@ if [ "${closed_steps:-x}" = "1" ]; then ok; else fail "numbers.lin artifact ran 
 
 if [ "$FAIL" -eq 0 ]; then
   echo "bench_runtime: OK ($PASS checks: interpreter and artifact agree on N(N+1)/2 for 6 sizes," 
-  echo "               artifact proven run-time dependent, identical under LIN_GC=200)"
+  echo "               artifact proven run-time dependent, identical with slots recycled)"
   exit 0
 fi
 echo "bench_runtime: $FAIL check(s) failed"
