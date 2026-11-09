@@ -168,8 +168,11 @@ static Term *expand(Term *t, Guard *g) {
   /* TLET binds in both children: the value may refer to itself, which is the recursion. */
   int bound = (t->type == TLAM || t->type == TDEF || t->type == TLET);
   if (bound) guard_push(g, t->name);
-  c->l = expand(t->l, g); if (bound) g->count--;
-  c->r = expand(t->r, g); return c;
+  c->l = expand(t->l, g);
+  if (bound && t->type != TLET) g->count--;     /* a let's name is also bound in its body (the right child) */
+  c->r = expand(t->r, g);
+  if (bound && t->type == TLET) g->count--;
+  return c;
 }
 
 Term *expand_defs(Term *t) {
@@ -274,7 +277,7 @@ static void qualify_free(Term *t, Guard *b) {
     const char *qn = lin_internf("%s.%s", curr_ns, t->name);
     if (lookup_raw(qn)) t->name = qn;
   }
-  int bound = (t->type == TLAM);
+  int bound = (t->type == TLAM || t->type == TLET);   /* a let's name is bound in its value and body */
   if (bound) guard_push(b, t->name);
   qualify_free(t->l, b); qualify_free(t->r, b);
   if (bound) b->count--;
