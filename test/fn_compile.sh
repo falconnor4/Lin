@@ -39,6 +39,19 @@ prog ifl '(define c (\n (ifl (leq n 1) (\_ 0) (\_ (add 1 (c (ifl (eq (mod n 2) 0
 prog calls '(define steps (\n (\acc (if (leq n 1) acc (steps (if (eq (mod n 2) 0) (div n 2) (add (mul 3 n) 1)) (add acc 1))))))
 (define best (\i (\m (if (eq i 0) m (best (sub i 1) (if (gt (steps i 0) m) (steps i 0) m))))))
 (best 7 0)' 16
+# FLOATS are checked against known values only: float operations are FFI calls with no pure-Lin fallback yet,
+# so the net alone cannot be the reference for them (it mis-reduces an undispatched float closure).
+progc() {
+  printf '%s\n' "$2" > "$TMP/$1.lin"
+  a=$(timeout 300 "$LIN_BIN" "$TMP/$1.lin" 2>/dev/null)
+  folded=$(LIN_FN_DEBUG=1 timeout 300 "$LIN_BIN" "$TMP/$1.lin" 2>&1 >/dev/null | grep -c "folded a call")
+  if [ "$a" = "=> $3" ] && [ "$folded" -ge 1 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL $1: compiled '$a', want '=> $3', folds $folded"; fi
+}
+progc float '(define it (\cr (\ci (\zr (\zi (\k (if (eq k 0) 0 (if (flt 4.0 (fadd (fmul zr zr) (fmul zi zi))) k
+  (it cr ci (fadd (fsub (fmul zr zr) (fmul zi zi)) cr) (fadd (fmul 2.0 (fmul zr zi)) ci) (sub k 1))))))))))
+(it 0.3 0.6 0.0 0.0 8)' 0
+progc floatres '(define h (\x (\k (if (eq k 0) x (h (fmul x 1.5) (sub k 1))))))
+(ffloor (h 2.0 4))' 10
 # Parallel compiled code (an operation whose two operands both recurse runs them on two threads) must answer
 # exactly what one thread does, for every width.
 printf '%s\n' '(define fib (\n (if (lt n 2) n (add (fib (sub n 1)) (fib (sub n 2))))))' '(fib 32)' > "$TMP/par.lin"

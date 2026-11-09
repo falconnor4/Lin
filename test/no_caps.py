@@ -35,6 +35,8 @@ SHIFT = re.compile(r"(?<![<\w])(\d+)[LU]*\s*<<\s*(\d{2,})\b")
 # (file, finding) -> why it is allowed to be what it is.  Exact first, then the pattern table, so
 # moving code does not churn this and one reason can cover a family.
 DECLARED = {
+    ("std/drivers/fn.c", "name[64]"): "an FFI name read to match against the float rows: a longer name is no row (the read declines)",
+    ("std/drivers/fn.c", "lit[64]"): "a float literal's text: a longer one makes the compiler decline, and the net computes it",
     ("std/drivers/fn.c", ">= 4096"): "a parallel reduction's threshold: below a few thousand iterations a thread costs more than it saves (measured: a 4096-step loop is ~10 us)",
     ("std/drivers/fn.c", "params[sizeof(unsigned) * 8]"): "a compiled function's parameters: one bit each of the strictness set",
     ("std/drivers/fn.c", "<< 20"): "a compiled function's helper-thread stack (256 MB, reserved lazily): deep recursion runs in it",

@@ -1,6 +1,8 @@
 #include "../../src/lin.h"
 #include "../runtime/pattern.h"     /* the structural recognisers and the op vocabulary (LIN_OP_*) */
-#include "../runtime/i64.h"         /* THE integer semantics */
+#define LIN_WANT_F64
+#include <math.h>
+#include "../runtime/i64.h"         /* THE integer and float semantics */
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -54,30 +56,20 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
   if (!fn) return 0;
   if (argc < 0) return arith_supplies(fn);        /* the ownership query: no operands, no computing */
 
-  /* float binary ops: args are IEEE-754 bits carried as longs; result float */
-  if      (fn[0]=='l' && fn[1]=='i' && fn[2]=='n' && !strncmp(fn, "lin_fadd", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x+y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fsub", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x-y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fmul", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x*y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fdiv", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=y!=0.0?x/y:0.0; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fpow", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=pow(x,y); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fatan2", 10)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=atan2(x,y); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fmin", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x<y?x:y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fmax", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x>y?x:y; memcpy(out,&r,8); *outkind=4; return 1; }
-  /* float unary ops -> float */
-  else if (!strncmp(fn, "lin_fsqrt", 9)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=x>=0.0?sqrt(x):0.0; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fsin", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=sin(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fcos", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=cos(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_ftan", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=tan(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fabs", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=fabs(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fsign", 9)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=x>=0.0?1.0:-1.0; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_ffract", 10)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=x-floor(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  /* float comparisons -> Church bool */
-  else if (!strncmp(fn, "lin_feq", 7)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); *out=x==y; *outkind=3; return 1; }
-  else if (!strncmp(fn, "lin_flt", 7)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); *out=x<y;  *outkind=3; return 1; }
-  else if (!strncmp(fn, "lin_fleq", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); *out=x<=y; *outkind=3; return 1; }
-  /* float -> int / 3-arg float combinators */
-  if (!strncmp(fn, "lin_ffloor", 10)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); *out=(long)floor(x); *outkind=1; return 1; }
-  if (!strncmp(fn, "lin_fmin", 8) || !strncmp(fn, "lin_fmax", 8)) { /* handled above */ }
+  /* float ops: std/runtime/i64.h's rows (IEEE-754 bits carried as longs) -- the same lines the fn driver compiles */
+#define F2(name, f) else if (!strncmp(fn, name, sizeof name - 1)) { if (argc < 2) return 0; *out = f(a[0], a[1]); *outkind = 4; return 1; }
+#define F1(name, f) else if (!strncmp(fn, name, sizeof name - 1)) { if (argc < 1) return 0; *out = f(a[0]); *outkind = 4; return 1; }
+#define FB(name, f) else if (!strncmp(fn, name, sizeof name - 1)) { if (argc < 2) return 0; *out = f(a[0], a[1]); *outkind = 3; return 1; }
+  if (0) {}
+  F2("lin_fadd", lin_f64_add) F2("lin_fsub", lin_f64_sub) F2("lin_fmul", lin_f64_mul) F2("lin_fdiv", lin_f64_div)
+  F2("lin_fpow", lin_f64_pow) F2("lin_fatan2", lin_f64_atan2) F2("lin_fmin", lin_f64_min) F2("lin_fmax", lin_f64_max)
+  F1("lin_fsqrt", lin_f64_sqrt) F1("lin_fsin", lin_f64_sin) F1("lin_fcos", lin_f64_cos) F1("lin_ftan", lin_f64_tan)
+  F1("lin_fabs", lin_f64_abs) F1("lin_fsign", lin_f64_sign) F1("lin_ffract", lin_f64_fract)
+  FB("lin_feq", lin_f64_eq) FB("lin_flt", lin_f64_lt) FB("lin_fleq", lin_f64_leq)
+#undef F2
+#undef F1
+#undef FB
+  if (!strncmp(fn, "lin_ffloor", 10)) { if (argc < 1) return 0; *out = lin_f64_floor(a[0]); *outkind = 1; return 1; }
   if (!strncmp(fn, "lin_lerp", 8) && argc >= 3) { double x,y,t; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); memcpy(&t,&a[2],8); double r=x+(y-x)*t; memcpy(out,&r,8); *outkind=4; return 1; }
   if (!strncmp(fn, "lin_fclamp", 10) && argc >= 3) { double x,lo,hi; memcpy(&x,&a[0],8); memcpy(&lo,&a[1],8); memcpy(&hi,&a[2],8); double r=x<lo?lo:(x>hi?hi:x); memcpy(out,&r,8); *outkind=4; return 1; }
 

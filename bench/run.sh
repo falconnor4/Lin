@@ -29,7 +29,7 @@ printf '| %-9s | %10s | %10s | %10s | %8s | %s\n' benchmark "C -O3" "Lin" "Lin -
 printf '|%s|%s|%s|%s|%s|%s\n' ----------- ------------ ------------ ------------ ---------- --------
 for f in "$DIR"/*.lin; do
   name=$(basename "$f" .lin)
-  "$CC" -O3 -march=native -o "$TMP/$name" "$DIR/$name.c" 2>/dev/null || { echo "| $name | (C build failed)"; continue; }
+  "$CC" -O3 -march=native -ffp-contract=off -o "$TMP/$name" "$DIR/$name.c" 2>/dev/null || { echo "| $name | (C build failed)"; continue; }
   want=$("$TMP/$name")
   got=$("$LIN" "$f" 2>/dev/null | sed 's/^=> //')         # also warms the compile cache
   if [ "$got" != "$want" ]; then printf '| %-9s | MISMATCH: C %s, Lin %s\n' "$name" "$want" "$got"; continue; fi

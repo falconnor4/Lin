@@ -25,8 +25,37 @@
   static inline long lin_i64_shl(long a, long k) { return (k < 0 || k >= (long)(sizeof(long) * 8)) ? 0 : (long)((unsigned long)a << k); } \
   static inline long lin_i64_shr(long a, long k) { return k < 0 ? 0 : (k >= (long)(sizeof(long) * 8) ? (a < 0 ? -1 : 0) : (a >> k)); }
 LIN_I64_DEFS
+/* FLOATS: IEEE-754 doubles carried as their 64-bit patterns (a float travels in a `long` like every value), with
+   the undefined cases defined: x / 0.0 = 0.0, sqrt of a negative = 0.0, floor gives an INTEGER.  (Needs <math.h>.) */
+#define LIN_F64_DEFS \
+  static inline double lin_d(long x) { double d; __builtin_memcpy(&d, &x, 8); return d; } \
+  static inline long lin_l(double d) { long x; __builtin_memcpy(&x, &d, 8); return x; } \
+  static inline long lin_f64_add(long a, long b) { return lin_l(lin_d(a) + lin_d(b)); } \
+  static inline long lin_f64_sub(long a, long b) { return lin_l(lin_d(a) - lin_d(b)); } \
+  static inline long lin_f64_mul(long a, long b) { return lin_l(lin_d(a) * lin_d(b)); } \
+  static inline long lin_f64_div(long a, long b) { return lin_l(lin_d(b) != 0.0 ? lin_d(a) / lin_d(b) : 0.0); } \
+  static inline long lin_f64_pow(long a, long b) { return lin_l(pow(lin_d(a), lin_d(b))); } \
+  static inline long lin_f64_atan2(long a, long b) { return lin_l(atan2(lin_d(a), lin_d(b))); } \
+  static inline long lin_f64_min(long a, long b) { return lin_d(a) < lin_d(b) ? a : b; } \
+  static inline long lin_f64_max(long a, long b) { return lin_d(a) > lin_d(b) ? a : b; } \
+  static inline long lin_f64_sqrt(long a) { return lin_l(lin_d(a) >= 0.0 ? sqrt(lin_d(a)) : 0.0); } \
+  static inline long lin_f64_sin(long a) { return lin_l(sin(lin_d(a))); } \
+  static inline long lin_f64_cos(long a) { return lin_l(cos(lin_d(a))); } \
+  static inline long lin_f64_tan(long a) { return lin_l(tan(lin_d(a))); } \
+  static inline long lin_f64_abs(long a) { return lin_l(fabs(lin_d(a))); } \
+  static inline long lin_f64_sign(long a) { return lin_l(lin_d(a) >= 0.0 ? 1.0 : -1.0); } \
+  static inline long lin_f64_fract(long a) { return lin_l(lin_d(a) - floor(lin_d(a))); } \
+  static inline long lin_f64_eq(long a, long b) { return lin_d(a) == lin_d(b); } \
+  static inline long lin_f64_lt(long a, long b) { return lin_d(a) < lin_d(b); } \
+  static inline long lin_f64_leq(long a, long b) { return lin_d(a) <= lin_d(b); } \
+  static inline long lin_f64_floor(long a) { return (long)floor(lin_d(a)); } \
+  static inline long lin_f64_of_int(long i) { return lin_l((double)i); }
+#ifdef LIN_WANT_F64
+LIN_F64_DEFS
+#endif
 #define LIN_I64_STR2(...) #__VA_ARGS__
 #define LIN_I64_STR(x) LIN_I64_STR2(x)
 /* the same definitions as C source, for a driver that compiles code */
 #define LIN_I64_SRC LIN_I64_STR(LIN_I64_DEFS) "\n"
+#define LIN_F64_SRC "#include <math.h>\n" LIN_I64_STR(LIN_F64_DEFS) "\n"
 #endif

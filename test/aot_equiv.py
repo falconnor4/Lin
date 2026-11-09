@@ -192,7 +192,7 @@ def corpus(lin_abs, std_dir, env, tmp, known):
     here would then never reach the caller's total -- a harness that cannot fail the run is worse
     than no harness at all.
     """
-    tdir = os.path.join(os.path.dirname(os.path.abspath(std_dir)), 'test')
+    tdir = TEST_DIR
     checked = refused = environ = known_hit = bad = 0
     for name in sorted(os.listdir(tdir)):
         if not name.endswith('.lin'):
@@ -277,6 +277,8 @@ def corpus(lin_abs, std_dir, env, tmp, known):
 # (`system`) is refused at build time even though it is a plain libc call, because a build may not
 # perform what it cannot see the value of.
 BUILD_OBSERVE = 'build_observe.lin'
+# The corpus lives beside THIS script, not beside the std: a packaged std (nix: share/lin/std) has no tests.
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 BUILD_OBSERVE_VAR = 'LIN_BUILD_OBSERVE'
 BUILD_OBSERVE_YES = '=> 21'       # shell `test -n "$LIN_BUILD_OBSERVE"` exits 0
 BUILD_OBSERVE_NO = '=> 277'      # ... exits 1, and `system` reports the raw wait status (256)
@@ -284,7 +286,7 @@ BUILD_OBSERVE_NO = '=> 277'      # ... exits 1, and `system` reports the raw wai
 
 def build_time_observation(lin_abs, std_dir, env, tmp):
     """(failures, note) for the build-time purity rule; see the section comment above."""
-    src = os.path.join(os.path.dirname(os.path.abspath(std_dir)), 'test', BUILD_OBSERVE)
+    src = os.path.join(TEST_DIR, BUILD_OBSERVE)
     if not os.path.exists(src):
         print('FAIL test/%s is missing -- the build-observation rule is untested' % BUILD_OBSERVE)
         return 1, ''

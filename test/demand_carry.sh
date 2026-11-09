@@ -94,7 +94,10 @@ if ! "$CC" -O2 -w -std=c99 -fPIC -shared -I "$ROOT/src" -o "$TMPD/pass.so" "$TMP
 fi
 
 # ---------------- build both artifacts: with the claim, and without it ----------------
-LD_PRELOAD="$TMPD/pass.so" BENCH_N= "$LIN_BIN" build "$PROG" -o "$TMPD/carried" >"$TMPD/build1.log" 2>&1 \
+# LD_PRELOAD reaches the PROCESS that is exec'd first: a packaged lin is a wrapper script (nix makeWrapper), and the
+# plugin, which needs lin's symbols, would be preloaded into the shell instead.  Preload into the binary itself.
+REAL="$(dirname "$LIN_BIN")/.$(basename "$LIN_BIN")-wrapped"; [ -x "$REAL" ] || REAL="$LIN_BIN"
+LD_PRELOAD="$TMPD/pass.so" BENCH_N= "$REAL" build "$PROG" -o "$TMPD/carried" >"$TMPD/build1.log" 2>&1 \
   || bad "the build with the producing pass failed"
 BENCH_N= "$LIN_BIN" build "$PROG" -o "$TMPD/control" >"$TMPD/build2.log" 2>&1 \
   || bad "the control build failed"

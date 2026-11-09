@@ -29,6 +29,8 @@
  * ==========================================================================*/
 #include "../../src/lin.h"
 #include "../runtime/pattern.h"   /* the op vocabulary (LIN_OP_*) */
+#define LIN_WANT_F64
+#include <math.h>
 #include "../runtime/i64.h"
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +40,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <dlfcn.h>
+#include <limits.h>
 
 static int dbg = -1;
 #define DBG(...) do { if (dbg) { fprintf(stderr, "fn: " __VA_ARGS__); fflush(stderr); } } while (0)
@@ -85,7 +88,7 @@ static int y_call(const Net *n, Port p1, Port p2, int *h, int *appy, int *F) {
 }
 
 /* ---- the evaluator --------------------------------------------------------------------------- */
-enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL };
+enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP };   /* E_FOP: a float row (FROW[k]) over args */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
                       int id, var, vscope; } Expr;   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_MCONS, V_MCONS1, V_MCELL, V_MNIL };
@@ -112,7 +115,7 @@ static void arena_free(void) {
 static Net *N; static long fuel; static int failed;
 /* THE UNIT: every function this compilation reaches.  funs[0] is the one being called; a call to another
    recursive function (a `Y G` met while evaluating) compiles G as funs[k], once per node. */
-typedef struct { int lam, arity; Expr *body; unsigned strict; } Fun;
+typedef struct { int lam, arity; Expr *body; unsigned strict, fmask; } Fun;   /* fmask: the FLOAT parameters */
 static Fun *funs; static int nfun, funcap;
 static int arity;   /* funs[0]'s, which the entry point and the parallel sites are written for */
 static void fail(const char *why) { if (!failed) DBG("declined: %s\n", why); failed = 1; }
@@ -138,6 +141,7 @@ static V *force(Lz *l) {
 }
 
 static Expr *to_expr(V *v);
+static Expr *ffi_expr(V *v);
 /* An `_op` head: \x. ((\k. B) x) with k unused, applied to its operand list (code, a, b). */
 static int compile_body(int G, Env *outer);
 static int is_y(const Net *n, int h);
@@ -174,6 +178,13 @@ static V *apply(V *f, Lz *x) {
   switch (f->k) {
   case V_CLO: {
     if (op_head(f->lam)) return op_value(x);
+    /* A float operation USED (a comparison applied to two branches): its value is the operation's result, not
+       a beta of the closure.  Never while decoding: the markers are applied to cells all the time. */
+    if (!(x->state == 2 && x->v && x->v->k >= V_MCONS)) {
+      Expr *fe = ffi_expr(f);
+      if (failed) return NULL;
+      if (fe) { V *s = mkv(V_SYM); s->e = fe; return apply(s, x); }
+    }
     if (is_y(N, f->lam)) {                          /* another recursive function: compile it into the unit */
       V *g = force(x);
       if (!g || g->k != V_CLO) { fail("a fixpoint of something that is not a function"); return NULL; }
@@ -260,6 +271,78 @@ static long const_int(V *v, int *ok) {
   return 0;
 }
 
+/* FLOATS.  A float operation is an FFI closure \_ffi.\_ret.((_ffi name) args) (std/float.lin); its name and
+   operand list are read by evaluating them, and a row the table below knows becomes E_FOP.  The rows are
+   std/runtime/i64.h's, which arith's table uses too, so the compiled and the folded float are one function. */
+static const struct { const char *name, *c; int arity, kind, in; } FROW[] = {
+  { "lin_fadd", "lin_f64_add", 2, 4, 4 }, { "lin_fsub", "lin_f64_sub", 2, 4, 4 }, { "lin_fmul", "lin_f64_mul", 2, 4, 4 },
+  { "lin_fdiv", "lin_f64_div", 2, 4, 4 }, { "lin_fpow", "lin_f64_pow", 2, 4, 4 }, { "lin_fatan2", "lin_f64_atan2", 2, 4, 4 },
+  { "lin_fmin", "lin_f64_min", 2, 4, 4 }, { "lin_fmax", "lin_f64_max", 2, 4, 4 }, { "lin_fsqrt", "lin_f64_sqrt", 1, 4, 4 },
+  { "lin_fsin", "lin_f64_sin", 1, 4, 4 }, { "lin_fcos", "lin_f64_cos", 1, 4, 4 }, { "lin_ftan", "lin_f64_tan", 1, 4, 4 },
+  { "lin_fabs", "lin_f64_abs", 1, 4, 4 }, { "lin_fsign", "lin_f64_sign", 1, 4, 4 }, { "lin_ffract", "lin_f64_fract", 1, 4, 4 },
+  { "lin_feq", "lin_f64_eq", 2, 3, 4 }, { "lin_flt", "lin_f64_lt", 2, 3, 4 }, { "lin_fleq", "lin_f64_leq", 2, 3, 4 },
+  { "lin_ffloor", "lin_f64_floor", 1, 1, 4 }, { "lin_float", "lin_f64_of_int", 1, 4, 1 },
+};
+static int cur_fid;   /* the unit function being evaluated: a float operand that is one of ITS parameters marks it */
+/* A string constant (a list of character codes) into `buf`; 0 if the value is not one. */
+static int const_str(V *v, char *buf, int cap) {
+  int n = 0;
+  for (; v && !failed && n < cap - 1; ) {
+    V *r = apply(apply(v, ready(mkv(V_MCONS))), ready(mkv(V_MNIL)));
+    if (!r) return 0;
+    if (r->k != V_MCELL) { buf[n] = 0; return n > 0; }       /* the terminal: \c.\n.true answers true */
+    int ok; long ch = const_int(force(r->a), &ok);
+    if (!ok || ch <= 0 || ch > UCHAR_MAX) return 0;
+    buf[n++] = (char)ch; v = force(r->b);
+  }
+  return 0;
+}
+static Expr *ffi_expr(V *v) {
+  int lam = v->lam;
+  Port r = dhop(N, W(N, (Port){lam, 2}));
+  if (!is(N, r, LAM, 0)) return NULL;
+  Port a2 = dhop(N, W(N, (Port){r.node, 2}));
+  if (!is(N, a2, APP, 1)) return NULL;
+  Port fa = dhop(N, W(N, (Port){a2.node, 0}));
+  if (!is(N, fa, APP, 1)) return NULL;
+  Port self = dhop(N, W(N, (Port){fa.node, 0}));
+  if (self.node != lam || self.port != 1) return NULL;
+  /* A CONS CELL HAS THIS SHAPE TOO (\c.\n.((c h) t)) -- and so does every numeral, a chain of cells -- so the
+     shape alone says nothing: only a head that reads as a NAME the table knows makes this an FFI call.  The
+     read is speculative: a head that is not a string is "not mine", never a failure. */
+  char name[64]; long sfuel = fuel; int sfail = failed;
+  int named = const_str(eval(W(N, (Port){fa.node, 2}), v->env), name, (int)sizeof name);
+  if (!named) { failed = sfail; fuel = sfuel; return NULL; }
+  int known = !strcmp(name, "lin_parse_float");
+  for (int k = 0; k < N_OF(FROW); k++) known |= !strcmp(name, FROW[k].name);
+  if (!known) { failed = sfail; fuel = sfuel; if (!strncmp(name, "lin_", 4)) { fail("an FFI call the compiler does not know"); } return NULL; }
+  V *l = eval(W(N, (Port){a2.node, 2}), v->env);
+  V *argv[4]; int argc = 0;
+  for (; l && !failed; ) {
+    V *c = apply(apply(l, ready(mkv(V_MCONS))), ready(mkv(V_MNIL)));
+    if (!c) return NULL;
+    if (c->k != V_MCELL) break;
+    if (argc >= N_OF(argv)) { fail("an FFI call with too many operands"); return NULL; }
+    argv[argc++] = force(c->a); l = force(c->b);
+  }
+  if (failed) return NULL;
+  if (!strcmp(name, "lin_parse_float") && argc == 1) {        /* (float "2.5"): a constant, read now */
+    char lit[64];
+    if (!const_str(argv[0], lit, (int)sizeof lit)) { fail("a float literal that is not a constant"); return NULL; }
+    Expr *e = mke(E_CONST, 4); e->k = lin_l(strtod(lit, NULL)); return e;
+  }
+  for (int k = 0; k < N_OF(FROW); k++) {
+    if (strcmp(name, FROW[k].name) || argc != FROW[k].arity) continue;
+    Expr *e = mke(E_FOP, FROW[k].kind); e->k = k; e->nargs = argc; e->args = A(sizeof(Expr *) * (size_t)argc);
+    for (int i = 0; i < argc; i++) {
+      if (!(e->args[i] = to_expr(argv[i]))) return NULL;
+      if (e->args[i]->op == E_PARAM && e->args[i]->nargs == cur_fid && FROW[k].in == 4) funs[cur_fid].fmask |= 1u << e->args[i]->k;
+    }
+    return e;
+  }
+  fail("an FFI call the compiler does not know"); return NULL;
+}
+
 static Expr *to_expr(V *v) {
   if (failed || !v) return NULL;
   if (v->k == V_SYM) return v->e;
@@ -269,6 +352,10 @@ static Expr *to_expr(V *v) {
     e->kind = e->b->kind; return e;
   }
   if (v->k == V_CLO) {
+    Expr *f = ffi_expr(v);
+    if (f || failed) return f;
+    double d;
+    if (net_read_float(N, (Port){v->lam, 0}, &d)) { Expr *e = mke(E_CONST, 4); e->k = lin_l(d); return e; }   /* a float box */
     int ok; long k = const_int(v, &ok);
     if (ok) { Expr *e = mke(E_CONST, 1); e->k = k; return e; }
     int bk = const_bool(v, &ok);
@@ -286,6 +373,7 @@ static unsigned strict(Expr *e) {
   case E_BIN: return strict(e->a) | strict(e->b);
   case E_IF: return strict(e->a) | (strict(e->b) & strict(e->c));
   case E_CALL: { unsigned s = 0; for (int i = 0; i < e->nargs; i++) if ((funs[e->k].strict >> i) & 1u) s |= strict(e->args[i]); return s; }
+  case E_FOP: { unsigned s = 0; for (int i = 0; i < e->nargs; i++) s |= strict(e->args[i]); return s; }
   default: return 0;
   }
 }
@@ -302,6 +390,7 @@ static int args_safe(const Expr *e) {
       if (!args_safe(e->args[i])) return 0;
     }
     return 1;
+  case E_FOP: for (int i = 0; i < e->nargs; i++) if (!args_safe(e->args[i])) return 0; return 1;
   default: return 1;
   }
 }
@@ -329,6 +418,7 @@ static int has_call(const Expr *e) {
   case E_CALL: return 1;
   case E_BIN: return has_call(e->a) || has_call(e->b);
   case E_IF: return has_call(e->a) || has_call(e->b) || has_call(e->c);
+  case E_FOP: for (int i = 0; i < e->nargs; i++) if (has_call(e->args[i])) return 1; return 0;
   default: return 0;
   }
 }
@@ -359,7 +449,7 @@ static void count_uses(const Expr *e) {           /* every reference inside the 
   switch (e->op) {
   case E_BIN: count_uses(e->a); count_uses(e->b); break;
   case E_IF: count_uses(e->a); count_uses(e->b); count_uses(e->c); break;
-  case E_CALL: for (int i = 0; i < e->nargs; i++) count_uses(e->args[i]); break;
+  case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) count_uses(e->args[i]); break;
   }
 }
 static void certain(const Expr *e, const Expr ***out, int *n, int *cap) {   /* post-order: dependencies first */
@@ -368,7 +458,7 @@ static void certain(const Expr *e, const Expr ***out, int *n, int *cap) {   /* p
   switch (e->op) {
   case E_BIN: certain(e->a, out, n, cap); certain(e->b, out, n, cap); break;
   case E_IF: certain(e->a, out, n, cap); break;                  /* only the condition: a branch may not run */
-  case E_CALL: for (int i = 0; i < e->nargs; i++) certain(e->args[i], out, n, cap); break;
+  case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) certain(e->args[i], out, n, cap); break;
   }
   if (*n >= *cap) *out = realloc(*out, (size_t)(*cap = *cap ? *cap * 2 : 16) * sizeof **out);
   (*out)[(*n)++] = e;
@@ -478,6 +568,10 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     put(b, " ? "); if (!emit_region(b, pre, e->b, par, budget - 1)) return 0;
     put(b, " : "); if (!emit_region(b, pre, e->c, par, budget - 1)) return 0;
     put(b, ")"); return 1;
+  case E_FOP:
+    put(b, "%s(", FROW[e->k].c);
+    for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
+    put(b, ")"); return 1;
   case E_CALL:
     par = par && e->k == 0;                        /* only the entry function has a parallel version */
     { int calls = 0; for (int i = 0; i < e->nargs; i++) calls += has_call(e->args[i]);
@@ -515,13 +609,13 @@ static int run_cc(const char *src, const char *so) {
   const char *cc = getenv("LIN_NATIVE_CC"); if (!cc || !cc[0]) cc = "cc";
   pid_t pid = fork();
   if (pid < 0) return 0;
-  if (pid == 0) { execlp(cc, cc, "-O3", "-march=native", "-w", "-fPIC", "-shared", "-pthread", "-o", so, src, (char *)NULL); _exit(127); }
+  if (pid == 0) { execlp(cc, cc, "-O3", "-march=native", "-ffp-contract=off", "-w", "-fPIC", "-shared", "-pthread", "-o", so, src, "-lm", (char *)NULL); _exit(127); }
   int st = 0;
   return waitpid(pid, &st, 0) >= 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
 typedef long (*Entry)(const long *, int threads);
-typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; } Compiled;   /* strict: the parameters certainly evaluated */
+typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict, fmask; } Compiled;   /* strict: the parameters certainly evaluated */
 static Compiled *done; static int ndone, donecap;
 /* -march=native code must never be loaded on a different CPU, so the cache key includes this one's identity. */
 static unsigned long cpu_key(void) {
@@ -552,7 +646,7 @@ static Compiled *compile_src(const char *src, int ar, int kind) {
   Entry e = hnd ? (Entry)(intptr_t)dlsym(hnd, "lin_fn_entry") : NULL;   /* one per object, loaded RTLD_LOCAL */
   if (!e) DBG("no compiler or the build failed for %s\n", c);
   if (ndone >= donecap) done = realloc(done, (size_t)(donecap = donecap ? donecap * 2 : 32) * sizeof *done);
-  done[ndone] = (Compiled){ h, e, ar, kind, 0 };
+  done[ndone] = (Compiled){ h, e, ar, kind, 0, 0 };
   return e ? &done[ndone++] : (ndone++, NULL);
 }
 
@@ -568,7 +662,7 @@ static int mentions(const Expr *e, int k) {
   case E_PARAM: return e->k == k && e->nargs == 0;
   case E_BIN: return mentions(e->a, k) || mentions(e->b, k);
   case E_IF: return mentions(e->a, k) || mentions(e->b, k) || mentions(e->c, k);
-  case E_CALL: for (int i = 0; i < e->nargs; i++) if (mentions(e->args[i], k)) return 1; return 0;
+  case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) if (mentions(e->args[i], k)) return 1; return 0;
   default: return 0;
   }
 }
@@ -615,7 +709,7 @@ static int compile_body(int G, Env *outer) {
   for (int i = 0; i < nfun; i++) if (funs[i].lam == G) return i;
   if (nfun >= 1 + LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }   /* mutual recursion re-copies: bound it */
   if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
-  int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u;
+  int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u; funs[fid].fmask = 0;
   /* a parameter is one bit of a strictness set, so a function has at most that many */
   int params[sizeof(unsigned) * 8], ar = 0; Port body = W(N, (Port){G, 2});
   for (Port q = dhop(N, body); is(N, q, LAM, 0) && ar < N_OF(params); q = dhop(N, W(N, (Port){q.node, 2}))) {
@@ -628,7 +722,9 @@ static int compile_body(int G, Env *outer) {
     Env *e = A(sizeof *e); e->lam = params[i]; V *s = mkv(V_SYM); s->e = mke(E_PARAM, 1); s->e->k = i; s->e->nargs = fid;
     e->t = ready(s); e->next = env; env = e;
   }
+  int save_fid = cur_fid; cur_fid = fid;
   Expr *top = to_expr(eval(body, env));
+  cur_fid = save_fid;
   if (failed || !top) return -1;
   funs[fid].body = top;
   return fid;
@@ -650,7 +746,7 @@ static Compiled *compile_fn(Net *n, int F) {
     if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
     else {
       Buf b = nbuf(4096), pre = nbuf(1024), pb = nbuf(1024);
-      put(&b, "%s\n#include <pthread.h>\n", LIN_I64_SRC);
+      put(&b, "%s%s\n#include <pthread.h>\n", LIN_I64_SRC, LIN_F64_SRC);
       for (int i = 0; i < nfun; i++) { put(&b, "static long f%d(", i); plistn(&b, 1, funs[i].arity); put(&b, ");\n"); }
       int ok = 1;
       for (int i = 0; ok && i < nfun; i++) {
@@ -680,8 +776,10 @@ static Compiled *compile_fn(Net *n, int F) {
         }
         put(&b, "long lin_fn_entry(const long *a, int threads) {\n");
         for (int i = 0; i < arity; i++) put(&b, "  long p%d = a[%d];\n", i, i);
-        if (has_red) {   /* below some thousands of iterations a thread costs more than it saves */
-          put(&b, "  if (threads > 1 && p%d > %ldL && p%d - %ldL >= 4096) {\n", red.iv, red.c, red.iv, red.c);
+        if (has_red) {   /* a cheap step needs some thousands of iterations to pay for a thread; a step that CALLS
+                            (a whole inner loop) pays from a few per thread */
+          if (has_call(red.g)) put(&b, "  if (threads > 1 && p%d > %ldL && p%d - %ldL >= (long)threads * 4) {\n", red.iv, red.c, red.iv, red.c);
+          else put(&b, "  if (threads > 1 && p%d > %ldL && p%d - %ldL >= 4096) {\n", red.iv, red.c, red.iv, red.c);
           put(&b, "    long next = p%d; pthread_t t[threads]; R q[threads];\n", red.iv);
           put(&b, "    for (int k = 0; k < threads; k++) { R r = { {"); plist(&b, 0);
           put(&b, "}, %ldL, (p%d - %ldL) / ((long)threads * 64) + 1, 0, &next }; q[k] = r; pthread_create(&t[k], 0, rrun, &q[k]); }\n", red.c, red.iv, red.c);
@@ -694,7 +792,7 @@ static Compiled *compile_fn(Net *n, int F) {
         plist(&b, 0); put(&b, "%s0); }\n  return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, ");\n}\n");
         DBG("compiling (%d function%s, arity %d, %d parallel site%s):\n%s\n", nfun, nfun == 1 ? "" : "s", arity, nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
         r = compile_src(b.s, arity, funs[0].body->kind);
-        if (r) r->strict = funs[0].strict;
+        if (r) { r->strict = funs[0].strict; r->fmask = funs[0].fmask; }
       } else DBG("declined: expression too large\n");
       free(b.s); free(pre.s); free(pb.s);
     }
@@ -732,7 +830,12 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
       Port a = W(n, (Port){call, 2});
       if (!((c->strict >> k) & 1u) && !is(n, dhop(n, a), LAM, 0)) { ok = 0; DBG("argument %d is lazy and not yet a value\n", k); break; }
       Port v = net_force_val(n, a);
-      if (!net_read_i64(n, v, &args[k])) { ok = 0; DBG("argument %d is not a number\n", k); }
+      if ((c->fmask >> k) & 1u) {                     /* a float parameter: a box, or a float operation to dispatch */
+        double d; Val fv; memset(&fv, 0, sizeof fv);
+        if (net_read_float(n, v, &d)) args[k] = lin_l(d);
+        else if (net_read_value(n, v, DT_FFI, &fv) && fv.kind == 4) args[k] = fv.iv;
+        else { ok = 0; DBG("argument %d is not a float\n", k); }
+      } else if (!net_read_i64(n, v, &args[k])) { ok = 0; DBG("argument %d is not a number\n", k); }
       if (!y_call(n, p1, p2, &h, &appy, &F)) { ok = 0; break; }   /* forcing rewrote the call itself */
     }
     if (!ok) {
@@ -741,7 +844,7 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
     }
     extern int lin_threads;
     long r = c->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
-    Port val = c->kind == 3 ? net_alloc_bool(n, r != 0) : net_alloc_scott(n, r);
+    Port val = c->kind == 3 ? net_alloc_bool(n, r != 0) : c->kind == 4 ? net_alloc_float(n, lin_d(r)) : net_alloc_scott(n, r);
     Port out = W(n, (Port){call, 1});
     net_link(n, val, out, 1);
     net_drop(n, call);                                  /* erases the call chain, Y and F behind it */

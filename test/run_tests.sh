@@ -143,7 +143,7 @@ rm -f "$NC_LOG"
 #   silently dropped the rest and handed the constructor a different type.
 # ----------------------------------------------------------------------------
 DA_LOG=$(mktemp)
-if ./test/datatype_arity.sh "$LIN_BIN" >"$DA_LOG" 2>&1; then
+if bash test/datatype_arity.sh "$LIN_BIN" >"$DA_LOG" 2>&1; then
   pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/datatype_arity.sh ($(tail -1 "$DA_LOG"))"
 else
   fail=$((fail+1)); echo "FAIL test/datatype_arity.sh"; cat "$DA_LOG"
@@ -156,7 +156,7 @@ rm -f "$DA_LOG"
 #   call must be REFUSED -- not forwarded with the wrong count, which is what it used to do.
 # ----------------------------------------------------------------------------
 FA_LOG=$(mktemp)
-if ./test/ffi_arity.sh "$LIN_BIN" >"$FA_LOG" 2>&1; then
+if bash test/ffi_arity.sh "$LIN_BIN" >"$FA_LOG" 2>&1; then
   pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/ffi_arity.sh ($(tail -1 "$FA_LOG"))"
 else
   fail=$((fail+1)); echo "FAIL test/ffi_arity.sh"; cat "$FA_LOG"
@@ -171,7 +171,7 @@ rm -f "$FA_LOG"
 #   The check count is read from the test's own summary, so it cannot drift from the assertions.
 # ----------------------------------------------------------------------------
 DAB_LOG=$(mktemp)
-if ./test/driver_abi.sh "$LIN_BIN" "$STD_DIR" >"$DAB_LOG" 2>&1; then
+if bash test/driver_abi.sh "$LIN_BIN" "$STD_DIR" >"$DAB_LOG" 2>&1; then
   n=$(sed -n 's/.*(\([0-9]*\) checks.*/\1/p' "$DAB_LOG" | tail -1)
   pass=$((pass+1)); total_checks=$((total_checks + ${n:-0})); echo "PASS test/driver_abi.sh ($(tail -1 "$DAB_LOG"))"
 else
@@ -261,7 +261,7 @@ fi
 # ----------------------------------------------------------------------------
 FN_LOG=$(mktemp)
 if bash test/fn_compile.sh "$LIN_BIN" "$STD_DIR" >"$FN_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 16)); echo "PASS test/fn_compile.sh ($(tail -1 "$FN_LOG"))"
+  pass=$((pass+1)); total_checks=$((total_checks + 18)); echo "PASS test/fn_compile.sh ($(tail -1 "$FN_LOG"))"
   rm -f "$FN_LOG"
 else
   fail=$((fail+1)); echo "FAIL test/fn_compile.sh"; cat "$FN_LOG"; rm -f "$FN_LOG"

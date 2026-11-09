@@ -1,0 +1,8 @@
+; mandelbrot: total escape iterations over a 1000 x 800 grid (floats, three nested loops)
+(define iter (\cr (\ci (\zr (\zi (\k (if (eq k 0) 0
+  (if (flt 4.0 (fadd (fmul zr zr) (fmul zi zi))) k
+    (iter cr ci (fadd (fsub (fmul zr zr) (fmul zi zi)) cr) (fadd (fmul 2.0 (fmul zr zi)) ci) (sub k 1))))))))))
+(define col (\y (\x (\acc (if (eq x 0) acc
+  (col y (sub x 1) (add acc (iter (fsub (fmul (i2f x) 0.003) 2.0) (fsub (fmul (i2f y) 0.003) 1.2) 0.0 0.0 200))))))))
+(define row (\y (\acc (if (eq y 0) acc (row (sub y 1) (add acc (col y 1000 0)))))))
+(row 800 0)
