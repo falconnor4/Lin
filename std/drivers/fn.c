@@ -255,6 +255,7 @@ static unsigned strict(Expr *e) {
 
 /* ---- C ------------------------------------------------------------------------------------------ */
 typedef struct { char *s; size_t len, cap; } Buf;
+static Buf nbuf(size_t cap) { Buf b = { malloc(cap), 0, cap }; b.s[0] = 0; return b; }
 static void put(Buf *b, const char *fmt, ...) {
   va_list ap; va_start(ap, fmt);
   for (;;) {
@@ -265,34 +266,71 @@ static void put(Buf *b, const char *fmt, ...) {
   }
   va_end(ap);
 }
-static int emit(Buf *b, Expr *e, int budget) {
-  if (budget <= 0) return 0;
+/* THE PARALLEL SITES.  An operation whose two operands BOTH contain a recursive call evaluates them at the same
+   time: one on a new thread, the other on this one.  That changes nothing about the value -- the operation
+   evaluates both operands anyway, and compiled code is pure -- and it is where a tree recursion's work is.  The
+   parallel version `fp` carries the recursion depth and spawns only while it is below `dmax` (derived from the
+   thread count), so the leaves run the sequential `f` with no threading cost at all. */
+static int has_call(const Expr *e) {
+  switch (e->op) {
+  case E_CALL: return 1;
+  case E_BIN: return has_call(e->a) || has_call(e->b);
+  case E_IF: return has_call(e->a) || has_call(e->b) || has_call(e->c);
+  default: return 0;
+  }
+}
+static int nsite;
+static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+static void plist(Buf *b, int typed) { for (int i = 0; i < arity; i++) put(b, typed ? "%slong p%d" : "%sp%d", i ? ", " : "", i); }
+static int emit_op(Buf *b, long k, const char *x, const char *y) {
   static const char *const fn[LIN_OP_N] = { [LIN_OP_ADD] = "lin_i64_add", [LIN_OP_MUL] = "lin_i64_mul",
     [LIN_OP_SUB] = "lin_i64_sub", [LIN_OP_EQ] = "==", [LIN_OP_LT] = "<", [LIN_OP_LEQ] = "<=", [LIN_OP_GT] = ">",
     [LIN_OP_GEQ] = ">=", [LIN_OP_DIV] = "lin_i64_div", [LIN_OP_MOD] = "lin_i64_mod", [LIN_OP_POW] = "lin_i64_pow" };
+  if (k >= LIN_OP_EQ && k <= LIN_OP_GEQ) put(b, "(long)(%s %s %s)", x, fn[k], y);
+  else put(b, "%s(%s, %s)", fn[k], x, y);
+  return 1;
+}
+static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
+  if (budget <= 0) return 0;
   switch (e->op) {
   case E_CONST: if (e->k == (long)(1UL << (LIN_INT_BITS - 1))) put(b, "(-%ldL-1)", -(e->k + 1)); else put(b, "(%ldL)", e->k); return 1;
   case E_PARAM: put(b, "p%ld", e->k); return 1;
-  case E_BIN:
-    if (e->k >= LIN_OP_EQ && e->k <= LIN_OP_GEQ) {
-      put(b, "(long)(");
-      if (!emit(b, e->a, budget - 1)) return 0;
-      put(b, " %s ", fn[e->k]);
-      if (!emit(b, e->b, budget - 1)) return 0;
-      put(b, ")"); return 1;
+  case E_BIN: {
+    Buf x = nbuf(256), y = nbuf(256);
+    int ok = 1;
+    if (par && has_call(e->a) && has_call(e->b)) {
+      int k = nsite++;
+      Buf sb = nbuf(512);            /* the site: operand a as a function of the parameters */
+      put(&sb, "static long site%d(", k); plist(&sb, 1); put(&sb, "%sint d) { return ", arity ? ", " : "");
+      ok = emitx(&sb, pre, e->a, 1, budget - 1);
+      put(&sb, "; }\ntypedef struct { long p[%d]; int d; long r; } S%d;\n", arity, k);
+      put(&sb, "static void *run%d(void *v) { S%d *s = v; s->r = site%d(", k, k, k);
+      for (int i = 0; i < arity; i++) put(&sb, "s->p[%d], ", i);
+      put(&sb, "s->d); return 0; }\n");
+      put(pre, "%s", sb.s); free(sb.s);
+      ok = ok && emitx(&y, pre, e->b, 1, budget - 1);
+      put(b, "({ S%d s%d_ = { {", k, k); plist(b, 0); put(b, "}, d, 0 }; pthread_t t%d_; ", k);
+      put(b, "int sp%d_ = d < dmax && !pthread_create(&t%d_, &attr, run%d, &s%d_); long y%d_ = %s; ", k, k, k, k, k, y.s);
+      put(b, "long x%d_ = sp%d_ ? (pthread_join(t%d_, 0), s%d_.r) : site%d(", k, k, k, k, k); plist(b, 0);
+      put(b, "%sd); ", arity ? ", " : "");
+      x.len = 0; put(&x, "x%d_", k); y.len = 0; put(&y, "y%d_", k);   /* the operands are now named locals */
+      emit_op(b, e->k, x.s, y.s); put(b, "; })");
+    } else {
+      ok = emitx(&x, pre, e->a, par, budget - 1) && emitx(&y, pre, e->b, par, budget - 1);
+      if (ok) emit_op(b, e->k, x.s, y.s);
     }
-    put(b, "%s(", fn[e->k]);
-    if (!emit(b, e->a, budget - 1)) return 0;
-    put(b, ", ");
-    if (!emit(b, e->b, budget - 1)) return 0;
-    put(b, ")"); return 1;
+    free(x.s); free(y.s); return ok;
+  }
   case E_IF:
-    put(b, "("); if (!emit(b, e->a, budget - 1)) return 0; put(b, " ? "); if (!emit(b, e->b, budget - 1)) return 0;
-    put(b, " : "); if (!emit(b, e->c, budget - 1)) return 0; put(b, ")"); return 1;
-  case E_CALL:
-    put(b, "f(");
-    for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emit(b, e->args[i], budget - 1)) return 0; }
+    put(b, "("); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
+    put(b, " ? "); if (!emitx(b, pre, e->b, par, budget - 1)) return 0;
+    put(b, " : "); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
     put(b, ")"); return 1;
+  case E_CALL:
+    put(b, par ? "fp(" : "f(");
+    for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
+    put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
+    return 1;
   }
   return 0;
 }
@@ -315,31 +353,27 @@ static int run_cc(const char *src, const char *so) {
   const char *cc = getenv("LIN_NATIVE_CC"); if (!cc || !cc[0]) cc = "cc";
   pid_t pid = fork();
   if (pid < 0) return 0;
-  if (pid == 0) { execlp(cc, cc, "-O2", "-w", "-fPIC", "-shared", "-o", so, src, (char *)NULL); _exit(127); }
+  if (pid == 0) { execlp(cc, cc, "-O2", "-w", "-fPIC", "-shared", "-pthread", "-o", so, src, (char *)NULL); _exit(127); }
   int st = 0;
   return waitpid(pid, &st, 0) >= 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
-typedef long (*Entry)(const long *);
+typedef long (*Entry)(const long *, int threads);
 typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; } Compiled;   /* strict: the parameters certainly evaluated */
 static Compiled *done; static int ndone, donecap;
 static Compiled *compile_src(const char *src, int ar, int kind) {
   unsigned long h = fnv1a(src);
   for (int i = 0; i < ndone; i++) if (done[i].h == h) return done[i].fn ? &done[i] : NULL;
-  char dir[4096], c[4200], so[4200], sym[64];
+  char dir[4096], c[4200], so[4200];
   cache_dir(dir, sizeof dir); mkdir_p(dir);
   snprintf(c, sizeof c, "%s/fn-%016lx.c", dir, h); snprintf(so, sizeof so, "%s/fn-%016lx.so", dir, h);
-  snprintf(sym, sizeof sym, "lin_fn_%016lx", h);
   void *hnd = dlopen(so, RTLD_NOW | RTLD_LOCAL);
   if (!hnd) {
     char tmp[4300]; snprintf(tmp, sizeof tmp, "%s.%d.tmp", c, (int)getpid());
     FILE *f = fopen(tmp, "wb");
-    if (f) { fprintf(f, "%s", src); fprintf(f, "long %s(const long *a) { return f(", sym);
-             for (int i = 0; i < ar; i++) fprintf(f, "%sa[%d]", i ? ", " : "", i);
-             fprintf(f, "); }\n"); fclose(f); rename(tmp, c);
-             if (run_cc(c, so)) hnd = dlopen(so, RTLD_NOW | RTLD_LOCAL); }
+    if (f) { fputs(src, f); fclose(f); rename(tmp, c); if (run_cc(c, so)) hnd = dlopen(so, RTLD_NOW | RTLD_LOCAL); }
   }
-  Entry e = hnd ? (Entry)(intptr_t)dlsym(hnd, sym) : NULL;
+  Entry e = hnd ? (Entry)(intptr_t)dlsym(hnd, "lin_fn_entry") : NULL;   /* one per object, loaded RTLD_LOCAL */
   if (!e) DBG("no compiler or the build failed for %s\n", c);
   if (ndone >= donecap) done = realloc(done, (size_t)(donecap = donecap ? donecap * 2 : 32) * sizeof *done);
   done[ndone] = (Compiled){ h, e, ar, kind, 0 };
@@ -364,16 +398,25 @@ static Compiled *compile_fn(Net *n, int F) {
   Compiled *r = NULL;
   if (!failed && top) {
     {
-      Buf b = { malloc(4096), 0, 4096 };
-      put(&b, "%s\nstatic long f(", LIN_I64_SRC);
-      for (int i = 0; i < arity; i++) put(&b, "%slong p%d", i ? ", " : "", i);
-      put(&b, ") { return ");
-      if (emit(&b, top, 4096)) {
-        put(&b, "; }\n");
-        DBG("compiling (arity %d):\n%s\n", arity, b.s + strlen(LIN_I64_SRC));
+      Buf b = nbuf(4096), pre = nbuf(1024), pb = nbuf(1024);
+      put(&b, "%s\n#include <pthread.h>\nstatic long f(", LIN_I64_SRC); plist(&b, 1); put(&b, ") { return ");
+      nsite = 0;
+      int ok = emitx(&b, &pre, top, 0, 4096) && emitx(&pb, &pre, top, 1, 4096);
+      if (ok) {
+        put(&b, "; }\nstatic int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
+        put(&b, "%sint d);\n%sstatic long fp(", arity ? ", " : "", pre.s); plist(&b, 1);
+        put(&b, "%sint d) { if (d >= dmax) return f(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s);
+        put(&b, "long lin_fn_entry(const long *a, int threads) {\n");
+        for (int i = 0; i < arity; i++) put(&b, "  long p%d = a[%d];\n", i, i);
+        /* the depth that keeps about four tasks per thread in flight */
+        put(&b, "  if (%d && threads > 1) { int lg = 0; while ((1 << lg) < threads) lg++; dmax = lg + 2;\n", nsite);
+        put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); return fp(");
+        plist(&b, 0); put(&b, "%s0); }\n  return f(", arity ? ", " : ""); plist(&b, 0); put(&b, ");\n}\n");
+        DBG("compiling (arity %d, %d parallel site%s):\n%s\n", arity, nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
         r = compile_src(b.s, arity, top->kind);
         if (r) r->strict = strict(top);
       } else DBG("declined: expression too large\n");
+      free(pre.s); free(pb.s);
       free(b.s);
     }
   }
@@ -417,7 +460,8 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
       if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
       continue;
     }
-    long r = c->fn(args);
+    extern int lin_threads;
+    long r = c->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
     Port val = c->kind == 3 ? net_alloc_bool(n, r != 0) : net_alloc_scott(n, r);
     Port out = W(n, (Port){call, 1});
     net_link(n, val, out, 1);

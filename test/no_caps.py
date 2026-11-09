@@ -35,6 +35,7 @@ SHIFT = re.compile(r"(?<![<\w])(\d+)[LU]*\s*<<\s*(\d{2,})\b")
 # (file, finding) -> why it is allowed to be what it is.  Exact first, then the pattern table, so
 # moving code does not churn this and one reason can cover a family.
 DECLARED = {
+    ("std/drivers/fn.c", "<< 20"): "a compiled function's helper-thread stack (256 MB, reserved lazily): deep recursion runs in it",
     ("src/main.c", "< 30"): "rlimit request: the core asks for a 1 GB stack, capped at what the OS allows",
     ("src/net.c", "< 30"): "table growth guard: refuses to double past 1 << 30 entries (allocation)",
     ("src/net.c", ">= 16"): "driver cap list: driven by n->ndrv, bounded by the claim region",

@@ -36,5 +36,15 @@ prog wrap '(define w (\n (if (eq n 0) 9223372036854775807 (add (w (sub n 1)) 1))
 (w 1)' -9223372036854775808
 prog ifl '(define c (\n (ifl (leq n 1) (\_ 0) (\_ (add 1 (c (ifl (eq (mod n 2) 0) (\_ (div n 2)) (\_ (add (mul 3 n) 1)))))))))
 (c 6)' 8
-if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass programs compiled from their nets, identical to the net's own answers)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
+# Parallel compiled code (an operation whose two operands both recurse runs them on two threads) must answer
+# exactly what one thread does, for every width.
+printf '%s\n' '(define fib (\n (if (lt n 2) n (add (fib (sub n 1)) (fib (sub n 2))))))' '(fib 32)' > "$TMP/par.lin"
+w1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/par.lin" 2>/dev/null)
+for t in 2 3 8; do
+  wt=$(timeout 120 "$LIN_BIN" -t $t "$TMP/par.lin" 2>/dev/null)
+  if [ "$wt" = "=> 2178309" ] && [ "$wt" = "$w1" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL parallel -t $t: '$wt' vs -t 1 '$w1'"; fi
+done
+sites=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/par.lin" 2>&1 >/dev/null | grep -c "1 parallel site")
+[ "$sites" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL the tree recursion was not compiled with a parallel site"; }
+if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
