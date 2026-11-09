@@ -356,18 +356,10 @@ else
   fail=$((fail+1)); echo "FAIL test/test_cli_flags.sh"; bash test/test_cli_flags.sh "$LIN_BIN"
 fi
 
-# The core is deliberately small enough to read in one sitting, and that budget is the only
-# thing keeping the engine from accreting passes.  It has to be a test: the claim in the
-# Makefile ("<= 3000 lines") had silently drifted past 3500, and a number in a comment
-# cannot fail a build.  Raised to 4500 for the liveness work (free-on-consume reclamation),
-# which is core: the budget counts the .c and .h files here, so nothing can be parked in a
-# side-channel extension to dodge it.
+# The core's size is REPORTED, not gated: the hard line cap was retired by the project owner.  Keeping
+# the core small is still a goal -- this line makes its growth visible in every run.
 LOC=$(cat src/*.c src/*.h | wc -l)
-if [ "$LOC" -le 4500 ]; then
-  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS src/ line budget ($LOC / 4500)"
-else
-  fail=$((fail+1)); echo "FAIL src/ line budget: $LOC lines, budget 4500 (delete code, or move a pass out to std/)"
-fi
+echo "INFO src/ size: $LOC lines"
 
 t_end=$(date +%s%3N 2>/dev/null || date +%s)
 total_dur=$((t_end - t_start))

@@ -283,8 +283,11 @@ static int wave_threads(void) {
 #ifdef _OPENMP
   return omp_get_max_threads();
 #else
-  extern int lin_threads; const char *e = getenv("OMP_NUM_THREADS");
-  return lin_threads > 0 ? lin_threads : (e ? atoi(e) : 1);
+  /* Latched: this is asked twice per WAVE, and getenv scans the whole environment -- measured 29% of a
+     recursive fib's instructions.  -t sets lin_threads before the first reduction. */
+  extern int lin_threads; static int env_w = -1;
+  if (env_w < 0) { const char *e = getenv("OMP_NUM_THREADS"); env_w = e ? atoi(e) : 1; }
+  return lin_threads > 0 ? lin_threads : env_w;
 #endif
 }
 static void ensure_tact(void) {
@@ -912,15 +915,28 @@ static void dem_put(Net *n, int v) {
   n->dem_out[n->dem_cnt++] = n->act[i]; n->dem_out[n->dem_cnt++] = n->act[i+1]; act_drop(n, v);
 }
 
+/* THE RESUMABLE WALK.  Under needed order a wave usually fires ONE pair, at the tip of the spine, and a rule
+   rewrites only that pair and the wires of its neighbours -- so everything the walk crossed above the tip is
+   unchanged, and walking it again from the root every wave made each step cost the spine's depth (measured:
+   55% of a recursive fib).  The walk remembers the last arrival above the redex; the next wave resumes there,
+   with the same stamp, so the marks above stay valid.  Only when the previous wave was exactly that: one base
+   pair, no driver claim/slice, no nested reduce, ROOT the only demand root (`res_net` is cleared otherwise). */
+static const Net *res_net; static Port res_at;
 static void net_mark_demand(Net *n) {
-  unsigned int stamp = ++n->dem_stamp; n->dem_cnt = 0;
-  if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; }
+  int resume = res_net == n && n->nroot == 0 && NAT_IN(n, res_at.node) && !n->dead[res_at.node];
+  res_net = NULL;
+  unsigned int stamp;
+  if (resume) { stamp = n->dem_stamp; n->vport[res_at.node] &= (unsigned char)~(1u << res_at.port); }
+  else { stamp = ++n->dem_stamp; if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; } }
+  n->dem_cnt = 0;
   /* One walk per root, ROOT first: the walk below never pushes, so the seeds need no stack. */
   for (int r = -1; r < n->nroot; r++) {
-    Port p = r < 0 ? (Port){0, 0} : n->root[r];
+    Port p = r < 0 ? (resume ? res_at : (Port){0, 0}) : n->root[r];
+    Port arr[3] = {NONE, NONE, NONE};   /* the last arrivals: the resume point is the newest outside the redex */
     for (;;) {
       int u = p.node;
       if (u < 0 || u >= n->nn || n->dead[u]) break;
+      if (r < 0) { arr[2] = arr[1]; arr[1] = arr[0]; arr[0] = p; }
       /* Visited PER PORT, not per node: an APP reached at its result and at its argument continues
          differently, so a node-level mark would cut the second path off and leave the redexes it
          leads to permanently un-demanded (measured: a Y-knot that stops reducing at depth 4). */
@@ -942,6 +958,10 @@ static void net_mark_demand(Net *n) {
         if ((t == LAM && (qt == APP || qt == DUP)) || (t != LAM && (qt == LAM || qt == DUP))) {
           if (n->dem[q.node] != stamp) { n->vport[q.node] = 0; if (n->act_of[q.node] >= 0) dem_put(n, q.node); }
           n->dem[q.node] = stamp;
+          if (r < 0) {                                     /* ROOT's tip: remember where to resume */
+            Port a = arr[1].node == q.node ? arr[2] : arr[1];
+            if (a.node > 0 && a.node != u && a.node != q.node) { res_net = n; res_at = a; }
+          }
         }
       }
       break;
@@ -1157,6 +1177,7 @@ long net_reduce(Net *n, long limit) {
 }
 
 static long net_reduce_body(Net *n, long limit) {
+  res_net = NULL;   /* the net may have been rewritten since the last reduce (a driver, readback, the compiler) */
   /* Each wave re-marks demand and fires only the pairs the walk reached; one off that path never leaves
      `act`, so it is still there when something needs it.  A wave firing nothing means WHNF: stop. */
   Port *curr = NULL, *base_rx = NULL; int curr_cap = 0, base_cap = 0;
@@ -1285,6 +1306,7 @@ static long net_reduce_body(Net *n, long limit) {
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
+      if (cnt != 2 || base_cnt != 2 || wtotal != 1 || nested_reduce || n->nheld) res_net = NULL;
       if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (real_base > wv_max) wv_max = real_base; if (wtotal > wv_width) wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);
@@ -1302,6 +1324,7 @@ static long net_reduce_body(Net *n, long limit) {
     }
   }
   net_flush_free(n);
+  res_net = NULL;
   /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation
      (measured: 47x the resident memory on queue.lin).  Each free is GUARDED -- 98% of waves emit no pair, so nearly all are free(NULL). */
   void *heap[] = {curr, base_rx, cand, owned};
