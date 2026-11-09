@@ -1,0 +1,31 @@
+; Mutual recursion between top-level definitions: the expander closes the cycle with a fixpoint at
+; the definition it re-enters, and the type checker gives a definition being inferred a monomorphic
+; hole instead of re-entering itself for ever.
+(define even? (\n (if (eq n 0) true (odd? (sub n 1)))))
+(define odd? (\n (if (eq n 0) false (even? (sub n 1)))))
+(even? 10)
+; expect => true
+(odd? 10)
+; expect => false
+(odd? 7)
+; expect => true
+
+; a three-way cycle
+(define ping (\n (if (eq n 0) 0 (add 1 (pong (sub n 1))))))
+(define pong (\n (if (eq n 0) 0 (add 10 (pang (sub n 1))))))
+(define pang (\n (if (eq n 0) 0 (add 100 (ping (sub n 1))))))
+(ping 6)
+; expect => 222
+
+; mutual recursion through a helper with several parameters (6-queens, bitmasks)
+(define q (\all (\cols (\d1 (\d2 (if (eq cols all) 1 (place all cols d1 d2 (band all (bxor -1 (bor cols (bor d1 d2)))))))))))
+(define place (\all (\cols (\d1 (\d2 (\avail (if (eq avail 0) 0
+  (let ((bit (band avail (sub 0 avail))))
+    (add (q all (bor cols bit) (shl (bor d1 bit) 1) (shr (bor d2 bit) 1))
+         (place all cols d1 d2 (bxor avail bit)))))))))))
+(q 63 0 0 0)
+; expect => 4
+
+; a definition's body is in the DEFINITION's scope, not its use site's: a local `mul` does not capture pow's
+(let ((mul (\a (\b 0)))) (pow 2 5))
+; expect => 32

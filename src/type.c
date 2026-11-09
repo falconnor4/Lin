@@ -96,6 +96,9 @@ static void def_type(Def *d);
 static Scheme *env_find(const char *name) {
   for (int i = envn - 1; i >= 0; i--) if (!strcmp(env[i].name, name)) return &env[i].s;
   Def *d = def_find(name);
+  /* MUTUAL RECURSION: a definition reached again while its own type is being inferred is a monomorphic hole,
+     as in letrec -- its uses inside the cycle constrain it instead of re-entering the inference for ever. */
+  if (d && d->typing) return &d->hole;
   if (d && !d->typed) def_type(d);             /* lazily: the first reference is what types a def */
   return (d && d->typed) ? &d->sch : NULL;
 }
@@ -233,7 +236,9 @@ static void env_load_defs(int top) {
    28.7ms of the 61.6ms startup and a program touches a fraction of them.  A scheme typed after `env_load_defs`' watermark has gone by is counted here. */
 static void def_type(Def *d) {
   char err[512]; Scheme sch; int sav = envn; const char *nm = strrchr(d->name, '.'); Term *b = d->raw ? d->raw : d->term;
+  d->typing = 1; d->hole = (Scheme){ .nq = 0, .t = tvar() };
   int ok = d->rec ? type_check_rec(nm ? nm + 1 : d->name, b, &sch, err, sizeof err) : type_check(b, &sch, err, sizeof err);
+  d->typing = 0;
   envn = sav;
   if (!ok) { printf("error: %s\n", err); return; }   /* an ill-typed def reports at its first use */
   d->sch = sch; d->typed = 1; count_free(&sch);

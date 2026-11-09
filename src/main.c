@@ -129,15 +129,35 @@ static void def_precompile(Def *d) {
   d->compiled = net_copy(&src); net_free(&src);
 }
 
+/* THE DEFINITIONS BEING EXPANDED, innermost last.  A reference to one of them is a CYCLE through definitions --
+   mutual recursion -- and is closed by a fixpoint at the definition it re-enters (`back`).  An expansion made
+   inside such a cycle names an ENCLOSING definition, so it depends on where it was expanded and is not cached
+   (`dep`).  A definition's body is expanded with a FRESH guard: the binders at its use site are not in its
+   scope, and letting them be would let a local `mul` capture the library's. */
+static Def **ds; static unsigned char *ds_back, *ds_dep; static int dsn, dscap;
 static Term *expand(Term *t, Guard *g) {
   if (!t) return NULL;
   if (t->type == TVAR) {
     if (guard_has(g, t->name)) return term_new(TVAR, t->name, NULL, NULL);
     Def *d = def_find(t->name);
     if (!d) return term_new(TVAR, t->name, NULL, NULL);
+    for (int i = dsn - 1; i >= 0; i--)
+      if (ds[i] == d) {                             /* a cycle: close it at ds[i], and what lies inside depends on it */
+        ds_back[i] = 1;
+        for (int j = i + 1; j < dsn; j++) ds_dep[j] = 1;
+        return term_new(TVAR, d->name, NULL, NULL);
+      }
     if (!d->expanded) {
-      guard_push(g, d->name); Term *body = term_copy(d->term);
-      d->expanded = expand(body, g); term_free(body); g->count--;
+      if (dsn >= dscap) { dscap = dscap ? dscap * 2 : 32; ds = realloc(ds, (size_t)dscap * sizeof *ds);
+                          ds_back = realloc(ds_back, (size_t)dscap); ds_dep = realloc(ds_dep, (size_t)dscap); }
+      int me = dsn++; ds[me] = d; ds_back[me] = ds_dep[me] = 0;
+      Guard fresh = {0}; Term *body = term_copy(d->term);
+      Term *e = expand(body, &fresh); term_free(body); free(fresh.names);
+      if (ds_back[me]) { Term *fx = term_fix(d->name, e); term_free(e); e = fx; }   /* mutual recursion: a fixpoint */
+      int dep = ds_dep[me];
+      dsn--;
+      if (dep) return e;                            /* depends on an enclosing definition: not cacheable */
+      d->expanded = e;
     }
     def_precompile(d);
     if (d->compiled) return term_new(TDEF, d->name, NULL, NULL); /* value marker */
@@ -334,7 +354,7 @@ static void process_def(Term *t) {
   if (rec) { d->raw = t->l; d->term = term_fix(t->name, t->l); }   /* the fix consumes nothing: the unfixed body stays for the deferred check */
   else d->term = t->l;
   t->l = NULL;
-  d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0;
+  d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0; d->typing = 0;
 }
 
 #include <unistd.h>

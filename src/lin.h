@@ -424,7 +424,8 @@ long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
 typedef struct { const char *name; Term *term, *expanded, *raw; Scheme sch; int typed, rec;
-                 Net *compiled; int comp_tried; } Def;
+                 Net *compiled; int comp_tried;
+                 int typing; Scheme hole; } Def;   /* typing: its type is being inferred (mutual recursion reaches it) */
 extern Def *defs;
 extern int ndefs, lin_threads;
 Def *def_find(const char *name);
