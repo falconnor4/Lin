@@ -268,6 +268,17 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Tier 5.3: the core language with NO standard library
+# ----------------------------------------------------------------------------
+NS_LOG=$(mktemp)
+if bash test/no_std.sh "$LIN_BIN" "$STD_DIR" >"$NS_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 10)); echo "PASS test/no_std.sh ($(tail -1 "$NS_LOG"))"
+  rm -f "$NS_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/no_std.sh"; cat "$NS_LOG"; rm -f "$NS_LOG"
+fi
+
+# ----------------------------------------------------------------------------
 # Tier 5.5: Erasure
 #   There is no collector: rules free what they consume and erasers consume what a
 #   program discards.  This pins that discarded structure is reclaimed and that no

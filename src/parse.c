@@ -44,7 +44,12 @@ Term *term_new(int type, const char *name, Term *l, Term *r) {
   t->name = name ? name : ""; return t;
 }
 void term_free(Term *t) { if (t) { term_free(t->l); term_free(t->r); free(t); } }
-Term *term_copy(Term *t) { return t ? term_new(t->type, t->name, term_copy(t->l), term_copy(t->r)) : NULL; }
+Term *term_copy(Term *t) {
+  if (!t) return NULL;
+  Term *c = term_new(t->type, t->name, term_copy(t->l), term_copy(t->r));
+  c->annot = t->annot;            /* a stated type (a literal's, a field's) is part of the term */
+  return c;
+}
 Term *term_fix(const char *name, Term *body) {
   const char *H = "_fix_h", *X = "_fix_x";
   Term *xx = term_new(TAPP, "", term_new(TVAR, X, 0, 0), term_new(TVAR, X, 0, 0));
@@ -194,11 +199,17 @@ static Term *parse_term(void) {
     }
     if (S[P] != '"') pfail("unterminated string literal");
     P++;
-    Term *body = term_new(TVAR, "list.nil", NULL, NULL);
+    /* A string is a list of character codes, written as the list encoding ITSELF -- cells \c.\n.((c h) t) ending in
+       \c.\n.true -- so a literal needs no library.  Its type, `list num`, is stated on the term (the checker
+       trusts an annotated lambda), and the binder names contain a space so nothing can capture them. */
+    Term *body = term_new(TLAM, " c", term_new(TLAM, " n", term_new(TLAM, " t", term_new(TLAM, " f",
+                   term_new(TVAR, " t", NULL, NULL), NULL), NULL), NULL), NULL);
     for (int i = dlen - 1; i >= 0; i--) {
       char cb[8]; snprintf(cb, sizeof cb, "%d", dec[i]); Term *ch = term_new(TNUM, lin_intern(cb, strlen(cb)), NULL, NULL);
-      body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "list.cons", NULL, NULL), ch), body);
+      body = term_new(TLAM, " c", term_new(TLAM, " n", term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, " c", NULL, NULL), ch), body), NULL), NULL);
     }
+    Type *ty = type_nominal("list"); ty->a = type_arg(type_nominal("num"));
+    body->annot = ty;
     return body;
   }
   if (S[P] == '(') {

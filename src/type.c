@@ -177,6 +177,7 @@ static Type *infer(Term *t) {
     return instantiate(s);
   }
   case TLAM: {
+    if (t->annot) return instantiate(&(Scheme){.nq = 0, .t = t->annot});   /* a literal states its own type */
     Type *a = tvar(); env_push(t->name, (Scheme){.nq = 0, .t = a});
     Type *b = infer(t->l); envn--; return tarrow(a, b);
   }

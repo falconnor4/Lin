@@ -144,6 +144,7 @@ static Term *expand(Term *t, Guard *g) {
     return term_copy(d->expanded);
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
+  c->annot = t->annot;            /* a literal's stated type travels with it (a string is an annotated lambda) */
   /* TLET binds in both children: the value may refer to itself, which is the recursion. */
   int bound = (t->type == TLAM || t->type == TDEF || t->type == TLET);
   if (bound) guard_push(g, t->name);
