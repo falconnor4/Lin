@@ -268,6 +268,17 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Tier 5.46: floats are net structure -- the pure soft float equals the hardware's IEEE-754
+# ----------------------------------------------------------------------------
+SF_LOG=$(mktemp)
+if bash test/softfloat.sh "$LIN_BIN" "$STD_DIR" >"$SF_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 56)); echo "PASS test/softfloat.sh ($(tail -1 "$SF_LOG"))"
+  rm -f "$SF_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/softfloat.sh"; cat "$SF_LOG"; rm -f "$SF_LOG"
+fi
+
+# ----------------------------------------------------------------------------
 # Tier 5.3: the core language with NO standard library
 # ----------------------------------------------------------------------------
 NS_LOG=$(mktemp)
