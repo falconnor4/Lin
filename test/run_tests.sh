@@ -257,6 +257,17 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Tier 5.45: the function compiler -- a recursive function compiled from its net equals the net
+# ----------------------------------------------------------------------------
+FN_LOG=$(mktemp)
+if bash test/fn_compile.sh "$LIN_BIN" "$STD_DIR" >"$FN_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 7)); echo "PASS test/fn_compile.sh ($(tail -1 "$FN_LOG"))"
+  rm -f "$FN_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/fn_compile.sh"; cat "$FN_LOG"; rm -f "$FN_LOG"
+fi
+
+# ----------------------------------------------------------------------------
 # Tier 5.5: Erasure
 #   There is no collector: rules free what they consume and erasers consume what a
 #   program discards.  This pins that discarded structure is reclaimed and that no

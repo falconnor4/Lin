@@ -36,6 +36,8 @@
 (load "std/drivers/readback.lin")
 ; value storage (the DT_FLOAT box table) is a driver's: see std/drivers/values.c
 (load "std/drivers/values.lin")
+; the function compiler: a recursive integer function runs as compiled C (std/drivers/fn.c)
+(load "std/drivers/fn.lin")
 
 (load "bool.lin")
 (load "num.lin")

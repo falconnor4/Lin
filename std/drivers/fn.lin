@@ -1,0 +1,5 @@
+; lin standard library: the FUNCTION COMPILER (std/drivers/fn.c).
+; A recursive integer function is compiled to C from its own net the first time it is called,
+; and the call is folded to its value.  Anything it cannot read is left to the core, unchanged.
+(load "std/drivers/driver.lin")
+(add_driver "fn")
