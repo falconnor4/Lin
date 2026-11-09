@@ -99,3 +99,11 @@ false
 
 (if (xor true true) 1 2)
 ; expect => 2
+; `if` is a CORE form ((c a) b): no library needed, and only the chosen branch is reduced
+(if (lt 1 2) (add 40 2) (div 1 0))
+; expect => 42
+((\t (\f t)) 7 8)
+; expect => 7
+; explicit delay: (lazy e) is a thunk, (force t) runs it
+(force (lazy (mul 6 7)))
+; expect => 42

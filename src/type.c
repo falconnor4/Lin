@@ -181,6 +181,13 @@ static Type *infer(Term *t) {
     Type *b = infer(t->l); envn--; return tarrow(a, b);
   }
   case TAPP: {
+    /* The `if` form ((c a) b), marked by the parser: c is a bool, both branches one type, and that is the
+       result.  Without the rule the boolean only unifies loosely with an arrow and the result is untyped. */
+    if (t->name && !strcmp(t->name, "if") && t->l && t->l->type == TAPP) {
+      unify(infer(t->l->l), tnom0("bool"));
+      Type *a = infer(t->l->r), *b = infer(t->r);
+      unify(a, b); return a;
+    }
     if (t->l && t->l->type == TLAM) {
       env_push(t->l->name, generalize(infer(t->r)));
       Type *b = infer(t->l->l); envn--; return b;

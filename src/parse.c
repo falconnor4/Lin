@@ -71,6 +71,12 @@ static const char *sym(void) {
   return P > start ? lin_intern(S + start, (size_t)(P - start)) : NULL;
 }
 
+/* An EXPLICIT thunk, in pure lambda calculus: `(lazy e)` is `(\_ e)` and `(force t)` applies it to the
+   identity.  Needed order already never reduces what nothing demands, so this is for code that wants to pass a
+   delayed value around as data.  The binder names contain a space, so no source program can capture them. */
+static Term *thunk(Term *e) { return term_new(TLAM, " t", e, NULL); }
+static Term *unit_id(void) { return term_new(TLAM, " i", term_new(TVAR, " i", NULL, NULL), NULL); }
+
 static int islambda(const char *s) {
   return !strcmp(s, "\\") || !strcmp(s, "lambda") || !strcmp(s, "lam") ||
          !strcmp(s, "\xce\xbb");
@@ -235,6 +241,24 @@ static Term *parse_term(void) {
       skipws(); const char *name = sym(); if (!name) pfail("expected name");
       skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
       return term_new(TEXPORT, name, NULL, NULL);
+    }
+    /* (if c a b) is ((c a) b): a boolean IS a selector (\t.\f.t), so the form needs no library, and needed
+       order reduces only the branch that is chosen. */
+    if (!strcmp(kw, "if")) {
+      Term *c = parse_term(), *a = parse_term(), *b = parse_term(); skipws();
+      if (S[P] != ')') { pfail("if: expected (if cond then else)"); } P++;
+      return term_new(TAPP, "if", term_new(TAPP, "", c, a), b);   /* the name marks it for the type checker only */
+    }
+    /* (lazy e) delays e as data; (force t) runs a delayed value. */
+    if (!strcmp(kw, "lazy")) {
+      Term *e = parse_term(); skipws();
+      if (S[P] != ')') { pfail("lazy: expected (lazy expr)"); } P++;
+      return thunk(e);
+    }
+    if (!strcmp(kw, "force")) {
+      Term *e = parse_term(); skipws();
+      if (S[P] != ')') { pfail("force: expected (force expr)"); } P++;
+      return term_new(TAPP, "", e, unit_id());
     }
     if (!strcmp(kw, "match")) {
       /* match => scrut applied to one lambda per case; pat is `_`, a lone name, or (Name v1...vk). Positional Scott dispatch: no type/registry dep. */
