@@ -1,8 +1,8 @@
 ; ==============================================================================
 ; Lin Standard Library: Numerals & Arithmetic
 ; ==============================================================================
-; Scott numerals (O(1) predecessor & pattern matching) + Church numerals (pure
-; unbounded self-iterating folds).
+; 64-bit two's complement integers as bit chains (pure Lin, O(64) per op) + Church
+; numerals (pure unbounded self-iterating folds).
 ;
 ; Arithmetic & comparison are PURE LIN Scott recursion, wrapped as driver-foldable
 ; `_op` closures: a saturated op like (add 4 3) reduces to
@@ -25,22 +25,44 @@
 
 (namespace num)
 
-; --- Core Scott Numeral Constructors & Destructors ---
+; --- 64-bit integers, as net structure ---
+; A numeral is a chain of BITS, least significant first: a cell `\c.\n.((c bit) rest)`, ended by a
+; terminal `\c.\n.s` whose s is the SIGN -- true: every further bit is 0, false: every further bit is 1.
+; So a chain is a two's complement integer, sign-extended; the arithmetic below is int64_t's, wrapping at
+; 64 bits (overflow wraps; x/0 = x%0 = 0), the same function std/runtime/i64.h states for the drivers.
+; Everything is O(64) bit steps -- no unary recursion -- and needs nothing but the lambda calculus.
 (define! zero num 0)
-; The encoding's OWN projections -- the same shapes std/list.lin uses, without its typed
-; surface: a numeral is a chain of booleans, so it reads itself rather than borrowing the list API.
 (define cons_  (\h (\t (\c (\n ((c h) t))))))
-(define nil_   (\c (\n bool.true)))
-(define hd     (\l ((l (\h (\t h))) bool.false)))
-(define tl     (\l ((l (\h (\t t))) nil_)))
-(define empty? (\l ((l (\h (\t bool.false))) bool.true)))
-
-(define! succ (num -> num) (\n (ifl (empty? n) (\_ (cons_ bool.true nil_))
-  (\_ (ifl (hd n) (\_ (cons_ bool.false (succ (tl n)))) (\_ (cons_ bool.true (tl n))))))))
-(define! pred (num -> num) (\n (ifl (empty? n) (\_ nil_)
-  (\_ (ifl (hd n) (\_ (cons_ bool.false (tl n)))
-    (\_ (ifl (empty? (tl n)) (\_ n) (\_ (cons_ bool.true (pred (tl n)))))))))))
-(define! is_zero (num -> bool) (\n (ifl (empty? n) (\_ bool.true) (\_ (ifl (hd n) (\_ bool.false) (\_ (is_zero (tl n))))))))
+(define nil_   (\c (\n bool.true)))           ; the non-negative terminal
+(define nneg_  (\c (\n bool.false)))          ; the negative terminal
+; THE CASE: a cell is handed to `cell`; a terminal's sign selects `pos` or `neg`.
+(define _case (\n (\cell (\pos (\neg ((((n (\h (\t (\p (\q ((cell h) t)))))) 0) pos) neg))))))
+(define _isterm (\n (_case n (\h (\t bool.false)) bool.true bool.true)))
+(define _hd (\n (_case n (\h (\t h)) bool.false bool.true)))          ; a terminal repeats its sign bit
+(define _tl (\n (_case n (\h (\t t)) n n)))
+(define _sign (\n (_case n (\h (\t (_sign t))) bool.false bool.true))) ; true = negative
+(define _bnot (\n (_case n (\h (\t (cons_ (bool.not h) (_bnot t)))) nneg_ nil_)))
+; keep at most 64 cells: the 64th bit becomes the sign
+(define _fuel (\k (\n (_case k
+  (\fh (\ft (_case n (\h (\t (if (_isterm ft) (cons_ h (if h nneg_ nil_)) (cons_ h ((_fuel ft) t))))) n n)))
+  n n))))
+(define _c2 (\f (\x (f (f x)))))
+(define _c64 ((\c8 (\f (c8 (c8 f)))) (\f (_c2 (_c2 (_c2 f)))))) ; Church 64
+(define _w64 ((_c64 (cons_ bool.true)) nil_))                  ; 64 cells of fuel
+(define _wrap (\n ((_fuel _w64) n)))
+; ripple-carry addition with carry-in c; both chains sign-extended by their terminals
+(define _xor3 (\a (\b (\c (bool.xor (bool.xor a b) c)))))
+(define _maj (\a (\b (\c (bool.or (bool.and a b) (bool.and c (bool.xor a b)))))))
+(define _addt (\sa (\sb (\c (if sa
+  (if sb (if c nneg_ (cons_ bool.false nneg_)) (if c nil_ nneg_))
+  (if sb (if c nil_ nneg_) (if c (cons_ bool.true nil_) nil_)))))))
+(define _add (\a (\b (\c (if (bool.and (_isterm a) (_isterm b))
+  (_addt (_sign a) (_sign b) c)
+  (cons_ (_xor3 (_hd a) (_hd b) c) (_add (_tl a) (_tl b) (_maj (_hd a) (_hd b) c))))))))
+(define! succ (num -> num) (\n (_wrap (_add n 0 bool.true))))
+(define! pred (num -> num) (\n (_wrap (_add n (_bnot 0) bool.false))))
+(define! is_zero (num -> bool) (\n (_case n (\h (\t (if h bool.false (is_zero t)))) bool.true bool.false)))
+(define! neg (num -> num) (\n (_wrap (_add (_bnot n) 0 bool.true))))
 
 ; --- Church Numerals & Self-Iterating Folds ---
 (define c_zero (\f (\x x)))
@@ -50,27 +72,37 @@
 (define c_pow  (\b (\e (e b))))
 (define c_to_scott (\cn (cn num.succ 0)))
 
-; --- Pure-Lin Scott recursion bodies (the always-correct β fallback) ---
-; sub/div/mod clamp like the native table (a<b => 0; /0 or %0 => 0); pow is the
-; positive-exponent loop (b=0 => 1), matching arith.so's integer rows.
+; --- the pure arithmetic (the always-correct fallback a fold driver pre-empts) ---
 ; The `_cl`-spine operands use the Church-list encodings (`\c \n`) the shared
 ; on-net decoder recognises, since num.lin loads before list.lin.
 (define! _cl_nil  (list a) (\c (\n n)))
 (define! _cl_cons (a -> list a -> list a) (\h (\t (\c (\n ((c h) t))))))
-(define! _padd (num -> num -> num) (\a (\b (ifl (is_zero a) (\_ b) (\_ (succ (_padd (pred a) b)))))))
-(define! _psub (num -> num -> num) (\a (\b (ifl (is_zero b) (\_ a) (\_ (ifl (is_zero a) (\_ 0) (\_ (_psub (pred a) (pred b)))))))))
-(define! _pmul (num -> num -> num) (\a (\b (ifl (is_zero a) (\_ 0) (\_ (_padd b (_pmul (pred a) b)))))))
-(define! _pdiv (num -> num -> num)
-  (\a (\b (ifl (is_zero a) (\_ 0) (\_ (ifl (is_zero b) (\_ 0) (\_ (ifl (lt a b) (\_ 0) (\_ (succ (_pdiv (_psub a b) b)))))))))))
-(define! _pmod (num -> num -> num)
-  (\a (\b (ifl (is_zero a) (\_ 0) (\_ (ifl (is_zero b) (\_ 0) (\_ (ifl (lt a b) (\_ a) (\_ (_pmod (_psub a b) b))))))))))
-(define! _ppow (num -> num -> num)
-  (\a (\b (ifl (is_zero b) (\_ 1) (\_ (_pmul a (_ppow a (pred b))))))))
-(define! _peq (num -> num -> bool) (\a (\b (ifl (is_zero a) (\_ (is_zero b)) (\_ (ifl (is_zero b) (\_ false) (\_ (_peq (pred a) (pred b)))))))))
-(define! _plt (num -> num -> bool) (\a (\b (ifl (is_zero a) (\_ (not (is_zero b))) (\_ (ifl (is_zero b) (\_ false) (\_ (_plt (pred a) (pred b)))))))))
+(define _abs (\n (if (_sign n) (neg n) n)))
+(define _pair (\x (\y (\p ((p x) y)))))
+(define _fst (\q (q bool.true)))
+(define _snd (\q (q bool.false)))
+(define! _padd (num -> num -> num) (\a (\b (_wrap (_add a b bool.false)))))
+(define! _psub (num -> num -> num) (\a (\b (_wrap (_add a (_bnot b) bool.true)))))
+(define _mulr (\a (\b (_case b (\h (\t (_add (if h a 0) (cons_ bool.false (_mulr a t)) bool.false))) 0 (neg a)))))
+(define! _pmul (num -> num -> num) (\a (\b (_wrap (_mulr a b)))))
+(define! _plt (num -> num -> bool) (\a (\b (if (bool.xor (_sign a) (_sign b)) (_sign a) (_sign (_psub a b))))))
+(define! _peq (num -> num -> bool) (\a (\b (is_zero (_psub a b)))))
+; unsigned long division of non-negative chains, most significant bit first (the recursion reaches it first)
+(define _divu (\a (\b (_case a
+  (\h (\t ((\qr ((\r2 (if (_plt r2 b) (_pair (cons_ bool.false (_fst qr)) r2) (_pair (cons_ bool.true (_fst qr)) (_psub r2 b))))
+             (cons_ h (_snd qr)))) (_divu t b))))
+  (_pair 0 0) (_pair 0 0)))))
+(define! _pdiv (num -> num -> num) (\a (\b (if (is_zero b) 0
+  ((\q (if (bool.xor (_sign a) (_sign b)) (neg q) q)) (_wrap (_fst (_divu (_abs a) (_abs b)))))))))
+(define! _pmod (num -> num -> num) (\a (\b (if (is_zero b) 0
+  ((\r (if (_sign a) (neg r) r)) (_wrap (_snd (_divu (_abs a) (_abs b)))))))))
+(define _powr (\a (\e (_case e (\h (\t (_pmul (if h a 1) (_powr (_pmul a a) t)))) 1 1))))
+(define! _ppow (num -> num -> num) (\a (\e (if (_sign e)
+  (if (_peq a 1) 1 (if (_peq a -1) (if (_hd e) -1 1) 0))
+  (_powr a e)))))
 (define _pgt (\a (\b (_plt b a))))
-(define _pleq (\a (\b (not (_plt b a)))))
-(define _pgeq (\a (\b (not (_plt a b)))))
+(define _pleq (\a (\b (bool.not (_plt b a)))))
+(define _pgeq (\a (\b (bool.not (_plt a b)))))
 
 ; --- Arithmetic & Comparison (pure-Lin, driver-foldable) ---
 ; Each op emits a saturated `_op` closure: an `_op` LAM applied to the operand

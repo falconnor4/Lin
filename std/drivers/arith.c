@@ -1,5 +1,6 @@
 #include "../../src/lin.h"
 #include "../runtime/pattern.h"     /* the structural recognisers and the op vocabulary (LIN_OP_*) */
+#include "../runtime/i64.h"         /* THE integer semantics */
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -81,12 +82,12 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
 
   /* integer arithmetic / comparisons */
   if (argc < 2) return 0;                       /* every int op needs 2 args */
-  if      (!strncmp(fn, "lin_add", 7)) *out = a[0] + a[1];
-  else if (!strncmp(fn, "lin_sub", 7)) *out = a[0] >= a[1] ? a[0] - a[1] : 0;
-  else if (!strncmp(fn, "lin_mul", 7)) *out = a[0] * a[1];
-  else if (!strncmp(fn, "lin_div", 7)) *out = a[1] ? a[0] / a[1] : 0;
-  else if (!strncmp(fn, "lin_mod", 7)) *out = a[1] ? a[0] % a[1] : 0;
-  else if (!strncmp(fn, "lin_pow", 7)) { long b=a[0], e=a[1], r=1; while (e>0) { if (e&1) r*=b; b*=b; e>>=1; } *out=r; }
+  if      (!strncmp(fn, "lin_add", 7)) *out = lin_i64_add(a[0], a[1]);   /* std/runtime/i64.h: THE semantics */
+  else if (!strncmp(fn, "lin_sub", 7)) *out = lin_i64_sub(a[0], a[1]);
+  else if (!strncmp(fn, "lin_mul", 7)) *out = lin_i64_mul(a[0], a[1]);
+  else if (!strncmp(fn, "lin_div", 7)) *out = lin_i64_div(a[0], a[1]);
+  else if (!strncmp(fn, "lin_mod", 7)) *out = lin_i64_mod(a[0], a[1]);
+  else if (!strncmp(fn, "lin_pow", 7)) *out = lin_i64_pow(a[0], a[1]);
   else if (!strncmp(fn, "lin_eq", 6)) { *out = a[0] == a[1]; *outkind=3; return 1; }
   else if (!strncmp(fn, "lin_lt", 6)) { *out = a[0] <  a[1]; *outkind=3; return 1; }
   else if (!strncmp(fn, "lin_leq", 7)) { *out = a[0] <= a[1]; *outkind=3; return 1; }

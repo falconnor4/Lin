@@ -81,7 +81,7 @@ static inline int box_num(Net *n, Port p, long *out) {
   if (!lin_pat_box(n, p, &w, &pay) || w != LIN_BOX_NUM) return 0;
   /* FORCING: the payload is the value the caller is observing, so readback may reduce to it -- and
      the core's own reader is the authority here exactly as it is for every other operand walk. */
-  if ((k = net_read_int(n, pay, LIN_ENC_NUM)) < 0) return 0;
+  if (!net_read_i64(n, pay, &k)) return 0;
   *out = k;
   return 1;
 }
@@ -105,7 +105,7 @@ static Val decode(Net *n, Port p, int domain) {
   /* A BOX states its own domain, so it is tried BEFORE the plain encoding: `0` and both Church
      booleans are shapes two or three domains claim, and a value a driver wrote in a box is
      unambiguous -- which is the whole reason it chose that encoding at AOT time. */
-  case DT_NUM: { long x; if (box_num(n, p, &x) || (x = net_read_int(n, p, LIN_ENC_NUM)) >= 0) { v.iv = x; v.kind = 1; } break; }
+  case DT_NUM: { long x; if (box_num(n, p, &x) || net_read_i64(n, p, &x)) { v.iv = x; v.kind = 1; } break; }
   case DT_BOOL: { long b; if (box_bool(n, p, &b) || (b = net_read_int(n, p, LIN_ENC_BOOL)) >= 0) { v.iv = b; v.kind = 3; } break; }
   case DT_STR: if (net_read_string_arena(n, p, LIN_ENC_NUM, &v.sv) >= 0) v.kind = 2; break;
   case DT_FLOAT: { double d; if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; } break; }
@@ -155,8 +155,8 @@ static Val value_any(Net *n, Port p) {
   if (box_bool(n, p, &b)) { v.iv = b; v.kind = 3; return v; }
   double d;
   if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; return v; }
-  long k = net_read_int(n, p, LIN_ENC_NUM);
-  if (k >= 0) { v.iv = k; v.kind = 1; return v; }
+  long k;
+  if (net_read_i64(n, p, &k)) { v.iv = k; v.kind = 1; return v; }
   { const char *s = str_determined(n, p); if (s) { v.sv = s; v.kind = 2; return v; } }
   return v;                                            /* kind 0: the caller writes the net */
 }

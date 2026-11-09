@@ -14,7 +14,7 @@ zero
 ; expect => 41
 
 (pred 0)
-; expect => 0
+; expect => -1
 
 (is_zero 0)
 ; expect => true
@@ -33,7 +33,7 @@ zero
 ; expect => 42
 
 (sub 5 10)
-; expect => 0
+; expect => -5
 
 (mul 6 7)
 ; expect => 42

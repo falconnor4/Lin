@@ -92,16 +92,18 @@ Lin programs are written in S-expression syntax for curried lambda calculus.
 
 ### Data Types & Numerals
 
-Numerals use Scott encodings, providing an $\mathcal{O}(1)$ predecessor:
+Integers are 64-bit two's complement and wrap on overflow, exactly like `int64_t`
+(`x / 0` and `x % 0` are 0). They are plain net structure: a chain of bit cells, least
+significant first, ended by a terminal carrying the sign. The pure-Lin arithmetic in
+`std/num.lin` takes O(64) bit steps per operation; the fold drivers compute the same
+function natively (`std/runtime/i64.h`).
 
 ```scheme
-zero        ; => 0
-(succ 41)   ; => 42
-(pred 42)   ; => 41
-(is_zero 0) ; => true
+(sub 3 8)                     ; => -5
+(add 9223372036854775807 1)   ; => -9223372036854775808
+(div -7 2)                    ; => -3
+(if (lt -1 0) 1 2)            ; => 1   (`if` is a core form: no library needed)
 ```
-
-Arbitrary-magnitude integer literals are supported directly.
 
 ### User-Defined Algebraic Data Types & Pattern Matching
 

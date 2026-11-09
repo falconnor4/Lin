@@ -16,7 +16,7 @@
 
 ; a driver fold fired and is observable
 (folded)
-; expect => false
+; expect => true
 
 ; --- float fold: `fsqrt` folded natively and consumed by `ffloor` ---
 (ffloor (fsqrt 144.0))
@@ -27,7 +27,7 @@
 ; expect => 8
 
 (folded)
-; expect => false
+; expect => true
 
 ; integer + float arithmetic stay correct when both fold
 (mul (add 20 22) 2)

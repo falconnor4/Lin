@@ -83,6 +83,7 @@ static int islambda(const char *s) {
 }
 
 static int isnum(const char *s) {
+  if (*s == '-' && s[1]) s++;                        /* a negative integer literal */
   if (!*s) return 0;
   for (const char *p = s; *p; p++)
     if (!isdigit((unsigned char)*p)) return 0;

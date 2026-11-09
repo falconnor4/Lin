@@ -357,6 +357,11 @@ void lin_domains_init(void);
    encoding -- including one that is still an unreduced thunk -- is DECLINED, never guessed. */
 long net_read_int(Net *n, Port p, int enc);          /* layers: a numeral's value, a list's length,
                                                         a BOOL's 1/0; -1 when `p` is not that encoding */
+/* The integer width: a numeral's value is a `long`, so the width is the type's, never a number chosen here. */
+#define LIN_INT_BITS ((int)(sizeof(long) * 8))
+/* A numeral's VALUE as a 64-bit two's complement integer: 1 and *out on success, 0 when `p` is not a
+   numeral.  (net_read_int's -1 "not this encoding" cannot tell a failure from the number -1.) */
+int  net_read_i64(Net *n, Port p, long *out);
 int  net_read_string_arena(Net *n, Port p, int pay_enc, const char **out); /* cell chain into the arena; pay_enc = the char-code encoding */
 /* One cell of the language's cons encoding: `*head`/`*tail` when `p` is a cell, 0 otherwise.  The
    cell shape is the one every spine walk agrees on, so it is exported once (readback walks it to

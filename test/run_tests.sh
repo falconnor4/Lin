@@ -246,6 +246,17 @@ total_checks=$((total_checks + line_total))
 t1=$(date +%s%3N 2>/dev/null || date +%s)
 
 # ----------------------------------------------------------------------------
+# Tier 5.4: 64-bit integers -- the net's own arithmetic and the fold drivers are one function
+# ----------------------------------------------------------------------------
+I64_LOG=$(mktemp)
+if bash test/int64.sh "$LIN_BIN" "$STD_DIR" >"$I64_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 38)); echo "PASS test/int64.sh ($(tail -1 "$I64_LOG"))"
+  rm -f "$I64_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/int64.sh"; cat "$I64_LOG"; rm -f "$I64_LOG"
+fi
+
+# ----------------------------------------------------------------------------
 # Tier 5.5: Erasure
 #   There is no collector: rules free what they consume and erasers consume what a
 #   program discards.  This pins that discarded structure is reclaimed and that no

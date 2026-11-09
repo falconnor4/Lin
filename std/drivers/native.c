@@ -30,7 +30,7 @@
  *
  *   - THE MATH IS NEVER RE-IMPLEMENTED.  The compiled expression is the shared
  *     table's own line (std/drivers/arith.c) copied verbatim -- including
- *     `lin_sub`'s saturating form `a >= b ? a-b : 0` and `lin_mod`'s zero guard --
+ *     the 64-bit wrapping forms and the zero guards of std/runtime/i64.h --
  *     and the fallback calls that same table through `lin_arith_scalar`.  A driver
  *     that assumed `sub` meant `a-b` would be wrong for every operand pair, which
  *     is exactly why the whitelist carries the expression, not just the name.
@@ -68,6 +68,7 @@
  * ==========================================================================*/
 #include "../../src/lin.h"
 #include "../runtime/pattern.h"
+#include "../runtime/i64.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -133,13 +134,9 @@ static const int DOMS_NUM[1] = { DT_NUM };
 /* The helpers are the table's own lines from std/drivers/arith.c, verbatim, so the
    compiled cone and the interpreted fold cannot disagree: the only difference
    between the two paths is WHEN the arithmetic is done, not what it is. */
-static const char *PRELUDE =
-  "static long n_add(long a, long b) { return a + b; }\n"
-  "static long n_sub(long a, long b) { return a >= b ? a - b : 0; }\n"
-  "static long n_mul(long a, long b) { return a * b; }\n"
-  "static long n_div(long a, long b) { return b ? a / b : 0; }\n"
-  "static long n_mod(long a, long b) { return b ? a % b : 0; }\n"
-  "static long n_pow(long b, long e) { long r = 1; while (e > 0) { if (e & 1) r *= b; b *= b; e >>= 1; } return r; }\n";
+static const char *PRELUDE = LIN_I64_SRC
+  "#define n_add lin_i64_add\n#define n_sub lin_i64_sub\n#define n_mul lin_i64_mul\n"
+  "#define n_div lin_i64_div\n#define n_mod lin_i64_mod\n#define n_pow lin_i64_pow\n";
 
 /* ---- emitting the cone ---------------------------------------------------- */
 

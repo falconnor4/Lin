@@ -171,9 +171,42 @@ static int enc_layer(Net *n, Port p, int enc, Layer *out) {
 /* How many INDUCTIVE layers from `p` down to the encoding's terminal: a numeral's value, a list's
    length, and for BOOL 1 (select-first, TRUE) or 0 (select-second).  -1 when `p` is not that encoding. */
 /* A numeral is one of two ways, told by structure: a cons spine of raw booleans (a bit-chain, O(log n)) or a lambda tower (the Scott numeral, O(n)). Cells mean bits. */
-long net_read_bits(Net *n, Port p) { long a = 0; int k = 0; Layer L; while (k < n->nn && cons_layer(n, p, &L) && L.layer == L_INDUCTIVE) { long b = net_read_int(n, L.head, LIN_ENC_BOOL); if (b < 0) break; a |= (b & 1) << k++; p = L.tail; } return k ? a : -1; }
+/* THE 64-BIT INTEGER.  A numeral is a cell chain of bits, least significant first, ended by a terminal that
+   carries the SIGN: `\c.\n.true` means every further bit is 0, `\c.\n.false` that every further bit is 1.
+   So the chain is a two's complement number, sign-extended to 64 bits; the arithmetic over it (std/num.lin)
+   wraps at 64 bits, exactly as int64_t does in the drivers.  Net structure only -- no payload, no node kind. */
+static long read_layers(Net *n, Port p, int enc);
+static int nil_sign(Net *n, Port p) {               /* 1 non-negative, 0 negative, -1 not a numeral terminal */
+  if (!hop_lam(n, &p, 0)) return -1;
+  Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));
+  if (c.port != 0 || !live(n, c) || n->tag[c.node] != LAM) return -1;
+  long b = net_read_int(n, wr(n, (Port){c.node, 2}), LIN_ENC_BOOL);
+  return b < 0 ? 1 : (int)b;                        /* a terminal with no sign (a plain nil) reads as 0-extended */
+}
+int net_read_i64(Net *n, Port p, long *out) {
+  unsigned long a = 0; int k = 0; Layer L;
+  for (;;) {
+    if (!cons_layer(n, p, &L)) break;
+    if (L.layer == L_TERMINAL) {
+      if (k == 0) break;                            /* a bare terminal is a list, not a numeral */
+      if (nil_sign(n, p) == 0 && k < LIN_INT_BITS) a |= ~0UL << k;
+      *out = (long)a; return 1;
+    }
+    long b = net_read_int(n, L.head, LIN_ENC_BOOL);
+    if (b < 0 || k > n->nn) break;                 /* a chain of distinct cells: the net's size bounds it */
+    if (k < LIN_INT_BITS) a |= (unsigned long)(b & 1) << k;
+    k++; p = L.tail;
+  }
+  long v = read_layers(n, p, LIN_ENC_NUM);          /* the other numeral: a Scott successor tower (non-negative) */
+  if (k == 0 && v >= 0) { *out = v; return 1; }
+  return 0;
+}
+long net_read_bits(Net *n, Port p) { long v; return net_read_i64(n, p, &v) && v >= 0 ? v : -1; }
 long net_read_int(Net *n, Port p, int enc) {
   if (enc == LIN_ENC_NUM) { long b = net_read_bits(n, p); if (b >= 0) return b; }
+  return read_layers(n, p, enc);
+}
+static long read_layers(Net *n, Port p, int enc) {
   long count = 0;
   for (int step = 0; step < n->nn; step++) {
     Layer L;
@@ -226,12 +259,15 @@ static Port alloc_scott(Net *n, long k, Scope lvl) {
   Scope bl = scope_app(n, lvl, 1);
   Port nl = net_alloc(n, LAM, lvl), n2 = net_alloc(n, LAM, bl), cur;
   net_link(n, (Port){nl.node, 2}, (Port){n2.node, 0}, 0); cur = (Port){nl.node, 0};
-  net_link(n, (Port){n2.node, 2}, net_alloc_bool(n, 1), 0);   /* NIL = `\c.\n.<value>`; the value is TRUE */
+  /* bits, least significant first, until what remains is all sign: at least one cell, so a numeral is never a
+     bare terminal (that is the empty list) */
+  int bits[LIN_INT_BITS], w = 0; long r = k;
+  do { bits[w++] = (int)(r & 1); r >>= 1; } while (w < LIN_INT_BITS && !(r == 0 || r == -1));
+  net_link(n, (Port){n2.node, 2}, net_alloc_bool(n, r == 0), 0);   /* the terminal's SIGN: true = 0-extended */
   net_link(n, (Port){nl.node, 1}, net_alloc(n, ERA, lvl), 0); net_link(n, (Port){n2.node, 1}, net_alloc(n, ERA, lvl), 0);
-  int w = 1; while ((k >> w) != 0 && w < 62) w++;
   for (int b = w - 1; b >= 0; b--) {
     Scope f = scope_app(n, lvl, 1), a = scope_app(n, lvl, 2);
-    Port bit = net_alloc_bool(n, (int)((k >> b) & 1));
+    Port bit = net_alloc_bool(n, bits[b]);
     Port c = net_alloc(n, LAM, f), nn = net_alloc(n, LAM, scope_app(n, f, 1));
     Port in = net_alloc(n, APP, f), ou = net_alloc(n, APP, a);
     net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 0);   net_link(n, (Port){nn.node, 2}, (Port){ou.node, 1}, 0);
@@ -407,8 +443,8 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
   }
   switch (dom) {
   case DT_NUM: {
-    long x = net_read_int(n, p, LIN_ENC_NUM);
-    if (x >= 0) { v->iv = x; v->kind = 1; return 1; }
+    long x;
+    if (net_read_i64(n, p, &x)) { v->iv = x; v->kind = 1; return 1; }
     break;
   }
   case DT_BOOL: {

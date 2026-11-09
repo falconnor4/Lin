@@ -789,8 +789,8 @@ static inline int lin_pat_enc_num_nf(const Net *n, Port p, int enc, long *out) {
   long cnt = 0;
   if (!n || enc == LIN_ENC_OP || enc == LIN_ENC_FFI) return 0;
   if (enc == LIN_ENC_NUM) {
-    long v = net_read_int((Net *)n, p, LIN_ENC_NUM);
-    if (v >= 0) { if (out) *out = v; return 1; }
+    long v;
+    if (net_read_i64((Net *)n, p, &v)) { if (out) *out = v; return 1; }
   }
   for (int step = 0; step < n->nn; step++) {
     int layer; LinMatch m;
@@ -811,8 +811,8 @@ static inline int lin_pat_enc_num(Net *n, Port p, int enc, long *out) {
   long cnt = 0;
   if (!n || enc == LIN_ENC_OP || enc == LIN_ENC_FFI) return 0;
   if (enc == LIN_ENC_NUM) {
-    long v = net_read_int(n, p, LIN_ENC_NUM);
-    if (v >= 0) { if (out) *out = v; return 1; }
+    long v;
+    if (net_read_i64(n, p, &v)) { if (out) *out = v; return 1; }
   }
   for (int step = 0; step < n->nn; step++) {
     int layer; LinMatch m;
