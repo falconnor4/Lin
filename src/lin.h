@@ -386,6 +386,9 @@ extern FILE *lin_out;
    programs still reduce exactly, by plain β of the pure-Lin fallback bodies. ---- */
 /* ---- Shared on-net FFI decoder (std/runtime/decoder.c): driver plugins reuse the one arg-spine / DUP-hop walker for the `_ffi` `_cl`-spine decode ---- */
 Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
+/* How many times a reader arrived at a fan's PRINCIPAL and had to pick a copy (src/io.c).  A fold whose operand
+   reads moved it read a value that is one per copy, not one value, and must not compute a shared result. */
+extern long lin_fan_ambiguous;
 Port net_dup_hop(Net *n, Port p);                       /* deref it the way an arriving port implies */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_header(Net *n, Port lam, Port *fnp, Port *argp); /* dig \_ffi.\_ret.((_ffi fn) args) */

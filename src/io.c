@@ -31,7 +31,17 @@ void lin_domains_init(void) {
 /* ---------------- fan walks ----------------  Fan chains: `dup_hop` is the crossing walk, `skip_dup` the plain one.  A CHAIN MAY CYCLE and the bound
    is the net's size, so one such walk used to cost the whole net (7.7k walks = 17.7 of 18.6s); Floyd
    finds the cycle and the walk takes the same last step by arithmetic, so the port is unchanged. */
-#define FSTEP(q) (cross ? wr(n, (Port){(q).node, (q).port == 0}) : wr(n, (Port){(q).node, 0}))
+/* A crossing walk that ARRIVES AT A FAN'S PRINCIPAL has to choose a copy: the value behind a fan-in is not one
+   value but one per copy, and the walk takes copy 1.  That is right for a reader that only wants a shape, and
+   wrong for one that wants THE value -- so every such choice is counted, and a fold whose operands needed one
+   knows its value is not the same for every copy (std/drivers/arith.c). */
+long lin_fan_ambiguous;
+static inline Port fstep(Net *n, Port q, int cross) {
+  if (!cross) return wr(n, (Port){q.node, 0});
+  if (q.port == 0) lin_fan_ambiguous++;
+  return wr(n, (Port){q.node, q.port == 0});
+}
+#define FSTEP(q) fstep(n, (q), cross)
 static inline Port fan_walk(Net *n, Port p, int cross) {
   Port a = p, b = p; long lim = (long)n->nn, st = 0, L = 1; int chase = 1;
   for (; st < lim && live(n, a) && n->tag[a.node] == DUP; st++) {
@@ -435,12 +445,14 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
      floats belong, and `(lin_parse_float (getenv "N"))` has one where a string belongs.  Dispatching
      is the readback provider's, and its own shape test is pure, so a slot that already IS a value
      pays only a walk of two wires. */
+  long amb = lin_fan_ambiguous;                      /* the closure test below is a SHAPE probe: its fan choices read no value */
   if (net_read_value(n, p, DT_FFI, v) && v->kind) return 1;
   {
     char fnb[2];                                     /* a sink: only the name's PRESENCE is tested, and any buffer over one byte reports one */
     Port q = net_dhop(n, p);
     if (q.port == 0 && net_ffi_fn(n, q, fnb, sizeof fnb)) return 0;
   }
+  lin_fan_ambiguous = amb;
   switch (dom) {
   case DT_NUM: {
     long x;

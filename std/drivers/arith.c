@@ -261,7 +261,11 @@ static int ffi_header(Net *n, int lam, Port *fnp, Port *argp) {
 static int op_eval(Net *n, int lam, int app, Val *v) {
   const char *fn;
   Port argp;
-  if (result_shared(n, lam, app)) return EV_NO;      /* a shared result is the core's β to take */
+  /* A SHARED RESULT is foldable when its operands are one value each: a `let`-bound result is shared by its
+     uses, all of which want the same number.  It is not when the operands were reached by choosing a copy at a
+     fan-in -- the redex sits in a body being copied, each copy binding its own operands -- so the reads below
+     are watched and that case alone goes to the core's beta. */
+  int shared = result_shared(n, lam, app); long amb0 = lin_fan_ambiguous;
   if (!op_head_of(n, app, &fn, &argp)) return EV_NO;
   int slots = net_spine_slots(n, argp);
   if (slots < 1) return EV_WAIT;                                /* operand spine not readably concrete */
@@ -273,6 +277,7 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
   if (!fargs || !c) { free(fargs); free(c); return EV_WAIT; }
   int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
   if (argc < slots) { free(fargs); free(c); return EV_WAIT; }
+  if (shared && lin_fan_ambiguous != amb0) { free(fargs); free(c); return EV_NO; }   /* one value per copy */
   for (int i = 0; i < slots; i++) {
     if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c); return EV_WAIT; }
     c[i] = fargs[i].iv;
