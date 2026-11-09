@@ -72,54 +72,11 @@
           lin = self.packages.${system}.lin;
           testRunner = self.packages.${system}.testRunner;
 
-          benchRunner = pkgs.writeShellScriptBin "lin-benchmarks" ''
-            set -e
-            LIN_BIN="${lin}/bin/lin"
-            export LIN_STD="${lin}/share/lin/std/std.lin"
-            export LIN_STD_DIR="${lin}/share/lin/std"
-
-            printf "%-15s %-10s %-20s %-20s %-15s\n" "Benchmark" "Metric" "Unoptimized (.lin)" "AOT E-Graph (.line)" "Reduction"
-            printf "%-15s %-10s %-20s %-20s %-15s\n" "---------------" "----------" "--------------------" "--------------------" "---------------"
-
-            TMP_DIR=$(mktemp -d)
-            trap 'rm -rf "$TMP_DIR"' EXIT
-
-            for f in benchmarks/bench_*.lin; do
-              name=$(basename "$f" .lin | sed 's/bench_//')
-              line_file="$TMP_DIR/$name.line"
-
-              # 1. Unoptimized run
-              unopt_err=$($LIN_BIN -b "$f" 2>&1 1>/dev/null || true)
-              u_steps=$(printf '%s' "$unopt_err" | sed -n 's/.*\[bench\] *\([0-9]*\) *steps.*/\1/p')
-              u_nodes=$(printf '%s' "$unopt_err" | sed -n 's/.*| *\([0-9]*\) *nodes.*/\1/p')
-
-              # 2. Build with AOT E-Graph
-              $LIN_BIN build "$f" -o "$line_file" 2>/dev/null
-
-              # 3. Optimized run
-              opt_err=$($LIN_BIN -b "$line_file" 2>&1 1>/dev/null || true)
-              o_steps=$(printf '%s' "$opt_err" | sed -n 's/.*\[bench\] *\([0-9]*\) *steps.*/\1/p')
-              o_nodes=$(printf '%s' "$opt_err" | sed -n 's/.*| *\([0-9]*\) *nodes.*/\1/p')
-
-              rm -f "$line_file"
-
-              if [ -n "$u_steps" ] && [ -n "$o_steps" ] && [ "$u_steps" -gt 0 ]; then
-                step_pct=$(( (u_steps - o_steps) * 100 / u_steps ))
-              else
-                step_pct=0
-              fi
-
-              if [ -n "$u_nodes" ] && [ -n "$o_nodes" ] && [ "$u_nodes" -gt 0 ]; then
-                node_pct=$(( (u_nodes - o_nodes) * 100 / u_nodes ))
-              else
-                node_pct=0
-              fi
-
-              printf "%-15s %-10s %-20s %-20s -%d%%\n" "$name" "Steps" "$u_steps" "$o_steps" "$step_pct"
-              printf "%-15s %-10s %-20s %-20s -%d%%\n" "" "Nodes" "$u_nodes" "$o_nodes" "$node_pct"
-              printf "%-15s %-10s %-20s %-20s %-15s\n" "" "Result" "verified" "verified" "MATCH"
-              echo ""
-            done
+          # Lin against C (bench/run.sh): the packaged lin, its std and drivers, against clang-level C.
+          benchRunner = pkgs.writeShellScriptBin "lin-bench" ''
+            export PATH="${pkgs.stdenv.cc}/bin:${pkgs.gawk}/bin:${pkgs.coreutils}/bin:$PATH"
+            export LIN_STD="${lin}/share/lin/std/std.lin" LIN_STD_DIR="${lin}/share/lin/std"
+            exec bash ${./bench}/run.sh "${lin}/bin/lin"
           '';
         in {
           default = {
@@ -132,10 +89,10 @@
             program = "${testRunner}/bin/lin-test";
             meta.description = "Run Lin test suite";
           };
-          benchmarks = {
+          bench = {
             type = "app";
-            program = "${benchRunner}/bin/lin-benchmarks";
-            meta.description = "Run Lin benchmarks";
+            program = "${benchRunner}/bin/lin-bench";
+            meta.description = "Lin against C (bench/run.sh)";
           };
         }
       );

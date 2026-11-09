@@ -86,7 +86,8 @@ static int y_call(const Net *n, Port p1, Port p2, int *h, int *appy, int *F) {
 
 /* ---- the evaluator --------------------------------------------------------------------------- */
 enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL };
-typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind; } Expr;   /* kind 1 int, 3 bool */
+typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
+                      int id, var, vscope; } Expr;   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_MCONS, V_MCONS1, V_MCELL, V_MNIL };
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
@@ -100,7 +101,13 @@ static void *A(size_t sz) {
   if (narena >= arcap) arena = realloc(arena, (size_t)(arcap = arcap ? arcap * 2 : 1024) * sizeof *arena);
   arena[narena++] = p; return p;
 }
-static void arena_free(void) { for (int i = 0; i < narena; i++) free(arena[i]); narena = 0; }
+struct Memo;
+static struct Memo **memo; static int memocap;
+static void arena_free(void) {
+  for (int i = 0; i < narena; i++) free(arena[i]);
+  narena = 0;
+  if (memocap) memset(memo, 0, (size_t)memocap * sizeof *memo);   /* its entries lived in the arena */
+}
 
 static Net *N; static long fuel; static int failed;
 /* THE UNIT: every function this compilation reaches.  funs[0] is the one being called; a call to another
@@ -114,7 +121,8 @@ static V *mkv(int k) { V *v = A(sizeof *v); v->k = k; return v; }
 static Lz *ready(V *v) { Lz *l = A(sizeof *l); l->state = 2; l->v = v; return l; }
 static Lz *lzp(Port p, Env *e) { Lz *l = A(sizeof *l); l->state = 0; l->p = p; l->env = e; return l; }
 static Lz *lzapp(Lz *f, Lz *x) { Lz *l = A(sizeof *l); l->state = 1; l->f = f; l->x = x; return l; }
-static Expr *mke(int op, int kind) { Expr *e = A(sizeof *e); e->op = op; e->kind = kind; return e; }
+static int eid;
+static Expr *mke(int op, int kind) { Expr *e = A(sizeof *e); e->op = op; e->kind = kind; e->id = eid++; e->var = -1; return e; }
 
 static V *eval(Port p, Env *env);
 static V *apply(V *f, Lz *x);
@@ -131,7 +139,7 @@ static V *force(Lz *l) {
 
 static Expr *to_expr(V *v);
 /* An `_op` head: \x. ((\k. B) x) with k unused, applied to its operand list (code, a, b). */
-static int compile_body(int G);
+static int compile_body(int G, Env *outer);
 static int is_y(const Net *n, int h);
 static int op_head(int lam) {
   Port q = W(N, (Port){lam, 2});
@@ -169,7 +177,7 @@ static V *apply(V *f, Lz *x) {
     if (is_y(N, f->lam)) {                          /* another recursive function: compile it into the unit */
       V *g = force(x);
       if (!g || g->k != V_CLO) { fail("a fixpoint of something that is not a function"); return NULL; }
-      int fid = compile_body(g->lam);
+      int fid = compile_body(g->lam, g->env);   /* in its own closure: an enclosing function stays callable */
       if (fid < 0) return NULL;
       V *v = mkv(V_SELF); v->lam = fid; return v;
     }
@@ -197,10 +205,23 @@ static V *apply(V *f, Lz *x) {
   }
 }
 
+/* A SHARED value is one value: reaching a producer through a fan (a `let`, a variable used twice) yields the
+   same V every time in the same environment, so the expression it builds is one DAG node, kept shared in C. */
+typedef struct Memo { Port p; Env *env; V *v; struct Memo *next; } Memo;
+static V *eval_at(Port p, Env *env);
 static V *eval(Port p, Env *env) {
   if (failed) return NULL;
   if (--fuel < 0) { fail("out of fuel"); return NULL; }
-  p = dhop(N, p);
+  Port q = dhop(N, p);
+  if (q.node == p.node && q.port == p.port) return eval_at(q, env);   /* not shared: nothing to remember */
+  if (!memocap) { memocap = 4096; memo = calloc((size_t)memocap, sizeof *memo); }
+  unsigned h = ((unsigned)q.node * 2654435761u ^ (unsigned)(uintptr_t)env * 40503u ^ q.port) & (unsigned)(memocap - 1);
+  for (Memo *m = memo[h]; m; m = m->next) if (m->p.node == q.node && m->p.port == q.port && m->env == env) return m->v;
+  V *v = eval_at(q, env);
+  if (v) { Memo *m = A(sizeof *m); m->p = q; m->env = env; m->v = v; m->next = memo[h]; memo[h] = m; }
+  return v;
+}
+static V *eval_at(Port p, Env *env) {
   if (!live(N, p)) { fail("a dead or open wire"); return NULL; }
   int t = N->tag[p.node];
   if (t == LAM && p.port == 0) { V *v = mkv(V_CLO); v->lam = p.node; v->env = env; return v; }
@@ -312,7 +333,68 @@ static int has_call(const Expr *e) {
   }
 }
 static int nsite;
+static int emitting;   /* the unit function being written: a parameter of another one cannot appear in it */
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+
+/* SHARING, KEPT IN THE C.  The evaluator builds a DAG -- a `let`-bound or shared value is ONE node -- and C
+   would compute such a node once per use.  A region (a function body, or one branch of a conditional) binds
+   every node it CERTAINLY evaluates (reachable without entering a branch) and uses twice or more, once, at its
+   start.  Only certain nodes move: one evaluated in just one branch is bound inside that branch, so a hoisted
+   value is never work -- or a divergent call -- the program would have skipped. */
+static int fscope, nvar;
+static unsigned *st_need, *st_vis, *st_uses; static int st_cap; static unsigned stamp;
+static void st_grow(void) {
+  if (eid <= st_cap) return;
+  int c = eid * 2 + 64;
+  st_need = realloc(st_need, (size_t)c * sizeof *st_need); st_vis = realloc(st_vis, (size_t)c * sizeof *st_vis);
+  st_uses = realloc(st_uses, (size_t)c * sizeof *st_uses);
+  memset(st_need + st_cap, 0, (size_t)(c - st_cap) * sizeof *st_need); memset(st_vis + st_cap, 0, (size_t)(c - st_cap) * sizeof *st_vis);
+  memset(st_uses + st_cap, 0, (size_t)(c - st_cap) * sizeof *st_uses); st_cap = c;
+}
+static int bound(const Expr *e) { return e->var >= 0 && e->vscope == fscope; }
+static void count_uses(const Expr *e) {           /* every reference inside the region, branches included */
+  if (st_vis[e->id] == stamp) { st_uses[e->id]++; return; }
+  st_vis[e->id] = stamp; st_uses[e->id] = 1;
+  if (bound(e)) return;
+  switch (e->op) {
+  case E_BIN: count_uses(e->a); count_uses(e->b); break;
+  case E_IF: count_uses(e->a); count_uses(e->b); count_uses(e->c); break;
+  case E_CALL: for (int i = 0; i < e->nargs; i++) count_uses(e->args[i]); break;
+  }
+}
+static void certain(const Expr *e, const Expr ***out, int *n, int *cap) {   /* post-order: dependencies first */
+  if (st_need[e->id] == stamp || bound(e)) return;
+  st_need[e->id] = stamp;
+  switch (e->op) {
+  case E_BIN: certain(e->a, out, n, cap); certain(e->b, out, n, cap); break;
+  case E_IF: certain(e->a, out, n, cap); break;                  /* only the condition: a branch may not run */
+  case E_CALL: for (int i = 0; i < e->nargs; i++) certain(e->args[i], out, n, cap); break;
+  }
+  if (*n >= *cap) *out = realloc(*out, (size_t)(*cap = *cap ? *cap * 2 : 16) * sizeof **out);
+  (*out)[(*n)++] = e;
+}
+static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
+  st_grow(); stamp += 2;
+  count_uses(e);
+  const Expr **cand = NULL; int nc = 0, cc = 0;
+  certain(e, &cand, &nc, &cc);
+  int nb = 0, ok = 1;
+  for (int i = 0; i < nc && ok; i++) {
+    Expr *x = (Expr *)cand[i];
+    if (x == e || st_uses[x->id] < 2 || x->op == E_CONST || x->op == E_PARAM) continue;
+    if (!nb++) put(b, "({ ");
+    put(b, "long v%d = ", nvar);
+    ok = emitx(b, pre, x, par, budget - 1);
+    put(b, "; ");
+    x->var = nvar++; x->vscope = fscope;
+    cand[i] = x;                                   /* still listed, so it is unbound below */
+  }
+  ok = ok && emitx(b, pre, e, par, budget - 1);
+  if (nb) put(b, "; })");
+  for (int i = 0; i < nc; i++) if (cand[i]->var >= 0 && cand[i]->vscope == fscope) ((Expr *)cand[i])->var = -1;
+  free(cand);
+  return ok;
+}
 static void plistn(Buf *b, int typed, int n) { for (int i = 0; i < n; i++) put(b, typed ? "%slong p%d" : "%sp%d", i ? ", " : "", i); }
 static void plist(Buf *b, int typed) { plistn(b, typed, arity); }
 static int emit_op(Buf *b, long k, const char *x, const char *y) {
@@ -325,31 +407,66 @@ static int emit_op(Buf *b, long k, const char *x, const char *y) {
   else put(b, "%s(%s, %s)", fn[k], x, y);
   return 1;
 }
+/* A GROUP of operands evaluated at once: every one but the last that contains a call runs on a new thread
+   (while `d < dmax`), the last runs here, and the rest are plain.  Writes "({ ...;" -- the caller writes the
+   use of names[i] and closes it with "; })". */
+static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int budget) {
+  int last = -1, ok = 1;
+  for (int i = 0; i < n; i++) if (has_call(xs[i])) last = i;
+  put(b, "({ ");
+  int *site = calloc((size_t)n, sizeof *site);
+  for (int i = 0; ok && i < n; i++) {
+    site[i] = -1;
+    if (!has_call(xs[i]) || i == last) continue;
+    int k = site[i] = nsite++;
+    Buf sb = nbuf(512);            /* the site: this operand as a function of the parameters */
+    put(&sb, "static long site%d(", k); plist(&sb, 1); put(&sb, "%sint d) { return ", arity ? ", " : "");
+    int save = fscope; fscope = ++nvar + (1 << 20);   /* a new C function: no enclosing local is in scope */
+    ok = emit_region(&sb, pre, xs[i], 1, budget - 1);
+    fscope = save;
+    put(&sb, "; }\ntypedef struct { long p[%d]; int d; long r; } S%d;\n", arity, k);
+    put(&sb, "static void *run%d(void *v) { S%d *s = v; s->r = site%d(", k, k, k);
+    for (int j = 0; j < arity; j++) put(&sb, "s->p[%d], ", j);
+    put(&sb, "s->d); return 0; }\n");
+    put(pre, "%s", sb.s); free(sb.s);
+    put(b, "S%d s%d_ = { {", k, k); plist(b, 0); put(b, "}, d, 0 }; pthread_t t%d_; ", k);
+    put(b, "int sp%d_ = d < dmax && !pthread_create(&t%d_, &attr, run%d, &s%d_); ", k, k, k, k);
+  }
+  int self = nvar++;
+  for (int i = 0; ok && i < n; i++) {             /* the last call-containing operand, on this thread */
+    if (i != last) continue;
+    put(b, "long y%d_ = ", self); ok = emitx(b, pre, xs[i], 1, budget - 1); put(b, "; ");
+  }
+  for (int i = 0; ok && i < n; i++) {
+    names[i].len = 0; names[i].s[0] = 0;
+    if (site[i] >= 0) {
+      int k = site[i];
+      put(b, "long x%d_ = sp%d_ ? (pthread_join(t%d_, 0), s%d_.r) : site%d(", k, k, k, k, k); plist(b, 0);
+      put(b, "%sd); ", arity ? ", " : "");
+      put(&names[i], "x%d_", k);
+    } else if (i == last) put(&names[i], "y%d_", self);
+    else ok = emitx(&names[i], pre, xs[i], 1, budget - 1);
+  }
+  free(site);
+  return ok;
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   if (budget <= 0) return 0;
+  if (bound(e)) { put(b, "v%d", e->var); return 1; }
   switch (e->op) {
   case E_CONST: if (e->k == (long)(1UL << (LIN_INT_BITS - 1))) put(b, "(-%ldL-1)", -(e->k + 1)); else put(b, "(%ldL)", e->k); return 1;
-  case E_PARAM: put(b, "p%ld", e->k); return 1;
+  case E_PARAM:   /* a parameter of an ENCLOSING function would need lambda lifting: decline instead */
+    if (e->nargs != emitting) { DBG("declined: a nested function uses its parent's parameter\n"); return 0; }
+    put(b, "p%ld", e->k); return 1;
   case E_BIN: {
     Buf x = nbuf(256), y = nbuf(256);
     int ok = 1;
     if (par && has_call(e->a) && has_call(e->b)) {
-      int k = nsite++;
-      Buf sb = nbuf(512);            /* the site: operand a as a function of the parameters */
-      put(&sb, "static long site%d(", k); plist(&sb, 1); put(&sb, "%sint d) { return ", arity ? ", " : "");
-      ok = emitx(&sb, pre, e->a, 1, budget - 1);
-      put(&sb, "; }\ntypedef struct { long p[%d]; int d; long r; } S%d;\n", arity, k);
-      put(&sb, "static void *run%d(void *v) { S%d *s = v; s->r = site%d(", k, k, k);
-      for (int i = 0; i < arity; i++) put(&sb, "s->p[%d], ", i);
-      put(&sb, "s->d); return 0; }\n");
-      put(pre, "%s", sb.s); free(sb.s);
-      ok = ok && emitx(&y, pre, e->b, 1, budget - 1);
-      put(b, "({ S%d s%d_ = { {", k, k); plist(b, 0); put(b, "}, d, 0 }; pthread_t t%d_; ", k);
-      put(b, "int sp%d_ = d < dmax && !pthread_create(&t%d_, &attr, run%d, &s%d_); long y%d_ = %s; ", k, k, k, k, k, y.s);
-      put(b, "long x%d_ = sp%d_ ? (pthread_join(t%d_, 0), s%d_.r) : site%d(", k, k, k, k, k); plist(b, 0);
-      put(b, "%sd); ", arity ? ", " : "");
-      x.len = 0; put(&x, "x%d_", k); y.len = 0; put(&y, "y%d_", k);   /* the operands are now named locals */
-      emit_op(b, e->k, x.s, y.s); put(b, "; })");
+      const Expr *xs[2] = { e->a, e->b }; Buf nm[2] = { nbuf(32), nbuf(32) };
+      ok = par_group(b, pre, xs, 2, nm, budget);
+      if (ok) { emit_op(b, e->k, nm[0].s, nm[1].s); put(b, "; })"); }
+      free(nm[0].s); free(nm[1].s);
     } else {
       ok = emitx(&x, pre, e->a, par, budget - 1) && emitx(&y, pre, e->b, par, budget - 1);
       if (ok) emit_op(b, e->k, x.s, y.s);
@@ -358,11 +475,20 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   }
   case E_IF:
     put(b, "("); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
-    put(b, " ? "); if (!emitx(b, pre, e->b, par, budget - 1)) return 0;
-    put(b, " : "); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
+    put(b, " ? "); if (!emit_region(b, pre, e->b, par, budget - 1)) return 0;
+    put(b, " : "); if (!emit_region(b, pre, e->c, par, budget - 1)) return 0;
     put(b, ")"); return 1;
   case E_CALL:
     par = par && e->k == 0;                        /* only the entry function has a parallel version */
+    { int calls = 0; for (int i = 0; i < e->nargs; i++) calls += has_call(e->args[i]);
+      if (par && calls >= 2) {                     /* independent calls among the arguments: at once */
+        Buf *nm = calloc((size_t)e->nargs, sizeof *nm);
+        for (int i = 0; i < e->nargs; i++) nm[i] = nbuf(32);
+        int ok = par_group(b, pre, (const Expr **)e->args, e->nargs, nm, budget);
+        if (ok) { put(b, "fp("); for (int i = 0; i < e->nargs; i++) put(b, "%s, ", nm[i].s); put(b, "d + 1); })"); }
+        for (int i = 0; i < e->nargs; i++) free(nm[i].s);
+        free(nm); return ok;
+      } }
     if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
     for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
     put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
@@ -389,7 +515,7 @@ static int run_cc(const char *src, const char *so) {
   const char *cc = getenv("LIN_NATIVE_CC"); if (!cc || !cc[0]) cc = "cc";
   pid_t pid = fork();
   if (pid < 0) return 0;
-  if (pid == 0) { execlp(cc, cc, "-O2", "-w", "-fPIC", "-shared", "-pthread", "-o", so, src, (char *)NULL); _exit(127); }
+  if (pid == 0) { execlp(cc, cc, "-O3", "-march=native", "-w", "-fPIC", "-shared", "-pthread", "-o", so, src, (char *)NULL); _exit(127); }
   int st = 0;
   return waitpid(pid, &st, 0) >= 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
@@ -397,8 +523,22 @@ static int run_cc(const char *src, const char *so) {
 typedef long (*Entry)(const long *, int threads);
 typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; } Compiled;   /* strict: the parameters certainly evaluated */
 static Compiled *done; static int ndone, donecap;
+/* -march=native code must never be loaded on a different CPU, so the cache key includes this one's identity. */
+static unsigned long cpu_key(void) {
+  static unsigned long k;
+  if (k) return k;
+  k = 1469598103934665603UL;
+  FILE *f = fopen("/proc/cpuinfo", "r");
+  if (f) {
+    char *line = NULL; size_t cap = 0;
+    while (getline(&line, &cap, f) > 0)
+      if (!strncmp(line, "flags", 5) || !strncmp(line, "model name", 10)) { k ^= fnv1a(line); k *= 1099511628211UL; }
+    free(line); fclose(f);
+  }
+  return k;
+}
 static Compiled *compile_src(const char *src, int ar, int kind) {
-  unsigned long h = fnv1a(src);
+  unsigned long h = fnv1a(src) ^ cpu_key();
   for (int i = 0; i < ndone; i++) if (done[i].h == h) return done[i].fn ? &done[i] : NULL;
   char dir[4096], c[4200], so[4200];
   cache_dir(dir, sizeof dir); mkdir_p(dir);
@@ -416,8 +556,62 @@ static Compiled *compile_src(const char *src, int ar, int kind) {
   return e ? &done[ndone++] : (ndone++, NULL);
 }
 
+/* A PARALLEL REDUCTION.  f(.., i, .., acc, ..) = if i == c then acc else f(.., i - 1, .., acc (+) g, ..), with every
+   other parameter passed unchanged, g independent of acc and (+) associative and commutative -- wrapping add or
+   mul, band / bor / bxor, or max / min written as a conditional -- folds g over the range (c, i0] in ANY order
+   to the same value.  So the range is split among the threads, each folds its blocks from (+)'s identity, and
+   the partial results are combined with the initial acc.  Every g(i) is still evaluated exactly once. */
+typedef struct { int iv, acc, op, ismax; long c; const Expr *g; } Red;
+static int is_param(const Expr *e, int k) { return e && e->op == E_PARAM && e->k == k && e->nargs == 0; }
+static int mentions(const Expr *e, int k) {
+  switch (e->op) {
+  case E_PARAM: return e->k == k && e->nargs == 0;
+  case E_BIN: return mentions(e->a, k) || mentions(e->b, k);
+  case E_IF: return mentions(e->a, k) || mentions(e->b, k) || mentions(e->c, k);
+  case E_CALL: for (int i = 0; i < e->nargs; i++) if (mentions(e->args[i], k)) return 1; return 0;
+  default: return 0;
+  }
+}
+static int find_reduction(Red *r) {
+  const Expr *e = funs[0].body;
+  if (e->op != E_IF || e->a->op != E_BIN || e->a->k != LIN_OP_EQ) return 0;
+  const Expr *c = e->a, *base = e->b, *step = e->c;
+  int iv; long cv;
+  if (c->a->op == E_PARAM && c->a->nargs == 0 && c->b->op == E_CONST) { iv = (int)c->a->k; cv = c->b->k; }
+  else if (c->b->op == E_PARAM && c->b->nargs == 0 && c->a->op == E_CONST) { iv = (int)c->b->k; cv = c->a->k; }
+  else return 0;
+  if (base->op != E_PARAM || base->nargs != 0 || base->k == iv) return 0;
+  int acc = (int)base->k;
+  if (step->op != E_CALL || step->k != 0 || step->nargs != arity) return 0;
+  for (int j = 0; j < arity; j++) {
+    const Expr *a = step->args[j];
+    if (j == iv) { if (!(a->op == E_BIN && a->k == LIN_OP_SUB && is_param(a->a, iv) && a->b->op == E_CONST && a->b->k == 1)) return 0; }
+    else if (j != acc && !is_param(a, j)) return 0;
+  }
+  const Expr *u = step->args[acc], *g = NULL; int op = -1, ismax = 0;
+  if (u->op == E_BIN && (u->k == LIN_OP_ADD || u->k == LIN_OP_MUL || u->k == LIN_OP_BAND || u->k == LIN_OP_BOR || u->k == LIN_OP_BXOR)) {
+    if (is_param(u->a, acc)) g = u->b; else if (is_param(u->b, acc)) g = u->a; else return 0;
+    op = (int)u->k;
+  } else if (u->op == E_IF && u->a->op == E_BIN && u->a->k >= LIN_OP_LT && u->a->k <= LIN_OP_GEQ) {
+    /* (if (x > acc) x acc) is max, (if (x < acc) x acc) is min -- in either operand order */
+    const Expr *x = NULL; int gt = u->a->k == LIN_OP_GT || u->a->k == LIN_OP_GEQ;
+    if (is_param(u->a->b, acc)) x = u->a->a; else if (is_param(u->a->a, acc)) { x = u->a->b; gt = !gt; } else return 0;
+    if (u->b == x && is_param(u->c, acc)) ismax = gt ? 1 : -1;
+    else if (u->c == x && is_param(u->b, acc)) ismax = gt ? -1 : 1;
+    else return 0;
+    g = x; op = LIN_OP_ADD;                         /* unused when ismax */
+  } else return 0;
+  if (mentions(g, acc)) return 0;
+  r->iv = iv; r->acc = acc; r->op = op; r->ismax = ismax; r->c = cv; r->g = g;
+  return 1;
+}
+static void red_combine(Buf *b, const Red *r, const char *x, const char *y) {
+  if (r->ismax) { put(b, "(%s %s %s ? %s : %s)", x, r->ismax > 0 ? ">" : "<", y, x, y); return; }
+  emit_op(b, r->op, x, y);
+}
+
 /* Evaluate G = \self.\p1..\pk. body into the unit; its index, or -1. */
-static int compile_body(int G) {
+static int compile_body(int G, Env *outer) {
   for (int i = 0; i < nfun; i++) if (funs[i].lam == G) return i;
   if (nfun >= 1 + LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }   /* mutual recursion re-copies: bound it */
   if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
@@ -429,9 +623,9 @@ static int compile_body(int G) {
   }
   funs[fid].arity = ar;
   if (ar == 0) { fail("a function with no parameters"); return -1; }
-  Env *env = A(sizeof *env); env->lam = G; V *self = mkv(V_SELF); self->lam = fid; env->t = ready(self);
+  Env *env = A(sizeof *env); env->lam = G; V *self = mkv(V_SELF); self->lam = fid; env->t = ready(self); env->next = outer;
   for (int i = 0; i < ar; i++) {
-    Env *e = A(sizeof *e); e->lam = params[i]; V *s = mkv(V_SYM); s->e = mke(E_PARAM, 1); s->e->k = i;
+    Env *e = A(sizeof *e); e->lam = params[i]; V *s = mkv(V_SYM); s->e = mke(E_PARAM, 1); s->e->k = i; s->e->nargs = fid;
     e->t = ready(s); e->next = env; env = e;
   }
   Expr *top = to_expr(eval(body, env));
@@ -442,10 +636,10 @@ static int compile_body(int G) {
 
 /* Compile F and everything it calls, or return NULL. */
 static Compiled *compile_fn(Net *n, int F) {
-  N = n; failed = 0; fuel = 200000; nfun = 0;
+  N = n; failed = 0; fuel = 200000; nfun = 0; eid = 0; nvar = 0;
   DBG("compile F=%d (net %d nodes)\n", F, n->nn);
   Compiled *r = NULL;
-  if (compile_body(F) == 0 && !failed) {
+  if (compile_body(F, NULL) == 0 && !failed) {
     arity = funs[0].arity;
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
       changed = 0;
@@ -461,16 +655,39 @@ static Compiled *compile_fn(Net *n, int F) {
       int ok = 1;
       for (int i = 0; ok && i < nfun; i++) {
         put(&b, "static long f%d(", i); plistn(&b, 1, funs[i].arity); put(&b, ") { return ");
-        ok = emitx(&b, &pre, funs[i].body, 0, 4096); put(&b, "; }\n");
+        emitting = i; fscope++; ok = emit_region(&b, &pre, funs[i].body, 0, 4096); put(&b, "; }\n");
       }
-      nsite = 0;
-      ok = ok && emitx(&pb, &pre, funs[0].body, 1, 4096);
+      nsite = 0; emitting = 0; fscope++;
+      ok = ok && emit_region(&pb, &pre, funs[0].body, 1, 4096);
       if (ok) {
         put(&b, "static int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
         put(&b, "%sint d);\n%sstatic long fp(", arity ? ", " : "", pre.s); plist(&b, 1);
         put(&b, "%sint d) { if (d >= dmax) return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s);
+        Red red; int has_red = find_reduction(&red);
+        if (has_red) {
+          long id = red.ismax > 0 ? (long)(1UL << (LIN_INT_BITS - 1)) : red.ismax < 0 ? (long)~(1UL << (LIN_INT_BITS - 1))
+                  : (red.op == LIN_OP_MUL) ? 1 : (red.op == LIN_OP_BAND) ? -1 : 0;   /* (+)'s identity */
+          put(&b, "static long g("); plist(&b, 1); put(&b, ") { return ");
+          emitting = 0; fscope++; ok = emit_region(&b, &pre, red.g, 0, 4096); put(&b, "; }\n");
+          put(&b, "typedef struct { long p[%d]; long lo, block, r; long *next; } R;\n", arity);
+          put(&b, "static void *rrun(void *v) { R *q = v; long acc = %ldL;\n", id);
+          for (int i = 0; i < arity; i++) put(&b, "  long p%d = q->p[%d];\n", i, i);
+          put(&b, "  for (;;) { long hi = __atomic_fetch_sub(q->next, q->block, __ATOMIC_RELAXED); if (hi <= q->lo) break;\n");
+          put(&b, "    long lo = hi - q->block; if (lo < q->lo) lo = q->lo;\n    for (long i = hi; i > lo; i--) { p%d = i; long x = g(", red.iv);
+          plist(&b, 0); put(&b, "); acc = "); red_combine(&b, &red, "x", "acc"); put(&b, "; } }\n");
+          put(&b, "  q->r = acc; return 0; }\n");
+          DBG("parallel reduction over p%d down to %ld, accumulator p%d\n", red.iv, red.c, red.acc);
+        }
         put(&b, "long lin_fn_entry(const long *a, int threads) {\n");
         for (int i = 0; i < arity; i++) put(&b, "  long p%d = a[%d];\n", i, i);
+        if (has_red) {   /* below some thousands of iterations a thread costs more than it saves */
+          put(&b, "  if (threads > 1 && p%d > %ldL && p%d - %ldL >= 4096) {\n", red.iv, red.c, red.iv, red.c);
+          put(&b, "    long next = p%d; pthread_t t[threads]; R q[threads];\n", red.iv);
+          put(&b, "    for (int k = 0; k < threads; k++) { R r = { {"); plist(&b, 0);
+          put(&b, "}, %ldL, (p%d - %ldL) / ((long)threads * 64) + 1, 0, &next }; q[k] = r; pthread_create(&t[k], 0, rrun, &q[k]); }\n", red.c, red.iv, red.c);
+          put(&b, "    long acc = p%d;\n    for (int k = 0; k < threads; k++) { pthread_join(t[k], 0); acc = ", red.acc);
+          red_combine(&b, &red, "q[k].r", "acc"); put(&b, "; }\n    return acc; }\n");
+        }
         /* the depth that keeps about four tasks per thread in flight */
         put(&b, "  if (%d && threads > 1) { int lg = 0; while ((1 << lg) < threads) lg++; dmax = lg + 2;\n", nsite);
         put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); return fp(");

@@ -1,0 +1,4 @@
+; a loop calling a helper loop: the longest Collatz chain below one million
+(define steps (\n (\acc (if (leq n 1) acc (steps (if (eq (band n 1) 0) (shr n 1) (add (mul 3 n) 1)) (add acc 1))))))
+(define best (\i (\m (if (eq i 0) m (best (sub i 1) ((\s (if (gt s m) s m)) (steps i 0)))))))
+(best 999999 0)

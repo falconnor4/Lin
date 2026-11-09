@@ -47,6 +47,18 @@ for t in 2 3 8; do
   wt=$(timeout 120 "$LIN_BIN" -t $t "$TMP/par.lin" 2>/dev/null)
   if [ "$wt" = "=> 2178309" ] && [ "$wt" = "$w1" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL parallel -t $t: '$wt' vs -t 1 '$w1'"; fi
 done
+# Parallel REDUCTIONS (a loop folding an associative op, or a max written as a conditional) must answer what
+# the sequential loop does at every width, and must have been recognised as reductions.
+printf '%s\n' '(define go (\i (\acc (if (eq i 0) acc (go (sub i 1) (add acc (mod (mul i i) 7)))))))' '(go 100000 0)' > "$TMP/red.lin"
+printf '%s\n' '(define st (\n (\a (if (leq n 1) a (st (if (eq (band n 1) 0) (shr n 1) (add (mul 3 n) 1)) (add a 1))))))' \
+  '(define best (\i (\m (if (eq i 0) m (best (sub i 1) ((\s (if (gt s m) s m)) (st i 0)))))))' '(best 20000 0)' > "$TMP/max.lin"
+for f in red max; do
+  r1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/$f.lin" 2>/dev/null); r8=$(timeout 120 "$LIN_BIN" -t 8 "$TMP/$f.lin" 2>/dev/null)
+  red=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" -t 8 "$TMP/$f.lin" 2>&1 >/dev/null | grep -c "parallel reduction")
+  if [ -n "$r1" ] && [ "$r1" = "$r8" ] && [ "$red" -ge 1 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL reduction $f: -t 1 '$r1' -t 8 '$r8' recognised $red"; fi
+done
+[ "$(timeout 120 "$LIN_BIN" "$TMP/red.lin" 2>/dev/null)" = "=> 200003" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL reduction value"; }
+[ "$(timeout 120 "$LIN_BIN" "$TMP/max.lin" 2>/dev/null)" = "=> 278" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL max-reduction value"; }
 sites=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/par.lin" 2>&1 >/dev/null | grep -c "1 parallel site")
 [ "$sites" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL the tree recursion was not compiled with a parallel site"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi

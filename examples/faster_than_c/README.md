@@ -1,3 +1,13 @@
+> **Superseded.** These three comparisons were not fair, and the measured suite now lives in
+> [`bench/`](../../bench/README.md):
+> - `bench_branch.c` calls `branch(d - 1)` twice while the Lin version binds it once with `let`,
+>   so the two programs compute different amounts of work (the C written the same way runs in
+>   nanoseconds);
+> - the Linden benchmark runs a C plugin, so it compares C with C;
+> - the stream benchmark compares a lazy prefix with an eager 10-million-element buffer.
+>
+> The text below is kept for history.
+
 # Empirical Proof: Why and Where Lin Outperforms C
 
 This suite provides reproducible, self-contained benchmarks demonstrating three fundamental architectural domains where Lin outperforms optimized C (`gcc/clang -O3`):
