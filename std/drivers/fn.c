@@ -51,6 +51,7 @@
 __thread __attribute__((tls_model("initial-exec"))) jmp_buf lin_jb;
 __thread __attribute__((tls_model("initial-exec"))) char *lin_stack_lo;
 __thread __attribute__((tls_model("initial-exec"))) long *lin_hp, *lin_he;
+__thread __attribute__((tls_model("initial-exec"))) long *lin_fl[8];   /* freed blocks by size (words), for reuse */
 static int dbg = -1;
 #define DBG(...) do { if (dbg) { fprintf(stderr, "fn: " __VA_ARGS__); fflush(stderr); } } while (0)
 #define IN(n, i) ((i) >= 0 && (i) < (n)->nn)
@@ -101,7 +102,7 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
        E_CTOR, E_MATCH, E_FIELD };   /* data: constructor k (its index) of args; match on a over args (one result per
                                         constructor, in order); field k of a */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; } Expr;   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; } Expr;   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
@@ -1077,7 +1078,24 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     else put(b, "; long _t = (_s & 1) ? (_s >> 1) : ((long *)_s)[0]; (");
     for (int i = 0; i < e->nargs; i++) {
       if (i < e->nargs - 1) put(b, "_t == %d ? ", i);
-      if (!emit_region(b, pre, e->args[i], par, budget - 1)) return 0;
+      const LinCtor *bc = NULL;
+      if (e->freeb && e->freeb[i] && !par && e->ci)   /* (the parallel copy frees nothing: its sites read the parameters) */
+        for (long k = 1; (bc = lin_ctor_info(k)); k++) if (bc->dt == e->ci->dt && bc->i == i) break;
+      if (bc && bc->k > 0) {
+        /* the fields first, then the block back to the allocator, then the branch over the copies */
+        int nfx = bc->k; Expr **fx = A(sizeof *fx * (size_t)nfx);
+        put(b, "({ ");
+        for (int j = 0; j < nfx; j++) {
+          Expr *t = mke(E_FIELD, 1); t->a = e->a; t->k = j; t->untag = e->untag; t->ci = bc; fx[j] = hc(t);
+          int k = nvar++; put(b, "long v%d = ((long *)_s)[%d]; ", k, j + !e->untag);
+          fx[j]->var = k; fx[j]->vscope = fscope;
+        }
+        if (nfx) put(b, "lin_free((long *)_s, %d); ", bc->k + !e->untag);
+        int ok = emit_region(b, pre, e->args[i], par, budget - 1);
+        put(b, "; })");
+        for (int j = 0; j < nfx; j++) fx[j]->var = -1;
+        if (!ok) return 0;
+      } else if (!emit_region(b, pre, e->args[i], par, budget - 1)) return 0;
       if (i < e->nargs - 1) put(b, " : ");
     }
     put(b, "); })"); return 1;
@@ -1396,6 +1414,14 @@ static unsigned occ_r(const Expr *e) {               /* how often occ_x is MOVED
 }
 static unsigned occ(const Expr *in, const Expr *x) { occ_x = x; mm_new(MM_OCC); return occ_r(in); }
 static unsigned char **uparam, *ufresh;
+/* A FIELD IS OWNED only if every constructor that writes it is given something fresh that nothing else holds:
+   `(node t t)` stores ONE block in two fields, and taking either apart in place would corrupt the other. */
+static unsigned char **fown; static long fown_n;
+static long ctor_id(const LinCtor *ci);
+static int field_owned(const Expr *e) {
+  long id = e->ci ? ctor_id(e->ci) : 0;
+  return id > 0 && id <= fown_n && e->k < e->ci->k && fown[id][e->k];
+}
 static int uniq_r(const Expr *e) {
   if (mm_has(MM_UNIQ, e)) return (int)mm_val[MM_UNIQ][e->id];
   int r = 0;
@@ -1405,7 +1431,7 @@ static int uniq_r(const Expr *e) {
   case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun && uparam[e->nargs][e->k]; break;
   case E_IF: r = uniq_r(e->b) && uniq_r(e->c); break;
   case E_MATCH: r = 1; for (int i = 0; i < e->nargs; i++) r = r && uniq_r(e->args[i]); break;
-  case E_FIELD: r = uniq_r(e->a); break;
+  case E_FIELD: r = uniq_r(e->a) && field_owned(e); break;
   default: break;
   }
   return (int)mm_put(MM_UNIQ, e, (unsigned)r);
@@ -1425,6 +1451,22 @@ static void uniq_calls(const Expr *e, const Expr *body) {   /* demote a callee's
   if (e->b) uniq_calls(e->b, body);
   if (e->c) uniq_calls(e->c, body);
   for (int i = 0; i < e->nargs && e->args; i++) uniq_calls(e->args[i], body);
+}
+static void own_ctors(const Expr *e, const Expr *body) {   /* demote a field some constructor writes shared */
+  if (!e || mm_has(MM_NUM, e)) return;
+  mm_put(MM_NUM, e, 1);
+  if (e->op == E_CTOR && e->ci) {
+    long id = ctor_id(e->ci);
+    for (int j = 0; id > 0 && id <= fown_n && j < e->nargs && j < e->ci->k; j++) {
+      const Expr *a = e->args[j];
+      if (!fown[id][j] || a->op == E_CONST) continue;
+      if (!uniq(a) || occ(body, a) > 1) { fown[id][j] = 0; uq_changed = 1; }
+    }
+  }
+  if (e->a) own_ctors(e->a, body);
+  if (e->b) own_ctors(e->b, body);
+  if (e->c) own_ctors(e->c, body);
+  for (int i = 0; i < e->nargs && e->args; i++) own_ctors(e->args[i], body);
 }
 static int only_reads(const Expr *e, const Expr *x) { /* x appears in e only as the base of field reads */
   if (e == x) return 0;
@@ -1447,14 +1489,24 @@ static Expr **ctor_slot_tail(Expr **slot, Expr *s, int nf, int branch) {   /* ma
   }
   return NULL;
 }
+static int reuses(const Expr *e, const Expr *s) {   /* does a constructor in e rebuild in s's block? */
+  if (!e) return 0;
+  if (e->op == E_CTOR && e->c == s) return 1;
+  if (e->op == E_IF) return reuses(e->b, s) || reuses(e->c, s);
+  return 0;
+}
 static void mark_reuse(Expr *e, int f) {
   if (!e || mm_has(MM_NUM, e)) return;
   mm_put(MM_NUM, e, 1);
   if (e->op == E_MATCH && e->a->op == E_PARAM && e->a->nargs == f && uparam[f][e->a->k]) {
     for (int i = 0; i < e->nargs; i++) {
       const LinCtor *c2 = NULL; int nf = -1;
-      for (long k = 1; (c2 = lin_ctor_info(k)); k++) if (c2->i == i && c2->m == e->nargs) { nf = c2->k; break; }
-      if (nf > 0 && only_reads(e->args[i], e->a)) ctor_slot_tail(&e->args[i], e->a, nf, i);
+      for (long k = 1; (c2 = lin_ctor_info(k)); k++) if (c2->i == i && e->ci && c2->dt == e->ci->dt) { nf = c2->k; break; }
+      if (nf > 0 && only_reads(e->args[i], e->a)) {
+        ctor_slot_tail(&e->args[i], e->a, nf, i);
+        /* not rebuilt in place: the block is FREED once its fields are read (emitx, E_MATCH) */
+        if (!reuses(e->args[i], e->a)) { if (!e->freeb) e->freeb = A((size_t)e->nargs); e->freeb[i] = 1; }
+      }
     }
   }
   if (e->a) mark_reuse(e->a, f);
@@ -1465,8 +1517,14 @@ static void mark_reuse(Expr *e, int f) {
 static void ownership(Expr *entry) {
   uparam = A(sizeof *uparam * (size_t)nfun); ufresh = A((size_t)nfun);
   for (int i = 0; i < nfun; i++) { int a = funs[i].arity ? funs[i].arity : 1; uparam[i] = A((size_t)a); memset(uparam[i], 1, (size_t)a); ufresh[i] = 1; }
-  for (int round = 0; round <= nfun * 64 + 64; round++) {
+  fown_n = 0; while (lin_ctor_info(fown_n + 1)) fown_n++;
+  fown = A(sizeof *fown * (size_t)(fown_n + 1));
+  for (long k = 1; k <= fown_n; k++) { int nk = lin_ctor_info(k)->k + 1; fown[k] = A((size_t)nk); memset(fown[k], 1, (size_t)nk); }
+  for (int round = 0; round <= nfun * 64 + 64 + fown_n; round++) {
     uq_changed = 0;
+    mm_new(MM_UNIQ);
+    for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); own_ctors(funs[i].body, funs[i].body); }
+    mm_new(MM_NUM); own_ctors(entry, entry);
     mm_new(MM_UNIQ);
     for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); uniq_calls(funs[i].body, funs[i].body); }
     mm_new(MM_NUM); uniq_calls(entry, entry);
@@ -1606,8 +1664,12 @@ static const char *DATA_RT =
   "  pthread_mutex_lock(&lin_chm);\n"
   "  if (lin_nch >= lin_cch) { lin_cch = lin_cch ? lin_cch * 2 : 64; lin_ch = realloc(lin_ch, (size_t)lin_cch * sizeof *lin_ch); }\n"
   "  lin_ch[lin_nch++] = c; lin_used += sz; pthread_mutex_unlock(&lin_chm); lin_hp = c; lin_he = c + sz; }\n"
-  "static inline long *lin_alloc(long n) { if (__builtin_expect(lin_hp + n > lin_he, 0)) lin_refill(n); long *r = lin_hp; lin_hp += n; return r; }\n"
-  "static void lin_free_all(void) { for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; }\n"
+  "extern LIN_TLS long *lin_fl[8];\n"
+  "static inline long *lin_alloc(long n) { long *f = lin_fl[n & 7]; if (n < 8 && f) { lin_fl[n] = (long *)f[0]; return f; }\n"
+  "  if (__builtin_expect(lin_hp + n > lin_he, 0)) lin_refill(n); long *r = lin_hp; lin_hp += n; return r; }\n"
+  /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
+  "static inline void lin_free(long *p, long n) { if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
+  "static void lin_free_all(void) { for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; for (int i = 0; i < 8; i++) lin_fl[i] = 0; }\n"
   /* The guard lives where an infinite STRUCTURE must go -- the arena's refill, once per chunk -- and checks memory and
      the stack there; a compiled function carries nothing (measured: a per-call check doubled a tree insert).  A call
      whose runaway recursion builds nothing is not caught -- the exposure numeric units have always had.  A task on
