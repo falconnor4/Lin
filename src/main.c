@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 #include <limits.h>
+#include <ctype.h>
 #include <sys/resource.h>
 #ifdef _OPENMP
 #include <omp.h>
@@ -591,11 +592,123 @@ static int resolve_path(const char *rel, char *out, size_t out_sz) {
 }
 
 static int load_file(const char *path);
+/* LAZY MODULES.  A module whose top-level forms only DEFINE (definitions, namespaces, exports, loads, opens) has
+   no effect until a program names something it defines, so the prelude does not parse it: a cheap scan of its
+   text lists the names loading it would define, and the first form that names one loads it -- at a form
+   boundary, so no definition is mid-flight while the table grows.  Resolution is unchanged: a name is looked up
+   in the same order (current namespace, opened ones newest first, then global), and a module that would supply
+   the first candidate is loaded before the lookup.  So the std can grow without costing a program that does not
+   use it anything. */
+static int lazy_ok;                                  /* (only while loading the prelude) */
+typedef struct { char *path; int loaded; } LazyMod;
+static LazyMod *lzm; static int nlzm, clzm;
+static const char **lzk; static int *lzv; static size_t lzcap, lzn;
+static int lazy_forced(const char *full) { for (int i = 0; i < nlzm; i++) if (lzm[i].loaded && !strcmp(lzm[i].path, full)) return 1; return 0; }
+static int lazy_pending(const char *full) { for (int i = 0; i < nlzm; i++) if (!lzm[i].loaded && !strcmp(lzm[i].path, full)) return 1; return 0; }
+static void lz_put(const char *name, int mod) {
+  if ((lzn + 1) * 2 >= lzcap) {
+    const char **ok = lzk; int *ov = lzv; size_t oc = lzcap;
+    lzcap = lzcap ? lzcap * 2 : 1024; lzk = calloc(lzcap, sizeof *lzk); lzv = malloc(lzcap * sizeof *lzv); lzn = 0;
+    for (size_t i = 0; i < oc; i++) if (ok[i]) lz_put(ok[i], ov[i]);
+    free(ok); free(ov);
+  }
+  for (size_t k = def_hash(name) & (lzcap - 1);; k = (k + 1) & (lzcap - 1)) {
+    if (!lzk[k]) { lzk[k] = name; lzv[k] = mod; lzn++; return; }
+    if (!strcmp(lzk[k], name)) { lzv[k] = mod; return; }
+  }
+}
+static int lz_get(const char *name) {
+  if (!lzcap) return -1;
+  for (size_t k = def_hash(name) & (lzcap - 1); lzk[k]; k = (k + 1) & (lzcap - 1)) if (!strcmp(lzk[k], name)) return lzv[k];
+  return -1;
+}
+/* The scan: top-level forms only, strings and comments skipped.  0 = not pure (load it now). */
+static int lz_tok(const char *s, int *i, char *out, int cap) {
+  while (s[*i] && (isspace((unsigned char)s[*i]) || s[*i] == ';')) { if (s[*i] == ';') while (s[*i] && s[*i] != '\n') (*i)++; else (*i)++; }
+  int n = 0;
+  if (s[*i] == '"') {                                  /* a string token: its text without quotes */
+    (*i)++;
+    while (s[*i] && s[*i] != '"') { if (s[*i] == '\\' && s[*i + 1]) (*i)++; if (n < cap - 1) out[n++] = s[*i]; (*i)++; }
+    if (s[*i] == '"') (*i)++;
+  } else while (s[*i] && !isspace((unsigned char)s[*i]) && s[*i] != '(' && s[*i] != ')' && s[*i] != ';') { if (n < cap - 1) out[n++] = s[*i]; (*i)++; }
+  out[n] = 0; return n;
+}
+static int lazy_register(const char *full, const char *src) {
+  const char **names = NULL; int nn = 0, cn = 0, pure = 1;
+  size_t sl = strlen(src) + 1;                         /* (a token is never longer than the text) */
+  char *ns = calloc(sl, 1), *tok = malloc(sl), *arg = malloc(sl);
+  for (int i = 0, depth = 0; src[i] && pure; ) {
+    char c = src[i];
+    if (c == ';') { while (src[i] && src[i] != '\n') i++; continue; }
+    if (c == '"') { i++; while (src[i] && src[i] != '"') { if (src[i] == '\\' && src[i + 1]) i++; i++; } if (src[i]) i++; continue; }
+    if (c == ')') { depth--; i++; continue; }
+    if (c != '(') { i++; continue; }
+    i++;
+    if (depth++ > 0) continue;
+    if (!lz_tok(src, &i, tok, (int)sl)) { pure = 0; break; }
+    if (!strcmp(tok, "define") || !strcmp(tok, "define!")) {
+      if (!lz_tok(src, &i, arg, (int)sl)) { pure = 0; break; }
+      if (nn >= cn) names = realloc(names, (size_t)(cn = cn ? cn * 2 : 64) * sizeof *names);
+      names[nn++] = ns[0] && !strchr(arg, '.') ? lin_internf("%s.%s", ns, arg) : lin_intern(arg, strlen(arg));
+    } else if (!strcmp(tok, "namespace")) {
+      lz_tok(src, &i, arg, (int)sl);
+      snprintf(ns, sl, "%s", (!strcmp(arg, "_") || !strcmp(arg, "root")) ? "" : arg);
+    } else if (!strcmp(tok, "export")) {
+      lz_tok(src, &i, arg, (int)sl);
+      size_t al = strlen(arg); int found = 0, n0 = nn;
+      for (int k = 0; k < n0; k++)
+        if (!strncmp(names[k], arg, al) && names[k][al] == '.' && !strchr(names[k] + al + 1, '.') && names[k][al + 1] != '_') {
+          const char *suf = names[k] + al + 1; found = 1;
+          if (nn >= cn) names = realloc(names, (size_t)(cn = cn ? cn * 2 : 64) * sizeof *names);
+          names[nn++] = ns[0] ? lin_internf("%s.%s", ns, suf) : suf;
+        }
+      if (!found) pure = 0;                            /* (re-exporting another file's namespace: load it now) */
+    } else if (!strcmp(tok, "load") || !strcmp(tok, "open")) {
+      /* a dependency loads when this module does; an open is the module's own scope */
+    } else pure = 0;                                   /* an expression, a datatype, anything with an effect */
+  }
+  free(ns); free(tok); free(arg);
+  if (!pure || !nn) { free(names); return 0; }
+  if (nlzm >= clzm) lzm = realloc(lzm, (size_t)(clzm = clzm ? clzm * 2 : 32) * sizeof *lzm);
+  lzm[nlzm] = (LazyMod){ strdup(full), 0 };
+  for (int k = 0; k < nn; k++) lz_put(names[k], nlzm);
+  nlzm++; free(names);
+  return 1;
+}
+/* Load what a name, as a program spells it here, would resolve to -- if a pending module supplies the first
+   candidate in lookup order. */
+static int lazy_try(const char *cand) {               /* 1: this candidate settles the lookup */
+  if (lookup_raw(cand)) return 1;
+  int m = lz_get(cand);
+  if (m < 0 || lzm[m].loaded) return 0;
+  lzm[m].loaded = 1;
+  int sq = quiet_forms, sl = lazy_ok; const char *prev_ns = curr_ns; int prev_open = n_open_ns;
+  quiet_forms = 1; lazy_ok = 1;                        /* (its own dependencies stay lazy) */
+  char path[PATH_MAX]; snprintf(path, sizeof path, "%s", lzm[m].path);
+  load_file(path);
+  quiet_forms = sq; lazy_ok = sl; curr_ns = prev_ns; n_open_ns = prev_open;
+  return 1;
+}
+static void lazy_demand(const char *name) {
+  if (!nlzm || !name || !*name) return;
+  if (strchr(name, '.')) { lazy_try(name); return; }
+  if (curr_ns[0] && lazy_try(dotted(curr_ns, name))) return;
+  for (int o = n_open_ns - 1; o >= 0; o--) if (lazy_try(dotted(open_ns[o], name))) return;
+  lazy_try(name);
+}
+static void lazy_demand_term(const Term *t) {
+  for (; t; t = t->r) {                                /* (iterating the right spine: long applications are deep there) */
+    if (t->type == TVAR) { lazy_demand(t->name); return; }
+    lazy_demand_term(t->l);
+  }
+}
 static void load_std(void) {
   const char *std = getenv("LIN_STD") ? getenv("LIN_STD") : "std/std.lin";
   quiet_forms = 1;
   lin_out = fopen("/dev/null", "w");
+  lazy_ok = !getenv("LIN_EAGER_STD");
   int ok = load_file(std);
+  lazy_ok = 0;
   if (lin_out) fclose(lin_out);
   lin_out = NULL;
   quiet_forms = 0;
@@ -625,6 +738,8 @@ static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
   if (perr) { build_read_err = 1; printf("error: %s\n", perr); return; }
   build_read_err = 0;
+  if (t->type == TDEF || t->type == TDEFX || (t->type != TLOAD && t->type != TNS && t->type != TOPEN && t->type != TEXPORT && t->type != TDATATYPE))
+    lazy_demand_term(t->type == TDEF || t->type == TDEFX ? t->l : t);   /* (what this form names, loaded first) */
   if (t->type == TLOAD) { if (!load_file(t->name)) printf("error: cannot load '%s'\n", t->name); }
   else if (t->type == TNS) set_namespace(t->name);
   else if (t->type == TOPEN) open_namespace(t->name);
@@ -663,10 +778,11 @@ static int load_file(const char *path) {
   if (!building && run_line_file(path)) return 1;
   char full[PATH_MAX];
   if (!resolve_path(path, full, sizeof full)) return 0;
-  if (is_already_loaded(full)) return 1;
-  mark_loaded(full);
+  if (is_already_loaded(full) || lazy_pending(full)) return 1;
   char *src = read_file(full);
   if (!src) return 0;
+  if (lazy_ok && !lazy_forced(full) && lazy_register(full, src)) { free(src); return 1; }   /* a pure module: read when a program names it */
+  mark_loaded(full);
   char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", full);
   char *last_slash = strrchr(dir, '/');
   if (last_slash) *last_slash = '\0'; else snprintf(dir, sizeof dir, ".");
