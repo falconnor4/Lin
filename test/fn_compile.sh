@@ -72,6 +72,13 @@ prog lifted '(datatype L (ln) (lc h t))
 (define lsum (\s (\a (match s (ln a) ((lc h t) (lsum t (add a h)))))))
 (define go (\k (\acc (if (eq k 0) acc (go (sub k 1) (add acc (lsum (lmap (\x (mul x k)) (upto 10)) 0)))))))
 (go 5 0)' 825
+# STRINGS and other cell-encoded lists: the cell encoding is a datatype to the compiler (a block per cell)
+prog strlen '(str_length "hello, world")' 12
+prog strbuild '(define rep (\n (\acc (if (eq n 0) acc (rep (sub n 1) (cons 97 acc))))))
+(str_length (str_concat (rep 300 nil) (rep 200 nil)))' 500
+prog strmap '(define up (\s (if (str_is_empty s) s (cons (if (and (geq (head s) 97) (leq (head s) 122)) (sub (head s) 32) (head s)) (up (tail s))))))
+(up "hello world")' '"HELLO WORLD"'
+prog strint '(str_parse_int "90210")' 90210
 # a function that may not look at its data argument (lazy in Lin, strict in C): still the net's answer
 prog lazydata '(datatype S (snil) (scons h t))
 (define upto (\n (if (eq n 0) snil (scons n (upto (sub n 1))))))

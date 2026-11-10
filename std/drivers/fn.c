@@ -105,7 +105,7 @@ typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
-typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; } V;   /* x: to_expr's answer */
+typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; int cells; } V;   /* cells: a match on the cell encoding */   /* x: to_expr's answer */
 typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int busy; } Lz;   /* 0 port, 1 application, 2 value */
 
 /* One compile attempt's memory: everything is freed together. */
@@ -276,7 +276,43 @@ static int dt_boxed(const char *dt, int *box) {      /* how many constructors of
 static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci) {
   Expr *e = mke(E_FIELD, 1); e->a = scrut; e->k = j; e->untag = untag; e->ci = ci; return hc(e);
 }
+/* THE CELL ENCODING AS A DATATYPE.  Lists, strings and the std's sequences are cells `\c.\n.((c h) t)` ended by
+   `\c.\n.true` -- no constructor marker, but two constructors all the same, and the compiler gives them the
+   datatype treatment under a name no source can write: a cell is a block {h, t}, the end an immediate.  A value
+   applied to branches with no marker is taken apart as cells; whether it really is a list is the SHAPE analysis'
+   question (a numeral is cells too, of bits -- one used both ways is not compiled).  The end answers `true` to
+   whatever it is given, which a program reads only as a boolean: here it is a constant every shape accepts. */
+static const LinCtor *cell_cons, *cell_nil;
+static const char *cells_dt;
+static void cells_init(void) {
+  if (cell_cons && lin_ctor_info(1)) {               /* (re-read: the registry may have moved) */
+    cell_cons = lin_ctor_info(lin_ctor_lookup(" cons")); cell_nil = lin_ctor_info(lin_ctor_lookup(" nil"));
+    return;
+  }
+  lin_ctor_register(" cells", " cons", 2, 0, 2); lin_ctor_register(" cells", " nil", 2, 1, 0);
+  cell_cons = lin_ctor_info(lin_ctor_lookup(" cons")); cell_nil = lin_ctor_info(lin_ctor_lookup(" nil"));
+  cells_dt = cell_cons ? cell_cons->dt : NULL;
+}
+static Expr *end_true(void) { Expr *e = mke(E_CONST, 3); e->k = 3; e->box = 1; return hc(e); }   /* (3: true, and the end) */
+static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci);
+static V *cells_add(V *m, Lz *x) {
+  if (m->nargs == 0) {                               /* the cell branch is a FUNCTION of the cell's two parts */
+    V *bv = force(x); if (!bv) return NULL;
+    if (bv->k != V_CLO && bv->k != V_FIX && bv->k != V_SELF) { fail("a value applied to something that is not a branch"); return NULL; } V *v = mkv(V_MATCH); v->e = m->e; v->cells = 1; v->nargs = 1; v->args = A(sizeof(Lz *)); v->args[0] = x; v->lam = 2; return v; }
+  cells_init();
+  if (!cell_cons || !cell_nil) { fail("no cell datatype"); return NULL; }
+  Expr *r = mke(E_MATCH, 1); r->a = m->e; r->nargs = 2; r->args = A(sizeof(Expr *) * 2);
+  int box = 0; r->untag = dt_boxed(cell_cons->dt, &box) == 1; r->box = box; r->ci = cell_cons;
+  V *b = force(m->args[0]);
+  for (int j = 0; b && j < 2; j++) { V *fv = mkv(V_SYM); fv->e = field_expr(m->e, j, r->untag, cell_cons); b = apply(b, ready(fv)); }
+  if (!(r->args[0] = to_expr(b))) return NULL;
+  r->args[1] = end_true();                           /* the end answers true, whatever the second branch was */
+  r->kind = r->args[0]->kind;
+  V *res = mkv(V_SYM); res->e = hc(r); return res;
+}
 static V *match_add(V *m, Lz *x) {
+  if (m->cells || (m->nargs == 0 && !(x->state == 0 && ({ Port b_, i_; int l_; marker_app(x->p, &b_, &l_, &i_); }))))
+    return cells_add(m, x);
   if (x->state != 0) { fail("a match branch that is not net structure"); return NULL; }
   Port body, idp; int lam; long id;
   if (!marker_app(x->p, &body, &lam, &idp)) { fail("a parameter applied to something that is not a match branch (a function parameter?)"); return NULL; }
@@ -502,6 +538,40 @@ static Expr *ffi_expr(V *v) {
 }
 
 static Expr *to_expr_v(V *v);
+static Expr *to_expr(V *v);
+/* A constant list: the cells answer the markers one by one, the end answers with a boolean.  Speculative: a value
+   that is not a list leaves no trace. */
+static Expr *const_cells(V *v) {
+  cells_init(); if (!cell_cons || !cell_nil) return NULL;
+  int sf = failed, snf = nfun; long sfu = fuel;
+  Expr **hs = NULL, *tailx = NULL; int nh = 0, cap = 0, ok = 0;
+  fail_quiet++;
+  for (int k = 0; k <= N->nn && v && !failed; k++) {
+    if (v->k != V_CLO) {                           /* a cell built on a list computed elsewhere: its tail */
+      if (nh && (tailx = to_expr(v))) ok = 1;
+      break;
+    }
+    V *r = apply(apply(v, ready(mkv(V_MCONS))), ready(mkv(V_MNIL)));
+    if (!r) break;
+    if (r->k == V_MCELL) {
+      Expr *h = to_expr(force(r->a)); if (!h) break;
+      if (nh == cap) { Expr **o = hs; hs = A(sizeof *hs * (size_t)(cap = cap ? cap * 2 : 16)); if (nh) memcpy(hs, o, sizeof *hs * (size_t)nh); }
+      hs[nh++] = h; v = force(r->b); continue;
+    }
+    if (r->k == V_CLO) { int bo; const_bool(r, &bo); ok = bo && !failed; }
+    break;
+  }
+  fail_quiet--;
+  if (!ok) { failed = sf; fuel = sfu; nfun = snf; return NULL; }
+  int box = 0, untag = dt_boxed(cell_cons->dt, &box) == 1;
+  Expr *l = tailx;
+  if (!l) { l = mke(E_CTOR, 5); l->k = cell_nil->i; l->nargs = 0; l->untag = untag; l->ci = cell_nil; l = hc(l); }
+  for (int i = nh - 1; i >= 0; i--) {
+    Expr *c = mke(E_CTOR, 5); c->k = cell_cons->i; c->nargs = 2; c->args = A(sizeof(Expr *) * 2);
+    c->args[0] = hs[i]; c->args[1] = l; c->untag = untag; c->ci = cell_cons; l = hc(c);
+  }
+  return l;
+}
 static Expr *to_expr(V *v) {                       /* one answer per value: a shared value is one node */
   if (failed || !v) return NULL;
   if (v->k == V_SYM) return v->e;
@@ -520,13 +590,20 @@ static Expr *to_expr_v(V *v) {
     if (d || failed) return d;
     Expr *f = ffi_expr(v);
     if (f || failed) return f;
-    int ok; long k = const_int(v, &ok);
+    /* (speculative: applying a cell to the markers takes its symbolic parts apart, which is no failure) */
+    int ok, sf = failed, snf = nfun; long sfu = fuel;
+    fail_quiet++; long k = const_int(v, &ok); if (failed) ok = 0; fail_quiet--;
+    if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
     if (ok) { Expr *e = mke(E_CONST, 1); e->k = k; return hc(e); }
-    int bk = const_bool(v, &ok);
+    fail_quiet++; int bk = const_bool(v, &ok); if (failed) ok = 0; fail_quiet--;
+    if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
     if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
+    Expr *cl = const_cells(v);                       /* a list (a string): its cells, as constructors */
+    if (cl || failed) return cl;
     fail("a closure where a number belongs"); return NULL;
   }
   if (v->k == V_MATCH) { fail("a match with branches missing"); return NULL; }
+  if (dbg > 1) DBG("[no number: V kind %d]\n", v->k);
   fail("a value with no number"); return NULL;
 }
 
@@ -1438,7 +1515,7 @@ static Shape sh_join(Shape a, Shape b) {
   return (Shape){ 9, NULL };
 }
 static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt; }
-static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed;
+static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad;
 static Shape *sh_memo; static unsigned *sh_gen, sh_g; static int sh_cap;
 static long ctor_id(const LinCtor *ci) { for (long k = 1; lin_ctor_info(k); k++) if (lin_ctor_info(k) == ci) return k; return 0; }
 static void sh_upd(Shape *slot, Shape v) { Shape j = sh_join(*slot, v); if (!sh_eq(j, *slot)) { *slot = j; sh_changed = 1; } }
@@ -1446,10 +1523,17 @@ static Shape shape_of(const Expr *e) {
   if (e->id < sh_cap && sh_gen[e->id] == sh_g) return sh_memo[e->id];
   Shape r = { 0, NULL };
   switch (e->op) {
-  case E_CONST: case E_BIN: case E_FOP: r.k = e->kind == 3 ? 3 : 1; break;
+  case E_CONST: if (e->box) break;                 /* the cells' end answering true: every shape takes it */
+    /* fallthrough */
+  case E_BIN: case E_FOP: r.k = e->kind == 3 ? 3 : 1; break;
   case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun ? sh_par[e->nargs][e->k] : (Shape){ 1, NULL }; break;
   case E_IF: shape_of(e->a); r = sh_join(shape_of(e->b), shape_of(e->c)); break;
-  case E_MATCH: shape_of(e->a); for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i])); break;
+  case E_MATCH: {
+    Shape sc = shape_of(e->a);                       /* what is taken apart must be that datatype's */
+    if (sc.k && !(sc.k == 5 && e->ci && sc.dt == e->ci->dt)) sh_bad = 1;
+    for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i]));
+    break;
+  }
   case E_CALL:
     for (int i = 0; i < e->nargs; i++) { Shape a = shape_of(e->args[i]); if (!(funs[e->k].known && funs[e->k].known[i])) sh_upd(&sh_par[e->k][i], a); }
     r = sh_fun[e->k]; break;
@@ -1461,7 +1545,7 @@ static Shape shape_of(const Expr *e) {
     r.k = 5; r.dt = e->ci->dt; break;
   }
   case E_FIELD: {
-    shape_of(e->a);
+    { Shape sc = shape_of(e->a); if (sc.k && !(sc.k == 5 && e->ci && sc.dt == e->ci->dt)) sh_bad = 1; }
     long id = ctor_id(e->ci);
     r = id > 0 && id <= sh_nctor && e->k < e->ci->k ? sh_fld[id][e->k] : (Shape){ 9, NULL }; break;
   }
@@ -1480,7 +1564,7 @@ static Shape unit_shapes(const Expr *entry) {
   if (sh_cap < eid) { sh_cap = eid * 2 + 64; sh_memo = realloc(sh_memo, sizeof *sh_memo * (size_t)sh_cap); sh_gen = realloc(sh_gen, sizeof *sh_gen * (size_t)sh_cap); memset(sh_gen, 0, sizeof *sh_gen * (size_t)sh_cap); }
   Shape res = { 0, NULL };
   for (int round = 0; round < 1000; round++) {
-    sh_changed = 0;
+    sh_changed = 0; sh_bad = 0;
     sh_g++;
     for (int i = 0; i < nfun; i++) sh_upd(&sh_fun[i], shape_of(funs[i].body));
     res = shape_of(entry);
@@ -1578,10 +1662,10 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
        data the rule above is relaxed: work may be wasted on a value nobody reads, but the answer is the net's. */
     if (!safe) { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) safe = 1; }
     if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
+    Shape rshape = safe ? unit_shapes(entry) : (Shape){ 1, NULL };
+    if (safe && sh_bad) { safe = 0; DBG("declined: a value taken apart as something it is not (a number read as cells?)\n"); }
     int numeric = safe && result_numeric(entry);
-    Shape rshape = { 1, NULL };
     if (safe && !numeric) {                            /* a STRUCTURE: folded if its shape is known to the leaves */
-      rshape = unit_shapes(entry);
       if (!shape_closed(rshape, 0) || rshape.k != 5) { safe = 0; DBG("declined: the result's shape is not known (a field holding different kinds of value)\n"); }
     }
     if (!safe) {}
@@ -1755,6 +1839,21 @@ static Scope fresh_label(Reif *R) {                   /* a sharing point no othe
 }
 static Port rf_ctor(Reif *R, const LinCtor *ci, const Port *fields) {
   Net *n = R->n; Scope sc = scope_nil();
+  if (cells_dt && ci->dt == cells_dt) {             /* a cell `\c.\n.((c h) t)`, or the end `\c.\n.true`: no marker */
+    Port c = net_alloc(n, LAM, sc), nn = net_alloc(n, LAM, sc);
+    net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 1);
+    net_link(n, (Port){nn.node, 1}, net_alloc(n, ERA, sc), 1);
+    if (ci->k == 2) {
+      Port a1 = net_alloc(n, APP, sc), a2 = net_alloc(n, APP, sc);
+      net_link(n, (Port){a1.node, 0}, (Port){c.node, 1}, 1); net_link(n, (Port){a1.node, 2}, fields[0], 1);
+      net_link(n, (Port){a2.node, 0}, (Port){a1.node, 1}, 1); net_link(n, (Port){a2.node, 2}, fields[1], 1);
+      net_link(n, (Port){nn.node, 2}, (Port){a2.node, 1}, 1);
+    } else {
+      net_link(n, (Port){c.node, 1}, net_alloc(n, ERA, sc), 1);
+      net_link(n, (Port){nn.node, 2}, net_alloc_bool(n, 1), 1);
+    }
+    return (Port){c.node, 0};
+  }
   Port *lam = malloc(sizeof *lam * (size_t)ci->m);
   for (int j = 0; j < ci->m; j++) lam[j] = net_alloc(n, LAM, sc);
   for (int j = 0; j + 1 < ci->m; j++) net_link(n, (Port){lam[j].node, 2}, (Port){lam[j + 1].node, 0}, 1);
@@ -1939,6 +2038,7 @@ static void __attribute__((constructor)) fn_load(void) {
   if (registered) return;
   registered = 1;
   lin_driver_add(&lin_fn_driver);
+  cells_init();                                      /* (the cell datatype, registered once) */
 }
 LinDriver lin_fn_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
