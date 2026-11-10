@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <limits.h>
 
 #include <setjmp.h>
@@ -100,7 +101,7 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
        E_CTOR, E_MATCH, E_FIELD };   /* data: constructor k (its index) of args; match on a over args (one result per
                                         constructor, in order); field k of a */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; } Expr;   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; } Expr;   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
@@ -145,12 +146,12 @@ static Expr **hct; static int hccap, hcn;
 static unsigned long hc_hash(const Expr *e) {
   unsigned long h = (unsigned long)e->op * 1000003u ^ (unsigned long)e->k * 2654435761u ^ (unsigned long)e->kind * 97u
                   ^ (unsigned long)e->nargs * 131u;
-  h = h * 31 + (uintptr_t)e->a; h = h * 31 + (uintptr_t)e->b; h = h * 31 + (uintptr_t)e->c;
+  h = h * 31 + (uintptr_t)e->a; h = h * 31 + (uintptr_t)e->b; h = h * 31 + (uintptr_t)e->c; h = h * 31 + (uintptr_t)e->ci;
   for (int i = 0; i < e->nargs && e->args; i++) h = h * 31 + (uintptr_t)e->args[i];
   return h ^ (h >> 29);
 }
 static int hc_eq(const Expr *x, const Expr *y) {
-  if (x->op != y->op || x->k != y->k || x->kind != y->kind || x->nargs != y->nargs || x->a != y->a || x->b != y->b || x->c != y->c) return 0;
+  if (x->op != y->op || x->k != y->k || x->kind != y->kind || x->nargs != y->nargs || x->a != y->a || x->b != y->b || x->c != y->c || x->ci != y->ci) return 0;
   if (!x->args != !y->args) return 0;
   for (int i = 0; i < x->nargs && x->args; i++) if (x->args[i] != y->args[i]) return 0;
   return 1;
@@ -272,8 +273,8 @@ static int dt_boxed(const char *dt, int *box) {      /* how many constructors of
   for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == dt && c->k > 0) { n++; *box = c->i; }
   return n;
 }
-static Expr *field_expr(Expr *scrut, int j, int untag) {
-  Expr *e = mke(E_FIELD, 1); e->a = scrut; e->k = j; e->untag = untag; return hc(e);
+static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci) {
+  Expr *e = mke(E_FIELD, 1); e->a = scrut; e->k = j; e->untag = untag; e->ci = ci; return hc(e);
 }
 static V *match_add(V *m, Lz *x) {
   if (x->state != 0) { fail("a match branch that is not net structure"); return NULL; }
@@ -291,14 +292,14 @@ static V *match_add(V *m, Lz *x) {
   /* every constructor has its branch: the match's value */
   Expr *r = mke(E_MATCH, 1); r->a = m->e; r->nargs = ci->m; r->args = A(sizeof(Expr *) * (size_t)ci->m);
   int box = 0, untag = dt_boxed(ci->dt, &box) == 1;
-  r->untag = untag; r->box = box;
+  r->untag = untag; r->box = box; r->ci = ci;
   int kind = -1;
   for (int i = 0; i < ci->m; i++) {
     const LinCtor *c2 = NULL;
     for (long k = 1; (c2 = lin_ctor_info(k)); k++) if (c2->dt == ci->dt && c2->i == i) break;
     if (!c2) { fail("a constructor missing from the registry"); return NULL; }
     V *b = force(v->args[i]);
-    for (int j = 0; b && j < c2->k; j++) { V *fv = mkv(V_SYM); fv->e = field_expr(m->e, j, untag); b = apply(b, ready(fv)); }
+    for (int j = 0; b && j < c2->k; j++) { V *fv = mkv(V_SYM); fv->e = field_expr(m->e, j, untag, c2); b = apply(b, ready(fv)); }
     if (!(r->args[i] = to_expr(b))) return NULL;
     if (r->args[i]->op == E_CALL) continue;          /* (a recursive call has the kind the other branches say) */
     int bk = r->args[i]->kind;
@@ -322,7 +323,7 @@ static Expr *ctor_expr(V *v) {
   while (is(N, x, APP, 1) && nf < ci->k) { fields[nf++] = W(N, (Port){x.node, 2}); x = dhop(N, W(N, (Port){x.node, 0})); }
   if (nf != ci->k || !(x.node == di && x.port == 1)) return NULL;
   Expr *e = mke(E_CTOR, 5); e->k = ci->i; e->nargs = nf; e->args = A(sizeof(Expr *) * (size_t)(nf ? nf : 1));
-  { int box; e->untag = dt_boxed(ci->dt, &box) == 1; }
+  { int box; e->untag = dt_boxed(ci->dt, &box) == 1; } e->ci = ci;
   for (int j = 0; j < nf; j++)                       /* (collected last field first) */
     if (!(e->args[nf - 1 - j] = to_expr(eval(fields[j], v->env)))) return NULL;
   return hc(e);
@@ -1013,8 +1014,10 @@ static int run_cc(const char *src, const char *so) {
 }
 
 typedef long (*Entry)(const long *, int threads);
-typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; int *aborted; } Compiled;   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
-static Compiled *done; static int ndone, donecap;
+typedef struct { unsigned char k; const char *dt; } Shape;     /* (see SHAPES below) */
+typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; int *aborted;
+                 Shape res; Shape **fld; long nctor; void (*release)(void); } Compiled;   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
+static Compiled **done; static int ndone, donecap;   /* (pointers: a call holds one while another compiles) */
 /* -march=native code must never be loaded on a different CPU, so the cache key includes this one's identity. */
 static unsigned long cpu_key(void) {
   static unsigned long k;
@@ -1029,9 +1032,10 @@ static unsigned long cpu_key(void) {
   }
   return k;
 }
-static Compiled *compile_src(const char *src, int ar, int kind) {
+static Shape **sh_fld; static long sh_nctor;
+static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
   unsigned long h = fnv1a(src) ^ cpu_key();
-  for (int i = 0; i < ndone; i++) if (done[i].h == h) return done[i].fn ? &done[i] : NULL;
+  for (int i = 0; i < ndone; i++) if (done[i]->h == h) return done[i]->fn ? done[i] : NULL;
   char dir[4096], c[4200], so[4200];
   cache_dir(dir, sizeof dir); mkdir_p(dir);
   snprintf(c, sizeof c, "%s/fn-%016lx.c", dir, h); snprintf(so, sizeof so, "%s/fn-%016lx.so", dir, h);
@@ -1046,8 +1050,16 @@ static Compiled *compile_src(const char *src, int ar, int kind) {
   int *ab = hnd ? (int *)dlsym(hnd, "lin_fn_aborted") : NULL;
   if (!e) DBG("no compiler or the build failed for %s\n", c);
   if (ndone >= donecap) done = realloc(done, (size_t)(donecap = donecap ? donecap * 2 : 32) * sizeof *done);
-  done[ndone] = (Compiled){ h, e, ar, kind, 0, ab };
-  return e ? &done[ndone++] : (ndone++, NULL);
+  Compiled *cp = calloc(1, sizeof *cp);
+  *cp = (Compiled){ h, e, ar, kind, 0, ab, res, NULL, 0, NULL };
+  if (kind == 5 && hnd) {                            /* the field shapes the result is read by, kept with the code */
+    cp->release = (void (*)(void))(intptr_t)dlsym(hnd, "lin_fn_release");
+    cp->nctor = sh_nctor; cp->fld = calloc((size_t)sh_nctor + 1, sizeof *cp->fld);
+    for (long k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; cp->fld[k] = malloc(sizeof **cp->fld * (size_t)nk); memcpy(cp->fld[k], sh_fld[k], sizeof **cp->fld * (size_t)nk); }
+    if (!cp->release) e = NULL;
+  }
+  done[ndone++] = cp;
+  return e ? cp : NULL;
 }
 
 /* A PARALLEL REDUCTION.  f(.., i, .., acc, ..) = if i == c then acc else f(.., i - 1, .., acc (+) g, ..), with every
@@ -1369,6 +1381,86 @@ static int result_numeric(const Expr *entry) {
   return is_num(entry);
 }
 
+/* SHAPES: what every value of the unit IS, data included, so a result that is a structure can be built back into
+   the net.  A C word is a number, a boolean or a datatype's value (an immediate or a block); which, is a fixpoint
+   over the unit: a constructor's field has the shape of what is put there, a parameter of what is passed, a call
+   of what its body returns, a field read of what was stored in that field.  Floats are numerals of their bits,
+   so they are numbers here.  Any disagreement (a field holding a number in one place and a tree in another) is
+   TOP, and a unit whose result reaches a TOP is not folded -- the net computes it. */
+/* Shape.k: 0 nothing yet, 1 number, 3 boolean, 5 data(dt), 9 top */
+static Shape sh_join(Shape a, Shape b) {
+  if (!a.k) return b;
+  if (!b.k) return a;
+  if (a.k == b.k && (a.k != 5 || a.dt == b.dt)) return a;
+  return (Shape){ 9, NULL };
+}
+static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt; }
+static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed;
+static Shape *sh_memo; static unsigned *sh_gen, sh_g; static int sh_cap;
+static long ctor_id(const LinCtor *ci) { for (long k = 1; lin_ctor_info(k); k++) if (lin_ctor_info(k) == ci) return k; return 0; }
+static void sh_upd(Shape *slot, Shape v) { Shape j = sh_join(*slot, v); if (!sh_eq(j, *slot)) { *slot = j; sh_changed = 1; } }
+static Shape shape_of(const Expr *e) {
+  if (e->id < sh_cap && sh_gen[e->id] == sh_g) return sh_memo[e->id];
+  Shape r = { 0, NULL };
+  switch (e->op) {
+  case E_CONST: case E_BIN: case E_FOP: r.k = e->kind == 3 ? 3 : 1; break;
+  case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun ? sh_par[e->nargs][e->k] : (Shape){ 1, NULL }; break;
+  case E_IF: shape_of(e->a); r = sh_join(shape_of(e->b), shape_of(e->c)); break;
+  case E_MATCH: shape_of(e->a); for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i])); break;
+  case E_CALL:
+    for (int i = 0; i < e->nargs; i++) { Shape a = shape_of(e->args[i]); if (!(funs[e->k].known && funs[e->k].known[i])) sh_upd(&sh_par[e->k][i], a); }
+    r = sh_fun[e->k]; break;
+  case E_CTOR: {
+    long id = ctor_id(e->ci);
+    if (id <= 0 || id > sh_nctor) { r.k = 9; break; }
+    sh_built[id] = 1;
+    for (int j = 0; j < e->nargs; j++) sh_upd(&sh_fld[id][j], shape_of(e->args[j]));
+    r.k = 5; r.dt = e->ci->dt; break;
+  }
+  case E_FIELD: {
+    shape_of(e->a);
+    long id = ctor_id(e->ci);
+    r = id > 0 && id <= sh_nctor && e->k < e->ci->k ? sh_fld[id][e->k] : (Shape){ 9, NULL }; break;
+  }
+  default: r.k = 9; break;
+  }
+  if (e->id < sh_cap) { sh_gen[e->id] = sh_g; sh_memo[e->id] = r; }
+  return r;
+}
+/* The shapes of the unit, to a fixpoint; the entry's.  Tables stay for the result's reading (data_shapes). */
+static Shape unit_shapes(const Expr *entry) {
+  sh_nctor = 0; while (lin_ctor_info(sh_nctor + 1)) sh_nctor++;
+  sh_par = A(sizeof *sh_par * (size_t)nfun); sh_fun = A(sizeof *sh_fun * (size_t)(nfun ? nfun : 1));
+  for (int i = 0; i < nfun; i++) sh_par[i] = A(sizeof **sh_par * (size_t)(funs[i].arity ? funs[i].arity : 1));
+  sh_fld = A(sizeof *sh_fld * (size_t)(sh_nctor + 1)); sh_built = A((size_t)(sh_nctor + 1));
+  for (long k = 1; k <= sh_nctor; k++) sh_fld[k] = A(sizeof **sh_fld * (size_t)(lin_ctor_info(k)->k + 1));
+  if (sh_cap < eid) { sh_cap = eid * 2 + 64; sh_memo = realloc(sh_memo, sizeof *sh_memo * (size_t)sh_cap); sh_gen = realloc(sh_gen, sizeof *sh_gen * (size_t)sh_cap); memset(sh_gen, 0, sizeof *sh_gen * (size_t)sh_cap); }
+  Shape res = { 0, NULL };
+  for (int round = 0; round < 1000; round++) {
+    sh_changed = 0;
+    sh_g++;
+    for (int i = 0; i < nfun; i++) sh_upd(&sh_fun[i], shape_of(funs[i].body));
+    res = shape_of(entry);
+    if (!sh_changed) break;
+  }
+  return res;
+}
+/* Can a value of this shape be read back?  Every constructor of every datatype it reaches that the unit builds
+   must have fields of a known shape. */
+static int shape_closed(Shape s, int depth) {   /* depth: datatypes on the walk (each one checked once) */
+  if (s.k == 1 || s.k == 3) return 1;
+  if (s.k != 5 || depth > sh_nctor) return 0;
+  for (long k = 1; k <= sh_nctor; k++) {
+    const LinCtor *c = lin_ctor_info(k);
+    if (c->dt != s.dt || !sh_built[k]) continue;
+    for (int j = 0; j < c->k; j++) {
+      Shape f = sh_fld[k][j];
+      if (f.k == 5 ? (f.dt != s.dt && !shape_closed(f, depth + 1)) : !(f.k == 1 || f.k == 3)) return 0;
+    }
+  }
+  return 1;
+}
+
 /* The data runtime a unit that builds or reads data gets: an arena (freed when the call returns -- nothing it
    built outlives a numeric result) and a GUARD.  Lin is lazy and the C is strict: a constructor's fields are
    computed when it is built, which a lazy program might never ask for -- an infinite structure, say.  So the
@@ -1442,7 +1534,13 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
        data the rule above is relaxed: work may be wasted on a value nobody reads, but the answer is the net's. */
     if (!safe) { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) safe = 1; }
     if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
-    else if (!result_numeric(entry)) DBG("declined: the result may be data, not a number\n");
+    int numeric = safe && result_numeric(entry);
+    Shape rshape = { 1, NULL };
+    if (safe && !numeric) {                            /* a STRUCTURE: folded if its shape is known to the leaves */
+      rshape = unit_shapes(entry);
+      if (!shape_closed(rshape, 0) || rshape.k != 5) { safe = 0; DBG("declined: the result's shape is not known (a field holding different kinds of value)\n"); }
+    }
+    if (!safe) {}
     else {
       { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) ownership(entry); }
       Buf b = nbuf(4096), fb = nbuf(4096), pre = nbuf(1024), pb = nbuf(1024);
@@ -1479,16 +1577,19 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         free(ebp.s);
         put(&b, "long lin_fn_entry(const long *a, int threads) { lin_threads_ = threads; lin_args = a; lin_fn_aborted = 0;\n");
         put(&b, "  pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);\n");
-        put(&b, "  if (pthread_create(&t, &at, lin_run, 0)) { lin_fn_aborted = 1; return 0; } pthread_join(t, 0); lin_free_all(); return lin_res; }\n");
-        DBG("compiling a data unit (%d function%s, %d numeric argument%s, %d parallel site%s):\n%s\n", nfun, nfun == 1 ? "" : "s", nnum, nnum == 1 ? "" : "s", nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, nnum, entry->kind == 3 ? 3 : 1);
+        /* a structure result stays in the arena until the driver has built it into the net (lin_fn_release) */
+        put(&b, "  if (pthread_create(&t, &at, lin_run, 0)) { lin_fn_aborted = 1; return 0; } pthread_join(t, 0);%s return lin_res; }\n",
+            numeric ? " lin_free_all();" : "");
+        put(&b, "void lin_fn_release(void) { lin_free_all(); }\n");
+        DBG("compiling a data unit (%d function%s, %d numeric argument%s, %d parallel site%s%s):\n%s\n", nfun, nfun == 1 ? "" : "s", nnum, nnum == 1 ? "" : "s", nsite, nsite == 1 ? "" : "s", numeric ? "" : ", a structure result", b.s + strlen(LIN_I64_SRC));
+        r = compile_src(b.s, nnum, numeric ? (entry->kind == 3 ? 3 : 1) : 5, rshape);
         if (r) r->strict = funs[0].strict;
       } else if (ok && aports) {                       /* numbers only, with expression arguments: the plain entry */
         put(&b, "%slong lin_fn_entry(const long *a, int threads) { (void)threads;\n", pre.s);
         for (int i = 0; i < nnum; i++) put(&b, "  long p%d = a[%d];\n", i, i);
         put(&b, "  return %s; }\n", eb.s);
         DBG("compiling (%d functions, entry with expression arguments):\n%s\n", nfun, b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, nnum, entry->kind == 3 ? 3 : 1);
+        r = compile_src(b.s, nnum, entry->kind == 3 ? 3 : 1, (Shape){ 1, NULL });
         if (r) r->strict = funs[0].strict;
       }
       nsite = 0; emitting = 0; fscope++;
@@ -1530,7 +1631,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); return fp(");
         plist(&b, 0); put(&b, "%s0); }\n  return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, ");\n}\n");
         DBG("compiling (%d function%s, arity %d, %d parallel site%s):\n%s\n", nfun, nfun == 1 ? "" : "s", arity, nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, arity, funs[0].body->kind);
+        r = compile_src(b.s, arity, funs[0].body->kind, (Shape){ 1, NULL });
         if (r) r->strict = funs[0].strict;
       } else DBG("declined: expression too large\n");
     done:
@@ -1546,6 +1647,138 @@ static int fn_off = -1;   /* LIN_FN_OFF: refuse every call (the differential's c
 static int fn_claim(const Net *n, Port p1, Port p2) {
   if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
   int h, a, F; return !fn_off && y_call(n, p1, p2, &h, &a, &F);
+}
+
+/* A STRUCTURE RESULT, BUILT INTO THE NET.  The unit's answer is a word: a number, a boolean, or a datatype's value
+   in its arena -- an immediate for a constructor with no fields, else a block (the layout the unit's own matches
+   read).  The shapes the compiler proved say which, field by field, so the value is rebuilt as the constructors
+   the source would have built -- each `\d0..\d(m-1). ((\_c (d_i f1..fk)) ID)`, marker and all, so everything that
+   reads a constructor reads these -- and a block the result reaches more than once is built ONCE and shared by a
+   fan with a label of its own, as the program's own sharing would be: the net gets the DAG, not a tree. */
+typedef struct { long ptr; int refs; int used; Port *outs; } RBlk;
+typedef struct { Net *n; const Compiled *c; RBlk *tab; long cap, cnt; long budget; int bad; unsigned long lbl; } Reif;
+static RBlk *rb_get(Reif *R, long ptr, int make) {
+  if (make && (R->cnt + 1) * 2 > R->cap) {
+    RBlk *o = R->tab; long oc = R->cap; R->cap = R->cap ? R->cap * 2 : 1024; R->tab = calloc((size_t)R->cap, sizeof *R->tab); R->cnt = 0;
+    for (long i = 0; i < oc; i++) if (o[i].ptr) { RBlk *b = rb_get(R, o[i].ptr, 1); *b = o[i]; }
+    free(o);
+  }
+  if (!R->cap) return NULL;
+  for (unsigned long h = ((unsigned long)ptr * 0x9E3779B97F4A7C15UL >> 7) & (unsigned long)(R->cap - 1);; h = (h + 1) & (unsigned long)(R->cap - 1)) {
+    if (R->tab[h].ptr == ptr) return &R->tab[h];
+    if (!R->tab[h].ptr) { if (!make) return NULL; R->tab[h].ptr = ptr; R->cnt++; return &R->tab[h]; }
+  }
+}
+static const LinCtor *dt_ctor(const char *dt, int i) {
+  const LinCtor *c; for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == dt && c->i == i) return c; return NULL;
+}
+/* the constructor of a word of datatype dt, and its fields' words */
+static const LinCtor *rd_word(const char *dt, long w, const long **fields) {
+  int box = 0, untag = dt_boxed(dt, &box) == 1;
+  if (w & 1) { *fields = NULL; return dt_ctor(dt, (int)(w >> 1)); }
+  const long *blk = (const long *)w;
+  if (!blk) return NULL;
+  if (untag) { *fields = blk; return dt_ctor(dt, box); }
+  *fields = blk + 1; return dt_ctor(dt, (int)blk[0]);
+}
+static long cid_of(const LinCtor *ci) { return ctor_id(ci); }
+/* pass 1: how often each block is reached (a block's fields are walked once) -- iteratively: results are deep */
+typedef struct { long w; const char *dt; } RTodo;
+static void rf_count(Reif *R, long w0, const char *dt0) {
+  RTodo *st = malloc(sizeof *st * 64); long sp = 0, sc = 64;
+  st[sp++] = (RTodo){ w0, dt0 };
+  while (sp && !R->bad) {
+    RTodo t = st[--sp];
+    const long *f; const LinCtor *ci = rd_word(t.dt, t.w, &f);
+    if (!ci) { R->bad = 1; break; }
+    if (!(t.w & 1)) { RBlk *b = rb_get(R, t.w, 1); if (b->refs++) continue; }
+    long id = cid_of(ci);
+    for (int j = 0; j < ci->k; j++) {
+      Shape fs = R->c->fld[id][j];
+      if (fs.k != 5) continue;
+      if (sp >= sc) st = realloc(st, sizeof *st * (size_t)(sc *= 2));
+      st[sp++] = (RTodo){ f[j], fs.dt };
+    }
+  }
+  free(st);
+}
+static Scope fresh_label(Reif *R) {                   /* a sharing point no other fan in the net has */
+  Scope s = scope_nil();
+  unsigned long v = 0x5Au << 24 | (R->lbl++ & 0xFFFFFFu);
+  for (int b = 31; b >= 0; b--) s = scope_app(R->n, s, (int)((v >> b) & 1));
+  return s;
+}
+static Port rf_ctor(Reif *R, const LinCtor *ci, const Port *fields) {
+  Net *n = R->n; Scope sc = scope_nil();
+  Port *lam = malloc(sizeof *lam * (size_t)ci->m);
+  for (int j = 0; j < ci->m; j++) lam[j] = net_alloc(n, LAM, sc);
+  for (int j = 0; j + 1 < ci->m; j++) net_link(n, (Port){lam[j].node, 2}, (Port){lam[j + 1].node, 0}, 1);
+  Port ma = net_alloc(n, APP, sc), lc = net_alloc(n, LAM, sc);
+  net_link(n, (Port){lam[ci->m - 1].node, 2}, (Port){ma.node, 1}, 1);
+  net_link(n, (Port){ma.node, 0}, (Port){lc.node, 0}, 1);              /* the marker: a redex, as the source's is */
+  net_link(n, (Port){lc.node, 1}, net_alloc(n, ERA, sc), 1);
+  net_link(n, (Port){ma.node, 2}, net_alloc_scott(n, cid_of(ci)), 1);
+  Port f = (Port){lam[ci->i].node, 1};
+  for (int j = 0; j < ci->k; j++) {
+    Port ap = net_alloc(n, APP, sc);
+    net_link(n, (Port){ap.node, 0}, f, 1);
+    net_link(n, (Port){ap.node, 2}, fields[j], 1);
+    f = (Port){ap.node, 1};
+  }
+  net_link(n, (Port){lc.node, 2}, f, 1);
+  for (int j = 0; j < ci->m; j++) if (j != ci->i) net_link(n, (Port){lam[j].node, 1}, net_alloc(n, ERA, sc), 1);
+  Port v = (Port){lam[0].node, 0};
+  free(lam);
+  return v;
+}
+/* pass 2: build (recursively, on the large stack rf_thread gives it) */
+static Port rf_build(Reif *R, long w, Shape s) {
+  if (R->bad) return NONE;
+  if (s.k == 1) return net_alloc_scott(R->n, w);
+  if (s.k == 3) return net_alloc_bool(R->n, w != 0);
+  const long *f; const LinCtor *ci = rd_word(s.dt, w, &f);
+  if (!ci) { R->bad = 1; return NONE; }
+  RBlk *b = (w & 1) ? NULL : rb_get(R, w, 0);
+  if (b && b->outs) return b->outs[b->used++];
+  long id = cid_of(ci);
+  Port *fp = malloc(sizeof *fp * (size_t)(ci->k + 1));
+  for (int j = 0; j < ci->k && !R->bad; j++) fp[j] = rf_build(R, f[j], R->c->fld[id][j]);
+  Port v = R->bad ? NONE : rf_ctor(R, ci, fp);
+  free(fp);
+  if (R->bad || !b || b->refs < 2) return v;
+  b->outs = malloc(sizeof *b->outs * (size_t)b->refs); b->used = 0;
+  Scope lb = fresh_label(R); Port cur = v;
+  for (int r = 0; r < b->refs - 1; r++) {
+    Port d = net_alloc(R->n, DUP, lb);
+    net_link(R->n, (Port){d.node, 0}, cur, 1);
+    b->outs[r] = (Port){d.node, 1}; cur = (Port){d.node, 2};
+  }
+  b->outs[b->refs - 1] = cur;
+  return b->outs[b->used++];
+}
+typedef struct { Reif *R; long w; Port out; } RfArg;
+static void *rf_thread(void *u) { RfArg *a = u; a->out = rf_build(a->R, a->w, a->R->c->res); return NULL; }
+/* The value of a compiled call's result word, as net structure; NONE if it cannot be read back. */
+static Port result_port(Net *n, const Compiled *c, long r) {
+  if (c->kind == 3) return net_alloc_bool(n, r != 0);
+  if (c->kind != 5) return net_alloc_scott(n, r);   /* (a float is the numeral of its bits) */
+  static unsigned long lbl;
+  Reif R = { n, c, NULL, 0, 0, 0, 0, lbl };   /* (each block is walked once: the arena bounds the walk) */
+  rf_count(&R, r, c->res.dt);
+  Port v = NONE;
+  if (!R.bad) {
+    RfArg a = { &R, r, NONE };
+    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);
+    pthread_t t;
+    if (!pthread_create(&t, &at, rf_thread, &a)) { pthread_join(t, NULL); v = a.out; }
+    pthread_attr_destroy(&at);
+  }
+  lbl = R.lbl;
+  for (long i = 0; i < R.cap; i++) free(R.tab[i].outs);
+  free(R.tab);
+  if (c->release) c->release();
+  if (R.bad) DBG("the structure result could not be read back: the net computes it\n");
+  return R.bad ? NONE : v;
 }
 
 /* Could this argument be a numeral already -- `\c.\n.` over a cell or a terminal -- WITHOUT forcing anything?
@@ -1598,14 +1831,16 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
           long r = c2->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
           if (c2->aborted && *c2->aborted) { DBG("the data unit's guard fired: the net computes it\n"); }
           else {
-            Port val = c2->kind == 3 ? net_alloc_bool(n, r != 0) : net_alloc_scott(n, r);
+            Port val = result_port(n, c2, r);
+            if (val.node < 0) goto decline_ex;
             Port out = W(n, (Port){cl, 1});
             net_link(n, val, out, 1);
             net_drop(n, cl);
-            DBG("folded a call with %d expression argument%s -> %ld\n", nexpr, nexpr == 1 ? "" : "s", r);
+            DBG("folded a call with %d expression argument%s -> %s\n", nexpr, nexpr == 1 ? "" : "s", c2->kind == 5 ? "a structure" : "a word");
             lin_fold_bump(); folded++; (*changed)++; n->steps++;
             continue;
           }
+          decline_ex:;
         }
       }
     }
@@ -1638,11 +1873,15 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
       if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
       continue;
     }
-    Port val = c->kind == 3 ? net_alloc_bool(n, r != 0) : net_alloc_scott(n, r);   /* a float is the numeral of its bits */
+    Port val = result_port(n, c, r);
+    if (val.node < 0) {
+      if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
+      continue;
+    }
     Port out = W(n, (Port){call, 1});
     net_link(n, val, out, 1);
     net_drop(n, call);                                  /* erases the call chain, Y and F behind it */
-    DBG("folded a call of arity %d -> %ld\n", c->arity, r);
+    DBG("folded a call of arity %d -> %s\n", c->arity, c->kind == 5 ? "a structure" : "a word");
     lin_fold_bump(); folded++; (*changed)++; n->steps++;
   }
   return folded;

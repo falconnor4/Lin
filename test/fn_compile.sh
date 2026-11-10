@@ -49,6 +49,22 @@ prog bst '(datatype T (tip) (bin k l r))
 (define build (\i (\t (if (eq i 0) t (build (sub i 1) (ins (mod (mul i 37) 101) t))))))
 (define walk (\t (\d (match t (tip 0) ((bin k l r) (add (mul k d) (add (walk l (add d 1)) (walk r (add d 1)))))))))
 (walk (build 30 tip) 1)' 7600
+# STRUCTURE RESULTS: a call whose value is data is built back into the net from the unit's arena, field kinds
+# inferred (numbers, booleans, other datatypes) and shared blocks kept shared
+prog dresult '(datatype L (ln) (lc h t))
+(define upto (\n (if (eq n 0) ln (lc n (upto (sub n 1))))))
+(upto 3)' '(lc 3 (lc 2 (lc 1 ln)))'
+prog dmixed '(datatype (P a b) (pr (x a) (y b)))
+(datatype (L a) (ln) (lc (h a) (t L a)))
+(define pairs (\n (if (eq n 0) ln (lc (pr n (eq (mod n 2) 0)) (pairs (sub n 1))))))
+(pairs 2)' '(lc (pr 2 true) (lc (pr 1 false) ln))'
+prog dshared '(datatype T (lf) (nd l r))
+(define full (\n (if (eq n 0) lf (let ((t (full (sub n 1)))) (nd t t)))))
+(full 2)' '(nd (nd lf lf) (nd lf lf))'
+prog dhigher '(datatype L (ln) (lc h t))
+(define upto (\n (if (eq n 0) ln (lc n (upto (sub n 1))))))
+(define lmap (\f (\s (match s (ln ln) ((lc h t) (lc (f h) (lmap f t)))))))
+(lmap (\x (mul x 10)) (upto 3))' '(lc 30 (lc 20 (lc 10 ln)))'
 # a function that may not look at its data argument (lazy in Lin, strict in C): still the net's answer
 prog lazydata '(datatype S (snil) (scons h t))
 (define upto (\n (if (eq n 0) snil (scons n (upto (sub n 1))))))

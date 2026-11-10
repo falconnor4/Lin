@@ -796,7 +796,11 @@ static int print_num_list(Net *n, Port p, FILE *f);
    one, a layer of the enclosing datatype (the usual undeclared field is the recursive one), else the term. */
 static int print_untyped(Net *n, Port p, const char *parent, FILE *f, int depth) {
   Port v = net_dup_hop(n, net_force_val(n, p));
-  if (ctor_fields(n, v, f, depth)) return 1;
+  { char *buf = NULL; size_t len = 0; FILE *g = open_memstream(&buf, &len); int ok = 0;   /* (all or nothing) */
+    if (g) { ok = ctor_fields(n, v, g, depth); fclose(g); }
+    if (ok) fwrite(buf, 1, len, f);
+    free(buf);
+    if (ok) return 1; }
   long x;
   if (net_read_i64(n, v, &x)) { fprintf(f, "%ld", x); return 1; }
   if (parent) {
