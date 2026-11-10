@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+void (*lin_ctor_demand)(const char *name);
 static const char *S;
 static int P;
 static jmp_buf PJ;
@@ -302,6 +303,7 @@ static Term *parse_term(void) {
         free(vs);
         /* a branch for a declared constructor states which (lin.h, the constructor registry): `((\_m BR) ID)` */
         { long cid = lin_ctor_lookup(ctorname);
+          if (!cid && lin_ctor_demand && strcmp(ctorname, "_")) { lin_ctor_demand(ctorname); cid = lin_ctor_lookup(ctorname); }
           const LinCtor *ci = cid ? lin_ctor_info(cid) : NULL;
           if (ci && ci->k == k) lam = term_new(TAPP, "", term_new(TLAM, "_m", lam, NULL), term_new(TNUM, lin_internf("%ld", cid), NULL, NULL)); }
         /* the application says which constructor this branch is for, so the checker can type the match

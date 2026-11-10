@@ -40,9 +40,11 @@ long lin_ctor_register(const char *dt, const char *name, int m, int i, int k) {
   for (long j = nctors; j-- > 0; )                   /* a reloaded declaration keeps its ID */
     if (!strcmp(ctors[j].dt, dt) && !strcmp(ctors[j].name, name) && ctors[j].m == m && ctors[j].i == i && ctors[j].k == k) return j + 1;
   if (nctors >= cctors) ctors = realloc(ctors, (size_t)(cctors = cctors ? cctors * 2 : 32) * sizeof *ctors);
-  ctors[nctors] = (LinCtor){ lin_intern(dt, strlen(dt)), lin_intern(name, strlen(name)), m, i, k };
+  ctors[nctors] = (LinCtor){ lin_intern(dt, strlen(dt)), lin_intern(name, strlen(name)), m, i, k, NULL };
   return ++nctors;
 }
+void lin_ctor_set_fdesc(long id, const char *fdesc) { if (id >= 1 && id <= nctors && fdesc) ctors[id - 1].fdesc = lin_intern(fdesc, strlen(fdesc)); }
+const char *lin_result_desc;
 const LinCtor *lin_ctor_info(long id) { return id >= 1 && id <= nctors ? &ctors[id - 1] : NULL; }
 long lin_ctor_lookup(const char *name) {             /* the latest declaration of that name wins, as a definition does */
   const char *dot = strrchr(name, '.');
@@ -169,11 +171,38 @@ static int cell_layer(Net *n, Port p, Port *head, Port *tail) {
   if (!live(n, body) || n->tag[body.node] != APP) return 0;
   Port ia = skip_dup(n, net_force_val(n, wr(n, (Port){body.node, 0})));
   if (!live(n, ia) || n->tag[ia.node] != APP) return 0;
+  /* ...and the cell applies its OWN first binder (or a copy of it): `\l.\n.((n x) y)` or `\l.\n.(((n x) y) z)`
+     (a datatype's constructors) have the same spine and are not cells */
+  Port hd = skip_dup(n, net_force_val(n, wr(n, (Port){ia.node, 0})));
+  if (!live(n, hd) || (n->tag[hd.node] == LAM ? hd.port != 1 || hd.node != p.node : n->tag[hd.node] != DUP)) return 0;
   if (head) *head = wr(n, (Port){ia.node, 2});
   if (tail) *tail = wr(n, (Port){body.node, 2});
   return 1;
 }
 int net_read_cell(Net *n, Port p, Port *head, Port *tail) { return cell_layer(n, p, head, tail); }
+/* A datatype's layer: the m dispatch binders, then the spine (forced as it is walked, so a constructor's own
+   marker -- a redex under its binders -- reduces away on the way), whose head is one of those binders.  The
+   plain fan walk throughout, as cell_layer: a spine reached through a fan stands for one value. */
+int net_read_scott(Net *n, Port p, int m, int *idx, Port *fields, int kmax) {
+  if (m <= 0) return -1;
+  int *lams = malloc(sizeof *lams * (size_t)m), k = 0, ok = 1;
+  for (int j = 0; j < m && ok; j++) {
+    if (!hop_lam(n, &p, 0) || p.port != 0) { ok = 0; break; }
+    lams[j] = p.node; p = wr(n, (Port){p.node, 2});
+  }
+  Port x = ok ? skip_dup(n, net_force_val(n, p)) : p;
+  while (ok && live(n, x) && n->tag[x.node] == APP && x.port == 1) {
+    if (k >= kmax || k > n->nn) { ok = 0; break; }
+    fields[k++] = wr(n, (Port){x.node, 2});
+    x = skip_dup(n, net_force_val(n, wr(n, (Port){x.node, 0})));
+  }
+  int i = -1;
+  if (ok && live(n, x) && n->tag[x.node] == LAM && x.port == 1) for (int j = 0; j < m; j++) if (lams[j] == x.node) i = j;
+  free(lams);
+  if (i < 0) return -1;
+  for (int a = 0, b = k - 1; a < b; a++, b--) { Port t = fields[a]; fields[a] = fields[b]; fields[b] = t; }   /* (the spine reads them last first) */
+  *idx = i; return k;
+}
 static int nil_layer(Net *n, Port p) {
   if (!hop_lam(n, &p, 0)) return 0;
   Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));

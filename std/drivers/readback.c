@@ -763,12 +763,109 @@ static int print_ctor(Net *n, Port p, FILE *out) {
   return ok;
 }
 
+/* A VALUE OF A DECLARED TYPE, BY THE TYPE.  The checker's descriptor of the result (lin.h: type_desc) says
+   which datatype it is, and each constructor's declared field types say what its fields are, so the value is
+   read layer by layer as that datatype -- `(scons 1 (scons 2 snil))` -- with no marker and no guess.  A field
+   whose type was not declared (`?`) is printed the way an untyped value is. */
+static const char *td_skip(const char *d) {
+  switch (*d) {
+  case 'N': case 'B': case 'F': case 'S': case '?': return d + 1;
+  case 'P': { const char *e = strchr(d, ';'); return e ? e + 1 : d + strlen(d); }
+  case 'D': { const char *q = strchr(d, '('); if (!q) return d + strlen(d); q++;
+              while (*q && *q != ')') { const char *r = td_skip(q); if (r == q) return q; q = r; } return *q ? q + 1 : q; }
+  default: return d;
+  }
+}
+/* d with each P<j>; replaced by args[j] (an argument this datatype's own descriptor gave): malloc'd */
+static char *td_subst(const char *d, const char *e, const char **args, const char **aend, int nargs) {
+  size_t cap = (size_t)(e - d) + 1, len = 0; char *o = malloc(cap);
+  for (const char *q = d; q < e; ) {
+    const char *from = q, *to; const char *nx;
+    if (*q == 'P') { int j = atoi(q + 1); nx = td_skip(q); if (j >= 0 && j < nargs) { from = args[j]; to = aend[j]; } else { from = "?"; to = from + 1; } }
+    else { nx = q + 1; to = nx; }
+    size_t l = (size_t)(to - from);
+    while (len + l + 1 > cap) { cap *= 2; o = realloc(o, cap); }
+    memcpy(o + len, from, l); len += l; q = nx;
+  }
+  o[len] = 0; return o;
+}
+static int print_typed(Net *n, Port p, const char *d, FILE *f, int depth);
+/* A field whose type was not declared: its constructor's marker if it still has one, a numeral if it reads as
+   one, a layer of the enclosing datatype (the usual undeclared field is the recursive one), else the term. */
+static int print_untyped(Net *n, Port p, const char *parent, FILE *f, int depth) {
+  Port v = net_dup_hop(n, net_force_val(n, p));
+  if (ctor_fields(n, v, f, depth)) return 1;
+  long x;
+  if (net_read_i64(n, v, &x)) { fprintf(f, "%ld", x); return 1; }
+  if (parent) {
+    char *buf = NULL; size_t len = 0; FILE *g = open_memstream(&buf, &len); int ok = 0;
+    if (g) { char *d = malloc(strlen(parent) + 4); sprintf(d, "D%s()", parent); ok = print_typed(n, v, d, g, depth + 1); free(d); fclose(g); }
+    if (ok) fwrite(buf, 1, len, f);
+    free(buf);
+    if (ok) return 1;
+  }
+  print_struct(f, v, -1); return 1;
+}
+static int print_typed_in(Net *n, Port p, const char *d, FILE *f, int depth, const char *parent);
+static int print_typed(Net *n, Port p, const char *d, FILE *f, int depth) { return print_typed_in(n, p, d, f, depth, NULL); }
+static int print_typed_in(Net *n, Port p, const char *d, FILE *f, int depth, const char *parent) {
+  if (depth > n->nn) return 0;                      /* (a walk of distinct layers) */
+  int dom = *d == 'N' ? DT_NUM : *d == 'B' ? DT_BOOL : *d == 'F' ? DT_FLOAT : *d == 'S' ? DT_STR : -1;
+  if (dom >= 0) {
+    Val v = decode(n, p, dom);
+    if (v.kind == 2) { fprintf(f, "\"%s\"", v.sv); return 1; }
+    return render_val(f, v);
+  }
+  if (*d != 'D') return print_untyped(n, p, parent, f, depth);
+  const char *lp = strchr(d, '('); if (!lp) return 0;
+  char *name = strndup(d + 1, (size_t)(lp - d - 1));
+  const char **args = NULL, **aend = NULL; int nargs = 0;
+  for (const char *q = lp + 1; *q && *q != ')'; ) { const char *r = td_skip(q); if (r == q) break;
+    args = realloc(args, sizeof *args * (size_t)(nargs + 1)); aend = realloc(aend, sizeof *aend * (size_t)(nargs + 1));
+    args[nargs] = q; aend[nargs] = r; nargs++; q = r; }
+  int m = 0, kmax = 0;
+  for (long id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name)) { m = c->m; if (c->k > kmax) kmax = c->k; } }
+  const LinCtor *ci = NULL; int i = -1, k = -1, ok = 0;
+  Port *fields = malloc(sizeof *fields * (size_t)(kmax + 1));
+  if (m) k = net_read_scott(n, p, m, &i, fields, kmax);
+  if (k >= 0) for (long id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name) && c->i == i && c->k == k) ci = c; }
+  if (ci) {
+    const char *nm = strrchr(ci->name, '.'); nm = nm ? nm + 1 : ci->name;
+    ok = 1;
+    if (!k) fputs(nm, f);
+    else {
+      fprintf(f, "(%s", nm);
+      const char *fd = ci->fdesc ? ci->fdesc : "";
+      for (int j = 0; j < k && ok; j++) {
+        const char *fe = *fd ? td_skip(fd) : fd;
+        char *sub = fe > fd ? td_subst(fd, fe, args, aend, nargs) : NULL;
+        fputc(' ', f); ok = print_typed_in(n, fields[j], sub ? sub : "?", f, depth + 1, name);
+        free(sub); fd = fe;
+      }
+      fputc(')', f);
+    }
+  }
+  free(fields); free(args); free(aend); free(name);
+  return ok;
+}
+static int print_by_type(Net *n, Port p, const char *d, FILE *out) {
+  char *buf = NULL; size_t len = 0;
+  FILE *f = open_memstream(&buf, &len);
+  if (!f) return 0;
+  int ok = print_typed(n, p, d, f, 0);
+  fclose(f);
+  if (ok) { fwrite(buf, 1, len, out); fflush(out); }
+  free(buf);
+  return ok;
+}
+
 static int print_body(Net *n, int domain) {
   N = n;
   Port r = net_dup_hop(n, net_force_val(n, wire((Port){0, 0})));   /* the result is observed here */
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     /* Observing an `_ffi` closure IS its effect, so it is dispatched first whatever the type says. */
     if (render_val(OUT, run_ffi(n, r))) return 0;
+    if (domain == LIN_DOM_DATA && lin_result_desc && print_by_type(n, r, lin_result_desc, OUT)) return 0;   /* by its type */
     if ((domain < 0 || domain == LIN_DOM_DATA) && print_ctor(n, r, OUT)) return 0;   /* a datatype's value, by its constructors' names */
     if (domain == LIN_DOM_DATA) domain = -2;          /* (not a numeral or a string: the term, as it is) */
     else {

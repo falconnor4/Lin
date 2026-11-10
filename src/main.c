@@ -377,13 +377,17 @@ static int quiet_forms = 0;
    or a type variable is not a value domain (-1), and a user datatype is a pure-Lin term whose
    encoding is its own -- readback prints the structure, which is the honest answer. */
 static int type_domain(Type *t) {
+  lin_result_desc = NULL;
   while (t && t->kind == TLINK) t = t->a;
   if (!t || t->kind != TNOM || !t->name) return -1;
   if (!strcmp(t->name, "num")) return DT_NUM;
   if (!strcmp(t->name, "bool")) return DT_BOOL;
   if (!strcmp(t->name, "float")) return DT_FLOAT;
   if (!strcmp(t->name, "list")) return DT_STR;     /* a list IS the string encoding: cells of values */
-  for (long id = 1; lin_ctor_info(id); id++) if (!strcmp(lin_ctor_info(id)->dt, t->name)) return LIN_DOM_DATA;
+  for (long id = 1; lin_ctor_info(id); id++) if (!strcmp(lin_ctor_info(id)->dt, t->name)) {
+    static char *desc; free(desc); desc = type_desc(t); lin_result_desc = desc;   /* (its type, for the reader) */
+    return LIN_DOM_DATA;
+  }
   return -1;
 }
 
@@ -500,6 +504,10 @@ static void process_datatype(Term *t) {
   for (Term *c = t->l; c; c = c->r, idx++) {
     int nfields = 0; for (Term *f = c->l; f; f = f->r) nfields++;
     long id = lin_ctor_register(t->name, curr_ns[0] && !strchr(c->name, '.') ? lin_internf("%s.%s", curr_ns, c->name) : c->name, m, idx, nfields);
+    { char *fd = NULL; size_t fl = 0;                   /* (the declared field types, for a reader: lin.h) */
+      for (Term *f = c->l; f; f = f->r) { char *d1 = type_desc(f->annot); size_t l1 = strlen(d1);
+        fd = realloc(fd, fl + l1 + 1); memcpy(fd + fl, d1, l1 + 1); fl += l1; free(d1); }
+      lin_ctor_set_fdesc(id, fd ? fd : ""); free(fd); }
     Term *lam = scott_ctor(t->name, idx, c->l, m, id);
     /* constructor type: fresh-params -> Name p1..pk.  A field with a declared
        type (annot) contributes that type (param refs resolved); an untyped field
@@ -633,23 +641,36 @@ static int lz_tok(const char *s, int *i, char *out, int cap) {
   } else while (s[*i] && !isspace((unsigned char)s[*i]) && s[*i] != '(' && s[*i] != ')' && s[*i] != ';') { if (n < cap - 1) out[n++] = s[*i]; (*i)++; }
   out[n] = 0; return n;
 }
+/* skip whitespace and comments; then, at a '(', the balanced form (strings and comments inside skipped) */
+static void lz_ws(const char *s, int *i) {
+  while (s[*i] && (isspace((unsigned char)s[*i]) || s[*i] == ';')) { if (s[*i] == ';') while (s[*i] && s[*i] != '\n') (*i)++; else (*i)++; }
+}
+static void lz_skip_form(const char *s, int *i) {
+  int depth = 0;
+  do {
+    char c = s[*i];
+    if (!c) return;
+    if (c == ';') { while (s[*i] && s[*i] != '\n') (*i)++; continue; }
+    if (c == '"') { (*i)++; while (s[*i] && s[*i] != '"') { if (s[*i] == '\\' && s[*i + 1]) (*i)++; (*i)++; } if (s[*i]) (*i)++; continue; }
+    if (c == '(') depth++; else if (c == ')') depth--;
+    (*i)++;
+  } while (depth > 0);
+}
 static int lazy_register(const char *full, const char *src) {
   const char **names = NULL; int nn = 0, cn = 0, pure = 1;
   size_t sl = strlen(src) + 1;                         /* (a token is never longer than the text) */
   char *ns = calloc(sl, 1), *tok = malloc(sl), *arg = malloc(sl);
-  for (int i = 0, depth = 0; src[i] && pure; ) {
-    char c = src[i];
-    if (c == ';') { while (src[i] && src[i] != '\n') i++; continue; }
-    if (c == '"') { i++; while (src[i] && src[i] != '"') { if (src[i] == '\\' && src[i + 1]) i++; i++; } if (src[i]) i++; continue; }
-    if (c == ')') { depth--; i++; continue; }
-    if (c != '(') { i++; continue; }
-    i++;
-    if (depth++ > 0) continue;
+#define LZ_ADD(nm) do { if (nn >= cn) names = realloc(names, (size_t)(cn = cn ? cn * 2 : 64) * sizeof *names); names[nn++] = (nm); } while (0)
+#define LZ_QUAL(a) (ns[0] && !strchr((a), '.') ? lin_internf("%s.%s", ns, (a)) : lin_intern((a), strlen(a)))
+  for (int i = 0; pure; ) {
+    lz_ws(src, &i);
+    if (!src[i]) break;
+    if (src[i] != '(') { pure = 0; break; }            /* a bare atom at top level: an expression */
+    int start = i; i++;
     if (!lz_tok(src, &i, tok, (int)sl)) { pure = 0; break; }
     if (!strcmp(tok, "define") || !strcmp(tok, "define!")) {
       if (!lz_tok(src, &i, arg, (int)sl)) { pure = 0; break; }
-      if (nn >= cn) names = realloc(names, (size_t)(cn = cn ? cn * 2 : 64) * sizeof *names);
-      names[nn++] = ns[0] && !strchr(arg, '.') ? lin_internf("%s.%s", ns, arg) : lin_intern(arg, strlen(arg));
+      LZ_ADD(LZ_QUAL(arg));
     } else if (!strcmp(tok, "namespace")) {
       lz_tok(src, &i, arg, (int)sl);
       snprintf(ns, sl, "%s", (!strcmp(arg, "_") || !strcmp(arg, "root")) ? "" : arg);
@@ -659,14 +680,24 @@ static int lazy_register(const char *full, const char *src) {
       for (int k = 0; k < n0; k++)
         if (!strncmp(names[k], arg, al) && names[k][al] == '.' && !strchr(names[k] + al + 1, '.') && names[k][al + 1] != '_') {
           const char *suf = names[k] + al + 1; found = 1;
-          if (nn >= cn) names = realloc(names, (size_t)(cn = cn ? cn * 2 : 64) * sizeof *names);
-          names[nn++] = ns[0] ? lin_internf("%s.%s", ns, suf) : suf;
+          LZ_ADD(ns[0] ? lin_internf("%s.%s", ns, suf) : suf);
         }
       if (!found) pure = 0;                            /* (re-exporting another file's namespace: load it now) */
-    } else if (!strcmp(tok, "load") || !strcmp(tok, "open")) {
-      /* a dependency loads when this module does; an open is the module's own scope */
-    } else pure = 0;                                   /* an expression, a datatype, anything with an effect */
+    } else if (!strcmp(tok, "datatype") || !strcmp(tok, "data")) {
+      /* its constructors are definitions (and a match names them while it is being READ: see lin_ctor_demand) */
+      lz_ws(src, &i);
+      if (src[i] == '(') lz_skip_form(src, &i); else lz_tok(src, &i, arg, (int)sl);   /* the type's name */
+      for (;;) {
+        lz_ws(src, &i);
+        if (!src[i] || src[i] == ')') break;
+        if (src[i] == '(') { int j = i + 1; if (lz_tok(src, &j, arg, (int)sl)) LZ_ADD(LZ_QUAL(arg)); lz_skip_form(src, &i); }
+        else if (lz_tok(src, &i, arg, (int)sl)) LZ_ADD(LZ_QUAL(arg)); else { pure = 0; break; }
+      }
+    } else if (strcmp(tok, "load") && strcmp(tok, "open")) pure = 0;   /* (a dependency loads when this module does) */
+    i = start; lz_skip_form(src, &i);
   }
+#undef LZ_ADD
+#undef LZ_QUAL
   free(ns); free(tok); free(arg);
   if (!pure || !nn) { free(names); return 0; }
   if (nlzm >= clzm) lzm = realloc(lzm, (size_t)(clzm = clzm ? clzm * 2 : 32) * sizeof *lzm);
@@ -707,6 +738,7 @@ static void load_std(void) {
   quiet_forms = 1;
   lin_out = fopen("/dev/null", "w");
   lazy_ok = !getenv("LIN_EAGER_STD");
+  lin_ctor_demand = lazy_demand;
   int ok = load_file(std);
   lazy_ok = 0;
   if (lin_out) fclose(lin_out);

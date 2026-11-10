@@ -325,6 +325,7 @@ Term *term_fix(const char *name, Term *body);
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
+char *type_desc(Type *t);   /* the type as a reader's descriptor (type.c): malloc'd */
 Type *type_var(void); Type *type_arrow(Type *a, Type *b); Type *type_nominal(const char *name); Type *type_arg(Type *arg); Type *type_param(int idx);
 int nominal_lookup(const char *name); int nominal_register(const char *name, int arity);
 int nominal_arity(const char *name);
@@ -396,10 +397,21 @@ Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) ch
    `((\_c (d_i f1..fk)) ID)` and a match branch for it `((\_m BRANCH) ID)`, redexes that beta away -- and ID
    names an entry here: the datatype, the constructor, its index among the m constructors and its k fields.
    Drivers and readback ask by ID; nothing in the core's reduction depends on it. */
-typedef struct { const char *dt, *name; int m, i, k; } LinCtor;
+typedef struct { const char *dt, *name; int m, i, k; const char *fdesc; } LinCtor;
 long lin_ctor_register(const char *dt, const char *name, int m, int i, int k);   /* its ID, >= 1 */
 const LinCtor *lin_ctor_info(long id);                                          /* NULL: no such ID */
-long lin_ctor_lookup(const char *name);                                         /* 0: not a constructor */
+long lin_ctor_lookup(const char *name);
+/* The constructor's FIELD TYPES as descriptors (type_desc), concatenated: what lets a reader print a value of a
+   declared datatype by its type alone, markers or not.  NULL until stated. */
+void lin_ctor_set_fdesc(long id, const char *fdesc);
+/* The observed result's type as a descriptor (NULL: none): set beside the domain (main.c, an artifact's load). */
+extern const char *lin_result_desc;
+/* One layer of a value of an m-constructor datatype, `\d0..\d(m-1). (d_i f1..fk)`, read with forcing: writes i
+   and up to kmax fields (in order) and returns k, or -1 when `p` is not such a layer. */
+int net_read_scott(Net *n, Port p, int m, int *idx, Port *fields, int kmax);
+/* Called by the reader for a match pattern naming no declared constructor yet: a module that declares it is
+   loaded then (main.c's lazy modules), so the branch states its constructor as it would have. */
+extern void (*lin_ctor_demand)(const char *name);                                         /* 0: not a constructor */
 extern long lin_fan_ambiguous;
 extern int lin_fan_undecided;            /* the first un-chosen fan whose principal a crossing walk reached (-1: none) */
 void lin_fan_choose(int node, int port);  /* read the superposition at `node` as its copy `port` (1 or 2) */

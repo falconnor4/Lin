@@ -1,0 +1,32 @@
+; std/seq.lin: a list as a declared datatype (typed, compiled by the function driver, printed by name)
+(load "std/std.lin")
+(ssum (srange 0 10))
+; expect => 45
+(slength (sfilter (\x (eq (mod x 3) 0)) (srange 0 30)))
+; expect => 10
+(ssum (smap (\x (mul x x)) (srange 0 10)))
+; expect => 285
+(sfoldl (\a (\x (add a x))) 0 (srange 1 101))
+; expect => 5050
+(sfoldr (\x (\a (add a x))) 0 (srange 1 11))
+; expect => 55
+(stake 3 (srange 5 100))
+; expect => (scons 5 (scons 6 (scons 7 snil)))
+(sreverse (srange 0 4))
+; expect => (scons 3 (scons 2 (scons 1 (scons 0 snil))))
+(sappend (srange 0 2) (srange 7 9))
+; expect => (scons 0 (scons 1 (scons 7 (scons 8 snil))))
+(shead 0 (sdrop 5 (srange 0 10)))
+; expect => 5
+(snth 2 0 (srange 10 20))
+; expect => 12
+(sany (\x (eq x 7)) (srange 0 10))
+; expect => true
+(sall (\x (lt x 5)) (srange 0 10))
+; expect => false
+(sempty snil)
+; expect => true
+(ssum (srange 0 1000000))
+; expect => 499999500000
+(slength (sreverse (srange 0 100000)))
+; expect => 100000

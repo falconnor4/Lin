@@ -54,3 +54,12 @@ nothing
 ; expect => (just (just 3))
 (bin 2 tip (bin 9 tip tip))
 ; expect => (bin 2 tip (bin 9 tip tip))
+; A value computed by a recursive function prints by its type: the declared field types say what each field is.
+(datatype (Lst a) (lnil_) (lcons_ (h a) (t Lst a)))
+(define upto_ (\n (if (eq n 0) lnil_ (lcons_ n (upto_ (sub n 1))))))
+(upto_ 3)
+; expect => (lcons_ 3 (lcons_ 2 (lcons_ 1 lnil_)))
+; an undeclared field that is the enclosing datatype prints as one too
+(define mk_tree (\n (if (eq n 0) tip (bin n (mk_tree (sub n 1)) tip))))
+(mk_tree 2)
+; expect => (bin 2 (bin 1 tip tip) tip)

@@ -581,7 +581,10 @@ int net_save_line(Net *n, const char *path) {
     uint32_t ld = (uint32_t)strlen(ci->dt), ln = (uint32_t)strlen(ci->name); int32_t mik[3] = { ci->m, ci->i, ci->k };
     fwrite(&ld, sizeof ld, 1, f); fwrite(ci->dt, 1, ld, f); fwrite(&ln, sizeof ln, 1, f); fwrite(ci->name, 1, ln, f);
     fwrite(mik, sizeof mik, 1, f);
+    uint32_t lf = ci->fdesc ? (uint32_t)strlen(ci->fdesc) + 1 : 0; fwrite(&lf, sizeof lf, 1, f); if (lf) fwrite(ci->fdesc, 1, lf - 1, f);
   }
+  uint32_t lr = lin_result_desc ? (uint32_t)strlen(lin_result_desc) + 1 : 0; fwrite(&lr, sizeof lr, 1, f);
+  if (lr) fwrite(lin_result_desc, 1, lr - 1, f);
   lin_driver_carry_write(n, f);
   fclose(f); chmod(path, 0755); return 1;
 }
@@ -637,10 +640,18 @@ int net_load_line(Net *n, const char *path) {
       uint32_t ld = 0, ln = 0; int32_t mik[3]; char *dt = NULL, *nm = NULL; int ok = 0;
       if (fread(&ld, sizeof ld, 1, f) == 1 && (dt = calloc(ld + 1, 1)) && fread(dt, 1, ld, f) == ld &&
           fread(&ln, sizeof ln, 1, f) == 1 && (nm = calloc(ln + 1, 1)) && fread(nm, 1, ln, f) == ln &&
-          fread(mik, sizeof mik, 1, f) == 1) { lin_ctor_register(dt, nm, mik[0], mik[1], mik[2]); ok = 1; }
+          fread(mik, sizeof mik, 1, f) == 1) {
+        long id = lin_ctor_register(dt, nm, mik[0], mik[1], mik[2]);
+        uint32_t lf = 0; char *fd = NULL;
+        if (fread(&lf, sizeof lf, 1, f) == 1 && (!lf || ((fd = calloc(lf, 1)) && fread(fd, 1, lf - 1, f) == lf - 1))) { if (lf) lin_ctor_set_fdesc(id, fd); ok = 1; }
+        free(fd);
+      }
       free(dt); free(nm);
       if (!ok) { fclose(f); net_free(n); return 0; }
     }
+    uint32_t lr = 0; static char *rd; free(rd); rd = NULL; lin_result_desc = NULL;
+    if (fread(&lr, sizeof lr, 1, f) != 1) { fclose(f); net_free(n); return 0; }
+    if (lr) { rd = calloc(lr, 1); if (!rd || fread(rd, 1, lr - 1, f) != lr - 1) { fclose(f); net_free(n); return 0; } lin_result_desc = rd; }
   }
   if (ver == 4) {
     /* A v4 artifact carried the float table inline.  The core passes it to whoever provides that domain. */
