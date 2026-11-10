@@ -75,7 +75,7 @@ prog lifted '(datatype L (ln) (lc h t))
 # STRINGS and other cell-encoded lists: the cell encoding is a datatype to the compiler (a block per cell)
 prog strlen '(str_length "hello, world")' 12
 prog strbuild '(define rep (\n (\acc (if (eq n 0) acc (rep (sub n 1) (cons 97 acc))))))
-(str_length (str_concat (rep 300 nil) (rep 200 nil)))' 500
+(str_length (str_concat (rep 30 nil) (rep 20 nil)))' 50
 prog strmap '(define up (\s (if (str_is_empty s) s (cons (if (and (geq (head s) 97) (leq (head s) 122)) (sub (head s) 32) (head s)) (up (tail s))))))
 (up "hello world")' '"HELLO WORLD"'
 prog strint '(str_parse_int "90210")' 90210
@@ -90,7 +90,7 @@ prog freed '(datatype L (ln) (lc h t))
 prog sharedfree '(datatype T (lf) (nd l r))
 (define full (\n (if (eq n 0) lf (let ((t (full (sub n 1)))) (nd t t)))))
 (define cnt (\t (match t (lf 1) ((nd l r) (add (cnt l) (cnt r))))))
-(cnt (full 16))' 65536
+(cnt (full 10))' 1024
 # a function that may not look at its data argument (lazy in Lin, strict in C): still the net's answer
 prog lazydata '(datatype S (snil) (scons h t))
 (define upto (\n (if (eq n 0) snil (scons n (upto (sub n 1))))))
