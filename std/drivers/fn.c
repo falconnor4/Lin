@@ -860,7 +860,7 @@ static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int b
     ok = emit_region(&sb, pre, xs[i], 1, budget - 1);
     fscope = save;
     put(&sb, "; }\ntypedef struct { long p[%d]; int d; long r; } S%d;\n", arity, k);
-    put(&sb, "static void *run%d(void *v) { S%d *s = v; s->r = site%d(", k, k, k);
+    put(&sb, "static void *run%d(void *v) { S%d *s = v; LIN_TASK_START((size_t)256 << 20); s->r = site%d(", k, k, k);
     for (int j = 0; j < arity; j++) put(&sb, "s->p[%d], ", j);
     put(&sb, "s->d); return 0; }\n");
     put(pre, "%s", sb.s); free(sb.s);
@@ -876,7 +876,7 @@ static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int b
     names[i].len = 0; names[i].s[0] = 0;
     if (site[i] >= 0) {
       int k = site[i];
-      put(b, "long x%d_ = sp%d_ ? (pthread_join(t%d_, 0), s%d_.r) : site%d(", k, k, k, k, k); plist(b, 0);
+      put(b, "long x%d_ = sp%d_ ? (pthread_join(t%d_, 0), LIN_JOINED, s%d_.r) : site%d(", k, k, k, k, k); plist(b, 0);
       put(b, "%sd); ", arity ? ", " : "");
       put(&names[i], "x%d_", k);
     } else if (i == last) put(&names[i], "y%d_", self);
@@ -1296,19 +1296,26 @@ static int result_numeric(const Expr *entry) {
    wrong answer: at worst the oracle's speed. */
 static const char *DATA_RT =
   "#include <setjmp.h>\n#include <stdlib.h>\n"
-  "static jmp_buf lin_jb; static char *lin_stack_lo; int lin_fn_aborted;\n"
-  "static long *lin_hp, *lin_he, lin_used; static void **lin_ch; static int lin_nch, lin_cch;\n"
-  "static long *lin_alloc(long n) {\n"
-  "  if (lin_hp + n > lin_he) { long sz = n > 65536 ? n : 65536; long *c = malloc((size_t)sz * 8);\n"
-  "    if (!c || lin_used > (1L << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) longjmp(lin_jb, 1);\n"
-  "    if (lin_nch >= lin_cch) { lin_cch = lin_cch ? lin_cch * 2 : 64; lin_ch = realloc(lin_ch, (size_t)lin_cch * sizeof *lin_ch); }\n"
-  "    lin_ch[lin_nch++] = c; lin_hp = c; lin_he = c + sz; lin_used += sz; }\n"
-  "  long *r = lin_hp; lin_hp += n; return r; }\n"
+  "#define LIN_TLS __thread __attribute__((tls_model(\"initial-exec\")))\n"
+  "static LIN_TLS jmp_buf lin_jb; static LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
+  "static LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch;\n"
+  "static pthread_mutex_t lin_chm = PTHREAD_MUTEX_INITIALIZER;\n"
+  "static __attribute__((noinline, cold)) void lin_refill(long n) {\n"
+  "  long sz = n > 65536 ? n : 65536; long *c = malloc((size_t)sz * 8);\n"
+  "  if (!c || lin_fn_aborted || lin_used > (1L << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) { free(c); lin_fn_aborted = 1; longjmp(lin_jb, 1); }\n"
+  "  pthread_mutex_lock(&lin_chm);\n"
+  "  if (lin_nch >= lin_cch) { lin_cch = lin_cch ? lin_cch * 2 : 64; lin_ch = realloc(lin_ch, (size_t)lin_cch * sizeof *lin_ch); }\n"
+  "  lin_ch[lin_nch++] = c; lin_used += sz; pthread_mutex_unlock(&lin_chm); lin_hp = c; lin_he = c + sz; }\n"
+  "static inline long *lin_alloc(long n) { if (__builtin_expect(lin_hp + n > lin_he, 0)) lin_refill(n); long *r = lin_hp; lin_hp += n; return r; }\n"
   "static void lin_free_all(void) { for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; }\n"
   /* The guard lives where an infinite STRUCTURE must go -- the arena's refill, once per chunk -- and checks memory and
      the stack there; a compiled function carries nothing (measured: a per-call check doubled a tree insert).  A call
-     whose runaway recursion builds nothing is not caught -- the exposure numeric units have always had. */
-  "#define LIN_ENTER\n#define LIN_LEAVE\n";
+     whose runaway recursion builds nothing is not caught -- the exposure numeric units have always had.  A task on
+     another thread has its own buffer and bound; abandoning anywhere marks the call, and a join that finds it marked
+     abandons the joiner too, so a half-computed value is never used. */
+  "#define LIN_ENTER\n#define LIN_LEAVE\n"
+  "#define LIN_TASK_START(ss) if (setjmp(lin_jb)) { lin_fn_aborted = 1; return 0; } lin_stack_lo = (char *)__builtin_frame_address(0) - (ss) + ((size_t)1 << 24)\n"
+  "#define LIN_JOINED (lin_fn_aborted ? (longjmp(lin_jb, 1), 0) : 0)\n";
 
 /* Compile F and everything it calls, or return NULL.  `aports`, when given, are the call's arguments: a NUMBER
    one (anum[k]) is passed to the entry, any other is compiled into it as an expression -- `(check (make 7))`
@@ -1357,18 +1364,31 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       emitting = -1; fscope++; ok = ok && emit_region(&eb, &pre, entry, 0, 4096);
       int data = uses_data;
       put(&b, "%s%s\n#include <pthread.h>\n", LIN_I64_SRC, LIN_F64_SRC);
-      if (data) put(&b, "%s", DATA_RT); else put(&b, "#define LIN_ENTER\n#define LIN_LEAVE\nint lin_fn_aborted;\n");
+      if (data) put(&b, "%s", DATA_RT); else put(&b, "#define LIN_ENTER\n#define LIN_LEAVE\n#define LIN_TASK_START(ss)\n#define LIN_JOINED 0\nint lin_fn_aborted;\n");
       put(&b, "%s", fb.s);
-      if (ok && data) {                                /* data: no threads (the guard unwinds one stack), its own stack */
-        put(&b, "%sstatic const long *lin_args; static long lin_res;\n", pre.s);
-        put(&b, "static void *lin_run(void *u) { (void)u; const long *a = lin_args; if (setjmp(lin_jb)) { lin_fn_aborted = 1; return 0; }\n");
-        put(&b, "  lin_stack_lo = (char *)__builtin_frame_address(0) - ((size_t)1 << 30) + ((size_t)1 << 24);\n");
+      if (ok && data) {                                /* data: on its own large stack, the tree recursions forked */
+        Buf ebp = nbuf(1024);
+        nsite = 0; emitting = 0; fscope++;
+        int pok = emit_region(&pb, &pre, funs[0].body, 1, 4096);
+        emitting = -1; fscope++;
+        pok = pok && emit_region(&ebp, &pre, entry, 1, 4096);
+        put(&b, "static int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
+        put(&b, "%sint d);\n%s", arity ? ", " : "", pre.s);
+        if (pok) { put(&b, "static long fp("); plist(&b, 1); put(&b, "%sint d) { if (d >= dmax) return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s); }
+        else { put(&b, "static long fp("); plist(&b, 1); put(&b, "%sint d) { (void)d; return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); }\n"); }
+        put(&b, "static const long *lin_args; static long lin_res; static int lin_threads_;\n");
+        put(&b, "static void *lin_run(void *u) { (void)u; const long *a = lin_args; LIN_TASK_START((size_t)1 << 30);\n");
         for (int i = 0; i < nnum; i++) put(&b, "  long p%d = a[%d];\n", i, i);
+        if (pok && nsite) {
+          put(&b, "  if (lin_threads_ > 1) { int lg = 0; while ((1 << lg) < lin_threads_) lg++; dmax = lg + 2;\n");
+          put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); int d = -1; lin_res = %s; return 0; }\n", ebp.s);
+        }
         put(&b, "  lin_res = %s; return 0; }\n", eb.s);
-        put(&b, "long lin_fn_entry(const long *a, int threads) { (void)threads; lin_args = a; lin_fn_aborted = 0;\n");
+        free(ebp.s);
+        put(&b, "long lin_fn_entry(const long *a, int threads) { lin_threads_ = threads; lin_args = a; lin_fn_aborted = 0;\n");
         put(&b, "  pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);\n");
         put(&b, "  if (pthread_create(&t, &at, lin_run, 0)) { lin_fn_aborted = 1; return 0; } pthread_join(t, 0); lin_free_all(); return lin_res; }\n");
-        DBG("compiling a data unit (%d function%s, %d numeric argument%s):\n%s\n", nfun, nfun == 1 ? "" : "s", nnum, nnum == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
+        DBG("compiling a data unit (%d function%s, %d numeric argument%s, %d parallel site%s):\n%s\n", nfun, nfun == 1 ? "" : "s", nnum, nnum == 1 ? "" : "s", nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
         r = compile_src(b.s, nnum, entry->kind == 3 ? 3 : 1);
         if (r) r->strict = funs[0].strict;
       } else if (ok && aports) {                       /* numbers only, with expression arguments: the plain entry */
