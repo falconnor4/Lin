@@ -479,7 +479,7 @@ static Term *scott_ctor(const char *dn, int idx, Term *fields, int m, long id) {
   Term *lam = app;
   for (int i = m - 1; i >= 0; i--) { const char *dn2 = lin_internf("_d%d", i); lam = term_new(TLAM, dn2, lam, NULL); }
   const char **fs = NULL; int nf = 0, cap = 0;
-  for (Term *f = fields; f; f = f->r) { fs = realloc(fs, (size_t)(cap = cap ? cap * 2 : 8) * sizeof *fs); fs[nf++] = f->name; }
+  for (Term *f = fields; f; f = f->r) { if (nf == cap) fs = realloc(fs, (size_t)(cap = cap ? cap * 2 : 8) * sizeof *fs); fs[nf++] = f->name; }
   for (int i = nf - 1; i >= 0; i--) lam = term_new(TLAM, fs[i], lam, NULL);
   free(fs);
   return lam;

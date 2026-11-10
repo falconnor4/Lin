@@ -1,0 +1,25 @@
+; std/array.lin: indexed storage as a 32-way radix trie -- persistent, and updated in place when nothing else
+; holds it (the function compiler proves ownership from the net)
+(load "std/std.lin")
+(aget (aset (array 10 0) 3 42) 3)
+; expect => 42
+(alen (array 100 7))
+; expect => 100
+(afold (\s (\x (add s x))) 0 (array 100 2))
+; expect => 200
+(ato_seq (aset (aset (array 4 0) 0 5) 3 9))
+; expect => (scons 5 (scons 0 (scons 0 (scons 9 snil))))
+(alen (apush (apush (array 64 0) 1) 2))
+; expect => 66
+(aget (apush (array 1024 0) 77) 1024)
+; expect => 77
+; persistent: the old array is unchanged by an update of a shared one
+(let ((a (array 5 1))) (add (aget a 2) (aget (aset a 2 10) 2)))
+; expect => 11
+(afold (\s (\x (add s x))) 0 (aof_seq (srange 0 100)))
+; expect => 4950
+; a million random writes and reads, compiled with in-place update
+(define fill (\a (\i (\n (if (eq i n) a (fill (aset a (mod (mul i 7919) n) i) (add i 1) n))))))
+(define sum (\a (\i (\n (\s (if (eq i n) s (sum a (add i 1) n (add s (aget a i)))))))))
+(sum (fill (array 1000000 0) 0 1000000) 0 1000000 0)
+; expect => 499999500000

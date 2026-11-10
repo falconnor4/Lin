@@ -290,7 +290,7 @@ static Term *parse_term(void) {
           for (;;) {
             skipws(); if (S[P] == ')') { P++; break; }
             const char *vn = sym(); if (!vn) pfail("match: bad field");
-            vs = realloc(vs, (size_t)(cap = cap ? cap * 2 : 4) * sizeof *vs);
+            if (k == cap) vs = realloc(vs, (size_t)(cap = cap ? cap * 2 : 4) * sizeof *vs);
             vs[k++] = vn;
           }
         } else {

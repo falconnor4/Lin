@@ -896,7 +896,7 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int nb = 0, ok = 1, nk = 0;
   for (int i = 0; i < nc; i++) {                   /* choose first: emitting a binding runs nested regions' passes */
     const Expr *x = cand[i];
-    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM) cand[nk++] = x;
+    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD) cand[nk++] = x;   /* (a field read is one load: not worth a local) */
   }
   nc = nk;
   for (int i = 0; i < nc && ok; i++) {
@@ -1013,6 +1013,89 @@ static void lift(void) {
 static void fv_params(Buf *b, int f, int typed, int lead) {   /* a function's extra parameters, after its own */
   for (int i = 0; i < nfv[f]; i++) put(b, typed ? "%slong l%d_%ld" : "%sl%d_%ld", (lead || i) ? ", " : "", fvs[f][i].h + 1, fvs[f][i].k);
 }
+/* INDEXED FIELDS.  A datatype with many fields of one kind is how a program says "an array of k slots" in pure Lin
+   (std/array.lin's trie nodes): choosing slot k is a decision tree of comparisons, and replacing it is one
+   conditional per field.  When the tree provably picks field k+off for every value k can take (k is masked,
+   so its range is known), that is ONE indexed load; and a constructor whose every field j is
+   `k == j+off ? f(field j) : field j`, with f the same for all j, is ONE indexed read-modify-write. */
+static int key_hi(const Expr *k, long *hi) {
+  if (k->op != E_BIN || k->k != LIN_OP_BAND) return 0;
+  const Expr *m = k->b->op == E_CONST ? k->b : k->a->op == E_CONST ? k->a : NULL;
+  long most = 0; const LinCtor *c;                  /* (no constructor has more slots than the widest declared) */
+  for (long id = 1; (c = lin_ctor_info(id)); id++) if (c->k > most) most = c->k;
+  if (!m || m->k <= 0 || m->k >= most || (m->k & (m->k + 1))) return 0;
+  *hi = m->k; return 1;
+}
+static int cmp_int(long code, long x, long y) {
+  switch (code) { case LIN_OP_EQ: return x == y; case LIN_OP_LT: return x < y; case LIN_OP_LEQ: return x <= y;
+                  case LIN_OP_GT: return x > y; case LIN_OP_GEQ: return x >= y; }
+  return -1;
+}
+static const Expr *dt_key(const Expr *e) {           /* the compared expression at the root of a decision tree */
+  if (e->op != E_IF || e->a->op != E_BIN || cmp_int(e->a->k, 0, 0) < 0) return NULL;
+  return e->a->b->op == E_CONST ? e->a->a : e->a->a->op == E_CONST ? e->a->b : NULL;
+}
+static const Expr *dt_leaf(const Expr *e, const Expr *K, long v) {
+  while (e->op == E_IF) {
+    const Expr *c = e->a; int r;
+    if (c->op != E_BIN) return NULL;
+    if (c->a == K && c->b->op == E_CONST) r = cmp_int(c->k, v, c->b->k);
+    else if (c->b == K && c->a->op == E_CONST) r = cmp_int(c->k, c->a->k, v);
+    else return NULL;
+    if (r < 0) return NULL;
+    e = r ? e->b : e->c;
+  }
+  return e;
+}
+/* Is e the selection of field K+off of one block?  Writes the block and off. */
+static int indexed_pick(const Expr *e, const Expr **K, const Expr **S, long *off) {
+  long hi; const Expr *k = dt_key(e);
+  if (!k || !key_hi(k, &hi)) return 0;
+  const Expr *base = NULL; const LinCtor *ci = NULL; long o = 0; int untag = 0;
+  for (long v = 0; v <= hi; v++) {
+    const Expr *l = dt_leaf(e, k, v);
+    if (!l || l->op != E_FIELD) return 0;
+    if (!v) { base = l->a; ci = l->ci; o = l->k; untag = l->untag; }
+    else if (l->a != base || l->ci != ci || l->untag != untag || l->k != v + o) return 0;
+  }
+  if (!ci || hi + o >= ci->k) return 0;
+  *K = k; *S = base; *off = o + !untag; return 1;
+}
+static int contains(const Expr *e, const Expr *x, int depth) {
+  if (e == x) return 1;
+  if (depth > eid) return 1;                         /* (a walk of the DAG: no deeper than its node count) */
+  if ((e->a && contains(e->a, x, depth + 1)) || (e->b && contains(e->b, x, depth + 1)) || (e->c && contains(e->c, x, depth + 1))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (contains(e->args[i], x, depth + 1)) return 1;
+  return 0;
+}
+static int eq_mod(const Expr *a, const Expr *b, const Expr *f0, const Expr *fj, int depth) {   /* a[f0] == b[fj] */
+  if (a == f0) return b == fj;
+  if (a == b) return !contains(a, f0, 0);
+  if (depth > eid || a->op != b->op || a->k != b->k || a->kind != b->kind || a->nargs != b->nargs || a->ci != b->ci || a->untag != b->untag) return 0;
+  if (!a->a != !b->a || !a->b != !b->b || !a->c != !b->c) return 0;
+  if (a->a && !eq_mod(a->a, b->a, f0, fj, depth + 1)) return 0;
+  if (a->b && !eq_mod(a->b, b->b, f0, fj, depth + 1)) return 0;
+  if (a->c && !eq_mod(a->c, b->c, f0, fj, depth + 1)) return 0;
+  for (int i = 0; i < a->nargs; i++) if (!eq_mod(a->args[i], b->args[i], f0, fj, depth + 1)) return 0;
+  return 1;
+}
+/* A reused constructor that rewrites exactly field K+off as f(that field)?  Writes K, off and f's field-0 instance. */
+static int indexed_update(const Expr *e, const Expr **K, long *off, const Expr **f0, const Expr **x0) {
+  if (!e->c || e->nargs < 2) return 0;
+  const Expr *k = NULL; long o = 0;
+  for (int j = 0; j < e->nargs; j++) {
+    const Expr *a = e->args[j];
+    if (a->op != E_IF || a->a->op != E_BIN || a->a->k != LIN_OP_EQ) return 0;
+    const Expr *kk = a->a->b->op == E_CONST ? a->a->a : a->a->a->op == E_CONST ? a->a->b : NULL;
+    long cv = a->a->b->op == E_CONST ? a->a->b->k : a->a->a->k;
+    const Expr *old = a->c;
+    if (!kk || old->op != E_FIELD || old->a != e->c || old->k != j) return 0;
+    if (!j) { k = kk; o = cv; } else if (kk != k || cv != j + o) return 0;
+    if (j && !eq_mod(e->args[0]->b, a->b, e->args[0]->c, old, 0)) return 0;
+  }
+  long hi; if (!key_hi(k, &hi) || hi != e->nargs - 1 || o != 0) return 0;
+  *K = k; *off = !e->untag; *f0 = e->args[0]->c; *x0 = e->args[0]->b; return 1;
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   if (budget <= 0) return 0;
   if (bound(e)) { put(b, "v%d", e->var); return 1; }
@@ -1036,7 +1119,12 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     }
     free(x.s); free(y.s); return ok;
   }
-  case E_IF:
+  case E_IF: {
+    const Expr *K, *S; long off;
+    if (indexed_pick(e, &K, &S, &off)) {
+      put(b, "(((long *)("); if (!emitx(b, pre, S, par, budget - 1)) return 0;
+      put(b, "))[("); if (!emitx(b, pre, K, par, budget - 1)) return 0; put(b, ") + %ld])", off); return 1;
+    } }
     put(b, "("); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
     put(b, " ? "); if (!emit_region(b, pre, e->b, par, budget - 1)) return 0;
     put(b, " : "); if (!emit_region(b, pre, e->c, par, budget - 1)) return 0;
@@ -1047,21 +1135,46 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   case E_CTOR:
     uses_data = 1;
     if (!e->nargs) { put(b, "(%ldL)", e->k * 2 + 1); return 1; }
+    { const Expr *K, *f0, *x0; long off;
+      if (e->c && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K, &off, &f0, &x0)) {
+        int kv = nvar++, ov = nvar++;
+        put(b, "({ long v%d = ", kv); if (!emitx(b, pre, K, par, budget - 1)) return 0;
+        put(b, "; long *_o = (long *)("); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
+        put(b, "); long v%d = _o[v%d + %ld]; ", ov, kv, off);
+        Expr *fx = (Expr *)f0; int sv = fx->var, ss = fx->vscope; fx->var = ov; fx->vscope = fscope;   /* field 0 stands for field K */
+        Expr *kx = (Expr *)K; int skv = kx->var, sks = kx->vscope; kx->var = kv; kx->vscope = fscope;
+        put(b, "_o[v%d + %ld] = ", kv, off);
+        int ok = emit_region(b, pre, x0, par, budget - 1);
+        fx->var = sv; fx->vscope = ss; kx->var = skv; kx->vscope = sks;
+        if (!ok) return 0;
+        put(b, "; (long)_o; })"); return 1;
+      } }
     if (e->c) {                                       /* REUSE: the block the enclosing match took apart (ownership) */
       /* only what changed is written: the same constructor keeps its tag, a field that IS the old one stays */
       put(b, "({ ");
+#define SAMEF(x) ((x)->op == E_FIELD && (x)->a == e->c && (x)->k == i)
       for (int i = 0; i < e->nargs; i++) {
         const Expr *a = e->args[i];
-        if (a->op == E_FIELD && a->a == e->c && a->k == i) continue;
+        if (SAMEF(a)) continue;
+        /* `cond ? new : old` (or `cond ? old : new`): the field is written only when it changes */
+        if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) {
+          int keep_else = SAMEF(a->c);
+          put(b, "long _c%d = ", i); if (!emitx(b, pre, a->a, par, budget - 1)) return 0;
+          put(b, "; long _a%d = %s_c%d ? ", i, keep_else ? "" : "!", i);
+          if (!emitx(b, pre, keep_else ? a->b : a->c, par, budget - 1)) return 0; put(b, " : 0; ");
+          continue;
+        }
         put(b, "long _a%d = ", i); if (!emitx(b, pre, a, par, budget - 1)) return 0; put(b, "; ");
       }
       put(b, "long *_o = (long *)("); if (!emitx(b, pre, e->c, par, budget - 1)) return 0; put(b, "); ");
       if (!e->untag && e->rtag - 1 != e->k) put(b, "_o[0] = %ldL; ", e->k);
       for (int i = 0; i < e->nargs; i++) {
         const Expr *a = e->args[i];
-        if (a->op == E_FIELD && a->a == e->c && a->k == i) continue;
+        if (SAMEF(a)) continue;
+        if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) { put(b, "if (%s_c%d) _o[%d] = _a%d; ", SAMEF(a->c) ? "" : "!", i, i + !e->untag, i); continue; }
         put(b, "_o[%d] = _a%d; ", i + !e->untag, i);
       }
+#undef SAMEF
       put(b, "(long)_o; })"); return 1;
     }
     if (e->untag) put(b, "({ long *_o = lin_alloc(%d); ", e->nargs);
@@ -1402,7 +1515,8 @@ static unsigned occ_r(const Expr *e) {               /* how often occ_x is MOVED
   if (mm_has(MM_OCC, e)) return mm_val[MM_OCC][e->id];
   unsigned r = 0;
   switch (e->op) {
-  case E_FIELD: r = e->a == occ_x ? 0 : occ_r(e->a); break;      /* reading a field consumes nothing */
+  case E_FIELD: r = 0; break;   /* reading a field consumes nothing -- and its base is an enclosing match's scrutinee,
+                                    evaluated (and counted) once, there */
   case E_IF: { unsigned b = occ_r(e->b), c = occ_r(e->c); r = occ_r(e->a) + (b > c ? b : c); break; }
   case E_MATCH: { unsigned m = 0; for (int i = 0; i < e->nargs; i++) { unsigned x = occ_r(e->args[i]); if (x > m) m = x; } r = occ_r(e->a) + m; break; }
   case E_BIN: r = occ_r(e->a) + occ_r(e->b); break;
@@ -1452,6 +1566,7 @@ static void uniq_calls(const Expr *e, const Expr *body) {   /* demote a callee's
   if (e->c) uniq_calls(e->c, body);
   for (int i = 0; i < e->nargs && e->args; i++) uniq_calls(e->args[i], body);
 }
+static Shape *sh_memo; static unsigned *sh_gen, sh_g; static int sh_cap;
 static void own_ctors(const Expr *e, const Expr *body) {   /* demote a field some constructor writes shared */
   if (!e || mm_has(MM_NUM, e)) return;
   mm_put(MM_NUM, e, 1);
@@ -1460,7 +1575,8 @@ static void own_ctors(const Expr *e, const Expr *body) {   /* demote a field som
     for (int j = 0; id > 0 && id <= fown_n && j < e->nargs && j < e->ci->k; j++) {
       const Expr *a = e->args[j];
       if (!fown[id][j] || a->op == E_CONST || (a->op == E_CTOR && !a->nargs)) continue;   /* (an immediate is no block) */
-      if (!uniq(a) || occ(body, a) > 1) { fown[id][j] = 0; uq_changed = 1; }
+      if (sh_cap > a->id && sh_gen[a->id] == sh_g && sh_memo[a->id].k != 5) continue;   /* (nor a number: only data is owned) */
+      if (!uniq(a) || occ(body, a) > 1) { if (dbg > 1) DBG("[disown %s.%d: arg op %d k %ld uniq %d occ %u body id %d]\n", e->ci->name, j, a->op, a->k, uniq(a), occ(body, a), body->id); fown[id][j] = 0; uq_changed = 1; }
     }
   }
   if (e->a) own_ctors(e->a, body);
@@ -1535,6 +1651,10 @@ static void ownership(Expr *entry) {
     if (!uq_changed) break;
   }
   for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); mark_reuse(funs[i].body, i); }
+  if (dbg > 1) {
+    for (int i = 0; i < nfun; i++) { DBG("[own f%d fresh %d:", i, ufresh[i]); for (int k = 0; k < funs[i].arity; k++) fprintf(stderr, " %d", uparam[i][k]); fprintf(stderr, "]\n"); }
+    for (long k = 1; k <= fown_n; k++) { const LinCtor *c = lin_ctor_info(k); if (c->k == 0) continue; DBG("[own %s:", c->name); for (int j = 0; j < c->k; j++) fprintf(stderr, " %d", fown[k][j]); fprintf(stderr, "]\n"); }
+  }
 }
 
 static int has_data(const Expr *e) {               /* (memoised in MM_NUM: call after mm_new(MM_NUM)) */
@@ -1574,7 +1694,6 @@ static Shape sh_join(Shape a, Shape b) {
 }
 static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt; }
 static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad;
-static Shape *sh_memo; static unsigned *sh_gen, sh_g; static int sh_cap;
 static long ctor_id(const LinCtor *ci) { for (long k = 1; lin_ctor_info(k); k++) if (lin_ctor_info(k) == ci) return k; return 0; }
 static void sh_upd(Shape *slot, Shape v) { Shape j = sh_join(*slot, v); if (!sh_eq(j, *slot)) { *slot = j; sh_changed = 1; } }
 static Shape shape_of(const Expr *e) {
@@ -1684,6 +1803,16 @@ static const char *DATA_RT =
    compiles `make` too, instead of asking the net to build the tree first. */
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum);
 static Compiled *compile_fn(Net *n, int F) { return compile_fn_ex(n, F, NULL, NULL); }
+/* THE CALL'S CONTEXT.  A recursive call is where the driver notices a unit, but the call's value is often taken
+   apart at once -- `(alen (fill a 0 n))` is fill's result applied to a match branch -- and folding a structure back
+   into the net only for the net to read one field of it is the slow way round.  So the applications around the
+   call join the unit: the result applied to arguments (kind 0: a match, a function result applied), or passed to a
+   function whose value is known (kind 1).  fn_reduce collects them, outermost last; the unit's value is theirs. */
+static Port *cx_port; static int *cx_kind, cx_n, cx_cap;
+static void cx_push(int kind, Port p) {
+  if (cx_n >= cx_cap) { cx_cap = cx_cap ? cx_cap * 2 : 8; cx_port = realloc(cx_port, sizeof *cx_port * (size_t)cx_cap); cx_kind = realloc(cx_kind, sizeof *cx_kind * (size_t)cx_cap); }
+  cx_port[cx_n] = p; cx_kind[cx_n] = kind; cx_n++;
+}
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum) {
   N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
@@ -1710,6 +1839,14 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     }
     if (failed) { arena_free(); return NULL; }        /* (a function the entry reached may be half-built) */
     entry = hc(entry);
+    if (aports && cx_n) {                              /* the context, applied to the call's value */
+      V *v = mkv(V_SYM); v->e = entry; cur_fid = -1;
+      for (int i = 0; i < cx_n && v && !failed; i++)
+        v = cx_kind[i] == 0 ? apply(v, lzp(cx_port[i], NULL)) : apply(eval(cx_port[i], NULL), ready(v));
+      Expr *x = v && !failed ? to_expr(v) : NULL;
+      if (!x || failed) { arena_free(); return NULL; }
+      entry = x;
+    }
     mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
       changed = 0;
@@ -1726,7 +1863,8 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
     Shape rshape = safe ? unit_shapes(entry) : (Shape){ 1, NULL };
     if (safe && sh_bad) { safe = 0; DBG("declined: a value taken apart as something it is not (a number read as cells?)\n"); }
-    int numeric = safe && result_numeric(entry);
+    int numeric = safe && (result_numeric(entry) || rshape.k == 1 || rshape.k == 3);   /* (a field read the shapes prove a number) */
+    int rbool = rshape.k == 3 || (rshape.k != 1 && entry->kind == 3);
     if (safe && !numeric) {                            /* a STRUCTURE: folded if its shape is known to the leaves */
       if (!shape_closed(rshape, 0) || rshape.k != 5) { safe = 0; DBG("declined: the result's shape is not known (a field holding different kinds of value)\n"); }
     }
@@ -1773,14 +1911,14 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
             numeric ? " lin_free_all();" : "");
         put(&b, "void lin_fn_release(void) { lin_free_all(); }\n");
         DBG("compiling a data unit (%d function%s, %d numeric argument%s, %d parallel site%s%s):\n%s\n", nfun, nfun == 1 ? "" : "s", nnum, nnum == 1 ? "" : "s", nsite, nsite == 1 ? "" : "s", numeric ? "" : ", a structure result", b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, nnum, numeric ? (entry->kind == 3 ? 3 : 1) : 5, rshape);
+        r = compile_src(b.s, nnum, numeric ? (rbool ? 3 : 1) : 5, rshape);
         if (r) r->strict = funs[0].strict;
       } else if (ok && aports) {                       /* numbers only, with expression arguments: the plain entry */
         put(&b, "%slong lin_fn_entry(const long *a, int threads) { (void)threads;\n", pre.s);
         for (int i = 0; i < nnum; i++) put(&b, "  long p%d = a[%d];\n", i, i);
         put(&b, "  return %s; }\n", eb.s);
         DBG("compiling (%d functions, entry with expression arguments):\n%s\n", nfun, b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, nnum, entry->kind == 3 ? 3 : 1, (Shape){ 1, NULL });
+        r = compile_src(b.s, nnum, rbool ? 3 : 1, (Shape){ 1, NULL });
         if (r) r->strict = funs[0].strict;
       }
       nsite = 0; emitting = 0; fscope++;
@@ -2029,7 +2167,19 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         nexpr += !an[k];
       }
       if (shape && nexpr) {
-        Compiled *c2 = compile_fn_ex(n, F, ap, an);
+        /* the context first (see cx_push): the widest that compiles, else the call alone */
+        int top = cl; cx_n = 0;
+        for (int k = 0; k < n->nn; k++) {
+          Port o = W(n, (Port){top, 1});
+          if (is(n, o, APP, 0)) { cx_push(0, W(n, (Port){o.node, 2})); top = o.node; }
+          else if (is(n, o, APP, 2)) { cx_push(1, W(n, (Port){o.node, 0})); top = o.node; }
+          else break;
+        }
+        Compiled *c2 = NULL;
+        if (cx_n) { c2 = compile_fn_ex(n, F, ap, an); if (c2) cl = top; else DBG("(the call's context does not compile: the call alone)\n"); }
+        int saved_cx = cx_n; cx_n = 0;
+        if (!c2) c2 = compile_fn_ex(n, F, ap, an);
+        (void)saved_cx;
         if (c2) {
           int nn = 0;
           for (int k = 0; k < car; k++) if (an[k]) net_read_i64(n, ap[k], &args[nn++]);
