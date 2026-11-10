@@ -22,14 +22,14 @@ The rules, so the numbers mean something:
 
 | benchmark | C -O3 | Lin | Lin -t 1 | C / Lin | what it exercises |
 |-----------|-------|-----|----------|---------|-------------------|
-| bintree | 35 ms | 6 ms | 6 ms | 5.83x | constructors + `match`: a depth-20 tree (2M nodes) built and counted |
-| bst | 46 ms | 51 ms | 53 ms | 0.90x | a search tree: 200,000 inserts (updated in place), a weighted walk |
-| collatz | 231 ms | 56 ms | 213 ms | 4.12x | a loop calling a helper loop; a max-reduction |
-| fib | 175 ms | 60 ms | 183 ms | 2.92x | tree recursion |
-| loop | 101 ms | 32 ms | 103 ms | 3.16x | a tail-recursive sum-reduction |
-| mandel | 139 ms | 42 ms | 132 ms | 3.31x | floats (numerals with soft-float meanings); three nested loops |
-| nqueens | 201 ms | 171 ms | 217 ms | 1.18x | bitmask backtracking, unbalanced tree |
-| tak | 83 ms | 41 ms | 96 ms | 2.02x | calls whose arguments are calls |
+| bintree | 34 ms | 6 ms | 7 ms | 5.67x | constructors + `match`: a depth-20 tree (2M nodes) built and counted |
+| bst | 28 ms | 31 ms | 30 ms | 0.90x | a search tree: 200,000 inserts (updated in place), a weighted walk |
+| collatz | 201 ms | 51 ms | 150 ms | 3.94x | a loop calling a helper loop; a max-reduction |
+| fib | 132 ms | 46 ms | 124 ms | 2.87x | tree recursion |
+| loop | 79 ms | 28 ms | 76 ms | 2.82x | a tail-recursive sum-reduction |
+| mandel | 114 ms | 31 ms | 92 ms | 3.68x | floats (numerals with soft-float meanings); three nested loops |
+| nqueens | 158 ms | 127 ms | 162 ms | 1.24x | bitmask backtracking, unbalanced tree |
+| tak | 58 ms | 32 ms | 74 ms | 1.81x | calls whose arguments are calls |
 
 Measured on a 4-core x86-64 container (gcc 15, nixpkgs). Re-run before quoting.
 
