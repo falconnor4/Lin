@@ -127,7 +127,9 @@ Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s) {
 
 /* Install a level trie: level 0 is the root, levels 1..nlv come in id order (parents precede
    children), so depths follow from parents.  nlv == 0 is a valid net. */
+static void lvl_prefix_forget(const Net *n);
 void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit) {
+  lvl_prefix_forget(n);
   lv_ensure(n, nlv + 1);
   n->nlv = nlv;
   n->lv_parent[0] = 0; n->lv_bit[0] = 0; n->lv_depth[0] = 0;
@@ -141,6 +143,7 @@ void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit)
 int net_level_count(const Net *n) { return n->nlv; }
 
 void net_init(Net *n, int cap) {
+  lvl_prefix_forget(n);
   n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
   n->scope = malloc(cap * sizeof(Scope));
   n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
@@ -161,6 +164,7 @@ void net_init(Net *n, int cap) {
 }
 
 void net_free(Net *n) {
+  lvl_prefix_forget(n);
   for (int i = 0; i < n->nheld; i++) {
     LinDriver *d = n->held_drv[i];
     if (d && DRV_HAS(d, release_claim) && d->release_claim)
@@ -541,20 +545,37 @@ static void link_copies(Net *n, int n1, int n2, const Port *t, const int *cp) {
 }
 
 /* The reference's commutation labels: path = [gen] ++ path(node) ++ path(dup), i.e. `1 : sLam ++ sDup`. */
-static int lvl_path(Net *n, Scope s, unsigned char *out) {
-  int d = lv_depth(n, s), l = (int)s;
-  for (int i = d - 1; i >= 0; i--) { out[i] = n->lv_bit[l]; l = n->lv_parent[l]; }
-  return d;
-}
 /* A commutation's copies are labelled INSIDE THE FAN: `[gen] ++ path(dup)`.  Concatenating the node's
    path too makes a level's depth the SUM of its parents' -- doubling per generation: measured path
    length 385 and 21.5 M `lv_intern` calls (72 % of a 20-step recursive countdown).  The generation bit
    still separates the two copies and the node's path adds nothing for well-nesting (see above). */
+/* [gen] ++ path(b) depends on (gen, b) only, and it is built one step from its parent's:
+   f(gen, 0) = intern(0, gen), f(gen, b) = intern(f(gen, up(b)), bit(b)).  Remembered per level (ids are
+   append-only within a net), so a commutation costs one lookup instead of re-interning the whole path. */
+static const Net *pf_net; static int *pf_memo[2], pf_cap, pf_nlv;
+static void lvl_prefix_forget(const Net *n) { if (pf_net == n) pf_net = NULL; }   /* its trie is being replaced */
+static int lvl_prefix_rec(Net *n, int gen, int b) {
+  if (!b) return lv_intern(n, 0, gen);
+  int *m = pf_memo[gen - 1];
+  if (b < pf_cap && m[b]) return m[b];
+  int r = lv_intern(n, lvl_prefix_rec(n, gen, lv_up(n, b)), n->lv_bit[b]);
+  if (b < pf_cap) m[b] = r;
+  return r;
+}
 static int lvl_prefix2(Net *n, int gen, Scope a, Scope b) {
-  unsigned char *pb = malloc((size_t)lv_depth(n, b) + 1); int db = lv_depth(n, b), cur = lv_intern(n, 0, gen);
-  (void)a; if (!pb) return (int)b;                    /* no room: keep the gauge rather than alias one */
-  lvl_path(n, b, pb); for (int i = 0; i < db; i++) cur = lv_intern(n, cur, pb[i]);
-  free(pb); return cur;
+  (void)a;
+  if (pf_net != n || n->nlv < pf_nlv) {               /* another net, or a trie that was replaced */
+    for (int g = 0; g < 2; g++) if (pf_memo[g]) memset(pf_memo[g], 0, (size_t)pf_cap * sizeof(int));
+    pf_net = n;
+  }
+  pf_nlv = n->nlv;
+  if (pf_cap <= n->nlv) {
+    int c = n->nlv * 2 + 256;
+    for (int g = 0; g < 2; g++) { pf_memo[g] = realloc(pf_memo[g], (size_t)c * sizeof(int));
+                                  memset(pf_memo[g] + pf_cap, 0, (size_t)(c - pf_cap) * sizeof(int)); }
+    pf_cap = c;
+  }
+  return lvl_prefix_rec(n, gen, (int)b);
 }
 /* the four rules of the scope-gauge calculus; ERA is inert (era pairs are dropped) */
 static int lin_trace = -1; static long dump_at = -2; static const char *dump_path;   /* LIN_TRACE; LIN_DUMP_AT_STEP x LIN_DUMP_NET dumps mid-reduction */
@@ -934,21 +955,29 @@ static void dem_put(Net *n, int v) {
    with the same stamp, so the marks above stay valid.  Only when the previous wave was exactly that: one base
    pair, no driver claim/slice, no nested reduce, ROOT the only demand root (`res_net` is cleared otherwise). */
 static const Net *res_net; static Port res_at;
+/* A FORCE WALKS ITS OWN ROOT.  net_force(p) exists to bring p to a value, and forces nest -- a fold reading
+   an operand forces it, that reduction meets another fold, which forces again -- so a walk from EVERY root on
+   every wave re-walked each enclosing force's spine for nothing (measured: 20 roots deep on a binary tree, 59M
+   of 63M walk steps, 200 per interaction fired).  Inside a force only its root is walked: everything fired is
+   still needed (it is needed by p, which is needed), and what the enclosing demands want waits until the
+   force returns -- which is when they would see it anyway.  -1: the top-level reduction, ROOT and all roots. */
+static const Net *floor_net; static int walk_floor = -1;
 static void net_mark_demand(Net *n) {
-  int resume = res_net == n && n->nroot == 0 && NAT_IN(n, res_at.node) && !n->dead[res_at.node];
+  int first = (floor_net == n && walk_floor >= 0 && walk_floor < n->nroot) ? walk_floor : -1;
+  int resume = res_net == n && n->nroot == first + 1 && NAT_IN(n, res_at.node) && !n->dead[res_at.node];
   res_net = NULL;
   unsigned int stamp;
   if (resume) { stamp = n->dem_stamp; n->vport[res_at.node] &= (unsigned char)~(1u << res_at.port); }
   else { stamp = ++n->dem_stamp; if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; } }
   n->dem_cnt = 0;
   /* One walk per root, ROOT first: the walk below never pushes, so the seeds need no stack. */
-  for (int r = -1; r < n->nroot; r++) {
-    Port p = r < 0 ? (resume ? res_at : (Port){0, 0}) : n->root[r];
+  for (int r = first; r < n->nroot; r++) {
+    Port p = r == first && resume ? res_at : r < 0 ? (Port){0, 0} : n->root[r];
     Port arr[3] = {NONE, NONE, NONE};   /* the last arrivals: the resume point is the newest outside the redex */
     for (;;) {
       int u = p.node;
       if (u < 0 || u >= n->nn || n->dead[u]) break;
-      if (r < 0) { arr[2] = arr[1]; arr[1] = arr[0]; arr[0] = p; }
+      if (r == first) { arr[2] = arr[1]; arr[1] = arr[0]; arr[0] = p; }
       /* Visited PER PORT, not per node: an APP reached at its result and at its argument continues
          differently, so a node-level mark would cut the second path off and leave the redexes it
          leads to permanently un-demanded (measured: a Y-knot that stops reducing at depth 4). */
@@ -970,7 +999,7 @@ static void net_mark_demand(Net *n) {
         if ((t == LAM && (qt == APP || qt == DUP)) || (t != LAM && (qt == LAM || qt == DUP))) {
           if (n->dem[q.node] != stamp) { n->vport[q.node] = 0; if (n->act_of[q.node] >= 0) dem_put(n, q.node); }
           n->dem[q.node] = stamp;
-          if (r < 0) {                                     /* ROOT's tip: remember where to resume */
+          if (r == first) {                                /* the walk's tip: remember where to resume */
             Port a = arr[1].node == q.node ? arr[2] : arr[1];
             if (a.node > 0 && a.node != u && a.node != q.node) { res_net = n; res_at = a; }
           }
@@ -1001,7 +1030,10 @@ long net_force(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || port_whnf(n, p)) return n->steps;
   int save = n->nroot;
   lin_demand(n, p);
+  const Net *sfn = floor_net; int sfl = walk_floor;
+  if (n->nroot > save) { floor_net = n; walk_floor = n->nroot - 1; }   /* (an existing root: walk as before) */
   long s = net_reduce(n, n->steps + (1L << 22));
+  floor_net = sfn; walk_floor = sfl;
   /* Only ever TRUNCATE.  A reduction here can reclaim, which rewrites the root array and can drop
      the root this call added; restoring the old COUNT would then claim entries that no longer name
      anything, and the next demand walk would seed itself from stale indices. */
@@ -1318,7 +1350,10 @@ static long net_reduce_body(Net *n, long limit) {
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
-      if (cnt != 2 || base_cnt != 2 || wtotal != 1 || nested_reduce || n->nheld) res_net = NULL;
+      /* Resume needs the wave to have been one LOCAL rewrite at the tip: one pair, fired by the base engine or
+         consumed by a driver's slice (a fold rewrites its pair and the wire to its consumer, the same locality
+         as a base rule), and no reduction nested inside it that might have rewritten the spine above. */
+      if (cnt != 2 || wtotal != 1 || n->nheld || nested_reduce) res_net = NULL;
       if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (real_base > wv_max) wv_max = real_base; if (wtotal > wv_width) wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);

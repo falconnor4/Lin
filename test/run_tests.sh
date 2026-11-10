@@ -297,7 +297,7 @@ fi
 # ----------------------------------------------------------------------------
 ER_LOG=$(mktemp)
 if bash test/erasure.sh "$LIN_BIN" "$STD_DIR" >"$ER_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 7)); echo "PASS test/erasure.sh ($(tail -1 "$ER_LOG"))"
+  pass=$((pass+1)); total_checks=$((total_checks + 8)); echo "PASS test/erasure.sh ($(tail -1 "$ER_LOG"))"
   rm -f "$ER_LOG"
 else
   fail=$((fail+1)); echo "FAIL test/erasure.sh"; cat "$ER_LOG"; rm -f "$ER_LOG"

@@ -81,9 +81,86 @@ int lin_build_depth = 0;
    Returns steps run, or -1 if it did not compile. */
 enum { DEPTH_RUN = 0, DEPTH_PRECOMPILE = 1, DEPTH_BUILD = 2 };
 static const Scheme *build_sch;      /* the program's inferred type: what the AOT pass point is handed */
+/* SHRINKING REDUCTIONS, before the term becomes a net.  `((\x B) A)` with x used at most once in B is
+   B[x := A] (or just B): the term only gets smaller, and in an optimal evaluator no work moves -- a redex is
+   shared across copies wherever it sits, so substituting under a lambda duplicates nothing.  What it buys is
+   SIZE, and size is what the oracle pays for on every call: a recursive function's body is copied per call,
+   and an inlined operator's operand list arrives as unreduced `_cl_cons` applications (each operator ~75
+   nodes, copied every time).  The operator protocol's own binders (`_op`, `_k`) are left alone: their shape
+   is what the fold drivers recognize (std/runtime/pattern.h).  Substitution renames a binder that would
+   capture. */
+/* Scoping as the compiler has it (compile.c, TLET): a lambda shadows its body; a `let` named like an
+   ENCLOSING binder shadows only its body -- its value means the enclosing one -- and every name counted or
+   renamed below is one an enclosing binder owns. */
+static int shrink_count(const Term *t, const char *x) {
+  if (!t) return 0;
+  if (t->type == TVAR) return !strcmp(t->name, x);
+  if (t->type == TLAM && t->name && !strcmp(t->name, x)) return 0;          /* shadowed */
+  if (t->type == TLET && t->name && !strcmp(t->name, x)) return shrink_count(t->l, x);   /* value: ours */
+  return shrink_count(t->l, x) + shrink_count(t->r, x);
+}
+static int shrink_free(const Term *t, const char *x) { return shrink_count(t, x) > 0; }
+static int shrink_seq;
+static void shrink_rename(Term *t, const char *from, const char *to) {   /* free occurrences of `from` in t */
+  if (!t) return;
+  if (t->type == TVAR) { if (!strcmp(t->name, from)) t->name = to; return; }
+  if (t->type == TLAM && t->name && !strcmp(t->name, from)) return;
+  if (t->type == TLET && t->name && !strcmp(t->name, from)) { shrink_rename(t->l, from, to); return; }
+  shrink_rename(t->l, from, to); shrink_rename(t->r, from, to);
+}
+/* t[x := a]: consumes t, copies a at the (single) occurrence */
+static Term *shrink_subst(Term *t, const char *x, const Term *a) {
+  if (!t) return NULL;
+  if (t->type == TVAR) {
+    if (!strcmp(t->name, x)) { term_free(t); return term_copy((Term *)a); }
+    return t;
+  }
+  if (t->type == TLAM && t->name) {
+    if (!strcmp(t->name, x)) return t;              /* shadowed: nothing below is x */
+    if (shrink_free(a, t->name) && shrink_free(t, x)) {   /* the binder would capture a free name of a */
+      const char *fresh = lin_internf(" s%d", shrink_seq++);
+      shrink_rename(t->l, t->name, fresh);
+      t->name = fresh;
+    }
+  }
+  if (t->type == TLET && t->name) {
+    if (!strcmp(t->name, x)) { t->l = shrink_subst(t->l, x, a); return t; }   /* the value means our x */
+    if (shrink_free(a, t->name) && shrink_free(t->r, x)) {   /* the body would capture a free name of a */
+      const char *fresh = lin_internf(" s%d", shrink_seq++);
+      shrink_rename(t->r, t->name, fresh);          /* (the value's occurrences mean the enclosing one) */
+      t->name = fresh;
+    }
+  }
+  t->l = shrink_subst(t->l, x, a);
+  t->r = shrink_subst(t->r, x, a);
+  return t;
+}
+static int shrink_protocol(const char *x) { return !strcmp(x, "_op") || !strcmp(x, "_k"); }
+static Term *shrink(Term *t) {
+  if (!t) return NULL;
+  t->l = shrink(t->l);
+  t->r = shrink(t->r);
+  /* a `let` nothing names (its value refers to itself or not at all) is never demanded: it goes */
+  if (t->type == TLET && t->name && !shrink_count(t->r, t->name)) {
+    Term *body = t->r; t->r = NULL; term_free(t); return body;
+  }
+  if (t->type == TAPP && t->l && t->l->type == TLAM && t->l->name && !shrink_protocol(t->l->name)) {   /* (an annotation is the checker's, which has run) */
+    Term *lam = t->l, *arg = t->r;
+    int uses = shrink_count(lam->l, lam->name);
+    if (uses <= 1) {
+      Term *body = lam->l; lam->l = NULL;
+      if (uses == 1) body = shrink_subst(body, lam->name, arg);
+      term_free(arg); free(lam); t->l = t->r = NULL; free(t);
+      return shrink(body);                          /* the substitution may have made a new redex */
+    }
+  }
+  return t;
+}
+
 static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, int *compiled, char *err, int errsz) {
   Term *ex = expand_defs(t);
   Term *opt = optimize ? egraph_optimize(ex) : ex;
+  if (opt != ex && !getenv("LIN_NO_SHRINK")) opt = shrink(opt);   /* what the e-graph's rewrites leave linear */
   int ok = compile(opt, net, err, errsz);
   if (!ok) { if (opt != ex) term_free(opt); term_free(ex); return -1; }
   if (compiled) *compiled = net->nn;
@@ -243,6 +320,7 @@ Term *expand_defs(Term *t) {
     res = term_new(TLET, gm[i].name, term_copy(gm[i].d->expanded_sh), res);
   free(gm);
   gm = sgm; ngm = sn; cgm = sc; gm_on = son;
+  if (!getenv("LIN_NO_SHRINK")) res = shrink(res);  /* (see shrink) */
   return res;
 }
 

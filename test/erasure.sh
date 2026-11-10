@@ -32,8 +32,11 @@ check '((\x 5) (list5 1 2 3 4 5))' 5 0
 check '(if true 1 (head (list3 7 8 9)))' 1 2
 # a discarded ARITHMETIC thunk: the fold's leftovers are erased too, so live stays far below peak
 printf '%s\n' '((\x 5) (mul 300 (add 7 9)))' > "$TMP/e.lin"
-line=$("$LIN_BIN" -b "$TMP/e.lin" 2>&1 | grep -o '[0-9]* nodes ([0-9]* live)')
+line=$(LIN_NO_SHRINK=1 "$LIN_BIN" -b "$TMP/e.lin" 2>&1 | grep -o '[0-9]* nodes ([0-9]* live)')   # the eraser itself (shrinking drops it before)
 peak=${line%% *}; live=$(printf '%s' "$line" | sed 's/.*(\([0-9]*\) live)/\1/')
 if [ -n "$live" ] && [ "$live" -lt $((peak / 4)) ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL discarded arithmetic: $live live of $peak peak"; fi
+# ...and the compiler's shrinking reductions remove an argument nobody uses before any of it is built
+sline=$("$LIN_BIN" -b "$TMP/e.lin" 2>&1 | grep -o '[0-9]* nodes ([0-9]* live)'); speak=${sline%% *}
+if [ -n "$speak" ] && [ "$speak" -lt $((peak / 4)) ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL shrinking left the dead argument: $speak nodes against $peak"; fi
 if [ "$fail" -eq 0 ]; then echo "erasure: OK ($pass checks: discarded structure reclaimed, values intact)"; else echo "erasure: $fail of $((pass+fail)) failed"; fi
 exit $fail

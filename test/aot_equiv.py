@@ -446,17 +446,24 @@ def main():
     eg = os.path.join(root, 'test', 'egraph.lin')
     payoff = ''
     if os.path.exists(eg):
+        # the compile-time optimizers TOGETHER -- shrinking reductions (src/main.c) and the e-graph -- against
+        # neither: the shrink pass now does most of the beta work the e-graph used to, so measuring the e-graph
+        # alone on a shrunk term asks the wrong question
         rc, _, err = run([lin, 'build', eg, '-o', os.path.join(tmp, 'payoff.line')], 300,
                          dict(env, LIN_AOT_SEARCH='1', LIN_PASSES='1'))
         nodes = {}
         for m in re.finditer(r'candidate (\S+)\s+artifact=\d+ B.*?compile=(\d+) nodes', err):
-            nodes[m.group(1)] = int(m.group(2))
+            if m.group(1) == 'default': nodes['default'] = int(m.group(2))
+        rc, _, err = run([lin, 'build', eg, '-o', os.path.join(tmp, 'payoff0.line')], 300,
+                         dict(env, LIN_AOT_SEARCH='1', LIN_PASSES='1', LIN_NO_SHRINK='1'))
+        for m in re.finditer(r'candidate (\S+)\s+artifact=\d+ B.*?compile=(\d+) nodes', err):
+            if m.group(1) == 'no-egraph': nodes['no-egraph'] = int(m.group(2))
         if 'default' not in nodes or 'no-egraph' not in nodes:
             print('FAIL could not read both candidates\' node counts from the build (%r)' % (nodes,))
             return 1
         if nodes['default'] >= nodes['no-egraph']:
-            print('FAIL the e-graph pass no longer pays off on test/egraph.lin: %d compiled nodes '
-                  'with the rules vs %d without them' % (nodes['default'], nodes['no-egraph']))
+            print('FAIL the compile-time optimizers no longer pay off on test/egraph.lin: %d compiled nodes '
+                  'with them vs %d without' % (nodes['default'], nodes['no-egraph']))
             return 1
         payoff = '; pays off %d -> %d nodes on test/egraph.lin' % (nodes['no-egraph'], nodes['default'])
     # ---- what a build may not DO (the rule the sweep's build/run split enforces) ----------------
