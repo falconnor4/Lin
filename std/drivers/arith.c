@@ -128,7 +128,7 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
  * ====================================================================== */
 
 /* Tri-state result of trying to compute a saturated closure's value. */
-enum { EV_NO = 0, EV_READY = 1, EV_WAIT = 2, EV_NOTFFI = 3 };   /* EV_NOTFFI: the header shape, but no call (see ffi_eval) */
+enum { EV_NO = 0, EV_READY = 1, EV_WAIT = 2, EV_NOTFFI = 3, EV_SUP = 4 };   /* EV_SUP: an operand is superposed (op_split) */   /* EV_NOTFFI: the header shape, but no call (see ffi_eval) */
 
 /* read a port's wire (a function, not a macro: `wire_at(n, a, b)` would
    split into three macro arguments at the comma inside the braces) */
@@ -263,6 +263,45 @@ static int ffi_header(Net *n, int lam, Port *fnp, Port *argp) {
    EV_NO  : not a foldable op (no scalar provider claims it) -> let the core β the
             pure-Lin fallback body.
    EV_WAIT: our op, but an operand is not concrete yet -> also plain β. */
+/* WHICH COPY A SPLIT REDEX IS (see op_split).  A redex made by splitting carries the copy it stands for at
+   every fan it was split under: a chain of (fan, generation, port) per application node.  Its reads take
+   those ports (lin_fan_choose) -- the pairing the fans' own annihilation will give -- so a copy folds with
+   ITS operands before the copying has moved through.  An entry is void once its fan's slot is recycled
+   (the generation), and a node's chain is cleared when its slot is (node_recycled). */
+typedef struct { int fan; unsigned gen; int port, next; } Choice;
+static Choice *chs; static int nchs, cchs;
+static int *app_chain; static unsigned *node_gen; static int chain_cap;
+static int sup_fan = -1;
+static void chain_grow(Net *n) {
+  if (chain_cap >= n->nn) return;
+  int c = n->nn * 2 + 64;
+  app_chain = realloc(app_chain, (size_t)c * sizeof *app_chain);
+  node_gen = realloc(node_gen, (size_t)c * sizeof *node_gen);
+  for (int i = chain_cap; i < c; i++) { app_chain[i] = -1; node_gen[i] = 0; }
+  chain_cap = c;
+}
+static void arith_recycled(Net *n, void *st, int node) {
+  (void)n; (void)st;
+  if (node >= 0 && node < chain_cap) { app_chain[node] = -1; node_gen[node]++; }
+}
+static int chain_has(int ci, int fan) {
+  for (int k = ci; k >= 0; k = chs[k].next) if (chs[k].fan == fan && node_gen[fan] == chs[k].gen) return 1;
+  return 0;
+}
+static void chain_apply(Net *n, int app) {
+  lin_fan_unchoose_all();
+  if (app < 0 || app >= chain_cap) return;
+  for (int k = app_chain[app]; k >= 0; k = chs[k].next) {
+    int f = chs[k].fan;
+    if (f < n->nn && !n->dead[f] && n->tag[f] == DUP && node_gen[f] == chs[k].gen) lin_fan_choose(f, chs[k].port);
+  }
+}
+static int chain_push(int parent, int fan, int port) {
+  if (nchs >= cchs) chs = realloc(chs, (size_t)(cchs = cchs ? cchs * 2 : 256) * sizeof *chs);
+  chs[nchs] = (Choice){ fan, node_gen[fan], port, parent };
+  return nchs++;
+}
+
 static int op_eval(Net *n, int lam, int app, Val *v) {
   const char *fn;
   Port argp;
@@ -270,17 +309,25 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
      uses, all of which want the same number.  It is not when the operands were reached by choosing a copy at a
      fan-in -- the redex sits in a body being copied, each copy binding its own operands -- so the reads below
      are watched and that case alone goes to the core's beta. */
-  int shared = result_shared(n, lam, app); long amb0 = lin_fan_ambiguous;
-  if (!op_head_of(n, app, &fn, &argp)) return EV_NO;
+  int shared = result_shared(n, lam, app);
+  chain_grow(n); chain_apply(n, app);              /* a split copy reads as its copy */
+  lin_fan_undecided = -1; long amb0 = lin_fan_ambiguous;
+  int rc0 = EV_NO;
+  if (!op_head_of(n, app, &fn, &argp)) { lin_fan_unchoose_all(); return rc0; }
   int slots = net_spine_slots(n, argp);
-  if (slots < 1) return EV_WAIT;                                /* operand spine not readably concrete */
+  if (slots < 1) { lin_fan_unchoose_all(); return EV_WAIT; }   /* operand spine not readably concrete */
   /* The scratch is sized to the SPINE, never to a constant: an `_op` is N-ary by construction, and a
      fixed count declines the fold past it -- not a wrong answer (the redex still reduces, through the
      pure-Lin fallback below) but a fold given up on every visit, where once would do. */
   Val *fargs = calloc((size_t)slots, sizeof *fargs);
   long *c = calloc((size_t)slots, sizeof *c);
-  if (!fargs || !c) { free(fargs); free(c); return EV_WAIT; }
+  if (!fargs || !c) { free(fargs); free(c); lin_fan_unchoose_all(); return EV_WAIT; }
   int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
+  lin_fan_unchoose_all();
+  /* An operand behind a fan's PRINCIPAL (one not chosen) is superposed: one value per copy -- split. */
+  if (lin_fan_undecided >= 0 && (shared || argc < slots) && !chain_has(app_chain[app], lin_fan_undecided)) {
+    sup_fan = lin_fan_undecided; free(fargs); free(c); return EV_SUP;
+  }
   if (argc < slots) { free(fargs); free(c); return EV_WAIT; }
   if (shared && lin_fan_ambiguous != amb0) { free(fargs); free(c); return EV_NO; }   /* one value per copy */
   for (int i = 0; i < slots; i++) {
@@ -511,6 +558,42 @@ static int arith_claim(const Net *ncn, Port p1, Port p2) {
   return head_is_ffi(n, lam);
 }
 
+/* AN OPERATOR MEETING A SUPERPOSITION DUPLICATES ITSELF.  An `_op` redex inside a body the oracle is copying
+   lazily -- every recursive function the function compiler does not take -- sees an operand SUPERPOSED: a
+   fan-in F standing for "one value per copy" until the copy has moved through.  No single number is the
+   answer, and handing the redex to beta ran the operator's bitwise meaning on the superposition --
+   thousands of interactions per `add` (measured: a depth-8 binary tree, 2.1M interactions for 511 nodes).
+   What the fan would reach by moving through the operator is the redex split in two under F's own label:
+
+       head  L    --> fan-out F --> a head per copy          (copied lazily: its meaning stays correct)
+       list  P    --> fan-out F --> an operand list per copy (annihilates with the superposition F: each
+                                                              copy gets ITS operand)
+       result     <-- fan-in  F <-- the two copies' results
+
+   Standard nodes and interactions only; nothing is done twice that is not per copy anyway.  Each copy
+   then reads as its copy (the chain above) and folds at once, before the fans have moved through. */
+static void op_split(Net *n, int lam, int app, int f) {
+  Scope sf = n->scope[f], sa = n->scope[app];
+  Port res = wire_at(n, app, 1), list = wire_at(n, app, 2);
+  int parent = app_chain[app];
+  int d1 = net_alloc(n, DUP, sf).node, d2 = net_alloc(n, DUP, sf).node, r = net_alloc(n, DUP, sf).node;
+  int a1 = net_alloc(n, APP, sa).node, a2 = net_alloc(n, APP, sa).node;
+  chain_grow(n);
+  app_chain[a1] = chain_push(parent, f, 1);
+  app_chain[a2] = chain_push(parent, f, 2);
+  net_link(n, (Port){d1, 1}, (Port){a1, 0}, 0);
+  net_link(n, (Port){d1, 2}, (Port){a2, 0}, 0);
+  net_link(n, (Port){d2, 1}, (Port){a1, 2}, 0);
+  net_link(n, (Port){d2, 2}, (Port){a2, 2}, 0);
+  net_link(n, (Port){r, 1}, (Port){a1, 1}, 0);
+  net_link(n, (Port){r, 2}, (Port){a2, 1}, 0);
+  net_link(n, (Port){d2, 0}, list, 1);
+  if (res.node >= 0) net_link(n, (Port){r, 0}, res, 1);
+  net_link(n, (Port){d1, 0}, (Port){lam, 0}, 1);   /* the head meets the fan: copied */
+  app_chain[app] = -1;
+  net_drop(n, app);                                  /* every port re-aimed: drops nothing else */
+}
+
 /* AN OPERAND THAT WAITS FOR A BINDING.  An `_op` redex inside a lambda body is an active pair from the start,
    so the wave can offer it before the lambda is applied -- while an operand is still the lambda's VARIABLE.
    Forcing cannot make that concrete, and handing the redex to beta would trade the fold for the pure-Lin body
@@ -615,6 +698,8 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
       if (IN_NET(n, argp.node)) force_spine(n, argp);
       ev = ffi ? ffi_eval(n, lam, &v, NULL, 0) : op_eval(n, lam, app, &v);
     }
+    if (ev == EV_SUP && !ffi) { op_split(n, lam, app, sup_fan); done++; (*changed)++; n->steps++; continue; }
+    if (ev == EV_SUP) ev = EV_NO;
     if (ev == EV_READY) {
       if (!ffi) fold_op_head(n, lam, app, &v); else fold_ffi_head(n, lam, app, &v);
       done++; (*changed)++; n->steps++;
@@ -743,7 +828,8 @@ LinDriver lin_arith_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
   .size = (uint32_t)sizeof(LinDriver),   /* the ABI-5 extension contract: the core reads only these fields */
   .name = "arith", .description = "native scalar arithmetic table + `_op`/`_ffi` fold pre-emptor",
+  .node_recycled = arith_recycled,
   .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_FOLD | LIN_CAP_PREEMPT, .priority = 5,   /* before simd(10): claim folds first */
   .claim = arith_claim, .reduce = arith_reduce,
-  .wants = LIN_WANT_AOT, .aot = arith_aot,   /* the driver's own build-time pass, offered by the core */
+  .wants = LIN_WANT_AOT | LIN_WANT_RECYCLE, .aot = arith_aot,   /* its build-time pass; the split chains are node-keyed */
 };

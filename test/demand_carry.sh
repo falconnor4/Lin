@@ -69,6 +69,13 @@ static int rp_aot(Net *n, void *st, const Term *t, const Scheme *sch,
     if (!((tu == LAM && (tw == APP || tw == DUP)) || (tu != LAM && (tw == LAM || tw == DUP)))) continue;
     if (n->wire[w * 3].node != u || n->wire[w * 3].port != 0) continue;
     if (taken[u] || taken[w]) continue;
+    /* an operator head's own meaning redex -- `\_op.((\_k MEANING) _op)`: an APP applying a LAM to the
+       binder of the LAM whose body it is -- is not the program's work: it runs only if the fold declines,
+       and demanding it would run the operator's bitwise meaning for nothing */
+    { int app = tu == APP ? u : w, lam = tu == APP ? w : u;
+      Port arg = n->wire[app * 3 + 2];
+      if (n->tag[lam] == LAM && n->tag[app] == APP && arg.port == 1 && live(n, arg.node) && n->tag[arg.node] == LAM &&
+          n->wire[arg.node * 3 + 2].node == app && n->wire[arg.node * 3 + 2].port == 1) continue; }
     taken[u] = 1; taken[w] = 1;
     lin_demand(n, (Port){u, 0}); lin_demand(n, (Port){w, 0});
     declared++;

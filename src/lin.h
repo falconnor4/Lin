@@ -390,6 +390,9 @@ Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) ch
 /* How many times a reader arrived at a fan's PRINCIPAL and had to pick a copy (src/io.c).  A fold whose operand
    reads moved it read a value that is one per copy, not one value, and must not compute a shared result. */
 extern long lin_fan_ambiguous;
+extern int lin_fan_undecided;            /* the first un-chosen fan whose principal a crossing walk reached (-1: none) */
+void lin_fan_choose(int node, int port);  /* read the superposition at `node` as its copy `port` (1 or 2) */
+void lin_fan_unchoose_all(void);
 Port net_dup_hop(Net *n, Port p);                       /* deref it the way an arriving port implies */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_header(Net *n, Port lam, Port *fnp, Port *argp); /* dig \_ffi.\_ret.((_ffi fn) args) */

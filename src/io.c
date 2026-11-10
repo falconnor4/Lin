@@ -36,10 +36,24 @@ void lin_domains_init(void) {
    wrong for one that wants THE value -- so every such choice is counted, and a fold whose operands needed one
    knows its value is not the same for every copy (std/drivers/arith.c). */
 long lin_fan_ambiguous;
+/* CHOOSING A COPY.  A reader that stands for ONE copy of a superposition (a fold driver reading a redex it
+   split per copy) says which: fan node -> the auxiliary port of that copy.  A crossing walk arriving at a
+   chosen fan's principal takes that port, and that is not ambiguous; arriving at any other fan's principal
+   it takes copy 1 as always, counts the choice, and names the first such fan in `lin_fan_undecided`. */
+int lin_fan_undecided = -1;
+static int *fch_node, *fch_port, fch_n, fch_cap;
+void lin_fan_choose(int node, int port) {
+  if (fch_n >= fch_cap) { fch_cap = fch_cap ? fch_cap * 2 : 16; fch_node = realloc(fch_node, (size_t)fch_cap * sizeof *fch_node);
+                          fch_port = realloc(fch_port, (size_t)fch_cap * sizeof *fch_port); }
+  fch_node[fch_n] = node; fch_port[fch_n] = port; fch_n++;
+}
+void lin_fan_unchoose_all(void) { fch_n = 0; }
 static inline Port fstep(Net *n, Port q, int cross) {
-  if (!cross) return wr(n, (Port){q.node, 0});
-  if (q.port == 0) lin_fan_ambiguous++;
-  return wr(n, (Port){q.node, q.port == 0});
+  if (!cross || q.port != 0) return wr(n, (Port){q.node, 0});
+  for (int i = fch_n - 1; i >= 0; i--) if (fch_node[i] == q.node) return wr(n, (Port){q.node, fch_port[i]});
+  lin_fan_ambiguous++;
+  if (lin_fan_undecided < 0) lin_fan_undecided = q.node;
+  return wr(n, (Port){q.node, 1});
 }
 #define FSTEP(q) fstep(n, (q), cross)
 static inline Port fan_walk(Net *n, Port p, int cross) {
@@ -432,13 +446,14 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
      is the readback provider's, and its own shape test is pure, so a slot that already IS a value
      pays only a walk of two wires. */
   long amb = lin_fan_ambiguous;                      /* the closure test below is a SHAPE probe: its fan choices read no value */
-  if (net_read_value(n, p, DT_FFI, v) && v->kind) { lin_fan_ambiguous = amb; return 1; }   /* (the call's own value: dispatched once) */
+  int und = lin_fan_undecided;
+  if (net_read_value(n, p, DT_FFI, v) && v->kind) { lin_fan_ambiguous = amb; lin_fan_undecided = und; return 1; }   /* (the call's own value: dispatched once) */
   {
     char fnb[2];                                     /* a sink: only the name's PRESENCE is tested, and any buffer over one byte reports one */
     Port q = net_dhop(n, p);
     if (q.port == 0 && net_ffi_fn(n, q, fnb, sizeof fnb)) return 0;
   }
-  lin_fan_ambiguous = amb;
+  lin_fan_ambiguous = amb; lin_fan_undecided = und;
   switch (dom) {
   case DT_NUM: {
     long x;

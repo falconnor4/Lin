@@ -1060,6 +1060,10 @@ static inline int lin_pat_op_head(const Net *n, Port p, void *ctx) {
   (void)ctx;
   if (!n || p.port != 0 || !lin_pat_live(n, p.node) || n->tag[p.node] != LAM) return 0;
   Port use = net_wire(n, (Port){p.node, 1});
+  /* a COPY of a head (a fan copying it lazily) has its binder on the fan's auxiliary: the use is what the
+     fan's principal faces -- the head's own body, still shared */
+  for (int i = 0; i < n->nn && use.node >= 0 && lin_pat_live(n, use.node) && n->tag[use.node] == DUP && use.port != 0; i++)
+    use = net_wire(n, (Port){use.node, 0});
   if (use.port != 2 || !lin_pat_live(n, use.node) || n->tag[use.node] != APP) return 0;
   Port fn = net_wire(n, (Port){use.node, 0});
   if (!(fn.port == 0 && lin_pat_live(n, fn.node) && n->tag[fn.node] == LAM)) return 0;
