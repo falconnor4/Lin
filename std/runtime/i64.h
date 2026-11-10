@@ -48,7 +48,8 @@ LIN_I64_DEFS
   static inline long lin_f64_eq(long a, long b) { return lin_d(a) == lin_d(b); } \
   static inline long lin_f64_lt(long a, long b) { return lin_d(a) < lin_d(b); } \
   static inline long lin_f64_leq(long a, long b) { return lin_d(a) <= lin_d(b); } \
-  static inline long lin_f64_floor(long a) { return (long)floor(lin_d(a)); } \
+  static inline long lin_f64_floor(long a) { double f = floor(lin_d(a)); return (f != f || f >= 9223372036854775808.0 || f < -9223372036854775808.0) ? (-9223372036854775807L - 1) : (long)f; } \
+  static inline long lin_f64_floorf(long a) { return lin_l(floor(lin_d(a))); } \
   static inline long lin_f64_of_int(long i) { return lin_l((double)i); }
 #ifdef LIN_WANT_F64
 LIN_F64_DEFS

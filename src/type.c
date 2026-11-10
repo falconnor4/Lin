@@ -211,7 +211,7 @@ static Type *infer(Term *t) {
     Type *b = infer(t->r); envn--; return b;
   }
   case TDEFX: return infer(t->l);
-  case TFLOAT: return tvar();   /* float literal: fresh polymorphic type */
+  case TFLOAT: return tnom0("float");   /* a float literal: its bits are a numeral, its TYPE says float */
   case TNUM: return tvar();   /* numeral literal: fresh polymorphic type, as TFLOAT */
   }
   return NULL;

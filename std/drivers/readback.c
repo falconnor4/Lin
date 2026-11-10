@@ -142,8 +142,7 @@ static const char *str_determined(Net *n, Port p) {
 }
 
 /* WHAT AN UNLABELLED NET READS AS.  With no expectation to state, only the shapes ONE domain
-   claims are decoded: an `_ffi` closure (dispatching it IS the observation), a float box (its own
-   shape, with the provider's table as the authority), a NUMERAL CHAIN (one layer or more), and a
+   claims are decoded: an `_ffi` closure (dispatching it IS the observation), a NUMERAL CHAIN (one layer or more), and a
    string that the structure determines.  A shape TWO domains claim is NOT decoded: `\b0.\b1.b0`
    is the numeral zero, TRUE and the empty list at once, and the geometry cannot choose. */
 static Val value_any(Net *n, Port p) {
@@ -153,9 +152,7 @@ static Val value_any(Net *n, Port p) {
      reading that works with no expectation to state, and it is tried first for that reason. */
   if (box_num(n, p, &b)) { v.iv = b; v.kind = 1; return v; }
   if (box_bool(n, p, &b)) { v.iv = b; v.kind = 3; return v; }
-  double d;
-  if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; return v; }
-  long k;
+  long k;                                              /* (a float is a numeral: only its TYPE says float) */
   if (net_read_i64(n, p, &k)) { v.iv = k; v.kind = 1; return v; }
   { const char *s = str_determined(n, p); if (s) { v.sv = s; v.kind = 2; return v; } }
   return v;                                            /* kind 0: the caller writes the net */
@@ -179,11 +176,16 @@ static void *resolve_driver(const char *dn) {
    shapes are shared with every other domain.  A symbol whose operands are all `long` (which is what
    the dispatch below passes) needs no row: the DEFAULT is the number domain.  The float family is
    recognized by the `lin_f` prefix the std's float module uses. */
+/* The float rows BY NAME: a float is a numeral like any integer, so nothing about an argument says it is a
+   double -- only the row's signature does.  (A prefix test guessed: `lin_ffi12`, a user's 12-integer C
+   function, had its integers passed as doubles once floats became numerals.) */
 static int is_float_fn(const char *fn) {
-  if (strncmp(fn, "lin_f", 5)) return 0;
-  /* the exceptions inside the prefix: the fold counters, the int->float cast, and the string parse */
-  return strcmp(fn, "lin_folds") && strcmp(fn, "lin_folded") && strcmp(fn, "lin_float") &&
-         strcmp(fn, "lin_parse_float");
+  static const char *const rows[] = {
+    "lin_fadd", "lin_fsub", "lin_fmul", "lin_fdiv", "lin_fpow", "lin_fatan2", "lin_fmin", "lin_fmax",
+    "lin_fsqrt", "lin_fsin", "lin_fcos", "lin_ftan", "lin_fabs", "lin_fsign", "lin_ffract",
+    "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_fflr", "lin_ftoi", "lin_lerp", "lin_fclamp", NULL };
+  for (int i = 0; rows[i]; i++) if (!strcmp(fn, rows[i])) return 1;
+  return 0;
 }
 static int str_fn(const char *fn) {
   return !strcmp(fn, "puts") || !strcmp(fn, "getenv") || !strcmp(fn, "system") ||
@@ -503,6 +505,8 @@ static long run_io_body(Net *n, long step_limit) {
       Port src_p = pay[0], cb = pay[1];
       char in_buf[4096] = {0};
       long res_int = -1; int is_int = 0;
+      /* the runner OBSERVES the source, so it forces it: under needed order nothing else had a reason to */
+      if (src_p.node >= 0) src_p = net_force_val(n, src_p);
       Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0};
       if (fv.kind == 1) { res_int = fv.iv; is_int = 1; }
       else if (fv.kind == 3) is_int = 2;                      /* bool result */

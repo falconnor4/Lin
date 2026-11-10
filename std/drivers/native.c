@@ -92,7 +92,8 @@ static inline Port wire_at(const Net *n, int node, int port) { return n->wire[no
    name-free net can say -- `ctor_tag(nmof(n, lam))` is what this used to read. */
 static int head_is_ffi(const Net *n, int lam) {
   LinMatch m;
-  return lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
+  return lin_pat_ffi_head(n, (Port){lam, 0}) &&      /* the header's own promises (pattern.h) */
+         lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
 }
 
 /* The scalar-table row an `_op` redex names: the OPERATOR INDEX is the FIRST SLOT of its operand list
@@ -609,10 +610,19 @@ static int native_reduce(Net *n, Port *redexes, int nred, long limit, int *chang
       if (net_interact(n, (Port){lam, 0}, (Port){app, 0})) { (*changed)++; n->steps++; }
       continue;
     }
-    /* A shared result is not this driver's to compute once: hand the pair to the core's β, the same
-       exit the unreadable operator takes below.  (Precompile leaves the redex alone, as always.) */
+    /* A SHARED RESULT is not this driver's to COMPILE (a cone reaches its operands as structure, and a
+       shared one may hold one value per copy), but it is foldable exactly when arith's op_eval folds it:
+       when no operand read chose a copy at a fan-in -- a `let`-shared result is one value for all its
+       uses.  Otherwise the core's β, the exit the unreadable operator takes below. */
     if (result_shared(n, lam, app)) {
       if (lin_precompile_depth > 0) continue;
+      Val sv; memset(&sv, 0, sizeof sv);
+      long amb0 = lin_fan_ambiguous;
+      if (fold_via_table(n, fnp, &sv, args) && lin_fan_ambiguous == amb0) {   /* (fnp: the vocabulary's own static name) */
+        fold_cone(n, lam, app, &sv);
+        done++; (*changed)++; n->steps++;
+        continue;
+      }
       if (net_interact(n, (Port){lam, 0}, (Port){app, 0})) { (*changed)++; n->steps++; }
       continue;
     }

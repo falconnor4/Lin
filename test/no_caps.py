@@ -39,6 +39,7 @@ DECLARED = {
     ("std/drivers/fn.c", "lit[64]"): "a float literal's text: a longer one makes the compiler decline, and the net computes it",
     ("std/drivers/fn.c", ">= 4096"): "a parallel reduction's threshold: below a few thousand iterations a thread costs more than it saves (measured: a 4096-step loop is ~10 us)",
     ("std/drivers/fn.c", "params[sizeof(unsigned) * 8]"): "a compiled function's parameters: one bit each of the strictness set",
+    ("std/runtime/i64.h", ">= 9223372036854775808"): "2^63, the range of a 64-bit integer: a floor outside it is defined as INT64_MIN (what the soft float and x86 give)",
     ("std/drivers/fn.c", "> 29"): "a hash finaliser's mixing shift (folds high bits of a 64-bit hash into the table index): not a limit",
     ("std/drivers/fn.c", "mm_cap[MM_N]"): "one memo table per DAG walk the compiler has (the enum counts them): not a limit on the program",
     ("std/drivers/fn.c", "mm_gen[MM_N]"): "one memo table per DAG walk the compiler has (the enum counts them): not a limit on the program",

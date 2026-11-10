@@ -350,8 +350,8 @@ static void era_attach(Net *n, Port q, Port from, int reuse) {
      ERA x ERA                  both vanish
      ERA x LAM|APP|DUP (port 0) the node is consumed; its two other ports each get an eraser
      ERA at an APP result port  the application is discarded: its function and argument are erased
-   An eraser at a LAM's binder is an unused variable and simply stays.  An eraser at a DUP's copy port
-   also WAITS: the fan erases that copy when it next interacts (its copy lands on the eraser).  Collapsing
+   An eraser at a LAM's binder is an unused variable and simply stays.  Erasers at BOTH of a DUP's copy
+   ports erase its input.  An eraser at ONE copy port WAITS: the fan erases that copy when it next interacts (its copy lands on the eraser).  Collapsing
    the fan to a wire on the spot -- the classic "garbage fan" rule -- is NOT sound in this gauge calculus:
    a fan's partner is found by its label, and removing one fan of a pair let the other meet the wrong one
    (measured: `fib 2` read 2, `fib 3` never terminated, and either rule alone was fine).  Every rule removes one non-ERA
@@ -382,6 +382,18 @@ static void era_drain(Net *n) {
       n->dead[x] = n->dead[e] = 1;
       era_attach(n, f, (Port){x, 0}, x);
       era_attach(n, a, (Port){x, 2}, e);
+    } else if (t == DUP) {
+      /* BOTH copies erased: nobody needs what the fan copies, so its input is erased instead -- the
+         outcome of the fan meeting an eraser at its principal, reached from the other side.  (One copy
+         erased still WAITS: see the rules above.) */
+      Port o = WIRE(n, ((Port){x, 3 - w.port}));
+      if (o.node > 0 && o.node < n->nn && !n->dead[o.node] && n->tag[o.node] == ERA && o.port == 0 &&
+          mutual(n, o, (Port){x, 3 - w.port})) {
+        Port in = WIRE(n, ((Port){x, 0}));
+        n->dead[x] = n->dead[e] = n->dead[o.node] = 1;
+        node_free(n, o.node); node_free(n, e);
+        era_attach(n, in, (Port){x, 0}, x);
+      }
     }
   }
 }

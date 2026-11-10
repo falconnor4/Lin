@@ -115,7 +115,7 @@ static void arena_free(void) {
 static Net *N; static long fuel; static int failed;
 /* THE UNIT: every function this compilation reaches.  funs[0] is the one being called; a call to another
    recursive function (a `Y G` met while evaluating) compiles G as funs[k], once per node. */
-typedef struct { int lam, arity; Expr *body; unsigned strict, fmask; } Fun;   /* fmask: the FLOAT parameters */
+typedef struct { int lam, arity; Expr *body; unsigned strict; } Fun;
 static Fun *funs; static int nfun, funcap;
 static int arity;   /* funs[0]'s, which the entry point and the parallel sites are written for */
 static void fail(const char *why) { if (!failed) DBG("declined: %s\n", why); failed = 1; }
@@ -195,6 +195,14 @@ static long fold_op(long code, long x, long y) {   /* an integer operation on kn
   case LIN_OP_SHR: return lin_i64_shr(x, y);
   case LIN_OP_EQ: return x == y; case LIN_OP_LT: return x < y; case LIN_OP_LEQ: return x <= y;
   case LIN_OP_GT: return x > y;  case LIN_OP_GEQ: return x >= y;
+  case LIN_OP_FADD: return lin_f64_add(x, y);  case LIN_OP_FSUB: return lin_f64_sub(x, y);
+  case LIN_OP_FMUL: return lin_f64_mul(x, y);  case LIN_OP_FDIV: return lin_f64_div(x, y);
+  case LIN_OP_FEQ: return lin_f64_eq(x, y);    case LIN_OP_FLT: return lin_f64_lt(x, y);
+  case LIN_OP_FLEQ: return lin_f64_leq(x, y);  case LIN_OP_FMIN: return lin_f64_min(x, y);
+  case LIN_OP_FMAX: return lin_f64_max(x, y);  case LIN_OP_FSQRT: return lin_f64_sqrt(x);
+  case LIN_OP_FFLOOR: return lin_f64_floorf(x); case LIN_OP_FTOI: return lin_f64_floor(x);
+  case LIN_OP_ITOF: return lin_f64_of_int(x);  case LIN_OP_FABS: return lin_f64_abs(x);
+  case LIN_OP_FSIGN: return lin_f64_sign(x);   case LIN_OP_FFRACT: return lin_f64_fract(x);
   }
   return 0;
 }
@@ -212,7 +220,7 @@ static V *op_value(Lz *list) {
   }
   if (ns != 3 || code < 0 || code >= LIN_OP_N) { fail("not a binary integer op"); return NULL; }
   V *v = mkv(V_SYM);
-  int cmp = code >= LIN_OP_EQ && code <= LIN_OP_GEQ;
+  int cmp = LIN_OP_IS_CMP(code);
   if (slot[0]->op == E_CONST && slot[1]->op == E_CONST && slot[0]->kind == 1 && slot[1]->kind == 1) {
     /* both operands known: the operation is its value (the same rows the emitted C calls) */
     v->e = mke(E_CONST, cmp ? 3 : 1); v->e->k = fold_op(code, slot[0]->k, slot[1]->k); v->e = hc(v->e); return v;
@@ -385,10 +393,7 @@ static Expr *ffi_expr(V *v) {
   for (int k = 0; k < N_OF(FROW); k++) {
     if (strcmp(name, FROW[k].name) || argc != FROW[k].arity) continue;
     Expr *e = mke(E_FOP, FROW[k].kind); e->k = k; e->nargs = argc; e->args = A(sizeof(Expr *) * (size_t)argc);
-    for (int i = 0; i < argc; i++) {
-      if (!(e->args[i] = to_expr(argv[i]))) return NULL;
-      if (e->args[i]->op == E_PARAM && e->args[i]->nargs == cur_fid && FROW[k].in == 4) funs[cur_fid].fmask |= 1u << e->args[i]->k;
-    }
+    for (int i = 0; i < argc; i++) if (!(e->args[i] = to_expr(argv[i]))) return NULL;
     return hc(e);
   }
   fail("an FFI call the compiler does not know"); return NULL;
@@ -410,8 +415,6 @@ static Expr *to_expr_v(V *v) {
   if (v->k == V_CLO) {
     Expr *f = ffi_expr(v);
     if (f || failed) return f;
-    double d;
-    if (net_read_float(N, (Port){v->lam, 0}, &d)) { Expr *e = mke(E_CONST, 4); e->k = lin_l(d); return hc(e); }   /* a float box */
     int ok; long k = const_int(v, &ok);
     if (ok) { Expr *e = mke(E_CONST, 1); e->k = k; return hc(e); }
     int bk = const_bool(v, &ok);
@@ -710,8 +713,15 @@ static int emit_op(Buf *b, long k, const char *x, const char *y) {
     [LIN_OP_SUB] = "lin_i64_sub", [LIN_OP_EQ] = "==", [LIN_OP_LT] = "<", [LIN_OP_LEQ] = "<=", [LIN_OP_GT] = ">",
     [LIN_OP_GEQ] = ">=", [LIN_OP_DIV] = "lin_i64_div", [LIN_OP_MOD] = "lin_i64_mod", [LIN_OP_POW] = "lin_i64_pow",
     [LIN_OP_BAND] = "lin_i64_band", [LIN_OP_BOR] = "lin_i64_bor", [LIN_OP_BXOR] = "lin_i64_bxor",
-    [LIN_OP_SHL] = "lin_i64_shl", [LIN_OP_SHR] = "lin_i64_shr" };
+    [LIN_OP_SHL] = "lin_i64_shl", [LIN_OP_SHR] = "lin_i64_shr",
+    [LIN_OP_FADD] = "lin_f64_add", [LIN_OP_FSUB] = "lin_f64_sub", [LIN_OP_FMUL] = "lin_f64_mul",
+    [LIN_OP_FDIV] = "lin_f64_div", [LIN_OP_FEQ] = "lin_f64_eq", [LIN_OP_FLT] = "lin_f64_lt", [LIN_OP_FLEQ] = "lin_f64_leq",
+    [LIN_OP_FMIN] = "lin_f64_min", [LIN_OP_FMAX] = "lin_f64_max", [LIN_OP_FSQRT] = "lin_f64_sqrt",
+    [LIN_OP_FFLOOR] = "lin_f64_floorf", [LIN_OP_FTOI] = "lin_f64_floor", [LIN_OP_ITOF] = "lin_f64_of_int",
+    [LIN_OP_FABS] = "lin_f64_abs", [LIN_OP_FSIGN] = "lin_f64_sign", [LIN_OP_FFRACT] = "lin_f64_fract" };
+  int unary = k >= LIN_OP_FSQRT && k <= LIN_OP_FFRACT;   /* (their second operand is the 0 the library writes) */
   if (k >= LIN_OP_EQ && k <= LIN_OP_GEQ) put(b, "(long)(%s %s %s)", x, fn[k], y);
+  else if (unary) put(b, "%s(%s)", fn[k], x);
   else put(b, "%s(%s, %s)", fn[k], x, y);
   return 1;
 }
@@ -833,7 +843,7 @@ static int run_cc(const char *src, const char *so) {
 }
 
 typedef long (*Entry)(const long *, int threads);
-typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict, fmask; } Compiled;   /* strict: the parameters certainly evaluated */
+typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; } Compiled;   /* strict: the parameters certainly evaluated */
 static Compiled *done; static int ndone, donecap;
 /* -march=native code must never be loaded on a different CPU, so the cache key includes this one's identity. */
 static unsigned long cpu_key(void) {
@@ -864,7 +874,7 @@ static Compiled *compile_src(const char *src, int ar, int kind) {
   Entry e = hnd ? (Entry)(intptr_t)dlsym(hnd, "lin_fn_entry") : NULL;   /* one per object, loaded RTLD_LOCAL */
   if (!e) DBG("no compiler or the build failed for %s\n", c);
   if (ndone >= donecap) done = realloc(done, (size_t)(donecap = donecap ? donecap * 2 : 32) * sizeof *done);
-  done[ndone] = (Compiled){ h, e, ar, kind, 0, 0 };
+  done[ndone] = (Compiled){ h, e, ar, kind, 0 };
   return e ? &done[ndone++] : (ndone++, NULL);
 }
 
@@ -927,7 +937,7 @@ static int compile_body(int G, Env *outer) {
   for (int i = 0; i < nfun; i++) if (funs[i].lam == G) return i;
   if (nfun >= 1 + LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }   /* mutual recursion re-copies: bound it */
   if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
-  int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u; funs[fid].fmask = 0;
+  int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u;
   /* a parameter is one bit of a strictness set, so a function has at most that many */
   int params[sizeof(unsigned) * 8], ar = 0; Port body = W(N, (Port){G, 2});
   for (Port q = dhop(N, body); is(N, q, LAM, 0) && ar < N_OF(params); q = dhop(N, W(N, (Port){q.node, 2}))) {
@@ -1011,7 +1021,7 @@ static Compiled *compile_fn(Net *n, int F) {
         plist(&b, 0); put(&b, "%s0); }\n  return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, ");\n}\n");
         DBG("compiling (%d function%s, arity %d, %d parallel site%s):\n%s\n", nfun, nfun == 1 ? "" : "s", arity, nsite, nsite == 1 ? "" : "s", b.s + strlen(LIN_I64_SRC));
         r = compile_src(b.s, arity, funs[0].body->kind);
-        if (r) { r->strict = funs[0].strict; r->fmask = funs[0].fmask; }
+        if (r) r->strict = funs[0].strict;
       } else DBG("declined: expression too large\n");
       free(b.s); free(pre.s); free(pb.s);
     }
@@ -1049,12 +1059,12 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
       Port a = W(n, (Port){call, 2});
       if (!((c->strict >> k) & 1u) && !is(n, dhop(n, a), LAM, 0)) { ok = 0; DBG("argument %d is lazy and not yet a value\n", k); break; }
       Port v = net_force_val(n, a);
-      if ((c->fmask >> k) & 1u) {                     /* a float parameter: a box, or a float operation to dispatch */
-        double d; Val fv; memset(&fv, 0, sizeof fv);
-        if (net_read_float(n, v, &d)) args[k] = lin_l(d);
-        else if (net_read_value(n, v, DT_FFI, &fv) && fv.kind == 4) args[k] = fv.iv;
-        else { ok = 0; DBG("argument %d is not a float\n", k); }
-      } else if (!net_read_i64(n, v, &args[k])) { ok = 0; DBG("argument %d is not a number\n", k); }
+      /* a number -- an integer or a float, both numerals -- or an FFI call still to dispatch */
+      if (!net_read_i64(n, v, &args[k])) {
+        Val fv; memset(&fv, 0, sizeof fv);
+        if (net_read_value(n, v, DT_FFI, &fv) && (fv.kind == 1 || fv.kind == 4)) args[k] = fv.iv;
+        else { ok = 0; DBG("argument %d is not a number\n", k); }
+      }
       if (!y_call(n, p1, p2, &h, &appy, &F)) { ok = 0; break; }   /* forcing rewrote the call itself */
     }
     if (!ok) {
@@ -1063,7 +1073,7 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
     }
     extern int lin_threads;
     long r = c->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
-    Port val = c->kind == 3 ? net_alloc_bool(n, r != 0) : c->kind == 4 ? net_alloc_float(n, lin_d(r)) : net_alloc_scott(n, r);
+    Port val = c->kind == 3 ? net_alloc_bool(n, r != 0) : net_alloc_scott(n, r);   /* a float is the numeral of its bits */
     Port out = W(n, (Port){call, 1});
     net_link(n, val, out, 1);
     net_drop(n, call);                                  /* erases the call chain, Y and F behind it */

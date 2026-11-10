@@ -253,14 +253,13 @@ int net_read_string_arena(Net *n, Port p, int pay_enc, const char **out) {
   free(buf); return -1;
 }
 
-/* Decoding a float box is entirely the provider's: the core hands it the port, because the box's shape
-   is not what makes it a float -- the TABLE is. */
+/* A FLOAT IS A NUMERAL: its 64-bit IEEE-754 pattern, the same net structure as an integer (std/softfloat.lin
+   gives the operations their pure meanings).  So decoding one is reading the numeral; what says "float"
+   is the TYPE, which the caller knows -- the structure alone never claims a numeral is a float. */
 int net_read_float(Net *n, Port p, double *out) {
-  N = n;
-  Val v;
-  memset(&v, 0, sizeof v);
-  if (!net_unbox_value(n, DT_FLOAT, p, &v) || v.kind != 4) return 0;
-  memcpy(out, &v.iv, 8);
+  long bits;
+  if (!net_read_i64(n, p, &bits)) return 0;
+  memcpy(out, &bits, 8);
   return 1;
 }
 
@@ -334,23 +333,10 @@ Port net_alloc_bool(Net *n, int val) {
   return (Port){bt.node, 0};
 }
 
-/* A thin call into the DT_FLOAT provider.  A missing provider is a misconfiguration, reported once
-   the way a missing scalar table is (`lin_scalar_ops_load`), not a silent wrong answer. */
+/* ...and building one is building the numeral of its bits. */
 Port net_alloc_float(Net *n, double d) {
-  Val v;
-  memset(&v, 0, sizeof v);
-  v.kind = 4;
-  memcpy(&v.iv, &d, 8);
-  Port p = net_box_value(n, DT_FLOAT, &v);
-  if (p.node < 0) {
-    static int warned;
-    if (!warned) {
-      warned = 1;
-      fprintf(stderr, "lin: no driver provides the float domain -- load std/drivers/values.lin "
-                      "(`(set_driver \"values\")`)\n");
-    }
-  }
-  return p;
+  long bits; memcpy(&bits, &d, 8);
+  return net_alloc_scott(n, bits);
 }
 
 /* ---------------- the closure headers ----------------
@@ -446,7 +432,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
      is the readback provider's, and its own shape test is pure, so a slot that already IS a value
      pays only a walk of two wires. */
   long amb = lin_fan_ambiguous;                      /* the closure test below is a SHAPE probe: its fan choices read no value */
-  if (net_read_value(n, p, DT_FFI, v) && v->kind) return 1;
+  if (net_read_value(n, p, DT_FFI, v) && v->kind) { lin_fan_ambiguous = amb; return 1; }   /* (the call's own value: dispatched once) */
   {
     char fnb[2];                                     /* a sink: only the name's PRESENCE is tested, and any buffer over one byte reports one */
     Port q = net_dhop(n, p);
@@ -478,9 +464,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
   default:
     break;                        /* an OP/EFF closure is not a scalar operand */
   }
-  /* what the STRUCTURE determines by itself (see above) */
-  double d;
-  if (net_read_float(n, p, &d)) { memcpy(&v->iv, &d, 8); v->kind = 4; return 1; }
+  /* what the STRUCTURE determines by itself (see above): a float is a numeral, so only its type says so */
   long x = net_read_int(n, p, LIN_ENC_NUM);
   if (x > 0) { v->iv = x; v->kind = 1; return 1; }
   if (net_read_string_arena(n, p, LIN_ENC_NUM, &v->sv) > 0) { v->kind = 2; return 1; }

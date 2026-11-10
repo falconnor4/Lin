@@ -323,14 +323,14 @@ fi
 #   The float box table used to be core state with a hardcoded container section.
 #   It is a driver's now, carried as an opaque named section, which is what makes
 #   an artifact self-describing and keeps the core ignorant of every value domain.
-#   See test/values_carry.sh.
+#   See test/floats_carry.sh.
 # ----------------------------------------------------------------------------
-VC_LOG=$(mktemp)
-if bash test/values_carry.sh "$LIN_BIN" "$STD_DIR" >"$VC_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 4)); echo "PASS test/values_carry.sh ($(tail -1 "$VC_LOG"))"
-  rm -f "$VC_LOG"
+FC_LOG=$(mktemp)
+if bash test/floats_carry.sh "$LIN_BIN" "$STD_DIR" >"$FC_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 4)); echo "PASS test/floats_carry.sh ($(tail -1 "$FC_LOG"))"
+  rm -f "$FC_LOG"
 else
-  fail=$((fail+1)); echo "FAIL test/values_carry.sh"; cat "$VC_LOG"; rm -f "$VC_LOG"
+  fail=$((fail+1)); echo "FAIL test/floats_carry.sh"; cat "$FC_LOG"; rm -f "$FC_LOG"
 fi
 
 # ----------------------------------------------------------------------------

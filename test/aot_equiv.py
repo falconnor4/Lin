@@ -150,12 +150,11 @@ CASES = [
     (r'(let ((x 3.5)) (fmul x 2.0))', '=> 7'),
 ]
 
-# The pass the numbers in the driver favour (arith's AOT pass, std/drivers/arith.c): it chooses an
-# UNAMBIGUOUS ENCODING for the values of its own domain that the program observes.  Without it the
-# artifact writes the value as the structure it is, because a container carries no type and `0`,
-# TRUE and FALSE are shapes other domains claim too.  These are the cases that pin it: `want` is the
-# INTERPRETER's answer, the pass-on artifact has to match it, and the pass-off artifact must differ
-# (otherwise the pass is not exercised and this file would pass vacuously).
+# Values whose SHAPE other domains share: `0`, TRUE and FALSE (and every float, which is a numeral).  A
+# v8 container states the DOMAIN of its result (the build's type of it), so the artifact reads them as
+# the interpreter does with or without arith's AOT box pass (std/drivers/arith.c), which chose an
+# unambiguous encoding back when a container carried no type.  Both builds must print the interpreter's
+# answer: the pass may not change a value, and the container may not depend on it.
 VALUE_CASES = [
     (r'0',                    '=> 0'),        # a bare literal: no nominal type, so it declines
     (r'(is_zero 0)',          '=> true'),
@@ -163,10 +162,6 @@ VALUE_CASES = [
     (r'(leq 5 5)',            '=> true'),
     (r'(gt 4 2)',             '=> true'),
 ]
-# `0` above is deliberate: its type is an arrow, not the nominal `num`, so there is no domain for the
-# pass to name and it DECLINES -- which is the honest limit of the mechanism, and why the improvement
-# is "some cases" rather than all: a value whose meaning nothing states is still written as its net.
-VALUE_DECLINES = {r'0'}
 
 
 def run(argv, timeout, env):
@@ -423,11 +418,7 @@ def main():
         if rc != 0 or got != want:
             print('FAIL %s\n  search artifact: want %r got %r (rc=%d)' % (expr, want, got, rc))
             bad += 1
-    # THE PASS HAS TO PAY OFF, not merely run (and the pass-on/pass-off builds above already prove it
-    # is exercised without crashing).  A case whose pass-off artifact ALREADY prints the value proves
-    # nothing about the pass, so each VALUE_CASES entry must improve, except the ones listed as
-    # declining by construction -- those must be untouched, which is the other half of the contract.
-    improved, unchanged = [], []
+    # Both builds -- the box pass on and off -- print the interpreter's answer (see VALUE_CASES).
     for expr, want in VALUE_CASES:
         src = os.path.join(tmp, 'v.lin')
         on, off = os.path.join(tmp, 'v.on.line'), os.path.join(tmp, 'v.off.line')
@@ -438,31 +429,11 @@ def main():
         _, gon, _ = run([on], 60, env)
         _, goff, _ = run([off], 60, env)
         gon, goff = gon.strip(), goff.strip()
-        if gon != want:                       # whatever else, the pass-on artifact is the interpreter's answer
-            print('FAIL %s\n  pass-on: want %r got %r (pass-off %r)' % (expr, want, gon, goff))
+        if gon != want or goff != want:
+            print('FAIL %s\n  want %r: pass-on %r, pass-off %r' % (expr, want, gon, goff))
             bad += 1
-        elif expr in VALUE_DECLINES:
-            # A case the pass must NOT touch -- its result type names no domain, so it declines and
-            # the artifact still writes the value as the structure it is -- so the two builds have to
-            # agree, and there is nothing here for the pass to improve.  This is the honest limit of
-            # the mechanism, and it is why the improvement is "some cases" rather than all.
-            if gon != goff:
-                print('FAIL %s\n  the pass touched a case it has no domain for: %r vs %r'
-                      % (expr, gon, goff))
-                bad += 1
-            else:
-                unchanged.append(expr)
-        elif goff == want:
-            print('FAIL %s\n  the pass-off artifact already reads %r, so this case does not pin the '
-                  'pass' % (expr, want))
-            bad += 1
-        else:
-            improved.append(expr)
     if bad:
         print('aot_equiv: %d case(s) where the artifact disagrees with the interpreter' % bad)
-        return 1
-    if not improved:
-        print('aot_equiv: no case where the pass changes the readback -- it is no longer exercised')
         return 1
     if fires < 1:
         print('aot_equiv: the e-graph pass fired no rule on any case -- it is no longer '
@@ -506,10 +477,10 @@ def main():
     if bo_note:
         print('aot_equiv: build-time observation: ' + bo_note)
     print('aot_equiv: OK (%d cases x {passes on, passes off, AOT-search}; e-graph fired %d time(s), '
-          'declined %d capture-risk rewrite(s), %d searched builds; AOT pass improved %d value case(s) '
-          '(%s), declined by type on %d; CORPUS: %d suites, artifact == interpreter\'s final answer, '
+          'declined %d capture-risk rewrite(s), %d searched builds; %d shared-shape value case(s) read '
+          'by the container\'s type, box pass on and off; CORPUS: %d suites, artifact == interpreter\'s final answer, '
           '%d refused by both paths, %d environmental (pinned)%s)'
-          % (len(CASES), fires, declines, chosen, len(improved), ', '.join(improved), len(unchanged),
+          % (len(CASES), fires, declines, chosen, len(VALUE_CASES),
              cchecked, crefused, cenviron, payoff))
     return 0
 

@@ -135,6 +135,44 @@ static void def_precompile(Def *d) {
    (`dep`).  A definition's body is expanded with a FRESH guard: the binders at its use site are not in its
    scope, and letting them be would let a local `mul` capture the library's. */
 static Def **ds; static unsigned char *ds_back, *ds_dep; static int dsn, dscap;
+static Term *expand(Term *t, Guard *g);
+
+/* AN OPERATOR'S MEANING IS SHARED CODE.  An `_op` head carries its operator's pure meaning,
+   `((\_op ((\_k MEANING) _op)) operands)`, which runs only when no driver folds the operator.  Expanded
+   like ordinary code, every use of an operator would carry its own copy of everything the meaning names --
+   a soft-float `fmul` is ~90k nodes, and `bench/mandel.lin`'s twenty float operations built 2M nodes before
+   the first step.  But a meaning is the same closed code at every use, so it is built ONCE per top-level
+   form: inside a meaning (the body of the reserved binder `_k`), a definition is referenced by a stable
+   name (" m:<def>"), and the form is wrapped in one `let` per definition so referenced, dependencies
+   outermost.  The net then shares each meaning across all its uses, and copies of it are made
+   incrementally, as far as a use needs (optimal sharing).  NOT ordinary code: an operator inside a shared
+   body sees its operands superposed (one per copy) until the copying is done, so a fold there declines,
+   and the folds are where ordinary code's speed is.  Types are not involved: checking ran before
+   expansion, on the names.  A definition being expanded right now (a cycle) stays a name: term_fix
+   closes it. */
+static int in_meaning;
+typedef struct { Def *d; const char *name; } MeaningDef;
+static MeaningDef *gm; static int ngm, cgm, gm_on;
+static const char *m_name(Def *d) { return lin_internf(" m:%s", d->name); }
+static int gm_has(Def *d) { for (int i = 0; i < ngm; i++) if (gm[i].d == d) return 1; return 0; }
+static Term *expand_def_body(Def *d, int meaning, int *owned);
+static void gm_need(Def *d);
+static void gm_scan(const Term *t) {                /* every " m:" name an expansion refers to is bound */
+  if (!t) return;
+  if (t->type == TVAR && !strncmp(t->name, " m:", 3)) { Def *d = def_find(t->name + 3); if (d) gm_need(d); return; }
+  gm_scan(t->l); gm_scan(t->r);
+}
+static void gm_need(Def *d) {
+  if (gm_has(d)) return;
+  int owned = 0;
+  Term *e = expand_def_body(d, 1, &owned);
+  if (!e || owned) { if (owned) term_free(e); return; }   /* (an uncacheable one is expanded in place: see expand) */
+  gm_scan(e);                                       /* its dependencies first: they are bound outside it */
+  if (gm_has(d)) return;
+  if (ngm >= cgm) gm = realloc(gm, (size_t)(cgm = cgm ? cgm * 2 : 16) * sizeof *gm);
+  gm[ngm++] = (MeaningDef){ d, m_name(d) };
+}
+
 static Term *expand(Term *t, Guard *g) {
   if (!t) return NULL;
   if (t->type == TVAR) {
@@ -147,36 +185,65 @@ static Term *expand(Term *t, Guard *g) {
         for (int j = i + 1; j < dsn; j++) ds_dep[j] = 1;
         return term_new(TVAR, d->name, NULL, NULL);
       }
-    if (!d->expanded) {
-      if (dsn >= dscap) { dscap = dscap ? dscap * 2 : 32; ds = realloc(ds, (size_t)dscap * sizeof *ds);
-                          ds_back = realloc(ds_back, (size_t)dscap); ds_dep = realloc(ds_dep, (size_t)dscap); }
-      int me = dsn++; ds[me] = d; ds_back[me] = ds_dep[me] = 0;
-      Guard fresh = {0}; Term *body = term_copy(d->term);
-      Term *e = expand(body, &fresh); term_free(body); free(fresh.names);
-      if (ds_back[me]) { Term *fx = term_fix(d->name, e); term_free(e); e = fx; }   /* mutual recursion: a fixpoint */
-      int dep = ds_dep[me];
-      dsn--;
-      if (dep) return e;                            /* depends on an enclosing definition: not cacheable */
-      d->expanded = e;
-    }
-    def_precompile(d);
-    if (d->compiled) return term_new(TDEF, d->name, NULL, NULL); /* value marker */
-    return term_copy(d->expanded);
+    int owned = 0;
+    Term *x = expand_def_body(d, in_meaning, &owned);
+    if (!x) return NULL;
+    if (owned || d->compiled) { if (gm_on) gm_scan(x); return x; }
+    if (in_meaning && gm_on) { gm_need(d); return term_new(TVAR, m_name(d), NULL, NULL); }   /* see in_meaning */
+    if (gm_on) gm_scan(x);
+    return term_copy(x);
   }
   Term *c = term_new(t->type, t->name, NULL, NULL);
   c->annot = t->annot;            /* a literal's stated type travels with it (a string is an annotated lambda) */
   /* TLET binds in both children: the value may refer to itself, which is the recursion. */
   int bound = (t->type == TLAM || t->type == TDEF || t->type == TLET);
+  int meaning = t->type == TLAM && !strcmp(t->name, "_k");   /* an operator's meaning: see in_meaning */
   if (bound) guard_push(g, t->name);
+  in_meaning += meaning;
   c->l = expand(t->l, g);
+  in_meaning -= meaning;
   if (bound && t->type != TLET) g->count--;     /* a let's name is also bound in its body (the right child) */
   c->r = expand(t->r, g);
   if (bound && t->type == TLET) g->count--;
   return c;
 }
 
+/* A definition's expansion in the given mode (cached, unless it depends on an enclosing definition being
+   expanded -- then it is the caller's to own).  A precompiled one is its value marker. */
+static Term *expand_def_body(Def *d, int meaning, int *owned) {
+  *owned = 0;
+  Term **slot = meaning ? &d->expanded_sh : &d->expanded;   /* one expansion per mode */
+  {
+    if (!*slot) {
+      if (dsn >= dscap) { dscap = dscap ? dscap * 2 : 32; ds = realloc(ds, (size_t)dscap * sizeof *ds);
+                          ds_back = realloc(ds_back, (size_t)dscap); ds_dep = realloc(ds_dep, (size_t)dscap); }
+      int me = dsn++; ds[me] = d; ds_back[me] = ds_dep[me] = 0;
+      Term *body = term_copy(d->term), *e;
+      int save = in_meaning; in_meaning = meaning;
+      { Guard fresh = {0}; e = expand(body, &fresh); free(fresh.names); }
+      in_meaning = save;
+      term_free(body);
+      if (ds_back[me]) { Term *fx = term_fix(d->name, e); term_free(e); e = fx; }   /* mutual recursion: a fixpoint */
+      int dep = ds_dep[me];
+      dsn--;
+      if (dep) { *owned = 1; return e; }           /* depends on an enclosing definition: not cacheable, the caller's */
+      *slot = e;
+    }
+    def_precompile(d);
+    if (d->compiled) return term_new(TDEF, d->name, NULL, NULL); /* value marker */
+    return *slot;
+  }
+}
 Term *expand_defs(Term *t) {
-  Guard g = {0}; Term *res = expand(t, &g); free(g.names); return res;
+  /* one set of shared meanings per top-level form (see in_meaning); a nested call keeps its own */
+  MeaningDef *sgm = gm; int sn = ngm, sc = cgm, son = gm_on;
+  gm = NULL; ngm = cgm = 0; gm_on = 1;
+  Guard g = {0}; Term *res = expand(t, &g); free(g.names);
+  for (int i = ngm - 1; i >= 0; i--)                /* dependencies come first in gm: they end up outermost */
+    res = term_new(TLET, gm[i].name, term_copy(gm[i].d->expanded_sh), res);
+  free(gm);
+  gm = sgm; ngm = sn; cgm = sc; gm_on = son;
+  return res;
 }
 
 /* Benchmark accounting.  `eval_form` reduces the net *before* its recursion-sentinel check, so
@@ -357,7 +424,7 @@ static void process_def(Term *t) {
   if (rec) { d->raw = t->l; d->term = term_fix(t->name, t->l); }   /* the fix consumes nothing: the unfixed body stays for the deferred check */
   else d->term = t->l;
   t->l = NULL;
-  d->expanded = NULL; d->compiled = NULL; d->comp_tried = 0; d->typing = 0;
+  d->expanded = NULL; d->expanded_sh = NULL; d->compiled = NULL; d->comp_tried = 0; d->typing = 0;
 }
 
 #include <unistd.h>
@@ -435,9 +502,10 @@ static int build_read_err = 0;
 
 static int run_line_file(const char *path) {
   Net net; if (!net_load_line(&net, path)) return 0;
-  /* A container carries no type, so nothing here knows what its result MEANS: readback decodes
-     what the structure determines by itself and prints the rest. */
-  run_and_report(&net, -1); net_free(&net); return 1;
+  /* A v8 container carries the DOMAIN of its result (the build's type of it): a float is a numeral, so the
+     structure alone cannot say "float".  An older one carries none, and readback decodes what the structure
+     determines by itself. */
+  run_and_report(&net, lin_line_domain); net_free(&net); return 1;
 }
 
 static void export_namespace(const char *name);   /* (export <ns>) re-export */
@@ -528,6 +596,7 @@ static void aot_reset_defs(void) {
   for (int i = 0; i < ndefs; i++) {
     Def *d = &defs[i];
     term_free(d->expanded); d->expanded = NULL;
+    term_free(d->expanded_sh); d->expanded_sh = NULL;
     if (d->compiled) { net_free(d->compiled); free(d->compiled); d->compiled = NULL; }
     d->comp_tried = 0;
   }
@@ -632,6 +701,7 @@ static int do_build(const char *in_f, const char *out_f) {
   if (!build_term) { fprintf(stderr, "error: no expression to build in '%s'\n", in_f); return 1; }
   char err[512]; Scheme sch;
   if (!type_check(build_term, &sch, err, sizeof err)) { fprintf(stderr, "error: %s\n", err); return 1; }
+  lin_line_domain = type_domain(sch.t);           /* the artifact says what its result MEANS (a float is a numeral) */
   build_sch = &sch;                    /* the AOT pass point is handed the types the compiler inferred */
   /* The artifact is the deliverable, so the build's decisions are the ones the measurements choose. */
   int rc = aot_search(build_term, out_f);

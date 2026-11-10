@@ -995,11 +995,21 @@ static inline void lin_pat_cache_invalidate(LinPatCache *c) {
  * ------------------------------------------------------------------------- */
 enum { LIN_OP_ADD = 0, LIN_OP_MUL, LIN_OP_SUB, LIN_OP_EQ, LIN_OP_LT, LIN_OP_LEQ, LIN_OP_GT,
        LIN_OP_GEQ, LIN_OP_DIV, LIN_OP_MOD, LIN_OP_POW,
-       LIN_OP_BAND, LIN_OP_BOR, LIN_OP_BXOR, LIN_OP_SHL, LIN_OP_SHR, LIN_OP_N };
+       LIN_OP_BAND, LIN_OP_BOR, LIN_OP_BXOR, LIN_OP_SHL, LIN_OP_SHR,
+       /* FLOATS are numerals too (a float is its 64-bit IEEE-754 pattern); their pure meanings are
+          std/softfloat.lin's, and a one-operand operation carries a 0 as its second operand */
+       LIN_OP_FADD, LIN_OP_FSUB, LIN_OP_FMUL, LIN_OP_FDIV, LIN_OP_FEQ, LIN_OP_FLT, LIN_OP_FLEQ,
+       LIN_OP_FMIN, LIN_OP_FMAX, LIN_OP_FSQRT, LIN_OP_FFLOOR, LIN_OP_FTOI, LIN_OP_ITOF, LIN_OP_FABS,
+       LIN_OP_FSIGN, LIN_OP_FFRACT, LIN_OP_N };
+#define LIN_OP_IS_FLOAT(c) ((c) >= LIN_OP_FADD && (c) < LIN_OP_N)
+#define LIN_OP_IS_CMP(c) (((c) >= LIN_OP_EQ && (c) <= LIN_OP_GEQ) || ((c) >= LIN_OP_FEQ && (c) <= LIN_OP_FLEQ))
 static inline const char *lin_op_fn(int code) {
   static const char *const names[LIN_OP_N] = {
     "lin_add", "lin_mul", "lin_sub", "lin_eq", "lin_lt", "lin_leq", "lin_gt", "lin_geq",
-    "lin_div", "lin_mod", "lin_pow", "lin_band", "lin_bor", "lin_bxor", "lin_shl", "lin_shr"
+    "lin_div", "lin_mod", "lin_pow", "lin_band", "lin_bor", "lin_bxor", "lin_shl", "lin_shr",
+    "lin_fadd", "lin_fsub", "lin_fmul", "lin_fdiv", "lin_feq", "lin_flt", "lin_fleq",
+    "lin_fmin", "lin_fmax", "lin_fsqrt", "lin_fflr", "lin_ftoi", "lin_float", "lin_fabs",
+    "lin_fsign", "lin_ffract"
   };
   return (code >= 0 && code < LIN_OP_N) ? names[code] : NULL;
 }
@@ -1022,13 +1032,42 @@ static inline const char *lin_op_fn(int code) {
  *
  * Applying the head to its list beta-reduces the marker away, leaving exactly the pure fallback in
  * `_k`'s place -- so a driver that declines still gets the exact answer by plain beta. */
+/* A binder NOBODY USES: its wire ends at an eraser -- directly, or through the fans a copy put between them.
+   Copying a lambda wires each copy's binder to a fan's auxiliary port, and the fan only meets the eraser its
+   principal faces when erasure next runs (at a safepoint), so a copy's unused binder reads as a fan for a
+   while.  Following auxiliary -> principal answers what the copies' binder IS, without waiting. */
+static inline int lin_pat_unused_binder(const Net *n, int lam) {
+  Port w = net_wire(n, (Port){lam, 1});
+  for (int i = 0; i < n->nn && w.node >= 0 && lin_pat_live(n, w.node); i++) {
+    if (n->tag[w.node] == ERA) return 1;
+    if (n->tag[w.node] != DUP || w.port == 0) return 0;
+    w = net_wire(n, (Port){w.node, 0});
+  }
+  return 0;
+}
+/* Does the wire `w` (an occurrence of a bound variable) belong to `lam`'s binder?  Directly; or, while the
+   lambda is being copied, through the fan that superposes the copies' binders: a lazily copied closure
+   shares its body until the fan has moved through it, so the occurrence in that body is wired to the fan's
+   PRINCIPAL, and the copies' binders hang off its auxiliaries. */
+static inline int lin_pat_binder_of(const Net *n, Port w, int lam, int budget) {
+  if (budget <= 0 || w.node < 0 || !lin_pat_live(n, w.node)) return 0;
+  if (w.node == lam && w.port == 1) return 1;
+  if (n->tag[w.node] != DUP || w.port != 0) return 0;
+  return lin_pat_binder_of(n, net_wire(n, (Port){w.node, 1}), lam, budget - 1) ||
+         lin_pat_binder_of(n, net_wire(n, (Port){w.node, 2}), lam, budget - 1);
+}
 static inline int lin_pat_op_head(const Net *n, Port p, void *ctx) {
   (void)ctx;
   if (!n || p.port != 0 || !lin_pat_live(n, p.node) || n->tag[p.node] != LAM) return 0;
   Port use = net_wire(n, (Port){p.node, 1});
   if (use.port != 2 || !lin_pat_live(n, use.node) || n->tag[use.node] != APP) return 0;
   Port fn = net_wire(n, (Port){use.node, 0});
-  return fn.port == 0 && lin_pat_live(n, fn.node) && n->tag[fn.node] == LAM;
+  if (!(fn.port == 0 && lin_pat_live(n, fn.node) && n->tag[fn.node] == LAM)) return 0;
+  /* ...and `\_k`'s binder is UNUSED (an eraser on it).  Without this the shape is ordinary code:
+     inlining makes `(\a ((\x BODY) a))` everywhere -- `(\a (mul a b))` IS one -- and reading such a
+     lambda as an operator took its argument for an operand list and stranded the redex.  `_k` is the
+     one binder of the head nobody may name, so it is what the language can promise. */
+  return lin_pat_unused_binder(n, fn.node);
 }
 /* parenthesized: P_PRED carries a comma, so an unguarded macro would split as TWO arguments
    wherever it is nested (`P_NOT(P_OP_HEAD)`), which is exactly how it first failed to compile. */
@@ -1044,7 +1083,12 @@ static inline int lin_pat_ffi_head(const Net *n, Port p) {
   Port a2 = net_dhop((Net *)n, net_wire(n, (Port){r.node, 2}));
   if (a2.port != 1 || !lin_pat_live(n, a2.node) || n->tag[a2.node] != APP) return 0;
   Port fn = net_dhop((Net *)n, net_wire(n, (Port){a2.node, 0}));
-  return fn.port == 1 && lin_pat_live(n, fn.node) && n->tag[fn.node] == APP;
+  if (!(fn.port == 1 && lin_pat_live(n, fn.node) && n->tag[fn.node] == APP)) return 0;
+  /* ...and it is the HEADER, not code of that shape: the function applied is `_ffi` itself (the head's
+     own binder) and `_ret` is unused (an eraser on it).  `(\a (\b ((f a) b)))` is the same tree, and
+     the user's lambda read as a foreign call stranded its redex (see lin_pat_op_head). */
+  if (!lin_pat_binder_of(n, net_wire(n, (Port){fn.node, 0}), p.node, n->nn)) return 0;
+  return lin_pat_unused_binder(n, r.node);
 }
 
 /* WHAT A FOLD DRIVER COULD WANT, registered with the core as `LIN_CAP_FOLD`'s predicate: the shapes every

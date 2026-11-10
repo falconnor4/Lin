@@ -342,6 +342,7 @@ int lin_driver_aot(Net *n, const Term *t, const Scheme *sch);
 /* The term -> port map the core hands a pass: {-1,0} for a term it did not compile itself. */
 Port lin_node_of(void *ctx, const Term *t);
 int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const char *path);
+extern int lin_line_domain;   /* an artifact's result domain (DT_*, or -1): set by a build before saving, by a load */
 void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
 
 /* ---------------- the ENCODING REGISTRY: domain -> the shape it is written in ----------------
@@ -428,7 +429,8 @@ long long goi_det(Net *n);
 /* ---------------- main / defs ---------------- */
 typedef struct { const char *name; Term *term, *expanded, *raw; Scheme sch; int typed, rec;
                  Net *compiled; int comp_tried;
-                 int typing; Scheme hole; } Def;   /* typing: its type is being inferred (mutual recursion reaches it) */
+                 int typing; Scheme hole;           /* typing: its type is being inferred (mutual recursion reaches it) */
+                 Term *expanded_sh; } Def;          /* its expansion inside an operator's MEANING (main.c: in_meaning) */
 extern Def *defs;
 extern int ndefs, lin_threads;
 Def *def_find(const char *name);

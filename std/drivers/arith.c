@@ -43,7 +43,7 @@ static int arith_supplies(const char *fn) {
   static const char *const rows[] = {
     "lin_fadd", "lin_fsub", "lin_fmul", "lin_fdiv", "lin_fpow", "lin_fatan2", "lin_fmin", "lin_fmax",
     "lin_fsqrt", "lin_fsin", "lin_fcos", "lin_ftan", "lin_fabs", "lin_fsign", "lin_ffract",
-    "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_lerp", "lin_fclamp",
+    "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_fflr", "lin_ftoi", "lin_lerp", "lin_fclamp",
     "lin_add", "lin_sub", "lin_mul", "lin_div", "lin_mod", "lin_pow",
     "lin_band", "lin_bor", "lin_bxor", "lin_shl", "lin_shr",
     "lin_eq", "lin_lt", "lin_leq", "lin_gt", "lin_geq", NULL };
@@ -70,6 +70,10 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
 #undef F1
 #undef FB
   if (!strncmp(fn, "lin_ffloor", 10)) { if (argc < 1) return 0; *out = lin_f64_floor(a[0]); *outkind = 1; return 1; }
+  /* the float `_op` rows (LIN_OP_FFLOOR / FTOI / ITOF): floor as a float, floor to an integer, an integer as a float */
+  if (!strcmp(fn, "lin_fflr")) { if (argc < 1) return 0; *out = lin_f64_floorf(a[0]); *outkind = 4; return 1; }
+  if (!strcmp(fn, "lin_ftoi")) { if (argc < 1) return 0; *out = lin_f64_floor(a[0]); *outkind = 1; return 1; }
+  if (!strcmp(fn, "lin_float")) { if (argc < 1) return 0; *out = lin_f64_of_int(a[0]); *outkind = 4; return 1; }
   if (!strncmp(fn, "lin_lerp", 8) && argc >= 3) { double x,y,t; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); memcpy(&t,&a[2],8); double r=x+(y-x)*t; memcpy(out,&r,8); *outkind=4; return 1; }
   if (!strncmp(fn, "lin_fclamp", 10) && argc >= 3) { double x,lo,hi; memcpy(&x,&a[0],8); memcpy(&lo,&a[1],8); memcpy(&hi,&a[2],8); double r=x<lo?lo:(x>hi?hi:x); memcpy(out,&r,8); *outkind=4; return 1; }
 
@@ -124,7 +128,7 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
  * ====================================================================== */
 
 /* Tri-state result of trying to compute a saturated closure's value. */
-enum { EV_NO = 0, EV_READY = 1, EV_WAIT = 2 };
+enum { EV_NO = 0, EV_READY = 1, EV_WAIT = 2, EV_NOTFFI = 3 };   /* EV_NOTFFI: the header shape, but no call (see ffi_eval) */
 
 /* read a port's wire (a function, not a macro: `wire_at(n, a, b)` would
    split into three macro arguments at the comma inside the braces) */
@@ -138,7 +142,8 @@ static inline Port wire_at(const Net *n, int node, int port) { return n->wire[no
    never forces and never allocates, which is what `claim` requires. */
 static int head_is_ffi(const Net *n, int lam) {
   LinMatch m;
-  return lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
+  return lin_pat_ffi_head(n, (Port){lam, 0}) &&      /* the header's own promises (pattern.h) */
+         lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
 }
 
 /* The OPERATOR and its OPERANDS, read in ONE step.  Both live in the same cell -- the operator's
@@ -338,7 +343,12 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
      nqueens 1289, 123.8 -> 90.9ms; bench_runtime 12 and sudoku 0, both unchanged.  A name that is
      merely not readable YET still returns EV_WAIT through the header test above, which is where a
      not-yet-reduced name is caught. */
-  if (net_read_string_arena(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, &fn) < 0) return EV_NO;
+  /* A name field that is not a string is not a CALL: the header shape is the language's own cons cell, and
+     an applied cell is ordinary data being taken apart.  Said apart from EV_NO because a build LEAVES a
+     declined call for its artifact but must reduce a cell -- left alone, an operator's list never forms
+     and its fold never happens (measured: `(fmul 2.0 3.0)` shipped 237 kB and hung its artifact). */
+  if (net_read_string_arena(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, &fn) <= 0) return EV_NOTFFI;   /* (no symbol is nameless: an
+     empty read is a nil head, as readback's run_ffi says) */
   /* TWO QUESTIONS, BOTH ANSWERED BEFORE ANY OPERAND IS READ -- because reading a spine is what FORCES
      it, and a call that is not this fold's must not have its operands forced to find that out (measured:
      decoding every closure's spine to classify it took test/sat_verify.lin from 295 ms to 82 s).
@@ -501,6 +511,59 @@ static int arith_claim(const Net *ncn, Port p1, Port p2) {
   return head_is_ffi(n, lam);
 }
 
+/* AN OPERAND THAT WAITS FOR A BINDING.  An `_op` redex inside a lambda body is an active pair from the start,
+   so the wave can offer it before the lambda is applied -- while an operand is still the lambda's VARIABLE.
+   Forcing cannot make that concrete, and handing the redex to beta would trade the fold for the pure-Lin body
+   for good (measured: `((\a (\b (mul a b))) 16 3)` ran mul's bitwise body, 8045 steps, for a fold of one).
+   Such a redex is LEFT, re-queued: when the application binds the variable, demand reaches it again with a
+   value.  "Open" = the operand's producers, followed through applications and fans, reach a binder. */
+static unsigned *op_seen; static int op_seen_cap; static unsigned op_stamp;
+static int producer_open(Net *n, Port p) {
+  for (;;) {
+    if (!IN_NET(n, p.node) || n->dead[p.node]) return 0;
+    int t = n->tag[p.node];
+    if (p.node >= op_seen_cap) return 0;
+    if (op_seen[p.node] == op_stamp) return 0;
+    op_seen[p.node] = op_stamp;
+    if (t == LAM) return p.port == 1;                      /* a value (port 0), or a variable (port 1) */
+    if (t == DUP) { p = wire_at(n, p.node, 0); continue; } /* a copy: of what the fan's principal carries */
+    if (t == APP && p.port == 1) {
+      if (producer_open(n, wire_at(n, p.node, 0))) return 1;
+      p = wire_at(n, p.node, 2); continue;
+    }
+    return 0;
+  }
+}
+/* the steps count each deferred redex was last left at: deferring again needs the net to have moved */
+static long *op_defer_at; static int op_defer_cap;
+static int op_defer(Net *n, int app) {
+  if (op_defer_cap < n->nn) {
+    int c = n->nn * 2 + 64;
+    op_defer_at = realloc(op_defer_at, (size_t)c * sizeof *op_defer_at);
+    for (int i = op_defer_cap; i < c; i++) op_defer_at[i] = -1;
+    op_defer_cap = c;
+  }
+  if (op_defer_at[app] == (long)n->steps) return 0;   /* nothing moved since we last waited here */
+  op_defer_at[app] = (long)n->steps;
+  return 1;
+}
+static int operands_open(Net *n, Port argp) {
+  if (op_seen_cap < n->nn) {
+    op_seen = realloc(op_seen, (size_t)(op_seen_cap = n->nn * 2 + 64) * sizeof *op_seen);
+    memset(op_seen, 0, (size_t)op_seen_cap * sizeof *op_seen);
+  }
+  op_stamp++;
+  int slots = net_spine_slots(n, argp);
+  Port cur = net_dhop(n, argp);
+  for (int k = 0; k < slots; k++) {
+    Port head, next;
+    if (!net_read_cell(n, cur, &head, &next)) break;
+    if (producer_open(n, head)) return 1;                  /* (net_read_cell gives the slot's PRODUCER) */
+    cur = next;
+  }
+  return 0;
+}
+
 /* reduce: fold each claimed redex.  The ABI hands a slice of PAIRS: `nred` counts pairs,
    `redexes` holds 2*nred ports.  Every claimed pair is consumed one way or another: forced
    and folded, or handed back to the core's β, which is always correct (just slower) -- a
@@ -542,7 +605,8 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
        shipped with its redex β'd away and the artifact printed `(\a (\b (\c b)))` for every N instead
        of the answer.  The core's `act` list is a wave snapshot, so an unhandled pair is simply not
        re-enqueued into this reduction; the shipped net carries the closure. */
-    if (ev != EV_READY && (lin_precompile_depth > 0 || lin_build_depth > 0)) continue;
+    if (ev == EV_NOTFFI) { ffi = 0; ev = EV_NO; }    /* a cell, not a call: reduced like any redex, build or not */
+    else if (ev != EV_READY && (lin_precompile_depth > 0 || lin_build_depth > 0)) continue;
     if (ev == EV_WAIT) {
       /* The operands are not concrete yet.  Under needed order that is the normal state -- nothing
          had a reason to reduce them -- so ask for them and try again. */
@@ -554,6 +618,13 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
     if (ev == EV_READY) {
       if (!ffi) fold_op_head(n, lam, app, &v); else fold_ffi_head(n, lam, app, &v);
       done++; (*changed)++; n->steps++;
+      continue;
+    }
+    /* re-queued, not stranded (see operands_open) -- while the net is still moving.  A wave that
+       moved nothing else will move nothing the next time either: then the variable is not getting bound
+       (a function returned as the answer, say), and beta is all that is left. */
+    if (ev == EV_WAIT && !ffi && operands_open(n, wire_at(n, app, 2)) && op_defer(n, app)) {
+      net_link(n, (Port){lam, 0}, (Port){app, 0}, 1);
       continue;
     }
     /* Not foldable (an open precompile body, or an operand that is not a value even after

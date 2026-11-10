@@ -111,7 +111,8 @@ Port lin_node_of(void *ctx, const Term *t) {
 
 static Port ct_in(Term *t, Scope sc) {
   switch (t->type) {
-  case TFLOAT: return net_alloc_float(N, strtod(t->name, NULL));
+  case TFLOAT: { double d = strtod(t->name, NULL); long bits; memcpy(&bits, &d, 8);   /* a float literal IS the numeral of its bits */
+                return net_alloc_scott_at(N, bits, fan_lvl()); }
   case TNUM: return net_alloc_scott_at(N, atol(t->name), fan_lvl());
   case TVAR: {
     for (int i = csp - 1; i >= 0; i--) {
@@ -410,6 +411,11 @@ static void eg_saturate(EGraph *g) {
             int bl = eg_find(g, g->nodes[bn].l);
             if (g->classes[bl].cost <= eg_rules[r].param) {
               const char *vn = g->nodes[bn].name;
+              /* An OPERATOR HEAD is a protocol, not a redex to simplify: `((\_op ((\_k MEANING) _op)) operands)`
+                 is the shape the fold drivers recognize (pattern.h), and beta-ing either reserved binder
+                 replaces the operator by its pure meaning for good (measured: `(fmul 2.0 3.0)` shipped its
+                 whole soft-float meaning and its artifact ran it). */
+              if (!strcmp(vn, "_op") || !strcmp(vn, "_k")) continue;
               int before = eg_find(g, cls);
               g->capture = 0;
               int sub = eg_subst(g, g->nodes[bn].l, vn, n.r, 0, g->nc);
@@ -419,7 +425,7 @@ static void eg_saturate(EGraph *g) {
               if (eg_find(g, cls) != before) eg_rules[r].fires++;
             }
           }
-        } else if (eg_rules[r].kind == EG_ETA && n.type == TLAM) {
+        } else if (eg_rules[r].kind == EG_ETA && n.type == TLAM && strcmp(n.name, "_op")) {   /* (an operator head: see EG_BETA) */
           int body_cls = eg_find(g, n.l), bn = g->classes[body_cls].best_node;
           if (bn >= 0 && bn < g->nn && g->nodes[bn].type == TAPP) {
             int an_node = g->classes[eg_find(g, g->nodes[bn].r)].best_node;
@@ -544,12 +550,13 @@ void lin_set_self_path(const char *p) {
   free(rp);
 }
 
+int lin_line_domain = -1;   /* the result's value domain (DT_*), or -1: written by a build, read by a load */
 int net_save_line(Net *n, const char *path) {
   FILE *f = fopen(path, "wb"); if (!f) return 0;
   fprintf(f, "#!%s\n", self_path); fwrite("LINE", 1, 4, f);
   /* v6 dropped the per-node NAME TABLE: a net has no carrier labels, so there is nothing to write, and the count word
      stays in the header (as 0) so the metadata keeps its shape -- a v<=5 artifact still loads, its names DISCARDED. */
-  uint32_t meta[4] = { 7, (uint32_t)n->nn, (uint32_t)n->nlv, 0 };
+  uint32_t meta[4] = { 8, (uint32_t)n->nn, (uint32_t)n->nlv, 0 };
   fwrite(meta, sizeof(uint32_t), 4, f);
   fwrite(n->tag, 1, (size_t)n->nn, f); fwrite(n->dead, 1, (size_t)n->nn, f);
   fwrite(n->wire, sizeof(Port) * 3, (size_t)n->nn, f);
@@ -563,6 +570,8 @@ int net_save_line(Net *n, const char *path) {
   /* v5: one opaque section per driver with state to keep, written and handed back on load, keyed by name -- the container
      never learns what one means (lin.h).  Before v5 this section was the float table itself, hardcoded here: the leak the
      driver ABI exists to close. */
+  /* v8: the result's DOMAIN, from the build's type (a float and an integer are both numerals) */
+  int32_t dom = lin_line_domain; fwrite(&dom, sizeof dom, 1, f);
   lin_driver_carry_write(n, f);
   fclose(f); chmod(path, 0755); return 1;
 }
@@ -580,7 +589,7 @@ int net_load_line(Net *n, const char *path) {
   char magic[4]; uint32_t meta[4];
   /* v3 files predate the float table and are still readable; a v3 file simply has no floats. */
   if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "LINE", 4) || fread(meta, 4, 4, f) != 4 ||
-      (meta[0] != 3 && meta[0] != 4 && meta[0] != 5 && meta[0] != 6 && meta[0] != 7)) {
+      (meta[0] != 3 && meta[0] != 4 && meta[0] != 5 && meta[0] != 6 && meta[0] != 7 && meta[0] != 8)) {
     fclose(f); return 0;
   }
   int ver = (int)meta[0];
@@ -609,6 +618,8 @@ int net_load_line(Net *n, const char *path) {
   if (ver >= 7) { uint32_t nr = 0; Port rp;
     if (fread(&nr, sizeof nr, 1, f) != 1) { fclose(f); net_free(n); return 0; }
     for (uint32_t k = 0; k < nr; k++) { if (fread(&rp, sizeof rp, 1, f) != 1) { fclose(f); net_free(n); return 0; } lin_demand(n, rp); } }
+  lin_line_domain = -1;
+  if (ver >= 8) { int32_t dom; if (fread(&dom, sizeof dom, 1, f) != 1) { fclose(f); net_free(n); return 0; } lin_line_domain = dom; }
   if (ver == 4) {
     /* A v4 artifact carried the float table inline.  The core passes it to whoever provides that domain. */
     uint32_t nf = 0;
