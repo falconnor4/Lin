@@ -1026,8 +1026,37 @@ static int port_whnf(Net *n, Port p) {
            (n->tag[q.node] == APP || n->tag[q.node] == DUP));
 }
 
+/* Would the demand walk from p reach a redex?  The walk's own rules (net_mark_demand), followed without marking:
+   a force whose port reaches none has nothing to do, and skipping the reducer's whole wave machinery for it is
+   what makes reading a value cheap (readers force every layer they read). */
+static int walk_reaches_redex(Net *n, Port p) {
+  for (int i = 0; i < n->nn; i++) {
+    int u = p.node;
+    if (u < 0 || u >= n->nn || n->dead[u]) return 0;
+    int t = n->tag[u];
+    if (t == ROOT) { p = WIRE(n, p); continue; }
+    if (t == ERA) return 1;                          /* (the walk marks it, and a queued pair of marked ends fires) */
+    if (t == LAM && p.port != 0) return 0;
+    if ((t == APP || t == DUP) && p.port != 0) { p = WIRE(n, ((Port){u, 0})); continue; }
+    Port q = WIRE(n, p);
+    if (q.node < 0 || q.node >= n->nn || q.port != 0 || n->dead[q.node]) return 0;
+    int qt = n->tag[q.node];
+    /* any interacting pair at the tip (conservative: the walk also fires a queued pair whose ends it passed) */
+    return !((t == LAM && qt == LAM) || (t == APP && qt == APP) || (t == ROOT || qt == ROOT));
+  }
+  return 1;                                          /* (a cycle the walk cannot settle: let the reducer decide) */
+}
+
 long net_force(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || port_whnf(n, p)) return n->steps;
+  /* (only for a port that is not a root already: forcing an existing root walks every demand, as before) */
+  { int is_root = 0; for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) { is_root = 1; break; }
+    if (!is_root && !walk_reaches_redex(n, p)) {
+      res_net = NULL;
+      if (reduce_depth) nested_reduce = 1;          /* what a force inside a wave means for reclaiming (net_reduce) */
+      return n->steps;
+    } }   /* (a force is where an outside
+       rewrite -- a driver reading, then folding -- invalidates the walk's resume point, as the reducer itself does) */
   int save = n->nroot;
   lin_demand(n, p);
   const Net *sfn = floor_net; int sfl = walk_floor;
@@ -1350,10 +1379,10 @@ static long net_reduce_body(Net *n, long limit) {
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
-      /* Resume needs the wave to have been one LOCAL rewrite at the tip: one pair, fired by the base engine or
-         consumed by a driver's slice (a fold rewrites its pair and the wire to its consumer, the same locality
-         as a base rule), and no reduction nested inside it that might have rewritten the spine above. */
-      if (cnt != 2 || wtotal != 1 || n->nheld || nested_reduce) res_net = NULL;
+      /* Resume needs the wave to have been one LOCAL rewrite at the tip by the base engine, with no reduction
+         nested inside it that might have rewritten the spine above.  (Not after a driver: a split re-aims the
+         result's consumer, and resuming above it was measured wrong.) */
+      if (cnt != 2 || base_cnt != 2 || wtotal != 1 || n->nheld || nested_reduce) res_net = NULL;
       if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (real_base > wv_max) wv_max = real_base; if (wtotal > wv_width) wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);
