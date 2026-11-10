@@ -41,16 +41,44 @@ void open_namespace(const char *name) {
   if (n_open_ns == open_ns_cap) open_ns = realloc(open_ns, (size_t)(open_ns_cap = open_ns_cap ? open_ns_cap * 2 : 8) * sizeof *open_ns);
   open_ns[n_open_ns++] = name;
 }
+/* Definitions only ever append, and the latest of a name wins: an open-addressed index from the name to its
+   latest definition, grown with the table (a prelude makes thousands of lookups; a scan per lookup was a third
+   of startup). */
+static int *def_ix; static size_t def_ixcap;
+static size_t def_hash(const char *s) { size_t h = 1469598103934665603ull; for (; *s; s++) h = (h ^ (unsigned char)*s) * 1099511628211ull; return h; }
+static void def_index(int i) {
+  if ((size_t)ndefs * 2 >= def_ixcap) {
+    free(def_ix); def_ixcap = def_ixcap ? def_ixcap * 2 : 1024;
+    while ((size_t)ndefs * 2 >= def_ixcap) def_ixcap *= 2;
+    def_ix = malloc(def_ixcap * sizeof *def_ix);
+    for (size_t k = 0; k < def_ixcap; k++) def_ix[k] = -1;
+    for (int j = 0; j < ndefs; j++) if (j != i) def_index(j);   /* (in order: a later one replaces an earlier) */
+  }
+  for (size_t k = def_hash(defs[i].name) & (def_ixcap - 1);; k = (k + 1) & (def_ixcap - 1)) {
+    if (def_ix[k] < 0 || !strcmp(defs[def_ix[k]].name, defs[i].name)) { def_ix[k] = i; return; }
+  }
+}
 static Def *lookup_raw(const char *s) {
-  for (int i = ndefs - 1; i >= 0; i--) if (!strcmp(defs[i].name, s)) return &defs[i];
+  if (!def_ixcap) return NULL;
+  for (size_t k = def_hash(s) & (def_ixcap - 1); def_ix[k] >= 0; k = (k + 1) & (def_ixcap - 1))
+    if (!strcmp(defs[def_ix[k]].name, s)) return &defs[def_ix[k]];
   return NULL;
+}
+/* `ns.name` for a LOOKUP: built in a scratch buffer, so a miss -- most of them -- allocates nothing (formatting and
+   keeping a string per probe was a sixth of startup).  A hit's name is the definition's own. */
+static const char *dotted(const char *ns, const char *name) {
+  static char *buf; static size_t cap;
+  size_t a = strlen(ns), b = strlen(name);
+  if (a + b + 2 > cap) { cap = (a + b + 2) * 2; buf = realloc(buf, cap); }
+  memcpy(buf, ns, a); buf[a] = '.'; memcpy(buf + a + 1, name, b + 1);
+  return buf;
 }
 Def *def_find(const char *name) {
   Def *d;
   if (strchr(name, '.')) return lookup_raw(name);
-  if (curr_ns[0] && (d = lookup_raw(lin_internf("%s.%s", curr_ns, name)))) return d;
+  if (curr_ns[0] && (d = lookup_raw(dotted(curr_ns, name)))) return d;
   for (int o = n_open_ns - 1; o >= 0; o--) {
-    if ((d = lookup_raw(lin_internf("%s.%s", open_ns[o], name)))) return d;
+    if ((d = lookup_raw(dotted(open_ns[o], name)))) return d;
   }
   return lookup_raw(name);
 }
@@ -402,7 +430,7 @@ void eval_form(Term *t) {
   char err[512]; Scheme sch;
   if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
   if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); return; }
-  Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 16);
+  Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 10);
   if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
   struct timespec b0, b1;
   bench_measured = bench_mode;
@@ -420,8 +448,8 @@ void eval_form(Term *t) {
 static void qualify_free(Term *t, Guard *b) {
   if (!t) return;
   if (t->type == TVAR && !strchr(t->name, '.') && !guard_has(b, t->name) && curr_ns[0]) {
-    const char *qn = lin_internf("%s.%s", curr_ns, t->name);
-    if (lookup_raw(qn)) t->name = qn;
+    Def *qd = lookup_raw(dotted(curr_ns, t->name));
+    if (qd) t->name = qd->name;
   }
   int bound = (t->type == TLAM || t->type == TLET);   /* a let's name is bound in its value and body */
   if (bound) guard_push(b, t->name);
@@ -500,6 +528,7 @@ static void process_def(Term *t) {
   } else {
     d->name = t->name;
   }
+  def_index((int)(d - defs));
   d->sch = sch; d->typed = (t->type == TDEFX); d->rec = rec; d->raw = NULL;
   /* A self-referential body becomes the standard fixpoint `Y (\name. body)`.  The binder carries
      `t->name` and NOT the namespace-qualified `d->name`: qualify_free runs before this def exists,
@@ -700,7 +729,7 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
   memset(st, 0, sizeof *st);
   aot_apply_cand(c);
   aot_reset_defs();
-  Net net; net_init(&net, 1 << 16);
+  Net net; net_init(&net, 1 << 10);
   /* AOT: run the reduction the runtime would otherwise run, and bake whatever is left.  Needed order stops at the
      first effect or observation, so the artifact keeps only what genuinely needs the runtime, and a Y-knot is left
      as the cycle it is instead of being unrolled to a guessed bound.  AN OBSERVING BUILD KEEPS THE WORK IT DID, and
@@ -812,7 +841,7 @@ static void do_type(const char *expr) {
 
 static void do_goi(const char *expr) {
   first_form = NULL; parse_forms(expr, cap_cb, NULL); if (!first_form) return;
-  Term *ex = expand_defs(first_form); Net net; net_init(&net, 1 << 16); char err[512];
+  Term *ex = expand_defs(first_form); Net net; net_init(&net, 1 << 10); char err[512];
   if (compile(ex, &net, err, sizeof err)) {
     long long d1 = goi_det(&net); net_reduce(&net, STEP_LIMIT);
     printf("goi: before %lld, after %lld\n", d1, goi_det(&net));
