@@ -30,3 +30,10 @@
 ; expect => 499999500000
 (slength (sreverse (srange 0 100000)))
 ; expect => 100000
+; higher-order over a million elements: the function argument is inlined into a specialised copy (fn driver)
+(ssum (smap (\x (mul x x)) (srange 0 1000000)))
+; expect => 333332833333500000
+(sfoldl (\a (\x (add a x))) 0 (sfilter (\x (eq (mod x 3) 0)) (srange 0 1000000)))
+; expect => 166666833333
+(sall (\x (lt x 5)) (srange 0 10))
+; expect => false

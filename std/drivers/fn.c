@@ -42,6 +42,14 @@
 #include <dlfcn.h>
 #include <limits.h>
 
+#include <setjmp.h>
+/* THE COMPILED UNITS' THREAD-LOCAL STATE, defined once HERE (this driver is loaded RTLD_GLOBAL) and shared by every
+   unit: units run one call at a time on threads they create, so each starts from fresh values.  Initial-exec TLS
+   is the fast kind, and it comes from a small fixed block per process -- one copy per unit ran out after a dozen
+   units (dlopen: "cannot allocate memory in static TLS block"). */
+__thread __attribute__((tls_model("initial-exec"))) jmp_buf lin_jb;
+__thread __attribute__((tls_model("initial-exec"))) char *lin_stack_lo;
+__thread __attribute__((tls_model("initial-exec"))) long *lin_hp, *lin_he;
 static int dbg = -1;
 #define DBG(...) do { if (dbg) { fprintf(stderr, "fn: " __VA_ARGS__); fflush(stderr); } } while (0)
 #define IN(n, i) ((i) >= 0 && (i) < (n)->nn)
@@ -93,7 +101,7 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
                                         constructor, in order); field k of a */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
                       int id, var, vscope, rtag, untag, box; } Expr;   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
-enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_MATCH: data applied to branches */
+enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
 typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; } V;   /* x: to_expr's answer */
@@ -117,10 +125,12 @@ static void arena_free(void) {
 static Net *N; static long fuel; static int failed;
 /* THE UNIT: every function this compilation reaches.  funs[0] is the one being called; a call to another
    recursive function (a `Y G` met while evaluating) compiles G as funs[k], once per node. */
-typedef struct { int lam, arity; Expr *body; unsigned strict; Expr **pnode; } Fun;   /* pnode: each parameter's node */
+typedef struct { int lam, arity; Expr *body; unsigned strict; Expr **pnode; struct V **known; struct Env *outer; } Fun;   /* pnode: each parameter's node */
+/* known: a FUNCTION-VALUED parameter this copy is specialised to (NULL: a parameter like any other) -- see spec_call */
 static Fun *funs; static int nfun, funcap;
 static int arity;   /* funs[0]'s, which the entry point and the parallel sites are written for */
-static void fail(const char *why) { if (!failed) DBG("declined: %s\n", why); failed = 1; }
+static int fail_quiet;   /* a speculative read (is_fun_value): its failures are answers, not declines */
+static void fail(const char *why) { if (!failed && !fail_quiet) DBG("declined: %s\n", why); failed = 1; }
 
 static V *mkv(int k) { V *v = A(sizeof *v); v->k = k; return v; }
 static Lz *ready(V *v) { Lz *l = A(sizeof *l); l->state = 2; l->v = v; return l; }
@@ -177,9 +187,12 @@ static Expr *to_expr(V *v);
 static Expr *ffi_expr(V *v);
 /* An `_op` head: \x. ((\k. B) x) with k unused, applied to its operand list (code, a, b). */
 static int compile_body(int G, Env *outer);
+static int compile_body_spec(int G, Env *outer, V **known);
+static V *fix_call(int G, Env *genv, int target, Lz **args, int nargs);
+static int fun_arity(int G);
 static int is_y(const Net *n, int h);
 static int op_head(int lam) {
-  Port q = W(N, (Port){lam, 2});
+  Port q = dhop(N, W(N, (Port){lam, 2}));            /* (read through a fan: a head being copied is still one) */
   if (!is(N, q, APP, 1)) return 0;
   Port k = dhop(N, W(N, (Port){q.node, 0})), x = dhop(N, W(N, (Port){q.node, 2}));
   if (!is(N, k, LAM, 0) || x.node != lam || x.port != 1) return 0;
@@ -287,6 +300,7 @@ static V *match_add(V *m, Lz *x) {
     V *b = force(v->args[i]);
     for (int j = 0; b && j < c2->k; j++) { V *fv = mkv(V_SYM); fv->e = field_expr(m->e, j, untag); b = apply(b, ready(fv)); }
     if (!(r->args[i] = to_expr(b))) return NULL;
+    if (r->args[i]->op == E_CALL) continue;          /* (a recursive call has the kind the other branches say) */
     int bk = r->args[i]->kind;
     kind = kind < 0 ? bk : (kind == bk ? kind : (kind == 5 || bk == 5 ? 5 : 1));
   }
@@ -327,12 +341,10 @@ static V *apply(V *f, Lz *x) {
       if (failed) return NULL;
       if (fe) { V *s = mkv(V_SYM); s->e = fe; return apply(s, x); }
     }
-    if (is_y(N, f->lam)) {                          /* another recursive function: compile it into the unit */
+    if (is_y(N, f->lam)) {                          /* another recursive function: compiled into the unit when called */
       V *g = force(x);
       if (!g || g->k != V_CLO) { fail("a fixpoint of something that is not a function"); return NULL; }
-      int fid = compile_body(g->lam, g->env);   /* in its own closure: an enclosing function stays callable */
-      if (fid < 0) return NULL;
-      V *v = mkv(V_SELF); v->lam = fid; return v;
+      V *v = mkv(V_FIX); v->lam = g->lam; v->env = g->env; v->nargs = 0; return v;   /* (in its own closure) */
     }
     Env *e = A(sizeof *e); e->lam = f->lam; e->t = x; e->next = f->env;
     return eval(W(N, (Port){f->lam, 2}), e);
@@ -349,14 +361,14 @@ static V *apply(V *f, Lz *x) {
     if (f->e->op == E_CONST) return force(f->e->k ? f->a : x);
     { V *v = mkv(V_COND); v->e = f->e; v->a = f->a; v->b = x; return v; }
   case V_COND: { V *v = mkv(V_COND); v->e = f->e; v->a = lzapp(f->a, x); v->b = lzapp(f->b, x); return v; }
-  case V_SELF: {                                    /* a function of the unit (v->lam is its index), being applied */
-    int ar = funs[f->lam].arity;
-    V *v = mkv(V_SELF); v->lam = f->lam; v->nargs = f->nargs + 1; v->args = A(sizeof(Lz *) * (size_t)v->nargs);
+  case V_SELF: case V_FIX: {                        /* a function of the unit (V_SELF: its index), being applied */
+    int ar = f->k == V_SELF ? funs[f->lam].arity : fun_arity(f->lam);
+    if (ar <= 0) { fail("a function with no parameters"); return NULL; }
+    V *v = mkv(f->k); v->lam = f->lam; v->env = f->env; v->nargs = f->nargs + 1; v->args = A(sizeof(Lz *) * (size_t)v->nargs);
     memcpy(v->args, f->args, sizeof(Lz *) * (size_t)f->nargs); v->args[f->nargs] = x;
     if (v->nargs < ar) return v;
-    V *s = mkv(V_SYM); s->e = mke(E_CALL, 1); s->e->k = f->lam; s->e->nargs = ar; s->e->args = A(sizeof(Expr *) * (size_t)ar);
-    for (int i = 0; i < ar; i++) { s->e->args[i] = to_expr(force(v->args[i])); if (!s->e->args[i]) return NULL; }
-    s->e = hc(s->e); return s;
+    return f->k == V_SELF ? fix_call(funs[f->lam].lam, funs[f->lam].outer, f->lam, v->args, ar)
+                          : fix_call(f->lam, f->env, -1, v->args, ar);
   }
   case V_MCONS: { V *v = mkv(V_MCONS1); v->a = x; return v; }
   case V_MCONS1: { V *v = mkv(V_MCELL); v->a = f->a; v->b = x; return v; }
@@ -499,7 +511,8 @@ static Expr *to_expr_v(V *v) {
   if (v->k == V_COND) {
     Expr *e = mke(E_IF, 1); e->a = v->e; e->b = to_expr(force(v->a)); e->c = to_expr(force(v->b));
     if (!e->b || !e->c) return NULL;
-    e->kind = e->b->kind; return hc(e);
+    e->kind = e->b->op == E_CALL ? e->c->kind : e->b->kind;   /* (a recursive call's kind is the other branch's) */
+    return hc(e);
   }
   if (v->k == V_CLO) {
     Expr *d = ctor_expr(v);                          /* data first: its marker is unmistakable */
@@ -1027,6 +1040,7 @@ static Compiled *compile_src(const char *src, int ar, int kind) {
     char tmp[4300]; snprintf(tmp, sizeof tmp, "%s.%d.tmp", c, (int)getpid());
     FILE *f = fopen(tmp, "wb");
     if (f) { fputs(src, f); fclose(f); rename(tmp, c); if (run_cc(c, so)) hnd = dlopen(so, RTLD_NOW | RTLD_LOCAL); }
+    if (!hnd) { const char *er = dlerror(); DBG("cannot load %s: %s\n", so, er ? er : "(no object)"); }
   }
   Entry e = hnd ? (Entry)(intptr_t)dlsym(hnd, "lin_fn_entry") : NULL;   /* one per object, loaded RTLD_LOCAL */
   int *ab = hnd ? (int *)dlsym(hnd, "lin_fn_aborted") : NULL;
@@ -1092,15 +1106,10 @@ static void red_combine(Buf *b, const Red *r, const char *x, const char *y) {
   emit_op(b, r->op, x, y);
 }
 
-/* Evaluate G = \self.\p1..\pk. body into the unit; its index, or -1. */
-static int compile_body(int G, Env *outer) {
-  for (int i = 0; i < nfun; i++) if (funs[i].lam == G) return i;
-  if (nfun >= 1 + LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }   /* mutual recursion re-copies: bound it */
-  if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
-  int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u; funs[fid].pnode = NULL;
-  /* a parameter is one bit of a strictness set, so a function has at most that many */
-  int params[sizeof(unsigned) * 8], ar = 0; Port body = W(N, (Port){G, 2});
-  for (Port q = dhop(N, body); is(N, q, LAM, 0) && ar < N_OF(params); q = dhop(N, W(N, (Port){q.node, 2}))) {
+/* G = \self.\p1..\pk. body: its parameters (at most `cap`) and the body's port; the count, or -1. */
+static int fun_params(int G, int *params, int cap, Port *bodyp) {
+  int ar = 0; Port body = W(N, (Port){G, 2});
+  for (Port q = dhop(N, body); is(N, q, LAM, 0) && ar < cap; q = dhop(N, W(N, (Port){q.node, 2}))) {
     params[ar++] = q.node; body = W(N, (Port){q.node, 2});
   }
   /* A function RETURNING a constructor value has that value's dispatch binders right under its own (shrinking
@@ -1109,9 +1118,63 @@ static int compile_body(int G, Env *outer) {
   { Port tip = dhop(N, body), mb, mid; int ml; long cid;
     if (marker_app(tip, &mb, &ml, &mid)) {
       Env *probe = NULL;
+      int sf = failed; long sfu = fuel;
       const LinCtor *ci = marker_ctor(mid, probe, &cid);
+      failed = sf; fuel = sfu;
       if (ci && ci->m <= ar) { ar -= ci->m; body = W(N, (Port){ar ? params[ar - 1] : G, 2}); }
     } }
+  if (bodyp) *bodyp = body;
+  return ar;
+}
+static int fun_arity(int G) { int params[sizeof(unsigned) * 8]; return fun_params(G, params, N_OF(params), NULL); }
+
+static int numeral_shape(const Net *n, Port p);
+/* HIGHER-ORDER CALLS.  A parameter that receives a FUNCTION -- `(smap (\x (mul x x)) s)`, the `f` a fold passes
+   down unchanged -- has no C value.  The callee is compiled as a copy SPECIALISED to it: that parameter is bound to
+   the function itself, so applying it is beta, inlined, and the recursion that passes it on calls the same copy.
+   (Defunctionalisation by specialisation: every function value the unit meets is a known lambda.)  A copy is one
+   per distinct function value; a recursion that builds a new one each step runs out of copies and declines. */
+static int fun_eq(V *a, V *b) {
+  if (a == b) return 1;
+  if (!a || !b || a->k != b->k) return 0;
+  if (a->k == V_CLO) return a->lam == b->lam && a->env == b->env;
+  if (a->k == V_FIX) return a->lam == b->lam && a->env == b->env && !a->nargs && !b->nargs;
+  return 0;
+}
+/* Is v a function (and not data, a number, a boolean or an FFI call -- all of which are lambdas too)?  Asked
+   speculatively: reading it as a number applies it to markers, which must leave no trace in the unit. */
+static int is_fun_value(V *v) {
+  if (!v) return 0;
+  if (v->k == V_FIX) return v->nargs == 0;
+  if (v->k != V_CLO || op_head(v->lam) || is_y(N, v->lam)) return 0;
+  if (numeral_shape(N, (Port){v->lam, 0})) return 0;   /* a cell or a terminal: a list, a string, a numeral -- data */
+  { int nl = 0; Port q = (Port){v->lam, 0}, mb, mid; int ml;
+    for (int i = 0; i < N->nn && is(N, q, LAM, 0); i++) { nl++; q = dhop(N, W(N, (Port){q.node, 2})); }
+    if (nl && marker_app(q, &mb, &ml, &mid)) return 0; }            /* a constructor value: data */
+  int sf = failed, snf = nfun, seid = eid; long sfu = fuel; int ok = 0, isf = 1; fail_quiet++;
+  const_int(v, &ok); if (!failed && ok) isf = 0;
+  failed = 0; if (isf) { const_bool(v, &ok); if (!failed && ok) isf = 0; }
+  failed = 0; if (isf && ffi_expr(v)) isf = 0;
+  failed = sf; fuel = sfu; nfun = snf; (void)seid; fail_quiet--;
+  return isf;
+}
+static int known_eq(V **a, V **b, int ar) {
+  for (int i = 0; i < ar; i++) {
+    V *x = a ? a[i] : NULL, *y = b ? b[i] : NULL;
+    if (!x != !y || (x && !fun_eq(x, y))) return 0;
+  }
+  return 1;
+}
+/* Evaluate G = \self.\p1..\pk. body into the unit (specialised to `known`); its index, or -1. */
+static int compile_body_spec(int G, Env *outer, V **known) {
+  int params[sizeof(unsigned) * 8]; Port body;
+  int ar = fun_params(G, params, N_OF(params), &body);
+  for (int i = 0; i < nfun; i++) if (funs[i].lam == G && known_eq(funs[i].known, known, ar)) return i;
+  if (nfun >= 1 + LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }   /* mutual recursion re-copies: bound it */
+  if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
+  int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u; funs[fid].pnode = NULL;
+  funs[fid].outer = outer; funs[fid].known = NULL;
+  if (known) { funs[fid].known = A(sizeof(V *) * (size_t)(ar ? ar : 1)); memcpy(funs[fid].known, known, sizeof(V *) * (size_t)ar); }
   funs[fid].arity = ar;
   if (ar == 0) { fail("a function with no parameters"); return -1; }
   Env *env = A(sizeof *env); env->lam = G; V *self = mkv(V_SELF); self->lam = fid; env->t = ready(self); env->next = outer;
@@ -1119,7 +1182,7 @@ static int compile_body(int G, Env *outer) {
   for (int i = 0; i < ar; i++) {
     Env *e = A(sizeof *e); e->lam = params[i]; V *s = mkv(V_SYM); s->e = mke(E_PARAM, 1); s->e->k = i; s->e->nargs = fid;
     funs[fid].pnode[i] = s->e;
-    e->t = ready(s); e->next = env; env = e;
+    e->t = ready(known && known[i] ? known[i] : s); e->next = env; env = e;   /* a known function: itself */
   }
   int save_fid = cur_fid; cur_fid = fid;
   Expr *top = to_expr(eval(body, env));
@@ -1127,6 +1190,24 @@ static int compile_body(int G, Env *outer) {
   if (failed || !top) return -1;
   funs[fid].body = top;
   return fid;
+}
+static int compile_body(int G, Env *outer) { return compile_body_spec(G, outer, NULL); }
+/* A full call of the recursive function G (closure genv): the copy its function arguments select (`target`, the
+   copy making a self call, when they are its own), and the call over the rest. */
+static V *fix_call(int G, Env *genv, int target, Lz **args, int ar) {
+  V **known = NULL;
+  for (int i = 0; i < ar; i++) {
+    V *av = force(args[i]); if (!av) return NULL;
+    if (is_fun_value(av)) { if (!known) known = A(sizeof(V *) * (size_t)ar); known[i] = av; }
+  }
+  int fid = target >= 0 && known_eq(funs[target].known, known, ar) ? target : compile_body_spec(G, genv, known);
+  if (fid < 0) return NULL;
+  V *s = mkv(V_SYM); s->e = mke(E_CALL, 1); s->e->k = fid; s->e->nargs = ar; s->e->args = A(sizeof(Expr *) * (size_t)ar);
+  for (int i = 0; i < ar; i++) {
+    if (known && known[i]) { Expr *z = mke(E_CONST, 1); z->k = 0; s->e->args[i] = hc(z); continue; }   /* (unused: bound in the copy) */
+    s->e->args[i] = to_expr(force(args[i])); if (!s->e->args[i]) return NULL;
+  }
+  s->e = hc(s->e); return s;
 }
 
 /* WHAT KIND A VALUE IS, so a folded result is never a pointer.  Numbers and data are both words in the C, and the
@@ -1297,8 +1378,8 @@ static int result_numeric(const Expr *entry) {
 static const char *DATA_RT =
   "#include <setjmp.h>\n#include <stdlib.h>\n"
   "#define LIN_TLS __thread __attribute__((tls_model(\"initial-exec\")))\n"
-  "static LIN_TLS jmp_buf lin_jb; static LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
-  "static LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch;\n"
+  "extern LIN_TLS jmp_buf lin_jb; extern LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
+  "extern LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch;\n"
   "static pthread_mutex_t lin_chm = PTHREAD_MUTEX_INITIALIZER;\n"
   "static __attribute__((noinline, cold)) void lin_refill(long n) {\n"
   "  long sz = n > 65536 ? n : 65536; long *c = malloc((size_t)sz * 8);\n"
@@ -1326,13 +1407,24 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
   N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
   Compiled *r = NULL;
-  if (compile_body(F, NULL) == 0 && !failed) {
+  V **known = NULL;                                  /* an argument that is a FUNCTION: the entry's copy is specialised to it */
+  if (aports) {
+    int ar = fun_arity(F);
+    for (int k = 0; k < ar && !failed; k++)
+      if (!anum[k] && is(n, dhop(n, aports[k]), LAM, 0)) {
+        V *av = eval(aports[k], NULL);
+        if (av && is_fun_value(av)) { if (!known) known = A(sizeof(V *) * (size_t)ar); known[k] = av; DBG("argument %d is a function: the callee is specialised to it\n", k); }
+      }
+    failed = 0; nfun = 0;
+  }
+  if (compile_body_spec(F, NULL, known) == 0 && !failed) {
     arity = funs[0].arity;
     /* THE ENTRY: f0 applied to the call's arguments -- the entry's own parameters, or expressions */
     int nnum = 0;
     Expr *entry = mke(E_CALL, funs[0].body->kind); entry->k = 0; entry->nargs = arity; entry->args = A(sizeof(Expr *) * (size_t)(arity ? arity : 1));
     for (int k = 0; k < arity && !failed; k++) {
-      if (!aports || anum[k]) { Expr *pe = mke(E_PARAM, 1); pe->k = nnum++; pe->nargs = -1; entry->args[k] = hc(pe); }
+      if (known && known[k]) { Expr *z = mke(E_CONST, 1); z->k = 0; entry->args[k] = hc(z); }   /* (bound in the copy) */
+      else if (!aports || anum[k]) { Expr *pe = mke(E_PARAM, 1); pe->k = nnum++; pe->nargs = -1; entry->args[k] = hc(pe); }
       else { cur_fid = -1; entry->args[k] = to_expr(eval(aports[k], NULL)); if (!entry->args[k]) failed = 1; }
     }
     if (failed) { arena_free(); return NULL; }        /* (a function the entry reached may be half-built) */
@@ -1456,6 +1548,22 @@ static int fn_claim(const Net *n, Port p1, Port p2) {
   int h, a, F; return !fn_off && y_call(n, p1, p2, &h, &a, &F);
 }
 
+/* Could this argument be a numeral already -- `\c.\n.` over a cell or a terminal -- WITHOUT forcing anything?
+   Reading a number forces its layers, and a FUNCTION argument forced so would have its body reduced (an `_op`
+   head under its binder taken apart) before the compiler reads it. */
+static int numeral_shape(const Net *n, Port p) {
+  Port c = dhop(n, p);
+  if (!is(n, c, LAM, 0)) return 0;
+  Port nn = dhop(n, W(n, (Port){c.node, 2}));
+  if (!is(n, nn, LAM, 0)) return 0;
+  Port b = dhop(n, W(n, (Port){nn.node, 2}));
+  if (is(n, b, LAM, 0)) return 1;                    /* a terminal: \c.\n.<sign> */
+  if (!is(n, b, APP, 1)) return 0;
+  Port ia = dhop(n, W(n, (Port){b.node, 0}));
+  if (!is(n, ia, APP, 1)) return 0;
+  Port hd = dhop(n, W(n, (Port){ia.node, 0}));
+  return hd.node == c.node && hd.port == 1;          /* a cell applies its own first binder */
+}
 static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
   (void)limit;
   int folded = 0;
@@ -1468,22 +1576,24 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
     }
     Compiled *c = lin_precompile_depth ? NULL : compile_fn(n, F);
     long args[8]; int call = appy, ok = c != NULL;
+    int car = c ? c->arity : (lin_precompile_depth ? 0 : (N = n, fun_arity(F)));   /* (a function that needs its arguments: see below) */
     /* ARGUMENTS THAT ARE NOT VALUES YET -- `(check (make 7))` -- are compiled into the unit as expressions, rather
-       than built by the net first (which is the slow part); a number already there is passed as one. */
-    if (ok && c->arity <= 8) {
+       than built by the net first (which is the slow part); a number already there is passed as one.  A function
+       taking a FUNCTION compiles only with its arguments (it is specialised to them). */
+    if (car > 0 && car <= 8) {
       Port ap[8]; int an[8], cl = appy, nexpr = 0, shape = 1;
-      for (int k = 0; k < c->arity; k++) {
+      for (int k = 0; k < car; k++) {
         Port nx = W(n, (Port){cl, 1});
         if (!is(n, nx, APP, 0)) { shape = 0; break; }
         cl = nx.node; ap[k] = W(n, (Port){cl, 2});
-        long dummy; an[k] = is(n, dhop(n, ap[k]), LAM, 0) && net_read_i64(n, ap[k], &dummy);
+        long dummy; an[k] = numeral_shape(n, ap[k]) && net_read_i64(n, ap[k], &dummy);
         nexpr += !an[k];
       }
       if (shape && nexpr) {
         Compiled *c2 = compile_fn_ex(n, F, ap, an);
         if (c2) {
           int nn = 0;
-          for (int k = 0; k < c->arity; k++) if (an[k]) net_read_i64(n, ap[k], &args[nn++]);
+          for (int k = 0; k < car; k++) if (an[k]) net_read_i64(n, ap[k], &args[nn++]);
           extern int lin_threads;
           long r = c2->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
           if (c2->aborted && *c2->aborted) { DBG("the data unit's guard fired: the net computes it\n"); }
