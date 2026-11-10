@@ -1459,7 +1459,7 @@ static void own_ctors(const Expr *e, const Expr *body) {   /* demote a field som
     long id = ctor_id(e->ci);
     for (int j = 0; id > 0 && id <= fown_n && j < e->nargs && j < e->ci->k; j++) {
       const Expr *a = e->args[j];
-      if (!fown[id][j] || a->op == E_CONST) continue;
+      if (!fown[id][j] || a->op == E_CONST || (a->op == E_CTOR && !a->nargs)) continue;   /* (an immediate is no block) */
       if (!uniq(a) || occ(body, a) > 1) { fown[id][j] = 0; uq_changed = 1; }
     }
   }
