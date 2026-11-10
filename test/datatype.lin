@@ -44,3 +44,13 @@
 (define bst_sum (\t (match t (tip 0) ((bin k l r) (add k (add (bst_sum l) (bst_sum r)))))))
 (bst_sum (bst_ins 5 (bst_ins 2 (bst_ins 9 tip))))
 ; expect => 16
+; A datatype's value prints by its constructors' names (the marker each constructor carries).
+(datatype Opt (nothing) (just x))
+(just 5)
+; expect => (just 5)
+nothing
+; expect => nothing
+(just (just 3))
+; expect => (just (just 3))
+(bin 2 tip (bin 9 tip tip))
+; expect => (bin 2 tip (bin 9 tip tip))

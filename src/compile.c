@@ -556,7 +556,7 @@ int net_save_line(Net *n, const char *path) {
   fprintf(f, "#!%s\n", self_path); fwrite("LINE", 1, 4, f);
   /* v6 dropped the per-node NAME TABLE: a net has no carrier labels, so there is nothing to write, and the count word
      stays in the header (as 0) so the metadata keeps its shape -- a v<=5 artifact still loads, its names DISCARDED. */
-  uint32_t meta[4] = { 8, (uint32_t)n->nn, (uint32_t)n->nlv, 0 };
+  uint32_t meta[4] = { 9, (uint32_t)n->nn, (uint32_t)n->nlv, 0 };
   fwrite(meta, sizeof(uint32_t), 4, f);
   fwrite(n->tag, 1, (size_t)n->nn, f); fwrite(n->dead, 1, (size_t)n->nn, f);
   fwrite(n->wire, sizeof(Port) * 3, (size_t)n->nn, f);
@@ -572,6 +572,16 @@ int net_save_line(Net *n, const char *path) {
      driver ABI exists to close. */
   /* v8: the result's DOMAIN, from the build's type (a float and an integer are both numerals) */
   int32_t dom = lin_line_domain; fwrite(&dom, sizeof dom, 1, f);
+  /* v9: the CONSTRUCTOR REGISTRY.  A constructor's marker names it by ID (lin.h); the IDs mean nothing without
+     the table, and an artifact runs in a process that never read the declarations. */
+  uint32_t nc = 0; while (lin_ctor_info((long)nc + 1)) nc++;
+  fwrite(&nc, sizeof nc, 1, f);
+  for (uint32_t k = 1; k <= nc; k++) {
+    const LinCtor *ci = lin_ctor_info((long)k);
+    uint32_t ld = (uint32_t)strlen(ci->dt), ln = (uint32_t)strlen(ci->name); int32_t mik[3] = { ci->m, ci->i, ci->k };
+    fwrite(&ld, sizeof ld, 1, f); fwrite(ci->dt, 1, ld, f); fwrite(&ln, sizeof ln, 1, f); fwrite(ci->name, 1, ln, f);
+    fwrite(mik, sizeof mik, 1, f);
+  }
   lin_driver_carry_write(n, f);
   fclose(f); chmod(path, 0755); return 1;
 }
@@ -589,7 +599,7 @@ int net_load_line(Net *n, const char *path) {
   char magic[4]; uint32_t meta[4];
   /* v3 files predate the float table and are still readable; a v3 file simply has no floats. */
   if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "LINE", 4) || fread(meta, 4, 4, f) != 4 ||
-      (meta[0] != 3 && meta[0] != 4 && meta[0] != 5 && meta[0] != 6 && meta[0] != 7 && meta[0] != 8)) {
+      (meta[0] != 3 && meta[0] != 4 && meta[0] != 5 && meta[0] != 6 && meta[0] != 7 && meta[0] != 8 && meta[0] != 9)) {
     fclose(f); return 0;
   }
   int ver = (int)meta[0];
@@ -620,6 +630,18 @@ int net_load_line(Net *n, const char *path) {
     for (uint32_t k = 0; k < nr; k++) { if (fread(&rp, sizeof rp, 1, f) != 1) { fclose(f); net_free(n); return 0; } lin_demand(n, rp); } }
   lin_line_domain = -1;
   if (ver >= 8) { int32_t dom; if (fread(&dom, sizeof dom, 1, f) != 1) { fclose(f); net_free(n); return 0; } lin_line_domain = dom; }
+  if (ver >= 9) {   /* the constructor registry, re-registered in order (an identical declaration keeps its ID) */
+    uint32_t nc = 0;
+    if (fread(&nc, sizeof nc, 1, f) != 1) { fclose(f); net_free(n); return 0; }
+    for (uint32_t k = 1; k <= nc; k++) {
+      uint32_t ld = 0, ln = 0; int32_t mik[3]; char *dt = NULL, *nm = NULL; int ok = 0;
+      if (fread(&ld, sizeof ld, 1, f) == 1 && (dt = calloc(ld + 1, 1)) && fread(dt, 1, ld, f) == ld &&
+          fread(&ln, sizeof ln, 1, f) == 1 && (nm = calloc(ln + 1, 1)) && fread(nm, 1, ln, f) == ln &&
+          fread(mik, sizeof mik, 1, f) == 1) { lin_ctor_register(dt, nm, mik[0], mik[1], mik[2]); ok = 1; }
+      free(dt); free(nm);
+      if (!ok) { fclose(f); net_free(n); return 0; }
+    }
+  }
   if (ver == 4) {
     /* A v4 artifact carried the float table inline.  The core passes it to whoever provides that domain. */
     uint32_t nf = 0;

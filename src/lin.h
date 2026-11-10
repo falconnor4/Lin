@@ -350,6 +350,9 @@ void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
    for; the shape behind each is the registry's business, and it is keyed by ENCODING, never by a
    carrier string: nothing about a node says which domain it belongs to (see LIN_ENC_* above). */
 enum { DT_NUM, DT_BOOL, DT_STR, DT_FFI, DT_FLOAT, DT_OP, DT_MAX };
+/* Not a value domain but an expectation: the result is a user DATATYPE's value (its constructors name it;
+   no numeral or string reading applies). */
+#define LIN_DOM_DATA (DT_MAX + 1)
 /* Register the builtin domains.  A `datatype` form registers its own (main.c): a user constructor
    gets no encoding of its own -- it is a pure-Lin term, and whoever reads it reads the term. */
 void lin_domains_init(void);

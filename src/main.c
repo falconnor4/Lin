@@ -354,6 +354,7 @@ static int type_domain(Type *t) {
   if (!strcmp(t->name, "bool")) return DT_BOOL;
   if (!strcmp(t->name, "float")) return DT_FLOAT;
   if (!strcmp(t->name, "list")) return DT_STR;     /* a list IS the string encoding: cells of values */
+  for (long id = 1; lin_ctor_info(id); id++) if (!strcmp(lin_ctor_info(id)->dt, t->name)) return LIN_DOM_DATA;
   return -1;
 }
 

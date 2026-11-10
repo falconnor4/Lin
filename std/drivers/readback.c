@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* ============================================================================
  * readback.c -- observing a reduced net: decode, print, run effects, dispatch FFI.
  *
@@ -667,7 +668,7 @@ static void print_port(Port p, int depth, int dom) {
          payload is the case that needs it: the driver chose the encoding, and if the read declines
          the payload is still whatever it is -- rendering it as the box's own application would be
          reporting the envelope instead of the letter. */
-      if (dom < 0 || boxed) { if (ob_val(value_any(N, p))) break; }
+      if (dom == -1 || boxed) { if (ob_val(value_any(N, p))) break; }   /* (-2: a datatype's value -- not a numeral or a string) */
       ob_printf("(\\%s ", pp_push(p.node));
       print_port(wire((Port){p.node, 2}), depth + 1, -1); ob_putc(')'); pp_top--; break;
     }
@@ -702,18 +703,83 @@ static void print_struct(FILE *f, Port r, int domain) {
   free(vis_print); vis_print = NULL; vis_cap = 0;
 }
 
+/* A DATATYPE'S VALUE, BY NAME.  A constructor states which it is (lin.h, the constructor registry): its body is
+   `((\_c (d_i f1..fk)) ID)` under its m dispatch binders.  The spine is read WITHOUT forcing -- the marker is a
+   redex under a lambda, and forcing there would reduce it away -- and each field is forced to its value and
+   printed the same way: `(node leaf (node leaf leaf))`, not a lambda term.
+   ALL OR NOTHING: a value whose markers were reduced away (a normal form), or whose field is reached only
+   through a superposition the walk cannot resolve, is not guessed at -- the caller prints the term. */
+static int ctor_fields(Net *n, Port p, FILE *f, int depth);
+static int field_value(Net *n, Port p, FILE *f, int depth) {
+  long amb = lin_fan_ambiguous;
+  Port v = net_dup_hop(n, net_force_val(n, p));
+  if (lin_fan_ambiguous != amb) return 0;                       /* which copy is this field's?  not known here */
+  if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) return 0;
+  if (depth <= n->nn && ctor_fields(n, v, f, depth)) return 1;   /* (a walk of distinct nodes) */
+  Val x = value_any(n, v);
+  if (x.kind == 2) { fprintf(f, "\"%s\"", x.sv); return 1; }
+  return x.kind && render_val(f, x);
+}
+static int ctor_fields(Net *n, Port p, FILE *f, int depth) {
+  Port q = net_dhop(n, p);
+  int m = 0;
+  for (int i = 0; i < n->nn && live(q) && n->tag[q.node] == LAM && q.port == 0; i++) { m++; q = net_dhop(n, wire((Port){q.node, 2})); }
+  if (!m || !live(q) || n->tag[q.node] != APP || q.port != 1) return 0;
+  Port cl = net_dhop(n, wire((Port){q.node, 0}));
+  if (!live(cl) || n->tag[cl.node] != LAM || cl.port != 0) return 0;
+  Port bnd = wire((Port){cl.node, 1});                          /* the marker's binder is unused: an eraser, */
+  for (int i = 0; i < n->nn && live(bnd) && n->tag[bnd.node] == DUP && bnd.port != 0; i++)
+    bnd = wire((Port){bnd.node, 0});                            /* ...also through the fan copying it */
+  if (!live(bnd) || n->tag[bnd.node] != ERA) return 0;
+  long id;
+  if (!net_read_i64(n, wire((Port){q.node, 2}), &id)) return 0;
+  const LinCtor *ci = lin_ctor_info(id);
+  if (!ci || ci->m != m) return 0;
+  Port x = net_dhop(n, wire((Port){cl.node, 2})), *fields = malloc(sizeof *fields * (size_t)(ci->k + 1));
+  int nf = 0;
+  while (nf < ci->k && live(x) && n->tag[x.node] == APP && x.port == 1) { fields[nf++] = wire((Port){x.node, 2}); x = net_dhop(n, wire((Port){x.node, 0})); }
+  /* the head is a dispatch binder -- its own, or, in a value copied lazily, the fan superposing the copies'
+     binders; WHICH one the marker's ID already says */
+  int head_ok = live(x) && ((n->tag[x.node] == LAM && x.port == 1) || (n->tag[x.node] == DUP && x.port == 0));
+  int ok = nf == ci->k && head_ok;
+  const char *nm = strrchr(ci->name, '.'); nm = nm ? nm + 1 : ci->name;
+  if (ok && !nf) fputs(nm, f);
+  else if (ok) {
+    fprintf(f, "(%s", nm);
+    for (int j = nf - 1; j >= 0 && ok; j--) { fputc(' ', f); ok = field_value(n, fields[j], f, depth + 1); }
+    fputc(')', f);
+  }
+  free(fields);
+  return ok;
+}
+static int print_ctor(Net *n, Port p, FILE *out) {
+  char *buf = NULL; size_t len = 0;
+  FILE *f = open_memstream(&buf, &len);
+  if (!f) return 0;
+  int ok = ctor_fields(n, p, f, 0);
+  fclose(f);
+  if (ok) { fwrite(buf, 1, len, out); fflush(out); }
+  free(buf);
+  return ok;
+}
+
 static int print_body(Net *n, int domain) {
   N = n;
   Port r = net_dup_hop(n, net_force_val(n, wire((Port){0, 0})));   /* the result is observed here */
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     /* Observing an `_ffi` closure IS its effect, so it is dispatched first whatever the type says. */
     if (render_val(OUT, run_ffi(n, r))) return 0;
+    if ((domain < 0 || domain == LIN_DOM_DATA) && print_ctor(n, r, OUT)) return 0;   /* a datatype's value, by its constructors' names */
+    if (domain == LIN_DOM_DATA) domain = -2;          /* (not a numeral or a string: the term, as it is) */
+    else {
     /* The type is the expectation when there is one; without it only what the structure determines
        is decoded.  Either way a value that does not hold is written as the net it is. */
     Val v = domain >= 0 ? decode(n, r, domain) : value_any(n, r);
     if (v.kind == 2) { fprintf(OUT, "\"%s\"", v.sv); fflush(OUT); return 0; }
     if (render_val(OUT, v)) return 0;
+    }
   }
+  if (domain == LIN_DOM_DATA) domain = -2;
   print_struct(OUT, r, domain);
   /* Neither mark is an answer, and both used to be emitted silently with exit status 0.  They mean
      different things, so they are reported differently -- on STDERR, so a test that compares stdout
