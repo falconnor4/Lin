@@ -14,7 +14,7 @@ Lin uses [Nix](https://nixos.org/) for reproducible, hermetic builds and testing
 # Build the lin compiler/runtime
 nix build
 
-# Run the full test suite (61 suites, incl. .line containers and the Python oracles)
+# Run the full test suite (all suites, incl. .line containers and the Python oracles)
 nix flake check
 
 # Interactively run the test runner
@@ -38,7 +38,7 @@ make build
 # Run tests via Nix (committed tree only - see note below)
 make nix-test
 
-# Trusted working-tree build + full suite (61 suites, incl. .line containers)
+# Trusted working-tree build + full suite (all suites, incl. .line containers)
 make test
 
 # Or compile directly with gcc/clang
@@ -128,13 +128,29 @@ scrutinee is applied to one value (nullary / `_`) or field-binding lambda per
 case. Constructors type-check through ordinary Hindley-Milner let-generalization,
 so no special type machinery is required.
 
+Fields may state their types, and a datatype may take type parameters:
+
+```scheme
+(datatype (Tree a) (leaf) (node (v a) (l Tree a) (r Tree a)))
+(define build (\n (if (eq n 0) leaf (node n (build (sub n 1)) leaf))))
+(build 2)                    ; => (node 2 (node 1 leaf leaf) leaf)
+```
+
+A value is printed by its type: a datatype by its constructors' names, a list of
+text as a string, any other list element by element (`[10 20 30]`, `[true false]`).
+Declared field types make the printing exact; an undeclared field is read as its
+constructor states, as a number, or as the enclosing datatype.
+
 ### Standard Library
 
-The standard library (`std/`) is written in pure Lin:
+The standard library (`std/`) is written in pure Lin. A module whose top-level forms
+only define is read when a program first names something in it, so the library can grow
+without costing a program that does not use it (`LIN_EAGER_STD=1` loads everything up front):
 
 - `std/bool.lin`: Booleans and conditionals (`true`, `false`, `not`, `and`, `or`, `xor`, `if`, `ifl`).
 - `std/pair.lin`: Pairs and projections (`pair`, `fst`, `snd`, `swap`, `pair_map`, `curry`, `uncurry`).
 - `std/list.lin`: Inductive lists (`nil`, `cons`, `head`, `tail`, `list1`..`list5`, `first`..`eighth`).
+- `std/seq.lin`: A list as a datatype, `(Seq a)` (`snil`, `scons`, `srange`, `smap`, `sfilter`, `sfoldl`, `sfoldr`, `ssum`, `slength`, `stake`, `sdrop`, `sreverse`, `sappend`, `sany`, `sall`, `snth`, `seq_of_list`, `seq_to_list`). Typed by `match`, and compiled by the function driver, higher-order calls included: `(ssum (smap (\x (mul x x)) (srange 0 1000000)))` runs as C.
 - `std/maybe.lin`: Option monad (`nothing`, `just`, `is_nothing`, `is_just`, `from_maybe`, `maybe_map`, `maybe_bind`, `maybe_or`).
 - `std/either.lin`: Sum / Result type (`left`, `right`, `is_left`, `is_right`, `either`, `either_map`, `either_bind`, `from_right`).
 - `std/tree.lin`: Binary trees (`leaf`, `node`, `is_leaf`, `is_node`, `tree_val`, `tree_left`, `tree_right`, navigation helpers).
@@ -189,6 +205,12 @@ Lin executes lambda calculus terms directly as interaction nets using non-abelia
   they reach (`ERA x LAM/APP/DUP`, a discarded application's inputs) with no tracing, no reachability walk and no
   pause. Freed slots are reused only at a safepoint, so no held index ever names a different node.
   `LIN_LEAKCHECK=1 lin -b f.lin` reports what the result still reaches (a diagnostic, never run otherwise).
+- **Compiled functions (a driver, not the core)**: `std/drivers/fn.c` reads a recursive function from its own
+  net and compiles it to C: arithmetic, conditionals, constructors and `match` (with in-place reuse of data
+  nothing else holds), calls among functions, and higher-order calls -- a function argument is inlined into a
+  copy of the callee specialised to it. Independent recursive calls run in parallel. Anything it cannot
+  compile, it declines, and the net computes it; the net's answer is the authority (`test/fn_compile.sh`).
+  `LIN_FN_OFF=1` turns it off, `LIN_FN_DEBUG=1` shows each decision and the C. See `bench/` for the numbers.
 - **Non-Resolution Graph Normalization**: Formula normalization bypasses classical $2^{\Omega(n)}$ resolution lower bounds on parity problems like Tseitin expanders ($82|E| - 3$ linear steps).
 
 ## Examples
