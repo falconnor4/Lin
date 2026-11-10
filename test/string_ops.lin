@@ -1,0 +1,29 @@
+; std/string.lin's text functions (pure Lin, compiled to C by the function driver)
+(load "std/std.lin")
+(str_of_num 12345)
+; expect => "12345"
+(str_of_num -42)
+; expect => "-42"
+(str_reverse "abc")
+; expect => "cba"
+(str_equal "abc" "abc")
+; expect => true
+(str_equal "abc" "abd")
+; expect => false
+(str_index_of "lo" "hello")
+; expect => 3
+(str_split 44 "a,bb,ccc")
+; expect => (scons "a" (scons "bb" (scons "ccc" snil)))
+(str_words "  the quick  brown fox ")
+; expect => (scons "the" (scons "quick" (scons "brown" (scons "fox" snil))))
+(str_join ", " (str_words "a b c"))
+; expect => "a, b, c"
+(str_take 3 (str_drop 2 "abcdefg"))
+; expect => "cde"
+(str_starts_with "ab" "abc")
+; expect => true
+(str_parse_int "90210")
+; expect => 90210
+(define rep (\n (\acc (if (eq n 0) acc (rep (sub n 1) (str_concat "ab " acc))))))
+(slength (str_words (rep 20000 "")))
+; expect => 20000

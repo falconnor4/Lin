@@ -509,7 +509,9 @@ static Expr *ffi_expr(V *v) {
      shape alone says nothing: only a head that reads as a NAME the table knows makes this an FFI call.  The
      read is speculative: a head that is not a string is "not mine", never a failure. */
   char name[64]; long sfuel = fuel; int sfail = failed;
+  fail_quiet++;
   int named = const_str(eval(W(N, (Port){fa.node, 2}), v->env), name, (int)sizeof name);
+  fail_quiet--;
   if (!named) { failed = sfail; fuel = sfuel; return NULL; }
   int known = !strcmp(name, "lin_parse_float");
   for (int k = 0; k < N_OF(FROW); k++) known |= !strcmp(name, FROW[k].name);
@@ -540,6 +542,9 @@ static Expr *ffi_expr(V *v) {
 
 static Expr *to_expr_v(V *v);
 static Expr *to_expr(V *v);
+static int numeral_shape(const Net *n, Port p);
+static int inp_on;
+static int input_of(Port p);
 /* A constant list: the cells answer the markers one by one, the end answers with a boolean.  Speculative: a value
    that is not a list leaves no trace. */
 static Expr *const_cells(V *v) {
@@ -599,6 +604,9 @@ static Expr *to_expr_v(V *v) {
     fail_quiet++; int bk = const_bool(v, &ok); if (failed) ok = 0; fail_quiet--;
     if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
     if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
+    if (inp_on && !v->env && numeral_shape(N, (Port){v->lam, 0})) {   /* a list already built: read in at call time */
+      Expr *pe = mke(E_PARAM, 1); pe->k = input_of((Port){v->lam, 0}); pe->nargs = -1; return hc(pe);
+    }
     Expr *cl = const_cells(v);                       /* a list (a string): its cells, as constructors */
     if (cl || failed) return cl;
     fail("a closure where a number belongs"); return NULL;
@@ -1267,7 +1275,7 @@ static int run_cc(const char *src, const char *so) {
 typedef long (*Entry)(const long *, int threads);
 typedef struct { unsigned char k; const char *dt; } Shape;     /* (see SHAPES below) */
 typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; int *aborted;
-                 Shape res; Shape **fld; long nctor; void (*release)(void); } Compiled;   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
+                 Shape res; Shape **fld; long nctor; void (*release)(void); Shape *psh; int npsh; } Compiled;   /* psh: each runtime argument's shape */   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
 static Compiled **done; static int ndone, donecap;   /* (pointers: a call holds one while another compiles) */
 /* -march=native code must never be loaded on a different CPU, so the cache key includes this one's identity. */
 static unsigned long cpu_key(void) {
@@ -1284,6 +1292,17 @@ static unsigned long cpu_key(void) {
   return k;
 }
 static Shape **sh_fld; static long sh_nctor;
+static Shape *esh; static int nesh, esh_data, esh_cap;
+/* RUNTIME INPUTS: a closed list met while compiling (a string the program read, nested in an argument
+   expression) is not expanded as a constant -- it is an extra runtime argument, read in at call time. */
+static Port *inp_port; static int n_inp, inp_cap;
+static int input_of(Port p) {                       /* its runtime index (a new one the first time) */
+  for (int i = 0; i < n_inp; i++) if (inp_port[i].node == p.node) return nesh - n_inp + i;
+  if (n_inp >= inp_cap) inp_port = realloc(inp_port, sizeof *inp_port * (size_t)(inp_cap = inp_cap ? inp_cap * 2 : 8));
+  if (nesh >= esh_cap) esh = realloc(esh, sizeof *esh * (size_t)(esh_cap = esh_cap ? esh_cap * 2 : 16));
+  inp_port[n_inp++] = p; esh[nesh] = (Shape){ 0, NULL }; esh_data = 1;
+  return nesh++;
+}   /* the entry's runtime arguments' shapes (data ones: passed in) */
 static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
   unsigned long h = fnv1a(src) ^ cpu_key();
   for (int i = 0; i < ndone; i++) if (done[i]->h == h) return done[i]->fn ? done[i] : NULL;
@@ -1303,11 +1322,12 @@ static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
   if (ndone >= donecap) done = realloc(done, (size_t)(donecap = donecap ? donecap * 2 : 32) * sizeof *done);
   Compiled *cp = calloc(1, sizeof *cp);
   *cp = (Compiled){ h, e, ar, kind, 0, ab, res, NULL, 0, NULL };
-  if (kind == 5 && hnd) {                            /* the field shapes the result is read by, kept with the code */
+  if (esh_data && nesh) { cp->npsh = nesh; cp->psh = malloc(sizeof *cp->psh * (size_t)nesh); memcpy(cp->psh, esh, sizeof *esh * (size_t)nesh); }
+  if ((kind == 5 || esh_data) && hnd) {             /* the field shapes the result (and the arguments) are read by */
     cp->release = (void (*)(void))(intptr_t)dlsym(hnd, "lin_fn_release");
     cp->nctor = sh_nctor; cp->fld = calloc((size_t)sh_nctor + 1, sizeof *cp->fld);
     for (long k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; cp->fld[k] = malloc(sizeof **cp->fld * (size_t)nk); memcpy(cp->fld[k], sh_fld[k], sizeof **cp->fld * (size_t)nk); }
-    if (!cp->release) e = NULL;
+    if (kind == 5 && !cp->release) e = NULL;
   }
   done[ndone++] = cp;
   return e ? cp : NULL;
@@ -1696,29 +1716,60 @@ static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt; }
 static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad;
 static long ctor_id(const LinCtor *ci) { for (long k = 1; lin_ctor_info(k); k++) if (lin_ctor_info(k) == ci) return k; return 0; }
 static void sh_upd(Shape *slot, Shape v) { Shape j = sh_join(*slot, v); if (!sh_eq(j, *slot)) { *slot = j; sh_changed = 1; } }
+static unsigned char *sh_fneed;                     /* a function whose result is needed as a number (once each) */
+static void sh_need_num(const Expr *x) {
+  if (x->op == E_IF) { sh_need_num(x->b); sh_need_num(x->c); return; }   /* (what the value may be, everywhere) */
+  if (x->op == E_CALL && sh_fneed && x->k >= 0 && x->k < nfun) {       /* ...and what a call returns */
+    if (!sh_fneed[x->k]) { sh_fneed[x->k] = 1; sh_changed = 1; sh_need_num(funs[x->k].body); }
+    return;
+  }
+  if (x->op == E_MATCH) { for (int i = 0; i < x->nargs; i++) if (!(x->args[i]->op == E_CONST && x->args[i]->box)) sh_need_num(x->args[i]); return; }
+  if (x->op == E_FIELD && x->ci) { long id = ctor_id(x->ci); if (id > 0 && id <= sh_nctor && x->k < x->ci->k) sh_upd(&sh_fld[id][x->k], (Shape){ 1, NULL }); }
+  else if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], (Shape){ 1, NULL });
+  else if (x->op == E_PARAM && x->nargs >= 0 && x->nargs < nfun) sh_upd(&sh_par[x->nargs][x->k], (Shape){ 1, NULL });
+}
 static Shape shape_of(const Expr *e) {
   if (e->id < sh_cap && sh_gen[e->id] == sh_g) return sh_memo[e->id];
   Shape r = { 0, NULL };
   switch (e->op) {
   case E_CONST: if (e->box) break;                 /* the cells' end answering true: every shape takes it */
-    /* fallthrough */
-  case E_BIN: case E_FOP: r.k = e->kind == 3 ? 3 : 1; break;
-  case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun ? sh_par[e->nargs][e->k] : (Shape){ 1, NULL }; break;
+    r.k = e->kind == 3 ? 3 : 1; break;
+  case E_BIN: case E_FOP:                            /* an operation's operands are numbers: what they were read from too */
+    for (int i = 0; i < (e->op == E_BIN ? 2 : e->nargs); i++) {
+      const Expr *x = e->op == E_BIN ? (i ? e->b : e->a) : e->args[i];
+      shape_of(x); sh_need_num(x);
+    }
+    r.k = e->kind == 3 ? 3 : 1; break;
+  case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun ? sh_par[e->nargs][e->k] : e->k < nesh ? esh[e->k] : (Shape){ 1, NULL }; break;
   case E_IF: shape_of(e->a); r = sh_join(shape_of(e->b), shape_of(e->c)); break;
   case E_MATCH: {
+    if (e->a->op == E_PARAM && e->ci) {             /* (a parameter taken apart: its use says what it is) */
+      if (e->a->nargs < 0 && e->a->k < nesh) sh_upd(&esh[e->a->k], (Shape){ 5, e->ci->dt });
+      else if (e->a->nargs >= 0 && e->a->nargs < nfun) sh_upd(&sh_par[e->a->nargs][e->a->k], (Shape){ 5, e->ci->dt });
+    }
     Shape sc = shape_of(e->a);                       /* what is taken apart must be that datatype's */
     if (sc.k && !(sc.k == 5 && e->ci && sc.dt == e->ci->dt)) sh_bad = 1;
     for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i]));
     break;
   }
   case E_CALL:
-    for (int i = 0; i < e->nargs; i++) { Shape a = shape_of(e->args[i]); if (!(funs[e->k].known && funs[e->k].known[i])) sh_upd(&sh_par[e->k][i], a); }
+    for (int i = 0; i < e->nargs; i++) {
+      Shape a = shape_of(e->args[i]);
+      if (funs[e->k].known && funs[e->k].known[i]) continue;
+      sh_upd(&sh_par[e->k][i], a);
+      const Expr *x = e->args[i];                    /* an argument passed in takes the parameter's shape */
+      if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], sh_par[e->k][i]);
+    }
     r = sh_fun[e->k]; break;
   case E_CTOR: {
     long id = ctor_id(e->ci);
     if (id <= 0 || id > sh_nctor) { r.k = 9; break; }
     sh_built[id] = 1;
-    for (int j = 0; j < e->nargs; j++) sh_upd(&sh_fld[id][j], shape_of(e->args[j]));
+    for (int j = 0; j < e->nargs; j++) {
+      sh_upd(&sh_fld[id][j], shape_of(e->args[j]));
+      const Expr *x = e->args[j];
+      if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], sh_fld[id][j]);
+    }
     r.k = 5; r.dt = e->ci->dt; break;
   }
   case E_FIELD: {
@@ -1736,7 +1787,7 @@ static Shape unit_shapes(const Expr *entry) {
   sh_nctor = 0; while (lin_ctor_info(sh_nctor + 1)) sh_nctor++;
   sh_par = A(sizeof *sh_par * (size_t)nfun); sh_fun = A(sizeof *sh_fun * (size_t)(nfun ? nfun : 1));
   for (int i = 0; i < nfun; i++) sh_par[i] = A(sizeof **sh_par * (size_t)(funs[i].arity ? funs[i].arity : 1));
-  sh_fld = A(sizeof *sh_fld * (size_t)(sh_nctor + 1)); sh_built = A((size_t)(sh_nctor + 1));
+  sh_fld = A(sizeof *sh_fld * (size_t)(sh_nctor + 1)); sh_built = A((size_t)(sh_nctor + 1)); sh_fneed = A((size_t)(nfun ? nfun : 1));
   for (long k = 1; k <= sh_nctor; k++) sh_fld[k] = A(sizeof **sh_fld * (size_t)(lin_ctor_info(k)->k + 1));
   if (sh_cap < eid) { sh_cap = eid * 2 + 64; sh_memo = realloc(sh_memo, sizeof *sh_memo * (size_t)sh_cap); sh_gen = realloc(sh_gen, sizeof *sh_gen * (size_t)sh_cap); memset(sh_gen, 0, sizeof *sh_gen * (size_t)sh_cap); }
   Shape res = { 0, NULL };
@@ -1827,6 +1878,17 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       }
     failed = 0; nfun = 0;
   }
+  nesh = 0; esh_data = 0; n_inp = 0; inp_on = aports != NULL;
+  int *rt_of = NULL;
+  if (aports) {                                      /* the runtime arguments: numbers, and data passed in (anum 2) */
+    int ar = fun_arity(F);
+    if (esh_cap < ar + 1) esh = realloc(esh, sizeof *esh * (size_t)(esh_cap = ar + 16));
+    rt_of = A(sizeof *rt_of * (size_t)(ar + 1));
+    for (int k = 0; k < ar; k++) {
+      rt_of[k] = -1;
+      if (anum[k] && !(known && known[k])) { rt_of[k] = nesh; esh[nesh++] = anum[k] == 2 ? (Shape){ 0, NULL } : (Shape){ 1, NULL }; esh_data |= anum[k] == 2; }
+    }
+  }
   if (compile_body_spec(F, NULL, known) == 0 && !failed) {
     arity = funs[0].arity;
     /* THE ENTRY: f0 applied to the call's arguments -- the entry's own parameters, or expressions */
@@ -1834,10 +1896,11 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     Expr *entry = mke(E_CALL, funs[0].body->kind); entry->k = 0; entry->nargs = arity; entry->args = A(sizeof(Expr *) * (size_t)(arity ? arity : 1));
     for (int k = 0; k < arity && !failed; k++) {
       if (known && known[k]) { Expr *z = mke(E_CONST, 1); z->k = 0; entry->args[k] = hc(z); }   /* (bound in the copy) */
-      else if (!aports || anum[k]) { Expr *pe = mke(E_PARAM, 1); pe->k = nnum++; pe->nargs = -1; entry->args[k] = hc(pe); }
+      else if (!aports || anum[k]) { Expr *pe = mke(E_PARAM, 1); pe->k = aports ? rt_of[k] : nnum; nnum++; pe->nargs = -1; entry->args[k] = hc(pe); }
       else { cur_fid = -1; entry->args[k] = to_expr(eval(aports[k], NULL)); if (!entry->args[k]) failed = 1; }
     }
     if (failed) { arena_free(); return NULL; }        /* (a function the entry reached may be half-built) */
+    if (aports) nnum = nesh;                         /* (the inputs met in the arguments come after them) */
     entry = hc(entry);
     if (aports && cx_n) {                              /* the context, applied to the call's value */
       V *v = mkv(V_SYM); v->e = entry; cur_fid = -1;
@@ -1845,7 +1908,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         v = cx_kind[i] == 0 ? apply(v, lzp(cx_port[i], NULL)) : apply(eval(cx_port[i], NULL), ready(v));
       Expr *x = v && !failed ? to_expr(v) : NULL;
       if (!x || failed) { arena_free(); return NULL; }
-      entry = x;
+      entry = x; nnum = nesh;
     }
     mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
@@ -1863,6 +1926,11 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
     Shape rshape = safe ? unit_shapes(entry) : (Shape){ 1, NULL };
     if (safe && sh_bad) { safe = 0; DBG("declined: a value taken apart as something it is not (a number read as cells?)\n"); }
+    for (int k = 0; safe && k < nesh; k++)            /* a data argument is read in by its shape: it must be known */
+      if (esh[k].k && !shape_closed(esh[k], 0)) {
+        safe = 0; DBG("declined: argument %d's shape is not known (%d %s)\n", k, esh[k].k, esh[k].dt ? esh[k].dt : "");
+        if (dbg > 1) for (long c = 1; c <= sh_nctor; c++) { const LinCtor *ci = lin_ctor_info(c); if (!sh_built[c]) continue; DBG("  %s built:", ci->name); for (int jj = 0; jj < ci->k; jj++) fprintf(stderr, " %d", sh_fld[c][jj].k); fprintf(stderr, "\n"); }
+      }
     int numeric = safe && (result_numeric(entry) || rshape.k == 1 || rshape.k == 3);   /* (a field read the shapes prove a number) */
     int rbool = rshape.k == 3 || (rshape.k != 1 && entry->kind == 3);
     if (safe && !numeric) {                            /* a STRUCTURE: folded if its shape is known to the leaves */
@@ -2125,6 +2193,111 @@ static Port result_port(Net *n, const Compiled *c, long r) {
   return R.bad ? NONE : v;
 }
 
+static int numeral_shape(const Net *n, Port p);
+/* DATA PASSED IN.  An argument that is already a value in the net -- a string the program read, a structure an
+   earlier call built -- is not compiled as a constant (a megabyte of input is not a C literal): the driver reads it
+   at call time into blocks of the layout the unit uses, by the shape the compiler inferred from how the unit uses
+   it.  The blocks live in a driver arena freed after the call (and after the result is read back, which may hold
+   them: a block the unit owned may have been rebuilt in place). */
+typedef struct { Net *n; const Compiled *c; void **ch; int nch, cch; long *hp, *he; long *mk; Port *mp; long mcap, mcnt; int bad; long steps0; } Marsh;
+static long *ms_alloc(Marsh *M, long words) {
+  if (M->hp + words > M->he) {
+    long sz = words > 65536 ? words : 65536; long *c = malloc((size_t)sz * sizeof *c);
+    if (!c) { M->bad = 1; return NULL; }
+    if (M->nch >= M->cch) M->ch = realloc(M->ch, sizeof *M->ch * (size_t)(M->cch = M->cch ? M->cch * 2 : 16));
+    M->ch[M->nch++] = c; M->hp = c; M->he = c + sz;
+  }
+  long *r = M->hp; M->hp += words; return r;
+}
+static void ms_free(Marsh *M) { for (int i = 0; i < M->nch; i++) free(M->ch[i]); free(M->ch); free(M->mk); free(M->mp); }
+static long ms_value(Marsh *M, Port p, Shape s, int depth);
+static long *ms_seen(Marsh *M, int node, int make) {   /* a value reached twice is one block (the net's sharing kept) */
+  if (make && (M->mcnt + 1) * 2 > M->mcap) {
+    long *ok = M->mk; Port *op = M->mp; long oc = M->mcap; M->mcap = M->mcap ? M->mcap * 2 : 1024;
+    M->mk = calloc((size_t)M->mcap, sizeof *M->mk); M->mp = calloc((size_t)M->mcap, sizeof *M->mp); M->mcnt = 0;
+    for (long i = 0; i < oc; i++) if (op[i].node > 0) { long *w = ms_seen(M, op[i].node, 1); *w = ok[i]; }
+    free(ok); free(op);
+  }
+  if (!M->mcap) return NULL;
+  for (unsigned long h = ((unsigned long)node * 0x9E3779B97F4A7C15UL >> 7) & (unsigned long)(M->mcap - 1);; h = (h + 1) & (unsigned long)(M->mcap - 1)) {
+    if (M->mp[h].node == node) return &M->mk[h];
+    if (M->mp[h].node <= 0) { if (!make) return NULL; M->mp[h].node = node; M->mk[h] = 0; M->mcnt++; return &M->mk[h]; }
+  }
+}
+static long ms_value(Marsh *M, Port p, Shape s, int depth) {
+  Net *n = M->n;
+  if (M->bad || depth > n->nn) { M->bad = 1; return 0; }
+  if (n->steps - M->steps0 > (long)n->nn) { M->bad = 1; return 0; }   /* (a value in hand needs no reduction to read) */
+  if (s.k == 0) {                                    /* a field the analysis saw no use of: what the value IS decides */
+    long x; if (net_read_i64(n, p, &x)) return x;
+    long b = net_read_int(n, p, LIN_ENC_BOOL); if (b >= 0) return b;
+    M->bad = 1; return 0;
+  }
+  if (s.k == 1) { long x; if (!net_read_i64(n, p, &x)) M->bad = 1; return x; }
+  if (s.k == 3) { long b = net_read_int(n, p, LIN_ENC_BOOL); if (b < 0) M->bad = 1; return b; }
+  if (s.k != 5) { M->bad = 1; return 0; }
+  int box = 0, untag = dt_boxed(s.dt, &box) == 1;
+  if (cells_dt && s.dt == cells_dt) {               /* a list: its spine read in a loop */
+    long first = 0, *link = &first;
+    Shape hs = M->c->fld[ctor_id(cell_cons)][0];
+    for (long k = 0; !M->bad; k++) {
+      Port h, t;
+      if (k > n->nn) { M->bad = 1; break; }
+      if (!net_read_cell(n, p, &h, &t)) {
+        if (net_read_int(n, p, LIN_ENC_STR) != 0) { M->bad = 1; break; }
+        *link = ((long)cell_nil->i << 1) | 1; break;
+      }
+      long *blk = ms_alloc(M, 2); if (!blk) break;
+      blk[0] = ms_value(M, h, hs, depth + 1); *link = (long)blk; link = &blk[1]; p = t;
+    }
+    return first;
+  }
+  int m = 0, kmax = 0; const LinCtor *c;
+  for (long id = 1; (c = lin_ctor_info(id)); id++) if (c->dt == s.dt) { m = c->m; if (c->k > kmax) kmax = c->k; }
+  Port v = net_dhop(n, net_force_val(n, p));
+  long *seen = v.node > 0 ? ms_seen(M, v.node, 0) : NULL;
+  if (seen && *seen) return *seen;
+  Port *fp = malloc(sizeof *fp * (size_t)(kmax + 1)); int i = -1;
+  int k = m ? net_read_scott(n, p, m, &i, fp, kmax) : -1;
+  const LinCtor *ci = k >= 0 ? dt_ctor(s.dt, i) : NULL;
+  long w = 0;
+  if (!ci || ci->k != k) M->bad = 1;
+  else if (!k) w = ((long)ci->i << 1) | 1;
+  else {
+    long *blk = ms_alloc(M, k + !untag);
+    if (blk) {
+      if (!untag) blk[0] = ci->i;
+      long id = ctor_id(ci);
+      for (int j = 0; j < k && !M->bad; j++) blk[j + !untag] = ms_value(M, fp[j], M->c->fld[id][j], depth + 1);
+      w = (long)blk;
+    }
+  }
+  free(fp);
+  if (!M->bad && v.node > 0 && !(w & 1)) { long *slot = ms_seen(M, v.node, 1); if (slot) *slot = w; }
+  return w;
+}
+typedef struct { Marsh *M; Port p; Shape s; long w; } MsArg;
+static void *ms_thread(void *u) { MsArg *a = u; a->w = ms_value(a->M, a->p, a->s, 0); return NULL; }
+static long marshal(Marsh *M, Port p, Shape s) {   /* (on a large stack: data is deep) */
+  MsArg a = { M, p, s, 0 };
+  pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);
+  pthread_t t;
+  if (pthread_create(&t, &at, ms_thread, &a)) M->bad = 1; else pthread_join(t, NULL);
+  pthread_attr_destroy(&at);
+  return a.w;
+}
+/* Is this argument a DATA value already -- a list or a constructor -- rather than a number or a function? */
+static int data_value(const Net *n, Port p) {
+  Port q = dhop(n, p);
+  if (!is(n, q, LAM, 0)) return 0;
+  if (numeral_shape(n, q)) return 1;                 /* (a cell or an end: a list, a string) */
+  int nl = 0;
+  for (int i = 0; i < n->nn && is(n, q, LAM, 0); i++) { nl++; q = dhop(n, W(n, (Port){q.node, 2})); }
+  Port mb, mid; int ml; Net *sn = N; N = (Net *)n;
+  int r = nl > 0 && marker_app(q, &mb, &ml, &mid);
+  N = sn; return r;
+}
+
 /* Could this argument be a numeral already -- `\c.\n.` over a cell or a terminal -- WITHOUT forcing anything?
    Reading a number forces its layers, and a FUNCTION argument forced so would have its body reduced (an `_op`
    head under its binder taken apart) before the compiler reads it. */
@@ -2164,7 +2337,9 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         if (!is(n, nx, APP, 0)) { shape = 0; break; }
         cl = nx.node; ap[k] = W(n, (Port){cl, 2});
         long dummy; an[k] = numeral_shape(n, ap[k]) && net_read_i64(n, ap[k], &dummy);
-        nexpr += !an[k];
+        if (!an[k] && data_value(n, ap[k])) an[k] = 2;   /* data already in the net: passed in at call time */
+        if (dbg > 1) { long x = 0; int ns = numeral_shape(n, ap[k]); int ok = ns && net_read_i64(n, ap[k], &x); DBG("[arg %d: shape %d read %d (%ld) -> %d]\n", k, ns, ok, x, an[k]); }
+        nexpr += an[k] != 1;
       }
       if (shape && nexpr) {
         /* the context first (see cx_push): the widest that compiles, else the call alone */
@@ -2176,18 +2351,40 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
           else break;
         }
         Compiled *c2 = NULL;
-        if (cx_n) { c2 = compile_fn_ex(n, F, ap, an); if (c2) cl = top; else DBG("(the call's context does not compile: the call alone)\n"); }
-        int saved_cx = cx_n; cx_n = 0;
+        int *tops = malloc(sizeof *tops * (size_t)(cx_n + 1)), all = cx_n;   /* each context's node, to cut back to */
+        { int t = cl; tops[0] = cl;
+          for (int i = 0; i < all; i++) { Port o = W(n, (Port){t, 1}); t = o.node; tops[i + 1] = t; } }
+        for (; cx_n > 0 && !c2; cx_n--) {             /* the widest context that compiles */
+          c2 = compile_fn_ex(n, F, ap, an);
+          if (c2) cl = tops[cx_n];
+        }
+        if (all && !c2) DBG("(no context of the call compiles: the call alone)\n");
+        free(tops); cx_n = 0;
         if (!c2) c2 = compile_fn_ex(n, F, ap, an);
-        (void)saved_cx;
         if (c2) {
-          int nn = 0;
-          for (int k = 0; k < car; k++) if (an[k]) net_read_i64(n, ap[k], &args[nn++]);
+          int nn = 0, pi = 0;
+          long *xa = malloc(sizeof *xa * (size_t)(car + n_inp + c2->npsh + 1));   /* (the arguments, inputs included) */
+          Marsh M; memset(&M, 0, sizeof M); M.n = n; M.c = c2; M.steps0 = n->steps;
+          for (int k = 0; k < car && !M.bad; k++) {
+            if (an[k] == 1) { net_read_i64(n, ap[k], &xa[nn++]); pi++; }
+            else if (an[k] == 2) {
+              if (pi >= c2->npsh) { M.bad = 1; break; }
+              xa[nn++] = marshal(&M, ap[k], c2->psh[pi]); pi++;
+              if (dbg > 1) DBG("[argument %d passed in as %d %s: %lx]\n", k, c2->psh[pi - 1].k, c2->psh[pi - 1].dt ? c2->psh[pi - 1].dt : "", (unsigned long)xa[nn - 1]);
+            }
+          }
+          for (int i = 0; i < n_inp && !M.bad; i++, pi++) {   /* the inputs met inside the arguments */
+            if (pi >= c2->npsh) { M.bad = 1; break; }
+            xa[nn++] = marshal(&M, inp_port[i], c2->psh[pi]);
+          }
+          if (M.bad) { DBG("an argument could not be read in: the net computes the call\n"); ms_free(&M); free(xa); goto decline_ex; }
           extern int lin_threads;
-          long r = c2->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
-          if (c2->aborted && *c2->aborted) { DBG("the data unit's guard fired: the net computes it\n"); }
+          long r = c2->fn(xa, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
+          free(xa);
+          if (c2->aborted && *c2->aborted) { DBG("the data unit's guard fired: the net computes it\n"); ms_free(&M); }
           else {
             Port val = result_port(n, c2, r);
+            ms_free(&M);                                 /* (after the result is read: it may hold blocks passed in) */
             if (val.node < 0) goto decline_ex;
             Port out = W(n, (Port){cl, 1});
             net_link(n, val, out, 1);

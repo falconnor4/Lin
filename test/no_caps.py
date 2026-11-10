@@ -106,6 +106,7 @@ PATTERNS = [
     (r"pattern\.h$", r"^\w+\[LIN_PAT_\w+\]$", "pattern matcher: a per-match array at the matcher's own capacity"),
     (r"\.(c|h)$", r"^#define \w+ [0-2]$", "an enumeration tag (0..2), not a capacity: these are kinds, not sizes"),
     (r"\.c$", r"^in_buf\[\d+\]$", "stdin buffer for a driver readback: grows with the read, not a program limit"),
+    (r"\.c$", r"^chunk\[BUFSIZ\]$", "one read's chunk, at stdio's own buffer size: the input buffer it fills grows"),
     (r"\.c$", r"^tmp\[\d+\]$", "scratch for a formatted diagnostic message"),
     (r"\.c$", r"^q\[\d+\]$", "quantified-variable set: the same Scheme ABI array"),
     (r"\.(c|h)$", r"^(why|msg|[A-Z]+MSG|err)\[\d+\]$", "diagnostic message buffer: truncates a message, never a value"),
