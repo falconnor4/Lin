@@ -57,6 +57,7 @@
 (load "sat.lin")
 (load "seq.lin")
 (load "array.lin")
+(load "omap.lin")
 (load "io.lin")
 
 ; --- Open All Standard Namespaces into Current Scope ---
@@ -80,5 +81,6 @@
 (open sat)
 (open seq)
 (open array)
+(open omap)
 (open io)
 

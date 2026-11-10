@@ -69,7 +69,11 @@
           (\_ (str_parse_int_help s 0))
           (\_ 0))))))
 
-; --- Re-export the safe str_* / streq names into root scope ---;; ---- building and taking apart (all pure Lin; the function compiler reads them as C) ----
+; --- Re-export the safe str_* / streq names into root scope ---; lexicographic order: negative, zero or positive
+(define str_compare (\a (\b (if (str_is_empty a) (if (str_is_empty b) 0 -1)
+  (if (str_is_empty b) 1 (if (lt (list.head a) (list.head b)) -1 (if (gt (list.head a) (list.head b)) 1
+    (str_compare (list.tail a) (list.tail b)))))))))
+;; ---- building and taking apart (all pure Lin; the function compiler reads them as C) ----
 ; the decimal digits of n (with a leading '-' when negative)
 (define _digits (\n (\acc (if (lt n 10) (list.cons (add n 48) acc) (_digits (div n 10) (list.cons (add (mod n 10) 48) acc))))))
 (define str_of_num (\n (if (lt n 0) (list.cons 45 (_digits (sub 0 n) list.nil)) (_digits n list.nil))))

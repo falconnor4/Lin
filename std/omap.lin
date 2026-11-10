@@ -1,0 +1,59 @@
+; ==============================================================================
+; Lin Standard Library: OMap -- an ordered map (a red-black tree)
+; ==============================================================================
+; Keys in order, O(log n) insert and lookup: Okasaki's red-black tree, which is
+; nothing but a datatype and `match`.  So it is typed, persistent, and compiled:
+; the function compiler reads the balancing as C and, for a map nothing else
+; holds, rebuilds the insertion path in place.
+;
+; The comparison is a parameter -- `cmp a b` is negative, zero or positive -- and
+; the integer- and string-keyed forms pass it for you:
+;   imap_*  integer keys        smap_*  string keys
+;   (omap_insert cmp k v m)  (omap_get cmp k default m)  (omap_has cmp k m)
+;   (omap_size m)  (omap_fold f z m)  -- f acc key value, keys in order
+;   (omap_keys m) (omap_values m)     -- as Seqs, in key order
+; ==============================================================================
+
+(load "bool.lin")
+(load "num.lin")
+(load "seq.lin")
+(load "string.lin")
+
+(namespace omap)
+
+; colour: 0 red, 1 black
+(datatype (OMap k v) (omempty) (omnode (c num) (l OMap k v) (key k) (val v) (r OMap k v)))
+
+(define omap_empty omempty)
+
+; the four red-red shapes, rotated into one red node over two black ones (the right side's, then the left's)
+(define _balrr (\c (\l (\k (\v (\r (match r (omempty (omnode c l k v r)) ((omnode rc rl rk rv rr) (match rr (omempty (omnode c l k v r)) ((omnode rrc rrl rrk rrv rrr) (if (eq rrc 0) (omnode 0 (omnode 1 l k v rl) rk rv (omnode 1 rrl rrk rrv rrr)) (omnode c l k v r))))))))))))
+(define _balr (\c (\l (\k (\v (\r (match r (omempty (omnode c l k v r)) ((omnode rc rl rk rv rr) (if (eq rc 0) (match rl (omempty (_balrr c l k v r)) ((omnode rlc rll rlk rlv rlr) (if (eq rlc 0) (omnode 0 (omnode 1 l k v rll) rlk rlv (omnode 1 rlr rk rv rr)) (_balrr c l k v r)))) (omnode c l k v r))))))))))
+(define _ballr (\c (\l (\k (\v (\r (match l (omempty (_balr c l k v r)) ((omnode lc ll lk lv lr) (match lr (omempty (_balr c l k v r)) ((omnode lrc lrl lrk lrv lrr) (if (eq lrc 0) (omnode 0 (omnode 1 ll lk lv lrl) lrk lrv (omnode 1 lrr k v r)) (_balr c l k v r))))))))))))
+(define _bal (\c (\l (\k (\v (\r (if (eq c 0) (omnode c l k v r) (match l (omempty (_balr c l k v r)) ((omnode lc ll lk lv lr) (if (eq lc 0) (match ll (omempty (_ballr c l k v r)) ((omnode llc lll llk llv llr) (if (eq llc 0) (omnode 0 (omnode 1 lll llk llv llr) lk lv (omnode 1 lr k v r)) (_ballr c l k v r)))) (_balr c l k v r)))))))))))
+
+(define _ins (\cmp (\k (\v (\m (match m (omempty (omnode 0 omempty k v omempty)) ((omnode c l mk mv r) (let ((o (cmp k mk))) (if (lt o 0) (_bal c (_ins cmp k v l) mk mv r) (if (gt o 0) (_bal c l mk mv (_ins cmp k v r)) (omnode c l k v r)))))))))))
+(define _blacken (\m (match m (omempty omempty) ((omnode c l k v r) (omnode 1 l k v r)))))
+(define omap_insert (\cmp (\k (\v (\m (_blacken (_ins cmp k v m)))))))
+
+(define omap_get (\cmp (\k (\d (\m (match m (omempty d) ((omnode c l mk mv r) (let ((o (cmp k mk))) (if (lt o 0) (omap_get cmp k d l) (if (gt o 0) (omap_get cmp k d r) mv))))))))))
+(define omap_has (\cmp (\k (\m (match m (omempty false) ((omnode c l mk mv r) (let ((o (cmp k mk))) (if (lt o 0) (omap_has cmp k l) (if (gt o 0) (omap_has cmp k r) true)))))))))
+(define omap_size (\m (match m (omempty 0) ((omnode c l k v r) (add 1 (add (omap_size l) (omap_size r)))))))
+(define omap_fold (\f (\z (\m (match m
+  (omempty z)
+  ((omnode c l k v r) (omap_fold f (f (omap_fold f z l) k v) r)))))))
+(define omap_keys (\m (sreverse (omap_fold (\acc (\k (\v (scons k acc)))) snil m))))
+(define omap_values (\m (sreverse (omap_fold (\acc (\k (\v (scons v acc)))) snil m))))
+
+; integer keys
+(define _icmp (\a (\b (if (lt a b) -1 (if (gt a b) 1 0)))))
+(define imap_insert (\k (\v (\m (omap_insert _icmp k v m)))))
+(define imap_get (\k (\d (\m (omap_get _icmp k d m)))))
+(define imap_has (\k (\m (omap_has _icmp k m))))
+; string keys
+(define smap_insert (\k (\v (\m (omap_insert str_compare k v m)))))
+(define smap_get (\k (\d (\m (omap_get str_compare k d m)))))
+(define smap_has (\k (\m (omap_has str_compare k m))))
+
+(namespace _)
+(export omap)
