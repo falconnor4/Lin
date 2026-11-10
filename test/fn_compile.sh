@@ -65,6 +65,13 @@ prog dhigher '(datatype L (ln) (lc h t))
 (define upto (\n (if (eq n 0) ln (lc n (upto (sub n 1))))))
 (define lmap (\f (\s (match s (ln ln) ((lc h t) (lc (f h) (lmap f t)))))))
 (lmap (\x (mul x 10)) (upto 3))' '(lc 30 (lc 20 (lc 10 ln)))'
+# a closure capturing a parameter of the function that builds it: lifted into the specialised copy's parameters
+prog lifted '(datatype L (ln) (lc h t))
+(define upto (\n (if (eq n 0) ln (lc n (upto (sub n 1))))))
+(define lmap (\f (\s (match s (ln ln) ((lc h t) (lc (f h) (lmap f t)))))))
+(define lsum (\s (\a (match s (ln a) ((lc h t) (lsum t (add a h)))))))
+(define go (\k (\acc (if (eq k 0) acc (go (sub k 1) (add acc (lsum (lmap (\x (mul x k)) (upto 10)) 0)))))))
+(go 5 0)' 825
 # a function that may not look at its data argument (lazy in Lin, strict in C): still the net's answer
 prog lazydata '(datatype S (snil) (scons h t))
 (define upto (\n (if (eq n 0) snil (scons n (upto (sub n 1))))))

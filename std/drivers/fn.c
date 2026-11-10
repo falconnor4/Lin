@@ -552,11 +552,12 @@ static unsigned mm_put(int w, const Expr *e, unsigned v) {
 
 /* Strictness: the parameters certainly evaluated, as a bit set.  A call evaluates the arguments its callee is
    strict in, so the sets are a fixpoint over the unit (compile_unit iterates them down from "everything"). */
+static int strict_fid = -2;   /* the function whose strictness is asked: an outer function's parameter is not its own */
 static unsigned strict_r(Expr *e) {
   MEMO(MM_STRICT, e);
   unsigned s = 0;
   switch (e->op) {
-  case E_PARAM: s = 1u << e->k; break;
+  case E_PARAM: s = strict_fid == -2 || e->nargs == strict_fid ? 1u << e->k : 0; break;
   case E_BIN: s = strict_r(e->a) | strict_r(e->b); break;
   case E_IF: s = strict_r(e->a) | (strict_r(e->b) & strict_r(e->c)); break;
   case E_CALL: for (int i = 0; i < e->nargs; i++) if ((funs[e->k].strict >> i) & 1u) s |= strict_r(e->args[i]); break;
@@ -899,14 +900,50 @@ static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int b
   free(site);
   return ok;
 }
+/* LAMBDA LIFTING.  A function the unit specialised to a closure reads what the closure captured -- often a parameter
+   of the function that made it (`(smap (\x (mul x k)) s)` inside a loop over k).  Such a function takes those
+   outer parameters as EXTRA C parameters, and every call passes them on: what a function reads from outside, its
+   callers read too, unless it is their own.  (h, k): parameter k of function h, h = -1 the entry's. */
+typedef struct { int h; long k; } FV;
+static FV **fvs; static int *nfv, lifted;
+static int fv_has(int f, int h, long k) { for (int i = 0; i < nfv[f]; i++) if (fvs[f][i].h == h && fvs[f][i].k == k) return 1; return 0; }
+static int fv_add(int f, int h, long k) {
+  if (h == f || fv_has(f, h, k)) return 0;
+  fvs[f] = realloc(fvs[f], sizeof **fvs * (size_t)(nfv[f] + 1)); fvs[f][nfv[f]++] = (FV){ h, k }; return 1;
+}
+static int fv_changed;
+static void fv_walk(int f, const Expr *e) {
+  if (!e || mm_has(MM_SSTR, e)) return;
+  mm_put(MM_SSTR, e, 1);
+  if (e->op == E_PARAM && e->nargs != f) fv_changed |= fv_add(f, e->nargs, e->k);
+  if (e->op == E_CALL) for (int i = 0; i < nfv[e->k]; i++) fv_changed |= fv_add(f, fvs[e->k][i].h, fvs[e->k][i].k);
+  if (e->a) fv_walk(f, e->a);
+  if (e->b) fv_walk(f, e->b);
+  if (e->c) fv_walk(f, e->c);
+  for (int i = 0; i < e->nargs && e->args; i++) fv_walk(f, e->args[i]);
+}
+static void lift(void) {
+  if (fvs) { for (int i = 0; i < lifted; i++) free(fvs[i]); }
+  free(fvs); free(nfv);
+  fvs = calloc((size_t)(nfun ? nfun : 1), sizeof *fvs); nfv = calloc((size_t)(nfun ? nfun : 1), sizeof *nfv);
+  for (int round = 0, ch = 1; ch && round <= nfun * 64 + 64; round++) {
+    ch = 0;
+    for (int f = 0; f < nfun; f++) { fv_changed = 0; mm_new(MM_SSTR); fv_walk(f, funs[f].body); ch |= fv_changed; }
+  }
+  lifted = nfun;
+}
+static void fv_params(Buf *b, int f, int typed, int lead) {   /* a function's extra parameters, after its own */
+  for (int i = 0; i < nfv[f]; i++) put(b, typed ? "%slong l%d_%ld" : "%sl%d_%ld", (lead || i) ? ", " : "", fvs[f][i].h + 1, fvs[f][i].k);
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   if (budget <= 0) return 0;
   if (bound(e)) { put(b, "v%d", e->var); return 1; }
   switch (e->op) {
   case E_CONST: if (e->k == (long)(1UL << (LIN_INT_BITS - 1))) put(b, "(-%ldL-1)", -(e->k + 1)); else put(b, "(%ldL)", e->k); return 1;
-  case E_PARAM:   /* a parameter of an ENCLOSING function would need lambda lifting: decline instead */
-    if (e->nargs != emitting) { DBG("declined: a nested function uses its parent's parameter\n"); return 0; }
-    put(b, "p%ld", e->k); return 1;
+  case E_PARAM:   /* an outer function's parameter: lifted into this one's extra parameters */
+    if (e->nargs == emitting) { put(b, "p%ld", e->k); return 1; }
+    if (emitting >= 0 && emitting < lifted && fv_has(emitting, e->nargs, e->k)) { put(b, "l%d_%ld", e->nargs + 1, e->k); return 1; }
+    DBG("declined: a parameter read where it is not in scope\n"); return 0;
   case E_BIN: {
     Buf x = nbuf(256), y = nbuf(256);
     int ok = 1;
@@ -984,6 +1021,12 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       } }
     if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
     for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
+    for (int i = 0; !par && e->k < lifted && i < nfv[e->k]; i++) {   /* the callee's lifted parameters: ours, or passed on */
+      const FV *v = &fvs[e->k][i];
+      if (v->h == emitting) put(b, ", p%ld", v->k);
+      else if (emitting >= 0 && emitting < lifted && fv_has(emitting, v->h, v->k)) put(b, ", l%d_%ld", v->h + 1, v->k);
+      else { DBG("declined: a lifted parameter with no source\n"); return 0; }
+    }
     put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
     return 1;
   }
@@ -1524,7 +1567,8 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
       changed = 0;
-      for (int i = 0; i < nfun; i++) { unsigned st = strict(funs[i].body) & funs[i].strict; if (st != funs[i].strict) { funs[i].strict = st; changed = 1; } }
+      for (int i = 0; i < nfun; i++) { strict_fid = i; unsigned st = strict(funs[i].body) & funs[i].strict; if (st != funs[i].strict) { funs[i].strict = st; changed = 1; } }
+      strict_fid = -2;
     }
     int safe = !failed;
     for (int i = 0; safe && i < nfun; i++) safe = args_safe(funs[i].body);
@@ -1544,10 +1588,11 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     else {
       { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) ownership(entry); }
       Buf b = nbuf(4096), fb = nbuf(4096), pre = nbuf(1024), pb = nbuf(1024);
-      for (int i = 0; i < nfun; i++) { put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); put(&fb, ");\n"); }
+      lift();
+      for (int i = 0; i < nfun; i++) { put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ");\n"); }
       int ok = 1;
       for (int i = 0; ok && i < nfun; i++) {
-        put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); put(&fb, ") { LIN_ENTER; return ");
+        put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ") { LIN_ENTER; return ");
         emitting = i; fscope++; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n");
       }
       Buf eb = nbuf(1024);                             /* the entry's call, as an expression of its parameters */
@@ -1559,7 +1604,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       if (ok && data) {                                /* data: on its own large stack, the tree recursions forked */
         Buf ebp = nbuf(1024);
         nsite = 0; emitting = 0; fscope++;
-        int pok = emit_region(&pb, &pre, funs[0].body, 1, 4096);
+        int pok = !nfv[0] && emit_region(&pb, &pre, funs[0].body, 1, 4096);   /* (the parallel copy is of f0's own parameters) */
         emitting = -1; fscope++;
         pok = pok && emit_region(&ebp, &pre, entry, 1, 4096);
         put(&b, "static int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
@@ -1593,7 +1638,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         if (r) r->strict = funs[0].strict;
       }
       nsite = 0; emitting = 0; fscope++;
-      if (!ok || data || aports) goto done;
+      if (!ok || data || aports || nfv[0]) goto done;
       ok = emit_region(&pb, &pre, funs[0].body, 1, 4096);
       if (ok) {
         put(&b, "static int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
