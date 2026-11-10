@@ -22,16 +22,27 @@ The rules, so the numbers mean something:
 
 | benchmark | C -O3 | Lin | Lin -t 1 | C / Lin | what it exercises |
 |-----------|-------|-----|----------|---------|-------------------|
-| bintree | 34 ms | 6 ms | 7 ms | 5.67x | constructors + `match`: a depth-20 tree (2M nodes) built and counted |
-| bst | 28 ms | 31 ms | 30 ms | 0.90x | a search tree: 200,000 inserts (updated in place), a weighted walk |
-| collatz | 201 ms | 51 ms | 150 ms | 3.94x | a loop calling a helper loop; a max-reduction |
-| fib | 132 ms | 46 ms | 124 ms | 2.87x | tree recursion |
-| loop | 79 ms | 28 ms | 76 ms | 2.82x | a tail-recursive sum-reduction |
-| mandel | 114 ms | 31 ms | 92 ms | 3.68x | floats (numerals with soft-float meanings); three nested loops |
-| nqueens | 158 ms | 127 ms | 162 ms | 1.24x | bitmask backtracking, unbalanced tree |
-| tak | 58 ms | 32 ms | 74 ms | 1.81x | calls whose arguments are calls |
+| array | 7 ms | 61 ms | 64 ms | 0.11x | `std/array.lin` (a 32-way trie, updated in place): 1M strided writes, 1M reads -- against a flat C array |
+| bintree | 30 ms | 6 ms | 6 ms | 5.00x | constructors + `match`: a depth-20 tree (2M nodes) built and counted |
+| bst | 33 ms | 36 ms | 35 ms | 0.92x | a search tree: 200,000 inserts (updated in place), a weighted walk |
+| collatz | 201 ms | 46 ms | 145 ms | 4.37x | a loop calling a helper loop; a max-reduction |
+| fib | 155 ms | 45 ms | 153 ms | 3.44x | tree recursion |
+| loop | 71 ms | 32 ms | 85 ms | 2.22x | a tail-recursive sum-reduction |
+| mandel | 116 ms | 41 ms | 113 ms | 2.83x | floats (numerals with soft-float meanings); three nested loops |
+| nqueens | 147 ms | 130 ms | 184 ms | 1.13x | bitmask backtracking, unbalanced tree |
+| omap | 118 ms | 96 ms | 133 ms | 1.23x | `std/omap.lin` (a red-black tree): 200,000 inserts, 200,000 lookups (the lookups split across threads) |
+| seqs | 57 ms | 39 ms | 37 ms | 1.46x | `std/seq.lin`: map, filter, fold over a million-element list (higher-order, specialised) |
+| tak | 69 ms | 34 ms | 62 ms | 2.03x | calls whose arguments are calls |
+| words | 4 ms | 28 ms | 27 ms | 0.14x | text: a 1M-character string built, its words counted -- against a C scan of a char buffer |
 
 Measured on a 4-core x86-64 container (gcc 15, nixpkgs). Re-run before quoting.
+
+## Where Lin is behind, and why
+
+`array` and `words` compare a persistent, pure structure with C's mutable flat memory, and that gap is real:
+an array element is four pointer hops down a trie where C does one indexed load, and a string is a linked list of
+cells where C scans bytes.  Both run as compiled C with in-place update and no garbage -- the remaining cost is
+the representation.  Closing it (wider nodes, fusing a producer with its consumer) is open work.
 
 ## Data structures
 
