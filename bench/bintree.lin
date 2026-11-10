@@ -1,0 +1,5 @@
+; binary-trees: build a complete tree of depth 7 and count its nodes (constructors + match)
+(datatype Tree (leaf) (node l r))
+(define make (\d (if (eq d 0) leaf (node (make (sub d 1)) (make (sub d 1))))))
+(define check (\t (match t (leaf 1) ((node l r) (add 1 (add (check l) (check r)))))))
+(check (make 7))

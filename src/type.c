@@ -172,6 +172,31 @@ static Scheme generalize(Type *t) {
   Scheme s; s.nq = qn; s.q = f.v; s.t = t; return s;
 }
 
+static Type *infer(Term *t);
+/* A MATCH OVER A DATATYPE.  `(match s (C1 ..) (C2 x y) ..)` is the positional Scott dispatch `((s b1) b2) ..`,
+   and typed as that application a recursive datatype could not be traversed recursively: the scrutinee's
+   type would have to be an arrow mentioning itself (an infinite type).  Each branch application names its
+   constructor (the parser writes `match:<Ctor>`), so the scrutinee is that datatype -- the constructor's
+   nominal result type -- each branch is "the constructor's fields -> the result", and all branches share
+   the result.  A branch whose pattern names no constructor (`_`, a variable) is typed loosely. */
+static int is_match_app(const Term *t) { return t && t->type == TAPP && t->name && !strncmp(t->name, "match:", 6); }
+static Type *infer_match(Term *t, Type **scrut) {
+  Type *r;
+  if (is_match_app(t->l)) r = infer_match(t->l, scrut);
+  else { *scrut = infer(t->l); r = tvar(); }
+  Scheme *cs = env_find(t->name + 6);
+  Type *b = infer(t->r);
+  if (!cs) return r;
+  Type *ct = instantiate(cs), *exp = r;
+  Type *fields[64]; int nf = 0;                      /* (a constructor's fields; more than this types loosely) */
+  for (Type *k = find(ct); k->kind == TARROW && nf < 64; k = find(k->b)) { fields[nf++] = k->a; ct = k->b; }
+  ct = find(ct);
+  if (ct->kind != TNOM) return r;                    /* not a datatype constructor: loose */
+  unify(*scrut, ct);
+  for (int i = nf - 1; i >= 0; i--) exp = tarrow(fields[i], exp);
+  unify(b, exp);
+  return r;
+}
 static Type *infer(Term *t) {
   switch (t->type) {
   case TVAR: {
@@ -192,6 +217,7 @@ static Type *infer(Term *t) {
       Type *a = infer(t->l->r), *b = infer(t->r);
       unify(a, b); return a;
     }
+    if (is_match_app(t)) { Type *sc = NULL; return infer_match(t, &sc); }
     if (t->l && t->l->type == TLAM) {
       env_push(t->l->name, generalize(infer(t->r)));
       Type *b = infer(t->l->l); envn--; return b;

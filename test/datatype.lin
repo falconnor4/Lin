@@ -30,3 +30,17 @@
 ; expect => 13
 (match none (none 7) ((some v) 0) ((err m) 0))
 ; expect => 7
+
+; A RECURSIVE datatype traversed by a recursive function: `match` is typed over the datatype (the
+; scrutinee is a Tree, a branch is "the constructor's fields -> the result"), not as a bare application,
+; which made the parameter's type an arrow mentioning itself (an infinite type).
+(datatype Tree (leaf) (node l r))
+(define make_tree (\d (if (eq d 0) leaf (node (make_tree (sub d 1)) (make_tree (sub d 1))))))
+(define count_tree (\t (match t (leaf 1) ((node l r) (add 1 (add (count_tree l) (count_tree r)))))))
+(count_tree (make_tree 3))
+; expect => 15
+(datatype Bst (tip) (bin k l r))
+(define bst_ins (\x (\t (match t (tip (bin x tip tip)) ((bin k l r) (if (lt x k) (bin k (bst_ins x l) r) (bin k l (bst_ins x r))))))))
+(define bst_sum (\t (match t (tip 0) ((bin k l r) (add k (add (bst_sum l) (bst_sum r)))))))
+(bst_sum (bst_ins 5 (bst_ins 2 (bst_ins 9 tip))))
+; expect => 16

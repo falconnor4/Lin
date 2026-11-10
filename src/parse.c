@@ -280,10 +280,11 @@ static Term *parse_term(void) {
       while (S[P] == '(') {
         P++; skipws();
         if (S[P] == ')') { P++; break; }
-        int k = 0; const char **vs = NULL;
+        int k = 0; const char **vs = NULL; const char *ctorname = "_";
         if (S[P] == '(') { /* (Ctor v1...vk) -> bind the fields */
           P++; skipws();
           const char *ctorhead = sym(); if (!ctorhead) pfail("match: bad pattern");
+          ctorname = ctorhead;
           int cap = 0;
           for (;;) {
             skipws(); if (S[P] == ')') { P++; break; }
@@ -293,12 +294,15 @@ static Term *parse_term(void) {
           }
         } else {
           const char *pn = sym(); if (!pn) pfail("match: bad pattern"); /* nullary/_ */
+          ctorname = pn;
         }
         Term *body = parse_tail(parse_term());
         Term *lam = body; /* nullary / wildcard: pass the value directly */
         for (int i = k - 1; i >= 0; i--) lam = term_new(TLAM, vs[i], lam, NULL);
         free(vs);
-        app = term_new(TAPP, "", app, lam);
+        /* the application says which constructor this branch is for, so the checker can type the match
+           as one over that datatype (type.c) -- the term itself is still positional Scott dispatch */
+        app = term_new(TAPP, lin_internf("match:%s", ctorname), app, lam);
         skipws();
       }
       skipws(); if (S[P] == ')') P++; /* consume match close */
