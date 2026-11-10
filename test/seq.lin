@@ -37,3 +37,14 @@
 ; expect => 166666833333
 (sall (\x (lt x 5)) (srange 0 10))
 ; expect => false
+; a list prints by its elements' type: text as a string, other numbers as a list, anything else element by element
+(seq_to_list (srange 0 3))
+; expect => [0 1 2]
+(list3 72 105 33)
+; expect => "Hi!"
+(cons true (cons false nil))
+; expect => [true false]
+(list2 (list2 1 2) (list2 3 4))
+; expect => [[1 2] [3 4]]
+(list2 "ab" "cd")
+; expect => ["ab" "cd"]

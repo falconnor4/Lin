@@ -383,7 +383,10 @@ static int type_domain(Type *t) {
   if (!strcmp(t->name, "num")) return DT_NUM;
   if (!strcmp(t->name, "bool")) return DT_BOOL;
   if (!strcmp(t->name, "float")) return DT_FLOAT;
-  if (!strcmp(t->name, "list")) return DT_STR;     /* a list IS the string encoding: cells of values */
+  if (!strcmp(t->name, "list")) {                   /* a list IS the string encoding: cells of values */
+    static char *ldesc; free(ldesc); ldesc = type_desc(t); lin_result_desc = ldesc;   /* (its elements' type, for the reader) */
+    return DT_STR;
+  }
   for (long id = 1; lin_ctor_info(id); id++) if (!strcmp(lin_ctor_info(id)->dt, t->name)) {
     static char *desc; free(desc); desc = type_desc(t); lin_result_desc = desc;   /* (its type, for the reader) */
     return LIN_DOM_DATA;

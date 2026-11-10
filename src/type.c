@@ -303,7 +303,7 @@ static void print_rec(Type *t, int par) {
 void scheme_print(Scheme *s) { print_rec(s->t, 0); }
 
 /* A TYPE AS A READER'S DESCRIPTOR (lin.h): what readback needs to print a value of it, as text a driver can
-   parse.  N num, B bool, F float, S list (the cell encoding), P<i>; a datatype parameter, D<name>(<args>) a
+   parse.  N num, B bool, F float, L<elem> list (the cell encoding), P<i>; a datatype parameter, D<name>(<args>) a
    datatype, ? anything else (a variable, an arrow). */
 static void desc_rec(Type *t, char **b, size_t *len, size_t *cap) {
 #define DPUT(str) do { size_t l_ = strlen(str); while (*len + l_ + 1 > *cap) { *cap = *cap ? *cap * 2 : 64; *b = realloc(*b, *cap); } memcpy(*b + *len, (str), l_ + 1); *len += l_; } while (0)
@@ -315,7 +315,7 @@ static void desc_rec(Type *t, char **b, size_t *len, size_t *cap) {
   if (!strcmp(t->name, "num")) { DPUT("N"); return; }
   if (!strcmp(t->name, "bool")) { DPUT("B"); return; }
   if (!strcmp(t->name, "float")) { DPUT("F"); return; }
-  if (!strcmp(t->name, "list")) { DPUT("S"); return; }
+  if (!strcmp(t->name, "list")) { DPUT("L"); if (t->a) desc_rec(t->a->kind == TARG ? t->a->a : t->a, b, len, cap); else DPUT("?"); return; }
   DPUT("D"); DPUT(t->name); DPUT("(");
   for (Type *k = t->a; k; k = k->b) desc_rec(k->kind == TARG ? k->a : k, b, len, cap);
   DPUT(")");

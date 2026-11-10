@@ -770,6 +770,7 @@ static int print_ctor(Net *n, Port p, FILE *out) {
 static const char *td_skip(const char *d) {
   switch (*d) {
   case 'N': case 'B': case 'F': case 'S': case '?': return d + 1;
+  case 'L': return td_skip(d + 1);
   case 'P': { const char *e = strchr(d, ';'); return e ? e + 1 : d + strlen(d); }
   case 'D': { const char *q = strchr(d, '('); if (!q) return d + strlen(d); q++;
               while (*q && *q != ')') { const char *r = td_skip(q); if (r == q) return q; q = r; } return *q ? q + 1 : q; }
@@ -790,6 +791,7 @@ static char *td_subst(const char *d, const char *e, const char **args, const cha
   o[len] = 0; return o;
 }
 static int print_typed(Net *n, Port p, const char *d, FILE *f, int depth);
+static int print_num_list(Net *n, Port p, FILE *f);
 /* A field whose type was not declared: its constructor's marker if it still has one, a numeral if it reads as
    one, a layer of the enclosing datatype (the usual undeclared field is the recursive one), else the term. */
 static int print_untyped(Net *n, Port p, const char *parent, FILE *f, int depth) {
@@ -815,6 +817,25 @@ static int print_typed_in(Net *n, Port p, const char *d, FILE *f, int depth, con
     Val v = decode(n, p, dom);
     if (v.kind == 2) { fprintf(f, "\"%s\"", v.sv); return 1; }
     return render_val(f, v);
+  }
+  if (*d == 'L') {                                  /* a list: text when it spells some, else its elements */
+    if (d[1] == 'N' || d[1] == '?') {
+      if (print_num_list(n, p, f)) return 1;
+      Val v = decode(n, p, DT_STR);
+      if (v.kind == 2) { fprintf(f, "\"%s\"", v.sv); return 1; }
+      if (d[1] == 'N') return 0;
+    }
+    Port cur = p; int k = 0, ok = 1;
+    fputc('[', f);
+    for (size_t step = 0; ok && step <= (size_t)n->nn; step++) {
+      Port head, tail;
+      if (!net_read_cell(n, cur, &head, &tail)) { ok = net_read_int(n, cur, LIN_ENC_STR) == 0; break; }
+      if (k++) fputc(' ', f);
+      ok = print_typed_in(n, head, d + 1, f, depth + 1, parent);
+      cur = tail;
+    }
+    fputc(']', f);
+    return ok;
   }
   if (*d != 'D') return print_untyped(n, p, parent, f, depth);
   const char *lp = strchr(d, '('); if (!lp) return 0;
@@ -859,13 +880,44 @@ static int print_by_type(Net *n, Port p, const char *d, FILE *out) {
   return ok;
 }
 
+/* A `list num` IS the string encoding, so the type cannot tell `"Hi"` from `(list3 10 20 30)`.  The elements can:
+   a list whose numbers are all text (printable bytes, tab, newline) prints as the string it spells, any other
+   list of numbers as the list it is -- `[10 20 30]` -- rather than as bytes no one typed.  0 = not a list of
+   numbers (the caller decodes as before). */
+static int print_num_list(Net *n, Port p, FILE *f) {
+  long *xs = NULL; size_t k = 0, cap = 0; int text = 1, ok = 0;
+  Port cur = p;
+  for (size_t step = 0; step <= (size_t)n->nn; step++) {
+    Port head, tail;
+    if (!net_read_cell(n, cur, &head, &tail)) { ok = k > 0 && net_read_int(n, cur, LIN_ENC_STR) == 0; break; }
+    long x; if (!net_read_i64(n, head, &x)) break;
+    if (k == cap) xs = realloc(xs, sizeof *xs * (cap = cap ? cap * 2 : 16));
+    xs[k++] = x;
+    text &= (x >= 32 && x <= 255 && x != 127) || x == 9 || x == 10 || x == 13;
+    cur = tail;
+  }
+  if (ok && !text) {
+    fputc('[', f);
+    for (size_t i = 0; i < k; i++) fprintf(f, i ? " %ld" : "%ld", xs[i]);
+    fputc(']', f); fflush(f);
+  }
+  free(xs);
+  return ok && !text;
+}
+
 static int print_body(Net *n, int domain) {
   N = n;
   Port r = net_dup_hop(n, net_force_val(n, wire((Port){0, 0})));   /* the result is observed here */
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     /* Observing an `_ffi` closure IS its effect, so it is dispatched first whatever the type says. */
-    if (render_val(OUT, run_ffi(n, r))) return 0;
+    /* ...unless the type says what it is instead: a datatype's value or a list of known elements is data, and a
+       cell holding a list is the same shape as an `_ffi` closure. */
+    int typed_data = domain == LIN_DOM_DATA || (domain == DT_STR && lin_result_desc && lin_result_desc[0] == 'L' && lin_result_desc[1] != '?');
+    if (!typed_data && render_val(OUT, run_ffi(n, r))) return 0;
     if (domain == LIN_DOM_DATA && lin_result_desc && print_by_type(n, r, lin_result_desc, OUT)) return 0;   /* by its type */
+    if (domain == DT_STR && lin_result_desc && lin_result_desc[0] == 'L' && lin_result_desc[1] != 'N' && lin_result_desc[1] != '?'
+        && print_by_type(n, r, lin_result_desc, OUT)) return 0;   /* a list of something else, by its elements' type */
+    if (domain == DT_STR && print_num_list(n, r, OUT)) return 0;   /* a list of numbers that is not text */
     if ((domain < 0 || domain == LIN_DOM_DATA) && print_ctor(n, r, OUT)) return 0;   /* a datatype's value, by its constructors' names */
     if (domain == LIN_DOM_DATA) domain = -2;          /* (not a numeral or a string: the term, as it is) */
     else {
