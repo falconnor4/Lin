@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* ============================================================================
  * readback.c -- observing a reduced net: decode, print, run effects, dispatch FFI.
  *
@@ -81,7 +82,7 @@ static inline int box_num(Net *n, Port p, long *out) {
   if (!lin_pat_box(n, p, &w, &pay) || w != LIN_BOX_NUM) return 0;
   /* FORCING: the payload is the value the caller is observing, so readback may reduce to it -- and
      the core's own reader is the authority here exactly as it is for every other operand walk. */
-  if ((k = net_read_int(n, pay, LIN_ENC_NUM)) < 0) return 0;
+  if (!net_read_i64(n, pay, &k)) return 0;
   *out = k;
   return 1;
 }
@@ -105,7 +106,7 @@ static Val decode(Net *n, Port p, int domain) {
   /* A BOX states its own domain, so it is tried BEFORE the plain encoding: `0` and both Church
      booleans are shapes two or three domains claim, and a value a driver wrote in a box is
      unambiguous -- which is the whole reason it chose that encoding at AOT time. */
-  case DT_NUM: { long x; if (box_num(n, p, &x) || (x = net_read_int(n, p, LIN_ENC_NUM)) >= 0) { v.iv = x; v.kind = 1; } break; }
+  case DT_NUM: { long x; if (box_num(n, p, &x) || net_read_i64(n, p, &x)) { v.iv = x; v.kind = 1; } break; }
   case DT_BOOL: { long b; if (box_bool(n, p, &b) || (b = net_read_int(n, p, LIN_ENC_BOOL)) >= 0) { v.iv = b; v.kind = 3; } break; }
   case DT_STR: if (net_read_string_arena(n, p, LIN_ENC_NUM, &v.sv) >= 0) v.kind = 2; break;
   case DT_FLOAT: { double d; if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; } break; }
@@ -142,8 +143,7 @@ static const char *str_determined(Net *n, Port p) {
 }
 
 /* WHAT AN UNLABELLED NET READS AS.  With no expectation to state, only the shapes ONE domain
-   claims are decoded: an `_ffi` closure (dispatching it IS the observation), a float box (its own
-   shape, with the provider's table as the authority), a NUMERAL CHAIN (one layer or more), and a
+   claims are decoded: an `_ffi` closure (dispatching it IS the observation), a NUMERAL CHAIN (one layer or more), and a
    string that the structure determines.  A shape TWO domains claim is NOT decoded: `\b0.\b1.b0`
    is the numeral zero, TRUE and the empty list at once, and the geometry cannot choose. */
 static Val value_any(Net *n, Port p) {
@@ -153,10 +153,8 @@ static Val value_any(Net *n, Port p) {
      reading that works with no expectation to state, and it is tried first for that reason. */
   if (box_num(n, p, &b)) { v.iv = b; v.kind = 1; return v; }
   if (box_bool(n, p, &b)) { v.iv = b; v.kind = 3; return v; }
-  double d;
-  if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; return v; }
-  long k = net_read_int(n, p, LIN_ENC_NUM);
-  if (k >= 0) { v.iv = k; v.kind = 1; return v; }
+  long k;                                              /* (a float is a numeral: only its TYPE says float) */
+  if (net_read_i64(n, p, &k)) { v.iv = k; v.kind = 1; return v; }
   { const char *s = str_determined(n, p); if (s) { v.sv = s; v.kind = 2; return v; } }
   return v;                                            /* kind 0: the caller writes the net */
 }
@@ -179,11 +177,16 @@ static void *resolve_driver(const char *dn) {
    shapes are shared with every other domain.  A symbol whose operands are all `long` (which is what
    the dispatch below passes) needs no row: the DEFAULT is the number domain.  The float family is
    recognized by the `lin_f` prefix the std's float module uses. */
+/* The float rows BY NAME: a float is a numeral like any integer, so nothing about an argument says it is a
+   double -- only the row's signature does.  (A prefix test guessed: `lin_ffi12`, a user's 12-integer C
+   function, had its integers passed as doubles once floats became numerals.) */
 static int is_float_fn(const char *fn) {
-  if (strncmp(fn, "lin_f", 5)) return 0;
-  /* the exceptions inside the prefix: the fold counters, the int->float cast, and the string parse */
-  return strcmp(fn, "lin_folds") && strcmp(fn, "lin_folded") && strcmp(fn, "lin_float") &&
-         strcmp(fn, "lin_parse_float");
+  static const char *const rows[] = {
+    "lin_fadd", "lin_fsub", "lin_fmul", "lin_fdiv", "lin_fpow", "lin_fatan2", "lin_fmin", "lin_fmax",
+    "lin_fsqrt", "lin_fsin", "lin_fcos", "lin_ftan", "lin_fabs", "lin_fsign", "lin_ffract",
+    "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_fflr", "lin_ftoi", "lin_lerp", "lin_fclamp", NULL };
+  for (int i = 0; rows[i]; i++) if (!strcmp(fn, rows[i])) return 1;
+  return 0;
 }
 static int str_fn(const char *fn) {
   return !strcmp(fn, "puts") || !strcmp(fn, "getenv") || !strcmp(fn, "system") ||
@@ -426,6 +429,7 @@ static Port net_alloc_string(Net *n, const char *s) {
   Port c_nil = net_alloc(n, LAM, sc), n_nil = net_alloc(n, LAM, sc);
   net_link(n, (Port){c_nil.node, 2}, (Port){n_nil.node, 0}, 0);
   net_link(n, (Port){n_nil.node, 2}, (Port){n_nil.node, 1}, 0);      /* select-second: the nil cell */
+  net_link(n, (Port){c_nil.node, 1}, net_alloc(n, ERA, sc), 0);
   Port cur = (Port){c_nil.node, 0};
   for (long i = (long)strlen(s) - 1; i >= 0; i--) {
     Port ch = net_alloc_scott(n, (unsigned char)s[i]);
@@ -435,6 +439,7 @@ static Port net_alloc_string(Net *n, const char *s) {
     net_link(n, (Port){a1.node, 0}, (Port){c_lam.node, 1}, 0); net_link(n, (Port){a1.node, 2}, ch, 0);
     net_link(n, (Port){a2.node, 0}, (Port){a1.node, 1}, 0); net_link(n, (Port){a2.node, 2}, cur, 0);
     net_link(n, (Port){n_lam.node, 2}, (Port){a2.node, 1}, 0);
+    net_link(n, (Port){n_lam.node, 1}, net_alloc(n, ERA, sc), 0);
     cur = (Port){c_lam.node, 0};
   }
   return cur;
@@ -501,6 +506,8 @@ static long run_io_body(Net *n, long step_limit) {
       Port src_p = pay[0], cb = pay[1];
       char in_buf[4096] = {0};
       long res_int = -1; int is_int = 0;
+      /* the runner OBSERVES the source, so it forces it: under needed order nothing else had a reason to */
+      if (src_p.node >= 0) src_p = net_force_val(n, src_p);
       Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0};
       if (fv.kind == 1) { res_int = fv.iv; is_int = 1; }
       else if (fv.kind == 3) is_int = 2;                      /* bool result */
@@ -661,7 +668,7 @@ static void print_port(Port p, int depth, int dom) {
          payload is the case that needs it: the driver chose the encoding, and if the read declines
          the payload is still whatever it is -- rendering it as the box's own application would be
          reporting the envelope instead of the letter. */
-      if (dom < 0 || boxed) { if (ob_val(value_any(N, p))) break; }
+      if (dom == -1 || boxed) { if (ob_val(value_any(N, p))) break; }   /* (-2: a datatype's value -- not a numeral or a string) */
       ob_printf("(\\%s ", pp_push(p.node));
       print_port(wire((Port){p.node, 2}), depth + 1, -1); ob_putc(')'); pp_top--; break;
     }
@@ -696,18 +703,236 @@ static void print_struct(FILE *f, Port r, int domain) {
   free(vis_print); vis_print = NULL; vis_cap = 0;
 }
 
+/* A DATATYPE'S VALUE, BY NAME.  A constructor states which it is (lin.h, the constructor registry): its body is
+   `((\_c (d_i f1..fk)) ID)` under its m dispatch binders.  The spine is read WITHOUT forcing -- the marker is a
+   redex under a lambda, and forcing there would reduce it away -- and each field is forced to its value and
+   printed the same way: `(node leaf (node leaf leaf))`, not a lambda term.
+   ALL OR NOTHING: a value whose markers were reduced away (a normal form), or whose field is reached only
+   through a superposition the walk cannot resolve, is not guessed at -- the caller prints the term. */
+static int ctor_fields(Net *n, Port p, FILE *f, int depth);
+static int field_value(Net *n, Port p, FILE *f, int depth) {
+  long amb = lin_fan_ambiguous;
+  Port v = net_dup_hop(n, net_force_val(n, p));
+  if (lin_fan_ambiguous != amb) return 0;                       /* which copy is this field's?  not known here */
+  if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) return 0;
+  if (depth <= n->nn && ctor_fields(n, v, f, depth)) return 1;   /* (a walk of distinct nodes) */
+  Val x = value_any(n, v);
+  if (x.kind == 2) { fprintf(f, "\"%s\"", x.sv); return 1; }
+  return x.kind && render_val(f, x);
+}
+static int ctor_fields(Net *n, Port p, FILE *f, int depth) {
+  Port q = net_dhop(n, p);
+  int m = 0;
+  for (int i = 0; i < n->nn && live(q) && n->tag[q.node] == LAM && q.port == 0; i++) { m++; q = net_dhop(n, wire((Port){q.node, 2})); }
+  if (!m || !live(q) || n->tag[q.node] != APP || q.port != 1) return 0;
+  Port cl = net_dhop(n, wire((Port){q.node, 0}));
+  if (!live(cl) || n->tag[cl.node] != LAM || cl.port != 0) return 0;
+  Port bnd = wire((Port){cl.node, 1});                          /* the marker's binder is unused: an eraser, */
+  for (int i = 0; i < n->nn && live(bnd) && n->tag[bnd.node] == DUP && bnd.port != 0; i++)
+    bnd = wire((Port){bnd.node, 0});                            /* ...also through the fan copying it */
+  if (!live(bnd) || n->tag[bnd.node] != ERA) return 0;
+  long id;
+  if (!net_read_i64(n, wire((Port){q.node, 2}), &id)) return 0;
+  const LinCtor *ci = lin_ctor_info(id);
+  if (!ci || ci->m != m) return 0;
+  Port x = net_dhop(n, wire((Port){cl.node, 2})), *fields = malloc(sizeof *fields * (size_t)(ci->k + 1));
+  int nf = 0;
+  while (nf < ci->k && live(x) && n->tag[x.node] == APP && x.port == 1) { fields[nf++] = wire((Port){x.node, 2}); x = net_dhop(n, wire((Port){x.node, 0})); }
+  /* the head is a dispatch binder -- its own, or, in a value copied lazily, the fan superposing the copies'
+     binders; WHICH one the marker's ID already says */
+  int head_ok = live(x) && ((n->tag[x.node] == LAM && x.port == 1) || (n->tag[x.node] == DUP && x.port == 0));
+  int ok = nf == ci->k && head_ok;
+  const char *nm = strrchr(ci->name, '.'); nm = nm ? nm + 1 : ci->name;
+  if (ok && !nf) fputs(nm, f);
+  else if (ok) {
+    fprintf(f, "(%s", nm);
+    for (int j = nf - 1; j >= 0 && ok; j--) { fputc(' ', f); ok = field_value(n, fields[j], f, depth + 1); }
+    fputc(')', f);
+  }
+  free(fields);
+  return ok;
+}
+static int print_ctor(Net *n, Port p, FILE *out) {
+  char *buf = NULL; size_t len = 0;
+  FILE *f = open_memstream(&buf, &len);
+  if (!f) return 0;
+  int ok = ctor_fields(n, p, f, 0);
+  fclose(f);
+  if (ok) { fwrite(buf, 1, len, out); fflush(out); }
+  free(buf);
+  return ok;
+}
+
+/* A VALUE OF A DECLARED TYPE, BY THE TYPE.  The checker's descriptor of the result (lin.h: type_desc) says
+   which datatype it is, and each constructor's declared field types say what its fields are, so the value is
+   read layer by layer as that datatype -- `(scons 1 (scons 2 snil))` -- with no marker and no guess.  A field
+   whose type was not declared (`?`) is printed the way an untyped value is. */
+static const char *td_skip(const char *d) {
+  switch (*d) {
+  case 'N': case 'B': case 'F': case 'S': case '?': return d + 1;
+  case 'L': return td_skip(d + 1);
+  case 'P': { const char *e = strchr(d, ';'); return e ? e + 1 : d + strlen(d); }
+  case 'D': { const char *q = strchr(d, '('); if (!q) return d + strlen(d); q++;
+              while (*q && *q != ')') { const char *r = td_skip(q); if (r == q) return q; q = r; } return *q ? q + 1 : q; }
+  default: return d;
+  }
+}
+/* d with each P<j>; replaced by args[j] (an argument this datatype's own descriptor gave): malloc'd */
+static char *td_subst(const char *d, const char *e, const char **args, const char **aend, int nargs) {
+  size_t cap = (size_t)(e - d) + 1, len = 0; char *o = malloc(cap);
+  for (const char *q = d; q < e; ) {
+    const char *from = q, *to; const char *nx;
+    if (*q == 'P') { int j = atoi(q + 1); nx = td_skip(q); if (j >= 0 && j < nargs) { from = args[j]; to = aend[j]; } else { from = "?"; to = from + 1; } }
+    else { nx = q + 1; to = nx; }
+    size_t l = (size_t)(to - from);
+    while (len + l + 1 > cap) { cap *= 2; o = realloc(o, cap); }
+    memcpy(o + len, from, l); len += l; q = nx;
+  }
+  o[len] = 0; return o;
+}
+static int print_typed(Net *n, Port p, const char *d, FILE *f, int depth);
+static int print_num_list(Net *n, Port p, FILE *f);
+/* A field whose type was not declared: its constructor's marker if it still has one, a numeral if it reads as
+   one, a layer of the enclosing datatype (the usual undeclared field is the recursive one), else the term. */
+static int print_untyped(Net *n, Port p, const char *parent, FILE *f, int depth) {
+  Port v = net_dup_hop(n, net_force_val(n, p));
+  { char *buf = NULL; size_t len = 0; FILE *g = open_memstream(&buf, &len); int ok = 0;   /* (all or nothing) */
+    if (g) { ok = ctor_fields(n, v, g, depth); fclose(g); }
+    if (ok) fwrite(buf, 1, len, f);
+    free(buf);
+    if (ok) return 1; }
+  long x;
+  if (net_read_i64(n, v, &x)) { fprintf(f, "%ld", x); return 1; }
+  if (parent) {
+    char *buf = NULL; size_t len = 0; FILE *g = open_memstream(&buf, &len); int ok = 0;
+    if (g) { char *d = malloc(strlen(parent) + 4); sprintf(d, "D%s()", parent); ok = print_typed(n, v, d, g, depth + 1); free(d); fclose(g); }
+    if (ok) fwrite(buf, 1, len, f);
+    free(buf);
+    if (ok) return 1;
+  }
+  print_struct(f, v, -1); return 1;
+}
+static int print_typed_in(Net *n, Port p, const char *d, FILE *f, int depth, const char *parent);
+static int print_typed(Net *n, Port p, const char *d, FILE *f, int depth) { return print_typed_in(n, p, d, f, depth, NULL); }
+static int print_typed_in(Net *n, Port p, const char *d, FILE *f, int depth, const char *parent) {
+  if (depth > n->nn) return 0;                      /* (a walk of distinct layers) */
+  int dom = *d == 'N' ? DT_NUM : *d == 'B' ? DT_BOOL : *d == 'F' ? DT_FLOAT : *d == 'S' ? DT_STR : -1;
+  if (dom >= 0) {
+    Val v = decode(n, p, dom);
+    if (v.kind == 2) { fprintf(f, "\"%s\"", v.sv); return 1; }
+    return render_val(f, v);
+  }
+  if (*d == 'L') {                                  /* a list: text when it spells some, else its elements */
+    if (d[1] == 'N' || d[1] == '?') {
+      if (print_num_list(n, p, f)) return 1;
+      Val v = decode(n, p, DT_STR);
+      if (v.kind == 2) { fprintf(f, "\"%s\"", v.sv); return 1; }
+      if (d[1] == 'N') return 0;
+    }
+    Port cur = p; int k = 0, ok = 1;
+    fputc('[', f);
+    for (size_t step = 0; ok && step <= (size_t)n->nn; step++) {
+      Port head, tail;
+      if (!net_read_cell(n, cur, &head, &tail)) { ok = net_read_int(n, cur, LIN_ENC_STR) == 0; break; }
+      if (k++) fputc(' ', f);
+      ok = print_typed_in(n, head, d + 1, f, depth + 1, parent);
+      cur = tail;
+    }
+    fputc(']', f);
+    return ok;
+  }
+  if (*d != 'D') return print_untyped(n, p, parent, f, depth);
+  const char *lp = strchr(d, '('); if (!lp) return 0;
+  char *name = strndup(d + 1, (size_t)(lp - d - 1));
+  const char **args = NULL, **aend = NULL; int nargs = 0;
+  for (const char *q = lp + 1; *q && *q != ')'; ) { const char *r = td_skip(q); if (r == q) break;
+    args = realloc(args, sizeof *args * (size_t)(nargs + 1)); aend = realloc(aend, sizeof *aend * (size_t)(nargs + 1));
+    args[nargs] = q; aend[nargs] = r; nargs++; q = r; }
+  int m = 0, kmax = 0;
+  for (long id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name)) { m = c->m; if (c->k > kmax) kmax = c->k; } }
+  const LinCtor *ci = NULL; int i = -1, k = -1, ok = 0;
+  Port *fields = malloc(sizeof *fields * (size_t)(kmax + 1));
+  if (m) k = net_read_scott(n, p, m, &i, fields, kmax);
+  if (k >= 0) for (long id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name) && c->i == i && c->k == k) ci = c; }
+  if (ci) {
+    const char *nm = strrchr(ci->name, '.'); nm = nm ? nm + 1 : ci->name;
+    ok = 1;
+    if (!k) fputs(nm, f);
+    else {
+      fprintf(f, "(%s", nm);
+      const char *fd = ci->fdesc ? ci->fdesc : "";
+      for (int j = 0; j < k && ok; j++) {
+        const char *fe = *fd ? td_skip(fd) : fd;
+        char *sub = fe > fd ? td_subst(fd, fe, args, aend, nargs) : NULL;
+        fputc(' ', f); ok = print_typed_in(n, fields[j], sub ? sub : "?", f, depth + 1, name);
+        free(sub); fd = fe;
+      }
+      fputc(')', f);
+    }
+  }
+  free(fields); free(args); free(aend); free(name);
+  return ok;
+}
+static int print_by_type(Net *n, Port p, const char *d, FILE *out) {
+  char *buf = NULL; size_t len = 0;
+  FILE *f = open_memstream(&buf, &len);
+  if (!f) return 0;
+  int ok = print_typed(n, p, d, f, 0);
+  fclose(f);
+  if (ok) { fwrite(buf, 1, len, out); fflush(out); }
+  free(buf);
+  return ok;
+}
+
+/* A `list num` IS the string encoding, so the type cannot tell `"Hi"` from `(list3 10 20 30)`.  The elements can:
+   a list whose numbers are all text (printable bytes, tab, newline) prints as the string it spells, any other
+   list of numbers as the list it is -- `[10 20 30]` -- rather than as bytes no one typed.  0 = not a list of
+   numbers (the caller decodes as before). */
+static int print_num_list(Net *n, Port p, FILE *f) {
+  long *xs = NULL; size_t k = 0, cap = 0; int text = 1, ok = 0;
+  Port cur = p;
+  for (size_t step = 0; step <= (size_t)n->nn; step++) {
+    Port head, tail;
+    if (!net_read_cell(n, cur, &head, &tail)) { ok = k > 0 && net_read_int(n, cur, LIN_ENC_STR) == 0; break; }
+    long x; if (!net_read_i64(n, head, &x)) break;
+    if (k == cap) xs = realloc(xs, sizeof *xs * (cap = cap ? cap * 2 : 16));
+    xs[k++] = x;
+    text &= (x >= 32 && x <= 255 && x != 127) || x == 9 || x == 10 || x == 13;
+    cur = tail;
+  }
+  if (ok && !text) {
+    fputc('[', f);
+    for (size_t i = 0; i < k; i++) fprintf(f, i ? " %ld" : "%ld", xs[i]);
+    fputc(']', f); fflush(f);
+  }
+  free(xs);
+  return ok && !text;
+}
+
 static int print_body(Net *n, int domain) {
   N = n;
   Port r = net_dup_hop(n, net_force_val(n, wire((Port){0, 0})));   /* the result is observed here */
   if (r.node >= 0 && r.node < n->nn && n->tag[r.node] == LAM) {
     /* Observing an `_ffi` closure IS its effect, so it is dispatched first whatever the type says. */
-    if (render_val(OUT, run_ffi(n, r))) return 0;
+    /* ...unless the type says what it is instead: a datatype's value or a list of known elements is data, and a
+       cell holding a list is the same shape as an `_ffi` closure. */
+    int typed_data = domain == LIN_DOM_DATA || (domain == DT_STR && lin_result_desc && lin_result_desc[0] == 'L' && lin_result_desc[1] != '?');
+    if (!typed_data && render_val(OUT, run_ffi(n, r))) return 0;
+    if (domain == LIN_DOM_DATA && lin_result_desc && print_by_type(n, r, lin_result_desc, OUT)) return 0;   /* by its type */
+    if (domain == DT_STR && lin_result_desc && lin_result_desc[0] == 'L' && lin_result_desc[1] != 'N' && lin_result_desc[1] != '?'
+        && print_by_type(n, r, lin_result_desc, OUT)) return 0;   /* a list of something else, by its elements' type */
+    if (domain == DT_STR && print_num_list(n, r, OUT)) return 0;   /* a list of numbers that is not text */
+    if ((domain < 0 || domain == LIN_DOM_DATA) && print_ctor(n, r, OUT)) return 0;   /* a datatype's value, by its constructors' names */
+    if (domain == LIN_DOM_DATA) domain = -2;          /* (not a numeral or a string: the term, as it is) */
+    else {
     /* The type is the expectation when there is one; without it only what the structure determines
        is decoded.  Either way a value that does not hold is written as the net it is. */
     Val v = domain >= 0 ? decode(n, r, domain) : value_any(n, r);
     if (v.kind == 2) { fprintf(OUT, "\"%s\"", v.sv); fflush(OUT); return 0; }
     if (render_val(OUT, v)) return 0;
+    }
   }
+  if (domain == LIN_DOM_DATA) domain = -2;
   print_struct(OUT, r, domain);
   /* Neither mark is an answer, and both used to be emitted silently with exit status 0.  They mean
      different things, so they are reported differently -- on STDERR, so a test that compares stdout

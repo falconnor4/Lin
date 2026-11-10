@@ -150,12 +150,11 @@ CASES = [
     (r'(let ((x 3.5)) (fmul x 2.0))', '=> 7'),
 ]
 
-# The pass the numbers in the driver favour (arith's AOT pass, std/drivers/arith.c): it chooses an
-# UNAMBIGUOUS ENCODING for the values of its own domain that the program observes.  Without it the
-# artifact writes the value as the structure it is, because a container carries no type and `0`,
-# TRUE and FALSE are shapes other domains claim too.  These are the cases that pin it: `want` is the
-# INTERPRETER's answer, the pass-on artifact has to match it, and the pass-off artifact must differ
-# (otherwise the pass is not exercised and this file would pass vacuously).
+# Values whose SHAPE other domains share: `0`, TRUE and FALSE (and every float, which is a numeral).  A
+# v8 container states the DOMAIN of its result (the build's type of it), so the artifact reads them as
+# the interpreter does with or without arith's AOT box pass (std/drivers/arith.c), which chose an
+# unambiguous encoding back when a container carried no type.  Both builds must print the interpreter's
+# answer: the pass may not change a value, and the container may not depend on it.
 VALUE_CASES = [
     (r'0',                    '=> 0'),        # a bare literal: no nominal type, so it declines
     (r'(is_zero 0)',          '=> true'),
@@ -163,10 +162,6 @@ VALUE_CASES = [
     (r'(leq 5 5)',            '=> true'),
     (r'(gt 4 2)',             '=> true'),
 ]
-# `0` above is deliberate: its type is an arrow, not the nominal `num`, so there is no domain for the
-# pass to name and it DECLINES -- which is the honest limit of the mechanism, and why the improvement
-# is "some cases" rather than all: a value whose meaning nothing states is still written as its net.
-VALUE_DECLINES = {r'0'}
 
 
 def run(argv, timeout, env):
@@ -192,7 +187,7 @@ def corpus(lin_abs, std_dir, env, tmp, known):
     here would then never reach the caller's total -- a harness that cannot fail the run is worse
     than no harness at all.
     """
-    tdir = os.path.join(os.path.dirname(os.path.abspath(std_dir)), 'test')
+    tdir = TEST_DIR
     checked = refused = environ = known_hit = bad = 0
     for name in sorted(os.listdir(tdir)):
         if not name.endswith('.lin'):
@@ -277,6 +272,8 @@ def corpus(lin_abs, std_dir, env, tmp, known):
 # (`system`) is refused at build time even though it is a plain libc call, because a build may not
 # perform what it cannot see the value of.
 BUILD_OBSERVE = 'build_observe.lin'
+# The corpus lives beside THIS script, not beside the std: a packaged std (nix: share/lin/std) has no tests.
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 BUILD_OBSERVE_VAR = 'LIN_BUILD_OBSERVE'
 BUILD_OBSERVE_YES = '=> 21'       # shell `test -n "$LIN_BUILD_OBSERVE"` exits 0
 BUILD_OBSERVE_NO = '=> 277'      # ... exits 1, and `system` reports the raw wait status (256)
@@ -284,7 +281,7 @@ BUILD_OBSERVE_NO = '=> 277'      # ... exits 1, and `system` reports the raw wai
 
 def build_time_observation(lin_abs, std_dir, env, tmp):
     """(failures, note) for the build-time purity rule; see the section comment above."""
-    src = os.path.join(os.path.dirname(os.path.abspath(std_dir)), 'test', BUILD_OBSERVE)
+    src = os.path.join(TEST_DIR, BUILD_OBSERVE)
     if not os.path.exists(src):
         print('FAIL test/%s is missing -- the build-observation rule is untested' % BUILD_OBSERVE)
         return 1, ''
@@ -421,11 +418,7 @@ def main():
         if rc != 0 or got != want:
             print('FAIL %s\n  search artifact: want %r got %r (rc=%d)' % (expr, want, got, rc))
             bad += 1
-    # THE PASS HAS TO PAY OFF, not merely run (and the pass-on/pass-off builds above already prove it
-    # is exercised without crashing).  A case whose pass-off artifact ALREADY prints the value proves
-    # nothing about the pass, so each VALUE_CASES entry must improve, except the ones listed as
-    # declining by construction -- those must be untouched, which is the other half of the contract.
-    improved, unchanged = [], []
+    # Both builds -- the box pass on and off -- print the interpreter's answer (see VALUE_CASES).
     for expr, want in VALUE_CASES:
         src = os.path.join(tmp, 'v.lin')
         on, off = os.path.join(tmp, 'v.on.line'), os.path.join(tmp, 'v.off.line')
@@ -436,31 +429,11 @@ def main():
         _, gon, _ = run([on], 60, env)
         _, goff, _ = run([off], 60, env)
         gon, goff = gon.strip(), goff.strip()
-        if gon != want:                       # whatever else, the pass-on artifact is the interpreter's answer
-            print('FAIL %s\n  pass-on: want %r got %r (pass-off %r)' % (expr, want, gon, goff))
+        if gon != want or goff != want:
+            print('FAIL %s\n  want %r: pass-on %r, pass-off %r' % (expr, want, gon, goff))
             bad += 1
-        elif expr in VALUE_DECLINES:
-            # A case the pass must NOT touch -- its result type names no domain, so it declines and
-            # the artifact still writes the value as the structure it is -- so the two builds have to
-            # agree, and there is nothing here for the pass to improve.  This is the honest limit of
-            # the mechanism, and it is why the improvement is "some cases" rather than all.
-            if gon != goff:
-                print('FAIL %s\n  the pass touched a case it has no domain for: %r vs %r'
-                      % (expr, gon, goff))
-                bad += 1
-            else:
-                unchanged.append(expr)
-        elif goff == want:
-            print('FAIL %s\n  the pass-off artifact already reads %r, so this case does not pin the '
-                  'pass' % (expr, want))
-            bad += 1
-        else:
-            improved.append(expr)
     if bad:
         print('aot_equiv: %d case(s) where the artifact disagrees with the interpreter' % bad)
-        return 1
-    if not improved:
-        print('aot_equiv: no case where the pass changes the readback -- it is no longer exercised')
         return 1
     if fires < 1:
         print('aot_equiv: the e-graph pass fired no rule on any case -- it is no longer '
@@ -473,17 +446,24 @@ def main():
     eg = os.path.join(root, 'test', 'egraph.lin')
     payoff = ''
     if os.path.exists(eg):
+        # the compile-time optimizers TOGETHER -- shrinking reductions (src/main.c) and the e-graph -- against
+        # neither: the shrink pass now does most of the beta work the e-graph used to, so measuring the e-graph
+        # alone on a shrunk term asks the wrong question
         rc, _, err = run([lin, 'build', eg, '-o', os.path.join(tmp, 'payoff.line')], 300,
                          dict(env, LIN_AOT_SEARCH='1', LIN_PASSES='1'))
         nodes = {}
         for m in re.finditer(r'candidate (\S+)\s+artifact=\d+ B.*?compile=(\d+) nodes', err):
-            nodes[m.group(1)] = int(m.group(2))
+            if m.group(1) == 'default': nodes['default'] = int(m.group(2))
+        rc, _, err = run([lin, 'build', eg, '-o', os.path.join(tmp, 'payoff0.line')], 300,
+                         dict(env, LIN_AOT_SEARCH='1', LIN_PASSES='1', LIN_NO_SHRINK='1'))
+        for m in re.finditer(r'candidate (\S+)\s+artifact=\d+ B.*?compile=(\d+) nodes', err):
+            if m.group(1) == 'no-egraph': nodes['no-egraph'] = int(m.group(2))
         if 'default' not in nodes or 'no-egraph' not in nodes:
             print('FAIL could not read both candidates\' node counts from the build (%r)' % (nodes,))
             return 1
         if nodes['default'] >= nodes['no-egraph']:
-            print('FAIL the e-graph pass no longer pays off on test/egraph.lin: %d compiled nodes '
-                  'with the rules vs %d without them' % (nodes['default'], nodes['no-egraph']))
+            print('FAIL the compile-time optimizers no longer pay off on test/egraph.lin: %d compiled nodes '
+                  'with them vs %d without' % (nodes['default'], nodes['no-egraph']))
             return 1
         payoff = '; pays off %d -> %d nodes on test/egraph.lin' % (nodes['no-egraph'], nodes['default'])
     # ---- what a build may not DO (the rule the sweep's build/run split enforces) ----------------
@@ -504,10 +484,10 @@ def main():
     if bo_note:
         print('aot_equiv: build-time observation: ' + bo_note)
     print('aot_equiv: OK (%d cases x {passes on, passes off, AOT-search}; e-graph fired %d time(s), '
-          'declined %d capture-risk rewrite(s), %d searched builds; AOT pass improved %d value case(s) '
-          '(%s), declined by type on %d; CORPUS: %d suites, artifact == interpreter\'s final answer, '
+          'declined %d capture-risk rewrite(s), %d searched builds; %d shared-shape value case(s) read '
+          'by the container\'s type, box pass on and off; CORPUS: %d suites, artifact == interpreter\'s final answer, '
           '%d refused by both paths, %d environmental (pinned)%s)'
-          % (len(CASES), fires, declines, chosen, len(improved), ', '.join(improved), len(unchanged),
+          % (len(CASES), fires, declines, chosen, len(VALUE_CASES),
              cchecked, crefused, cenviron, payoff))
     return 0
 

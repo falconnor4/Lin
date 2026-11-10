@@ -96,6 +96,9 @@ static void def_type(Def *d);
 static Scheme *env_find(const char *name) {
   for (int i = envn - 1; i >= 0; i--) if (!strcmp(env[i].name, name)) return &env[i].s;
   Def *d = def_find(name);
+  /* MUTUAL RECURSION: a definition reached again while its own type is being inferred is a monomorphic hole,
+     as in letrec -- its uses inside the cycle constrain it instead of re-entering the inference for ever. */
+  if (d && d->typing) return &d->hole;
   if (d && !d->typed) def_type(d);             /* lazily: the first reference is what types a def */
   return (d && d->typed) ? &d->sch : NULL;
 }
@@ -169,6 +172,31 @@ static Scheme generalize(Type *t) {
   Scheme s; s.nq = qn; s.q = f.v; s.t = t; return s;
 }
 
+static Type *infer(Term *t);
+/* A MATCH OVER A DATATYPE.  `(match s (C1 ..) (C2 x y) ..)` is the positional Scott dispatch `((s b1) b2) ..`,
+   and typed as that application a recursive datatype could not be traversed recursively: the scrutinee's
+   type would have to be an arrow mentioning itself (an infinite type).  Each branch application names its
+   constructor (the parser writes `match:<Ctor>`), so the scrutinee is that datatype -- the constructor's
+   nominal result type -- each branch is "the constructor's fields -> the result", and all branches share
+   the result.  A branch whose pattern names no constructor (`_`, a variable) is typed loosely. */
+static int is_match_app(const Term *t) { return t && t->type == TAPP && t->name && !strncmp(t->name, "match:", 6); }
+static Type *infer_match(Term *t, Type **scrut) {
+  Type *r;
+  if (is_match_app(t->l)) r = infer_match(t->l, scrut);
+  else { *scrut = infer(t->l); r = tvar(); }
+  Scheme *cs = env_find(t->name + 6);
+  Type *b = infer(t->r);
+  if (!cs) return r;
+  Type *ct = instantiate(cs), *exp = r;
+  Type *fields[64]; int nf = 0;                      /* (a constructor's fields; more than this types loosely) */
+  for (Type *k = find(ct); k->kind == TARROW && nf < 64; k = find(k->b)) { fields[nf++] = k->a; ct = k->b; }
+  ct = find(ct);
+  if (ct->kind != TNOM) return r;                    /* not a datatype constructor: loose */
+  unify(*scrut, ct);
+  for (int i = nf - 1; i >= 0; i--) exp = tarrow(fields[i], exp);
+  unify(b, exp);
+  return r;
+}
 static Type *infer(Term *t) {
   switch (t->type) {
   case TVAR: {
@@ -177,10 +205,19 @@ static Type *infer(Term *t) {
     return instantiate(s);
   }
   case TLAM: {
+    if (t->annot) return instantiate(&(Scheme){.nq = 0, .t = t->annot});   /* a literal states its own type */
     Type *a = tvar(); env_push(t->name, (Scheme){.nq = 0, .t = a});
     Type *b = infer(t->l); envn--; return tarrow(a, b);
   }
   case TAPP: {
+    /* The `if` form ((c a) b), marked by the parser: c is a bool, both branches one type, and that is the
+       result.  Without the rule the boolean only unifies loosely with an arrow and the result is untyped. */
+    if (t->name && !strcmp(t->name, "if") && t->l && t->l->type == TAPP) {
+      unify(infer(t->l->l), tnom0("bool"));
+      Type *a = infer(t->l->r), *b = infer(t->r);
+      unify(a, b); return a;
+    }
+    if (is_match_app(t)) { Type *sc = NULL; return infer_match(t, &sc); }
     if (t->l && t->l->type == TLAM) {
       env_push(t->l->name, generalize(infer(t->r)));
       Type *b = infer(t->l->l); envn--; return b;
@@ -200,7 +237,7 @@ static Type *infer(Term *t) {
     Type *b = infer(t->r); envn--; return b;
   }
   case TDEFX: return infer(t->l);
-  case TFLOAT: return tvar();   /* float literal: fresh polymorphic type */
+  case TFLOAT: return tnom0("float");   /* a float literal: its bits are a numeral, its TYPE says float */
   case TNUM: return tvar();   /* numeral literal: fresh polymorphic type, as TFLOAT */
   }
   return NULL;
@@ -225,7 +262,9 @@ static void env_load_defs(int top) {
    28.7ms of the 61.6ms startup and a program touches a fraction of them.  A scheme typed after `env_load_defs`' watermark has gone by is counted here. */
 static void def_type(Def *d) {
   char err[512]; Scheme sch; int sav = envn; const char *nm = strrchr(d->name, '.'); Term *b = d->raw ? d->raw : d->term;
+  d->typing = 1; d->hole = (Scheme){ .nq = 0, .t = tvar() };
   int ok = d->rec ? type_check_rec(nm ? nm + 1 : d->name, b, &sch, err, sizeof err) : type_check(b, &sch, err, sizeof err);
+  d->typing = 0;
   envn = sav;
   if (!ok) { printf("error: %s\n", err); return; }   /* an ill-typed def reports at its first use */
   d->sch = sch; d->typed = 1; count_free(&sch);
@@ -262,6 +301,27 @@ static void print_rec(Type *t, int par) {
 }
 
 void scheme_print(Scheme *s) { print_rec(s->t, 0); }
+
+/* A TYPE AS A READER'S DESCRIPTOR (lin.h): what readback needs to print a value of it, as text a driver can
+   parse.  N num, B bool, F float, L<elem> list (the cell encoding), P<i>; a datatype parameter, D<name>(<args>) a
+   datatype, ? anything else (a variable, an arrow). */
+static void desc_rec(Type *t, char **b, size_t *len, size_t *cap) {
+#define DPUT(str) do { size_t l_ = strlen(str); while (*len + l_ + 1 > *cap) { *cap = *cap ? *cap * 2 : 64; *b = realloc(*b, *cap); } memcpy(*b + *len, (str), l_ + 1); *len += l_; } while (0)
+  if (t && t->kind != TPARAM) t = find(t);
+  if (!t) { DPUT("?"); return; }
+  if (t->kind == TPARAM) { char tmp[32]; snprintf(tmp, sizeof tmp, "P%d;", t->id); DPUT(tmp); return; }
+  if (t->kind == TARG) { desc_rec(t->a, b, len, cap); return; }
+  if (t->kind != TNOM || !t->name) { DPUT("?"); return; }
+  if (!strcmp(t->name, "num")) { DPUT("N"); return; }
+  if (!strcmp(t->name, "bool")) { DPUT("B"); return; }
+  if (!strcmp(t->name, "float")) { DPUT("F"); return; }
+  if (!strcmp(t->name, "list")) { DPUT("L"); if (t->a) desc_rec(t->a->kind == TARG ? t->a->a : t->a, b, len, cap); else DPUT("?"); return; }
+  DPUT("D"); DPUT(t->name); DPUT("(");
+  for (Type *k = t->a; k; k = k->b) desc_rec(k->kind == TARG ? k->a : k, b, len, cap);
+  DPUT(")");
+#undef DPUT
+}
+char *type_desc(Type *t) { char *b = NULL; size_t len = 0, cap = 0; desc_rec(t, &b, &len, &cap); if (!b) { b = malloc(2); strcpy(b, "?"); } return b; }
 Type *type_var(void) { return tvar(); }
 Type *type_arrow(Type *a, Type *b) { return tarrow(a, b); }
 Type *type_nominal(const char *name) { return tnom0(name); }

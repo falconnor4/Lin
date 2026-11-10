@@ -1,0 +1,3 @@
+; Takeuchi: deep recursion whose arguments are themselves calls
+(define tak (\x (\y (\z (if (lt y x) (tak (tak (sub x 1) y z) (tak (sub y 1) z x) (tak (sub z 1) x y)) z)))))
+(tak 30 20 10)

@@ -1,0 +1,6 @@
+; binary search tree: insert N keys (i * 7919 mod 1000003), then sum the keys in order, weighted by depth
+(datatype T (tip) (bin k l r))
+(define ins (\x (\t (match t (tip (bin x tip tip)) ((bin k l r) (if (lt x k) (bin k (ins x l) r) (bin k l (ins x r))))))))
+(define build (\i (\t (if (eq i 0) t (build (sub i 1) (ins (mod (mul i 7919) 1000003) t))))))
+(define walk (\t (\d (match t (tip 0) ((bin k l r) (add (mul k d) (add (walk l (add d 1)) (walk r (add d 1)))))))))
+(walk (build 200000 tip) 1)

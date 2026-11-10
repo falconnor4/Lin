@@ -25,13 +25,13 @@
 ; expect => 4
 
 (pred 0)
-; expect => 0
+; expect => -1
 
 (sub 8 3)
 ; expect => 5
 
 (sub 3 8)
-; expect => 0
+; expect => -5
 
 (add (mul 2 3) (sub 10 4))
 ; expect => 12

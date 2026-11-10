@@ -31,7 +31,50 @@ void lin_domains_init(void) {
 /* ---------------- fan walks ----------------  Fan chains: `dup_hop` is the crossing walk, `skip_dup` the plain one.  A CHAIN MAY CYCLE and the bound
    is the net's size, so one such walk used to cost the whole net (7.7k walks = 17.7 of 18.6s); Floyd
    finds the cycle and the walk takes the same last step by arithmetic, so the port is unchanged. */
-#define FSTEP(q) (cross ? wr(n, (Port){(q).node, (q).port == 0}) : wr(n, (Port){(q).node, 0}))
+/* A crossing walk that ARRIVES AT A FAN'S PRINCIPAL has to choose a copy: the value behind a fan-in is not one
+   value but one per copy, and the walk takes copy 1.  That is right for a reader that only wants a shape, and
+   wrong for one that wants THE value -- so every such choice is counted, and a fold whose operands needed one
+   knows its value is not the same for every copy (std/drivers/arith.c). */
+static LinCtor *ctors; static long nctors, cctors;
+long lin_ctor_register(const char *dt, const char *name, int m, int i, int k) {
+  for (long j = nctors; j-- > 0; )                   /* a reloaded declaration keeps its ID */
+    if (!strcmp(ctors[j].dt, dt) && !strcmp(ctors[j].name, name) && ctors[j].m == m && ctors[j].i == i && ctors[j].k == k) return j + 1;
+  if (nctors >= cctors) ctors = realloc(ctors, (size_t)(cctors = cctors ? cctors * 2 : 32) * sizeof *ctors);
+  ctors[nctors] = (LinCtor){ lin_intern(dt, strlen(dt)), lin_intern(name, strlen(name)), m, i, k, NULL };
+  return ++nctors;
+}
+void lin_ctor_set_fdesc(long id, const char *fdesc) { if (id >= 1 && id <= nctors && fdesc) ctors[id - 1].fdesc = lin_intern(fdesc, strlen(fdesc)); }
+const char *lin_result_desc;
+const LinCtor *lin_ctor_info(long id) { return id >= 1 && id <= nctors ? &ctors[id - 1] : NULL; }
+long lin_ctor_lookup(const char *name) {             /* the latest declaration of that name wins, as a definition does */
+  const char *dot = strrchr(name, '.');
+  for (long j = nctors; j-- > 0; ) {
+    const char *cn = ctors[j].name, *cd = strrchr(cn, '.');
+    if (!strcmp(cn, name) || (cd && !strcmp(cd + 1, name)) || (dot && !strcmp(dot + 1, cd ? cd + 1 : cn))) return j + 1;
+  }
+  return 0;
+}
+long lin_fan_ambiguous;
+/* CHOOSING A COPY.  A reader that stands for ONE copy of a superposition (a fold driver reading a redex it
+   split per copy) says which: fan node -> the auxiliary port of that copy.  A crossing walk arriving at a
+   chosen fan's principal takes that port, and that is not ambiguous; arriving at any other fan's principal
+   it takes copy 1 as always, counts the choice, and names the first such fan in `lin_fan_undecided`. */
+int lin_fan_undecided = -1;
+static int *fch_node, *fch_port, fch_n, fch_cap;
+void lin_fan_choose(int node, int port) {
+  if (fch_n >= fch_cap) { fch_cap = fch_cap ? fch_cap * 2 : 16; fch_node = realloc(fch_node, (size_t)fch_cap * sizeof *fch_node);
+                          fch_port = realloc(fch_port, (size_t)fch_cap * sizeof *fch_port); }
+  fch_node[fch_n] = node; fch_port[fch_n] = port; fch_n++;
+}
+void lin_fan_unchoose_all(void) { fch_n = 0; }
+static inline Port fstep(Net *n, Port q, int cross) {
+  if (!cross || q.port != 0) return wr(n, (Port){q.node, 0});
+  for (int i = fch_n - 1; i >= 0; i--) if (fch_node[i] == q.node) return wr(n, (Port){q.node, fch_port[i]});
+  lin_fan_ambiguous++;
+  if (lin_fan_undecided < 0) lin_fan_undecided = q.node;
+  return wr(n, (Port){q.node, 1});
+}
+#define FSTEP(q) fstep(n, (q), cross)
 static inline Port fan_walk(Net *n, Port p, int cross) {
   Port a = p, b = p; long lim = (long)n->nn, st = 0, L = 1; int chase = 1;
   for (; st < lim && live(n, a) && n->tag[a.node] == DUP; st++) {
@@ -128,11 +171,38 @@ static int cell_layer(Net *n, Port p, Port *head, Port *tail) {
   if (!live(n, body) || n->tag[body.node] != APP) return 0;
   Port ia = skip_dup(n, net_force_val(n, wr(n, (Port){body.node, 0})));
   if (!live(n, ia) || n->tag[ia.node] != APP) return 0;
+  /* ...and the cell applies its OWN first binder (or a copy of it): `\l.\n.((n x) y)` or `\l.\n.(((n x) y) z)`
+     (a datatype's constructors) have the same spine and are not cells */
+  Port hd = skip_dup(n, net_force_val(n, wr(n, (Port){ia.node, 0})));
+  if (!live(n, hd) || (n->tag[hd.node] == LAM ? hd.port != 1 || hd.node != p.node : n->tag[hd.node] != DUP)) return 0;
   if (head) *head = wr(n, (Port){ia.node, 2});
   if (tail) *tail = wr(n, (Port){body.node, 2});
   return 1;
 }
 int net_read_cell(Net *n, Port p, Port *head, Port *tail) { return cell_layer(n, p, head, tail); }
+/* A datatype's layer: the m dispatch binders, then the spine (forced as it is walked, so a constructor's own
+   marker -- a redex under its binders -- reduces away on the way), whose head is one of those binders.  The
+   plain fan walk throughout, as cell_layer: a spine reached through a fan stands for one value. */
+int net_read_scott(Net *n, Port p, int m, int *idx, Port *fields, int kmax) {
+  if (m <= 0) return -1;
+  int *lams = malloc(sizeof *lams * (size_t)m), k = 0, ok = 1;
+  for (int j = 0; j < m && ok; j++) {
+    if (!hop_lam(n, &p, 0) || p.port != 0) { ok = 0; break; }
+    lams[j] = p.node; p = wr(n, (Port){p.node, 2});
+  }
+  Port x = ok ? skip_dup(n, net_force_val(n, p)) : p;
+  while (ok && live(n, x) && n->tag[x.node] == APP && x.port == 1) {
+    if (k >= kmax || k > n->nn) { ok = 0; break; }
+    fields[k++] = wr(n, (Port){x.node, 2});
+    x = skip_dup(n, net_force_val(n, wr(n, (Port){x.node, 0})));
+  }
+  int i = -1;
+  if (ok && live(n, x) && n->tag[x.node] == LAM && x.port == 1) for (int j = 0; j < m; j++) if (lams[j] == x.node) i = j;
+  free(lams);
+  if (i < 0) return -1;
+  for (int a = 0, b = k - 1; a < b; a++, b--) { Port t = fields[a]; fields[a] = fields[b]; fields[b] = t; }   /* (the spine reads them last first) */
+  *idx = i; return k;
+}
 static int nil_layer(Net *n, Port p) {
   if (!hop_lam(n, &p, 0)) return 0;
   Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));
@@ -171,9 +241,42 @@ static int enc_layer(Net *n, Port p, int enc, Layer *out) {
 /* How many INDUCTIVE layers from `p` down to the encoding's terminal: a numeral's value, a list's
    length, and for BOOL 1 (select-first, TRUE) or 0 (select-second).  -1 when `p` is not that encoding. */
 /* A numeral is one of two ways, told by structure: a cons spine of raw booleans (a bit-chain, O(log n)) or a lambda tower (the Scott numeral, O(n)). Cells mean bits. */
-long net_read_bits(Net *n, Port p) { long a = 0; int k = 0; Layer L; while (k < n->nn && cons_layer(n, p, &L) && L.layer == L_INDUCTIVE) { long b = net_read_int(n, L.head, LIN_ENC_BOOL); if (b < 0) break; a |= (b & 1) << k++; p = L.tail; } return k ? a : -1; }
+/* THE 64-BIT INTEGER.  A numeral is a cell chain of bits, least significant first, ended by a terminal that
+   carries the SIGN: `\c.\n.true` means every further bit is 0, `\c.\n.false` that every further bit is 1.
+   So the chain is a two's complement number, sign-extended to 64 bits; the arithmetic over it (std/num.lin)
+   wraps at 64 bits, exactly as int64_t does in the drivers.  Net structure only -- no payload, no node kind. */
+static long read_layers(Net *n, Port p, int enc);
+static int nil_sign(Net *n, Port p) {               /* 1 non-negative, 0 negative, -1 not a numeral terminal */
+  if (!hop_lam(n, &p, 0)) return -1;
+  Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));
+  if (c.port != 0 || !live(n, c) || n->tag[c.node] != LAM) return -1;
+  long b = net_read_int(n, wr(n, (Port){c.node, 2}), LIN_ENC_BOOL);
+  return b < 0 ? 1 : (int)b;                        /* a terminal with no sign (a plain nil) reads as 0-extended */
+}
+int net_read_i64(Net *n, Port p, long *out) {
+  unsigned long a = 0; int k = 0; Layer L;
+  for (;;) {
+    if (!cons_layer(n, p, &L)) break;
+    if (L.layer == L_TERMINAL) {
+      if (k == 0) break;                            /* a bare terminal is a list, not a numeral */
+      if (nil_sign(n, p) == 0 && k < LIN_INT_BITS) a |= ~0UL << k;
+      *out = (long)a; return 1;
+    }
+    long b = net_read_int(n, L.head, LIN_ENC_BOOL);
+    if (b < 0 || k > n->nn) break;                 /* a chain of distinct cells: the net's size bounds it */
+    if (k < LIN_INT_BITS) a |= (unsigned long)(b & 1) << k;
+    k++; p = L.tail;
+  }
+  long v = read_layers(n, p, LIN_ENC_NUM);          /* the other numeral: a Scott successor tower (non-negative) */
+  if (k == 0 && v >= 0) { *out = v; return 1; }
+  return 0;
+}
+long net_read_bits(Net *n, Port p) { long v; return net_read_i64(n, p, &v) && v >= 0 ? v : -1; }
 long net_read_int(Net *n, Port p, int enc) {
   if (enc == LIN_ENC_NUM) { long b = net_read_bits(n, p); if (b >= 0) return b; }
+  return read_layers(n, p, enc);
+}
+static long read_layers(Net *n, Port p, int enc) {
   long count = 0;
   for (int step = 0; step < n->nn; step++) {
     Layer L;
@@ -210,14 +313,13 @@ int net_read_string_arena(Net *n, Port p, int pay_enc, const char **out) {
   free(buf); return -1;
 }
 
-/* Decoding a float box is entirely the provider's: the core hands it the port, because the box's shape
-   is not what makes it a float -- the TABLE is. */
+/* A FLOAT IS A NUMERAL: its 64-bit IEEE-754 pattern, the same net structure as an integer (std/softfloat.lin
+   gives the operations their pure meanings).  So decoding one is reading the numeral; what says "float"
+   is the TYPE, which the caller knows -- the structure alone never claims a numeral is a float. */
 int net_read_float(Net *n, Port p, double *out) {
-  N = n;
-  Val v;
-  memset(&v, 0, sizeof v);
-  if (!net_unbox_value(n, DT_FLOAT, p, &v) || v.kind != 4) return 0;
-  memcpy(out, &v.iv, 8);
+  long bits;
+  if (!net_read_i64(n, p, &bits)) return 0;
+  memcpy(out, &bits, 8);
   return 1;
 }
 
@@ -226,16 +328,21 @@ static Port alloc_scott(Net *n, long k, Scope lvl) {
   Scope bl = scope_app(n, lvl, 1);
   Port nl = net_alloc(n, LAM, lvl), n2 = net_alloc(n, LAM, bl), cur;
   net_link(n, (Port){nl.node, 2}, (Port){n2.node, 0}, 0); cur = (Port){nl.node, 0};
-  net_link(n, (Port){n2.node, 2}, net_alloc_bool(n, 1), 0);   /* NIL = `\c.\n.<value>`; the value is TRUE */
-  int w = 1; while ((k >> w) != 0 && w < 62) w++;
+  /* bits, least significant first, until what remains is all sign: at least one cell, so a numeral is never a
+     bare terminal (that is the empty list) */
+  int bits[LIN_INT_BITS], w = 0; long r = k;
+  do { bits[w++] = (int)(r & 1); r >>= 1; } while (w < LIN_INT_BITS && !(r == 0 || r == -1));
+  net_link(n, (Port){n2.node, 2}, net_alloc_bool(n, r == 0), 0);   /* the terminal's SIGN: true = 0-extended */
+  net_link(n, (Port){nl.node, 1}, net_alloc(n, ERA, lvl), 0); net_link(n, (Port){n2.node, 1}, net_alloc(n, ERA, lvl), 0);
   for (int b = w - 1; b >= 0; b--) {
     Scope f = scope_app(n, lvl, 1), a = scope_app(n, lvl, 2);
-    Port bit = net_alloc_bool(n, (int)((k >> b) & 1));
+    Port bit = net_alloc_bool(n, bits[b]);
     Port c = net_alloc(n, LAM, f), nn = net_alloc(n, LAM, scope_app(n, f, 1));
     Port in = net_alloc(n, APP, f), ou = net_alloc(n, APP, a);
     net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 0);   net_link(n, (Port){nn.node, 2}, (Port){ou.node, 1}, 0);
     net_link(n, (Port){ou.node, 0}, (Port){in.node, 1}, 0);  net_link(n, (Port){ou.node, 2}, cur, 0);
     net_link(n, (Port){in.node, 0}, (Port){c.node, 1}, 0);   net_link(n, (Port){in.node, 2}, bit, 0);
+    net_link(n, (Port){nn.node, 1}, net_alloc(n, ERA, lvl), 0);   /* the cell ignores the nil case */
     cur = (Port){c.node, 0};
   }
   return cur;
@@ -282,26 +389,14 @@ long net_peel_index(Net *n, Port p) {
 Port net_alloc_bool(Net *n, int val) {
   Scope sc = scope_nil(); Port bt = net_alloc(n, LAM, sc), bf = net_alloc(n, LAM, sc);
   net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0); net_link(n, (Port){bf.node, 2}, (Port){val ? bt.node : bf.node, 1}, 0);
+  net_link(n, (Port){val ? bf.node : bt.node, 1}, net_alloc(n, ERA, sc), 0);   /* the branch not taken is erased */
   return (Port){bt.node, 0};
 }
 
-/* A thin call into the DT_FLOAT provider.  A missing provider is a misconfiguration, reported once
-   the way a missing scalar table is (`lin_scalar_ops_load`), not a silent wrong answer. */
+/* ...and building one is building the numeral of its bits. */
 Port net_alloc_float(Net *n, double d) {
-  Val v;
-  memset(&v, 0, sizeof v);
-  v.kind = 4;
-  memcpy(&v.iv, &d, 8);
-  Port p = net_box_value(n, DT_FLOAT, &v);
-  if (p.node < 0) {
-    static int warned;
-    if (!warned) {
-      warned = 1;
-      fprintf(stderr, "lin: no driver provides the float domain -- load std/drivers/values.lin "
-                      "(`(set_driver \"values\")`)\n");
-    }
-  }
-  return p;
+  long bits; memcpy(&bits, &d, 8);
+  return net_alloc_scott(n, bits);
 }
 
 /* ---------------- the closure headers ----------------
@@ -396,16 +491,19 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
      floats belong, and `(lin_parse_float (getenv "N"))` has one where a string belongs.  Dispatching
      is the readback provider's, and its own shape test is pure, so a slot that already IS a value
      pays only a walk of two wires. */
-  if (net_read_value(n, p, DT_FFI, v) && v->kind) return 1;
+  long amb = lin_fan_ambiguous;                      /* the closure test below is a SHAPE probe: its fan choices read no value */
+  int und = lin_fan_undecided;
+  if (net_read_value(n, p, DT_FFI, v) && v->kind) { lin_fan_ambiguous = amb; lin_fan_undecided = und; return 1; }   /* (the call's own value: dispatched once) */
   {
     char fnb[2];                                     /* a sink: only the name's PRESENCE is tested, and any buffer over one byte reports one */
     Port q = net_dhop(n, p);
     if (q.port == 0 && net_ffi_fn(n, q, fnb, sizeof fnb)) return 0;
   }
+  lin_fan_ambiguous = amb; lin_fan_undecided = und;
   switch (dom) {
   case DT_NUM: {
-    long x = net_read_int(n, p, LIN_ENC_NUM);
-    if (x >= 0) { v->iv = x; v->kind = 1; return 1; }
+    long x;
+    if (net_read_i64(n, p, &x)) { v->iv = x; v->kind = 1; return 1; }
     break;
   }
   case DT_BOOL: {
@@ -427,9 +525,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
   default:
     break;                        /* an OP/EFF closure is not a scalar operand */
   }
-  /* what the STRUCTURE determines by itself (see above) */
-  double d;
-  if (net_read_float(n, p, &d)) { memcpy(&v->iv, &d, 8); v->kind = 4; return 1; }
+  /* what the STRUCTURE determines by itself (see above): a float is a numeral, so only its type says so */
   long x = net_read_int(n, p, LIN_ENC_NUM);
   if (x > 0) { v->iv = x; v->kind = 1; return 1; }
   if (net_read_string_arena(n, p, LIN_ENC_NUM, &v->sv) > 0) { v->kind = 2; return 1; }

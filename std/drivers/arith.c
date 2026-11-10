@@ -1,5 +1,8 @@
 #include "../../src/lin.h"
 #include "../runtime/pattern.h"     /* the structural recognisers and the op vocabulary (LIN_OP_*) */
+#define LIN_WANT_F64
+#include <math.h>
+#include "../runtime/i64.h"         /* THE integer and float semantics */
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -40,8 +43,9 @@ static int arith_supplies(const char *fn) {
   static const char *const rows[] = {
     "lin_fadd", "lin_fsub", "lin_fmul", "lin_fdiv", "lin_fpow", "lin_fatan2", "lin_fmin", "lin_fmax",
     "lin_fsqrt", "lin_fsin", "lin_fcos", "lin_ftan", "lin_fabs", "lin_fsign", "lin_ffract",
-    "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_lerp", "lin_fclamp",
+    "lin_feq", "lin_flt", "lin_fleq", "lin_ffloor", "lin_fflr", "lin_ftoi", "lin_lerp", "lin_fclamp",
     "lin_add", "lin_sub", "lin_mul", "lin_div", "lin_mod", "lin_pow",
+    "lin_band", "lin_bor", "lin_bxor", "lin_shl", "lin_shr",
     "lin_eq", "lin_lt", "lin_leq", "lin_gt", "lin_geq", NULL };
   for (int i = 0; fn && rows[i]; i++) if (!strncmp(fn, rows[i], strlen(rows[i]))) return 1;
   return 0;
@@ -52,41 +56,40 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
   if (!fn) return 0;
   if (argc < 0) return arith_supplies(fn);        /* the ownership query: no operands, no computing */
 
-  /* float binary ops: args are IEEE-754 bits carried as longs; result float */
-  if      (fn[0]=='l' && fn[1]=='i' && fn[2]=='n' && !strncmp(fn, "lin_fadd", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x+y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fsub", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x-y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fmul", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x*y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fdiv", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=y!=0.0?x/y:0.0; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fpow", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=pow(x,y); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fatan2", 10)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=atan2(x,y); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fmin", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x<y?x:y; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fmax", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); double r=x>y?x:y; memcpy(out,&r,8); *outkind=4; return 1; }
-  /* float unary ops -> float */
-  else if (!strncmp(fn, "lin_fsqrt", 9)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=x>=0.0?sqrt(x):0.0; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fsin", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=sin(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fcos", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=cos(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_ftan", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=tan(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fabs", 8)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=fabs(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_fsign", 9)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=x>=0.0?1.0:-1.0; memcpy(out,&r,8); *outkind=4; return 1; }
-  else if (!strncmp(fn, "lin_ffract", 10)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); double r=x-floor(x); memcpy(out,&r,8); *outkind=4; return 1; }
-  /* float comparisons -> Church bool */
-  else if (!strncmp(fn, "lin_feq", 7)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); *out=x==y; *outkind=3; return 1; }
-  else if (!strncmp(fn, "lin_flt", 7)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); *out=x<y;  *outkind=3; return 1; }
-  else if (!strncmp(fn, "lin_fleq", 8)) { if (argc < 2) return 0; double x,y; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); *out=x<=y; *outkind=3; return 1; }
-  /* float -> int / 3-arg float combinators */
-  if (!strncmp(fn, "lin_ffloor", 10)) { if (argc < 1) return 0; double x; memcpy(&x,&a[0],8); *out=(long)floor(x); *outkind=1; return 1; }
-  if (!strncmp(fn, "lin_fmin", 8) || !strncmp(fn, "lin_fmax", 8)) { /* handled above */ }
+  /* float ops: std/runtime/i64.h's rows (IEEE-754 bits carried as longs) -- the same lines the fn driver compiles */
+#define F2(name, f) else if (!strncmp(fn, name, sizeof name - 1)) { if (argc < 2) return 0; *out = f(a[0], a[1]); *outkind = 4; return 1; }
+#define F1(name, f) else if (!strncmp(fn, name, sizeof name - 1)) { if (argc < 1) return 0; *out = f(a[0]); *outkind = 4; return 1; }
+#define FB(name, f) else if (!strncmp(fn, name, sizeof name - 1)) { if (argc < 2) return 0; *out = f(a[0], a[1]); *outkind = 3; return 1; }
+  if (0) {}
+  F2("lin_fadd", lin_f64_add) F2("lin_fsub", lin_f64_sub) F2("lin_fmul", lin_f64_mul) F2("lin_fdiv", lin_f64_div)
+  F2("lin_fpow", lin_f64_pow) F2("lin_fatan2", lin_f64_atan2) F2("lin_fmin", lin_f64_min) F2("lin_fmax", lin_f64_max)
+  F1("lin_fsqrt", lin_f64_sqrt) F1("lin_fsin", lin_f64_sin) F1("lin_fcos", lin_f64_cos) F1("lin_ftan", lin_f64_tan)
+  F1("lin_fabs", lin_f64_abs) F1("lin_fsign", lin_f64_sign) F1("lin_ffract", lin_f64_fract)
+  FB("lin_feq", lin_f64_eq) FB("lin_flt", lin_f64_lt) FB("lin_fleq", lin_f64_leq)
+#undef F2
+#undef F1
+#undef FB
+  if (!strncmp(fn, "lin_ffloor", 10)) { if (argc < 1) return 0; *out = lin_f64_floor(a[0]); *outkind = 1; return 1; }
+  /* the float `_op` rows (LIN_OP_FFLOOR / FTOI / ITOF): floor as a float, floor to an integer, an integer as a float */
+  if (!strcmp(fn, "lin_fflr")) { if (argc < 1) return 0; *out = lin_f64_floorf(a[0]); *outkind = 4; return 1; }
+  if (!strcmp(fn, "lin_ftoi")) { if (argc < 1) return 0; *out = lin_f64_floor(a[0]); *outkind = 1; return 1; }
+  if (!strcmp(fn, "lin_float")) { if (argc < 1) return 0; *out = lin_f64_of_int(a[0]); *outkind = 4; return 1; }
   if (!strncmp(fn, "lin_lerp", 8) && argc >= 3) { double x,y,t; memcpy(&x,&a[0],8); memcpy(&y,&a[1],8); memcpy(&t,&a[2],8); double r=x+(y-x)*t; memcpy(out,&r,8); *outkind=4; return 1; }
   if (!strncmp(fn, "lin_fclamp", 10) && argc >= 3) { double x,lo,hi; memcpy(&x,&a[0],8); memcpy(&lo,&a[1],8); memcpy(&hi,&a[2],8); double r=x<lo?lo:(x>hi?hi:x); memcpy(out,&r,8); *outkind=4; return 1; }
 
   /* integer arithmetic / comparisons */
   if (argc < 2) return 0;                       /* every int op needs 2 args */
-  if      (!strncmp(fn, "lin_add", 7)) *out = a[0] + a[1];
-  else if (!strncmp(fn, "lin_sub", 7)) *out = a[0] >= a[1] ? a[0] - a[1] : 0;
-  else if (!strncmp(fn, "lin_mul", 7)) *out = a[0] * a[1];
-  else if (!strncmp(fn, "lin_div", 7)) *out = a[1] ? a[0] / a[1] : 0;
-  else if (!strncmp(fn, "lin_mod", 7)) *out = a[1] ? a[0] % a[1] : 0;
-  else if (!strncmp(fn, "lin_pow", 7)) { long b=a[0], e=a[1], r=1; while (e>0) { if (e&1) r*=b; b*=b; e>>=1; } *out=r; }
+  if      (!strncmp(fn, "lin_add", 7)) *out = lin_i64_add(a[0], a[1]);   /* std/runtime/i64.h: THE semantics */
+  else if (!strncmp(fn, "lin_sub", 7)) *out = lin_i64_sub(a[0], a[1]);
+  else if (!strncmp(fn, "lin_mul", 7)) *out = lin_i64_mul(a[0], a[1]);
+  else if (!strncmp(fn, "lin_div", 7)) *out = lin_i64_div(a[0], a[1]);
+  else if (!strncmp(fn, "lin_mod", 7)) *out = lin_i64_mod(a[0], a[1]);
+  else if (!strncmp(fn, "lin_pow", 7)) *out = lin_i64_pow(a[0], a[1]);
+  else if (!strncmp(fn, "lin_band", 8)) *out = lin_i64_band(a[0], a[1]);
+  else if (!strncmp(fn, "lin_bor", 7)) *out = lin_i64_bor(a[0], a[1]);
+  else if (!strncmp(fn, "lin_bxor", 8)) *out = lin_i64_bxor(a[0], a[1]);
+  else if (!strncmp(fn, "lin_shl", 7)) *out = lin_i64_shl(a[0], a[1]);
+  else if (!strncmp(fn, "lin_shr", 7)) *out = lin_i64_shr(a[0], a[1]);
   else if (!strncmp(fn, "lin_eq", 6)) { *out = a[0] == a[1]; *outkind=3; return 1; }
   else if (!strncmp(fn, "lin_lt", 6)) { *out = a[0] <  a[1]; *outkind=3; return 1; }
   else if (!strncmp(fn, "lin_leq", 7)) { *out = a[0] <= a[1]; *outkind=3; return 1; }
@@ -125,7 +128,7 @@ int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *ou
  * ====================================================================== */
 
 /* Tri-state result of trying to compute a saturated closure's value. */
-enum { EV_NO = 0, EV_READY = 1, EV_WAIT = 2 };
+enum { EV_NO = 0, EV_READY = 1, EV_WAIT = 2, EV_NOTFFI = 3, EV_SUP = 4 };   /* EV_SUP: an operand is superposed (op_split) */   /* EV_NOTFFI: the header shape, but no call (see ffi_eval) */
 
 /* read a port's wire (a function, not a macro: `wire_at(n, a, b)` would
    split into three macro arguments at the comma inside the braces) */
@@ -139,7 +142,8 @@ static inline Port wire_at(const Net *n, int node, int port) { return n->wire[no
    never forces and never allocates, which is what `claim` requires. */
 static int head_is_ffi(const Net *n, int lam) {
   LinMatch m;
-  return lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
+  return lin_pat_ffi_head(n, (Port){lam, 0}) &&      /* the header's own promises (pattern.h) */
+         lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
 }
 
 /* The OPERATOR and its OPERANDS, read in ONE step.  Both live in the same cell -- the operator's
@@ -219,8 +223,7 @@ static void fold_kill(Net *n, int v) {
      with the closures coming back unreduced because the copy `run_ffi` needs had been freed under it).
      Severing is the conservative form and it reclaims the same way: each cut frees whatever reaches
      zero live connections, and a shared node still has its other user, so it survives. */
-  for (int p = 0; p < 3; p++) net_sever(n, (Port){v, p});
-  n->dead[v] = 1;
+  net_drop(n, v);   /* consumed: every neighbour still wired to it is erased (a shared one sits behind a fan, which the eraser collapses) */
 }
 
 /* alloc a concrete value node (int -> Scott numeral, bool -> Church bool, float -> `_fsz` box) */
@@ -260,21 +263,73 @@ static int ffi_header(Net *n, int lam, Port *fnp, Port *argp) {
    EV_NO  : not a foldable op (no scalar provider claims it) -> let the core β the
             pure-Lin fallback body.
    EV_WAIT: our op, but an operand is not concrete yet -> also plain β. */
+/* WHICH COPY A SPLIT REDEX IS (see op_split).  A redex made by splitting carries the copy it stands for at
+   every fan it was split under: a chain of (fan, generation, port) per application node.  Its reads take
+   those ports (lin_fan_choose) -- the pairing the fans' own annihilation will give -- so a copy folds with
+   ITS operands before the copying has moved through.  An entry is void once its fan's slot is recycled
+   (the generation), and a node's chain is cleared when its slot is (node_recycled). */
+typedef struct { int fan; unsigned gen; int port, next; } Choice;
+static Choice *chs; static int nchs, cchs;
+static int *app_chain; static unsigned *node_gen; static int chain_cap;
+static int sup_fan = -1;
+static void chain_grow(Net *n) {
+  if (chain_cap >= n->nn) return;
+  int c = n->nn * 2 + 64;
+  app_chain = realloc(app_chain, (size_t)c * sizeof *app_chain);
+  node_gen = realloc(node_gen, (size_t)c * sizeof *node_gen);
+  for (int i = chain_cap; i < c; i++) { app_chain[i] = -1; node_gen[i] = 0; }
+  chain_cap = c;
+}
+static void arith_recycled(Net *n, void *st, int node) {
+  (void)n; (void)st;
+  if (node >= 0 && node < chain_cap) { app_chain[node] = -1; node_gen[node]++; }
+}
+static int chain_has(int ci, int fan) {
+  for (int k = ci; k >= 0; k = chs[k].next) if (chs[k].fan == fan && node_gen[fan] == chs[k].gen) return 1;
+  return 0;
+}
+static void chain_apply(Net *n, int app) {
+  lin_fan_unchoose_all();
+  if (app < 0 || app >= chain_cap) return;
+  for (int k = app_chain[app]; k >= 0; k = chs[k].next) {
+    int f = chs[k].fan;
+    if (f < n->nn && !n->dead[f] && n->tag[f] == DUP && node_gen[f] == chs[k].gen) lin_fan_choose(f, chs[k].port);
+  }
+}
+static int chain_push(int parent, int fan, int port) {
+  if (nchs >= cchs) chs = realloc(chs, (size_t)(cchs = cchs ? cchs * 2 : 256) * sizeof *chs);
+  chs[nchs] = (Choice){ fan, node_gen[fan], port, parent };
+  return nchs++;
+}
+
 static int op_eval(Net *n, int lam, int app, Val *v) {
   const char *fn;
   Port argp;
-  if (result_shared(n, lam, app)) return EV_NO;      /* a shared result is the core's β to take */
-  if (!op_head_of(n, app, &fn, &argp)) return EV_NO;
+  /* A SHARED RESULT is foldable when its operands are one value each: a `let`-bound result is shared by its
+     uses, all of which want the same number.  It is not when the operands were reached by choosing a copy at a
+     fan-in -- the redex sits in a body being copied, each copy binding its own operands -- so the reads below
+     are watched and that case alone goes to the core's beta. */
+  int shared = result_shared(n, lam, app);
+  chain_grow(n); chain_apply(n, app);              /* a split copy reads as its copy */
+  lin_fan_undecided = -1; long amb0 = lin_fan_ambiguous;
+  int rc0 = EV_NO;
+  if (!op_head_of(n, app, &fn, &argp)) { lin_fan_unchoose_all(); return rc0; }
   int slots = net_spine_slots(n, argp);
-  if (slots < 1) return EV_WAIT;                                /* operand spine not readably concrete */
+  if (slots < 1) { lin_fan_unchoose_all(); return EV_WAIT; }   /* operand spine not readably concrete */
   /* The scratch is sized to the SPINE, never to a constant: an `_op` is N-ary by construction, and a
      fixed count declines the fold past it -- not a wrong answer (the redex still reduces, through the
      pure-Lin fallback below) but a fold given up on every visit, where once would do. */
   Val *fargs = calloc((size_t)slots, sizeof *fargs);
   long *c = calloc((size_t)slots, sizeof *c);
-  if (!fargs || !c) { free(fargs); free(c); return EV_WAIT; }
+  if (!fargs || !c) { free(fargs); free(c); lin_fan_unchoose_all(); return EV_WAIT; }
   int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
+  lin_fan_unchoose_all();
+  /* An operand behind a fan's PRINCIPAL (one not chosen) is superposed: one value per copy -- split. */
+  if (lin_fan_undecided >= 0 && (shared || argc < slots) && !chain_has(app_chain[app], lin_fan_undecided)) {
+    sup_fan = lin_fan_undecided; free(fargs); free(c); return EV_SUP;
+  }
   if (argc < slots) { free(fargs); free(c); return EV_WAIT; }
+  if (shared && lin_fan_ambiguous != amb0) { free(fargs); free(c); return EV_NO; }   /* one value per copy */
   for (int i = 0; i < slots; i++) {
     if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c); return EV_WAIT; }
     c[i] = fargs[i].iv;
@@ -335,7 +390,12 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
      nqueens 1289, 123.8 -> 90.9ms; bench_runtime 12 and sudoku 0, both unchanged.  A name that is
      merely not readable YET still returns EV_WAIT through the header test above, which is where a
      not-yet-reduced name is caught. */
-  if (net_read_string_arena(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, &fn) < 0) return EV_NO;
+  /* A name field that is not a string is not a CALL: the header shape is the language's own cons cell, and
+     an applied cell is ordinary data being taken apart.  Said apart from EV_NO because a build LEAVES a
+     declined call for its artifact but must reduce a cell -- left alone, an operator's list never forms
+     and its fold never happens (measured: `(fmul 2.0 3.0)` shipped 237 kB and hung its artifact). */
+  if (net_read_string_arena(n, wire_at(n, a1.node, 2), LIN_ENC_NUM, &fn) <= 0) return EV_NOTFFI;   /* (no symbol is nameless: an
+     empty read is a nil head, as readback's run_ffi says) */
   /* TWO QUESTIONS, BOTH ANSWERED BEFORE ANY OPERAND IS READ -- because reading a spine is what FORCES
      it, and a call that is not this fold's must not have its operands forced to find that out (measured:
      decoding every closure's spine to classify it took test/sat_verify.lin from 295 ms to 82 s).
@@ -498,6 +558,95 @@ static int arith_claim(const Net *ncn, Port p1, Port p2) {
   return head_is_ffi(n, lam);
 }
 
+/* AN OPERATOR MEETING A SUPERPOSITION DUPLICATES ITSELF.  An `_op` redex inside a body the oracle is copying
+   lazily -- every recursive function the function compiler does not take -- sees an operand SUPERPOSED: a
+   fan-in F standing for "one value per copy" until the copy has moved through.  No single number is the
+   answer, and handing the redex to beta ran the operator's bitwise meaning on the superposition --
+   thousands of interactions per `add` (measured: a depth-8 binary tree, 2.1M interactions for 511 nodes).
+   What the fan would reach by moving through the operator is the redex split in two under F's own label:
+
+       head  L    --> fan-out F --> a head per copy          (copied lazily: its meaning stays correct)
+       list  P    --> fan-out F --> an operand list per copy (annihilates with the superposition F: each
+                                                              copy gets ITS operand)
+       result     <-- fan-in  F <-- the two copies' results
+
+   Standard nodes and interactions only; nothing is done twice that is not per copy anyway.  Each copy
+   then reads as its copy (the chain above) and folds at once, before the fans have moved through. */
+static void op_split(Net *n, int lam, int app, int f) {
+  Scope sf = n->scope[f], sa = n->scope[app];
+  Port res = wire_at(n, app, 1), list = wire_at(n, app, 2);
+  int parent = app_chain[app];
+  int d1 = net_alloc(n, DUP, sf).node, d2 = net_alloc(n, DUP, sf).node, r = net_alloc(n, DUP, sf).node;
+  int a1 = net_alloc(n, APP, sa).node, a2 = net_alloc(n, APP, sa).node;
+  chain_grow(n);
+  app_chain[a1] = chain_push(parent, f, 1);
+  app_chain[a2] = chain_push(parent, f, 2);
+  net_link(n, (Port){d1, 1}, (Port){a1, 0}, 0);
+  net_link(n, (Port){d1, 2}, (Port){a2, 0}, 0);
+  net_link(n, (Port){d2, 1}, (Port){a1, 2}, 0);
+  net_link(n, (Port){d2, 2}, (Port){a2, 2}, 0);
+  net_link(n, (Port){r, 1}, (Port){a1, 1}, 0);
+  net_link(n, (Port){r, 2}, (Port){a2, 1}, 0);
+  net_link(n, (Port){d2, 0}, list, 1);
+  if (res.node >= 0) net_link(n, (Port){r, 0}, res, 1);
+  net_link(n, (Port){d1, 0}, (Port){lam, 0}, 1);   /* the head meets the fan: copied */
+  app_chain[app] = -1;
+  net_drop(n, app);                                  /* every port re-aimed: drops nothing else */
+}
+
+/* AN OPERAND THAT WAITS FOR A BINDING.  An `_op` redex inside a lambda body is an active pair from the start,
+   so the wave can offer it before the lambda is applied -- while an operand is still the lambda's VARIABLE.
+   Forcing cannot make that concrete, and handing the redex to beta would trade the fold for the pure-Lin body
+   for good (measured: `((\a (\b (mul a b))) 16 3)` ran mul's bitwise body, 8045 steps, for a fold of one).
+   Such a redex is LEFT, re-queued: when the application binds the variable, demand reaches it again with a
+   value.  "Open" = the operand's producers, followed through applications and fans, reach a binder. */
+static unsigned *op_seen; static int op_seen_cap; static unsigned op_stamp;
+static int producer_open(Net *n, Port p) {
+  for (;;) {
+    if (!IN_NET(n, p.node) || n->dead[p.node]) return 0;
+    int t = n->tag[p.node];
+    if (p.node >= op_seen_cap) return 0;
+    if (op_seen[p.node] == op_stamp) return 0;
+    op_seen[p.node] = op_stamp;
+    if (t == LAM) return p.port == 1;                      /* a value (port 0), or a variable (port 1) */
+    if (t == DUP) { p = wire_at(n, p.node, 0); continue; } /* a copy: of what the fan's principal carries */
+    if (t == APP && p.port == 1) {
+      if (producer_open(n, wire_at(n, p.node, 0))) return 1;
+      p = wire_at(n, p.node, 2); continue;
+    }
+    return 0;
+  }
+}
+/* the steps count each deferred redex was last left at: deferring again needs the net to have moved */
+static long *op_defer_at; static int op_defer_cap;
+static int op_defer(Net *n, int app) {
+  if (op_defer_cap < n->nn) {
+    int c = n->nn * 2 + 64;
+    op_defer_at = realloc(op_defer_at, (size_t)c * sizeof *op_defer_at);
+    for (int i = op_defer_cap; i < c; i++) op_defer_at[i] = -1;
+    op_defer_cap = c;
+  }
+  if (op_defer_at[app] == (long)n->steps) return 0;   /* nothing moved since we last waited here */
+  op_defer_at[app] = (long)n->steps;
+  return 1;
+}
+static int operands_open(Net *n, Port argp) {
+  if (op_seen_cap < n->nn) {
+    op_seen = realloc(op_seen, (size_t)(op_seen_cap = n->nn * 2 + 64) * sizeof *op_seen);
+    memset(op_seen, 0, (size_t)op_seen_cap * sizeof *op_seen);
+  }
+  op_stamp++;
+  int slots = net_spine_slots(n, argp);
+  Port cur = net_dhop(n, argp);
+  for (int k = 0; k < slots; k++) {
+    Port head, next;
+    if (!net_read_cell(n, cur, &head, &next)) break;
+    if (producer_open(n, head)) return 1;                  /* (net_read_cell gives the slot's PRODUCER) */
+    cur = next;
+  }
+  return 0;
+}
+
 /* reduce: fold each claimed redex.  The ABI hands a slice of PAIRS: `nred` counts pairs,
    `redexes` holds 2*nred ports.  Every claimed pair is consumed one way or another: forced
    and folded, or handed back to the core's β, which is always correct (just slower) -- a
@@ -539,7 +688,8 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
        shipped with its redex β'd away and the artifact printed `(\a (\b (\c b)))` for every N instead
        of the answer.  The core's `act` list is a wave snapshot, so an unhandled pair is simply not
        re-enqueued into this reduction; the shipped net carries the closure. */
-    if (ev != EV_READY && (lin_precompile_depth > 0 || lin_build_depth > 0)) continue;
+    if (ev == EV_NOTFFI) { ffi = 0; ev = EV_NO; }    /* a cell, not a call: reduced like any redex, build or not */
+    else if (ev != EV_READY && (lin_precompile_depth > 0 || lin_build_depth > 0)) continue;
     if (ev == EV_WAIT) {
       /* The operands are not concrete yet.  Under needed order that is the normal state -- nothing
          had a reason to reduce them -- so ask for them and try again. */
@@ -548,9 +698,18 @@ static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *change
       if (IN_NET(n, argp.node)) force_spine(n, argp);
       ev = ffi ? ffi_eval(n, lam, &v, NULL, 0) : op_eval(n, lam, app, &v);
     }
+    if (ev == EV_SUP && !ffi) { op_split(n, lam, app, sup_fan); done++; (*changed)++; n->steps++; continue; }
+    if (ev == EV_SUP) ev = EV_NO;
     if (ev == EV_READY) {
       if (!ffi) fold_op_head(n, lam, app, &v); else fold_ffi_head(n, lam, app, &v);
       done++; (*changed)++; n->steps++;
+      continue;
+    }
+    /* re-queued, not stranded (see operands_open) -- while the net is still moving.  A wave that
+       moved nothing else will move nothing the next time either: then the variable is not getting bound
+       (a function returned as the answer, say), and beta is all that is left. */
+    if (ev == EV_WAIT && !ffi && operands_open(n, wire_at(n, app, 2)) && op_defer(n, app)) {
+      net_link(n, (Port){lam, 0}, (Port){app, 0}, 1);
       continue;
     }
     /* Not foldable (an open precompile body, or an operand that is not a value even after
@@ -669,7 +828,8 @@ LinDriver lin_arith_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),
   .size = (uint32_t)sizeof(LinDriver),   /* the ABI-5 extension contract: the core reads only these fields */
   .name = "arith", .description = "native scalar arithmetic table + `_op`/`_ffi` fold pre-emptor",
+  .node_recycled = arith_recycled,
   .caps = LIN_CAP_NATIVE_NUM | LIN_CAP_FOLD | LIN_CAP_PREEMPT, .priority = 5,   /* before simd(10): claim folds first */
   .claim = arith_claim, .reduce = arith_reduce,
-  .wants = LIN_WANT_AOT, .aot = arith_aot,   /* the driver's own build-time pass, offered by the core */
+  .wants = LIN_WANT_AOT | LIN_WANT_RECYCLE, .aot = arith_aot,   /* its build-time pass; the split chains are node-keyed */
 };

@@ -1,0 +1,50 @@
+; std/seq.lin: a list as a declared datatype (typed, compiled by the function driver, printed by name)
+(load "std/std.lin")
+(ssum (srange 0 10))
+; expect => 45
+(slength (sfilter (\x (eq (mod x 3) 0)) (srange 0 30)))
+; expect => 10
+(ssum (smap (\x (mul x x)) (srange 0 10)))
+; expect => 285
+(sfoldl (\a (\x (add a x))) 0 (srange 1 101))
+; expect => 5050
+(sfoldr (\x (\a (add a x))) 0 (srange 1 11))
+; expect => 55
+(stake 3 (srange 5 100))
+; expect => (scons 5 (scons 6 (scons 7 snil)))
+(sreverse (srange 0 4))
+; expect => (scons 3 (scons 2 (scons 1 (scons 0 snil))))
+(sappend (srange 0 2) (srange 7 9))
+; expect => (scons 0 (scons 1 (scons 7 (scons 8 snil))))
+(shead 0 (sdrop 5 (srange 0 10)))
+; expect => 5
+(snth 2 0 (srange 10 20))
+; expect => 12
+(sany (\x (eq x 7)) (srange 0 10))
+; expect => true
+(sall (\x (lt x 5)) (srange 0 10))
+; expect => false
+(sempty snil)
+; expect => true
+(ssum (srange 0 1000000))
+; expect => 499999500000
+(slength (sreverse (srange 0 100000)))
+; expect => 100000
+; higher-order over a million elements: the function argument is inlined into a specialised copy (fn driver)
+(ssum (smap (\x (mul x x)) (srange 0 1000000)))
+; expect => 333332833333500000
+(sfoldl (\a (\x (add a x))) 0 (sfilter (\x (eq (mod x 3) 0)) (srange 0 1000000)))
+; expect => 166666833333
+(sall (\x (lt x 5)) (srange 0 10))
+; expect => false
+; a list prints by its elements' type: text as a string, other numbers as a list, anything else element by element
+(seq_to_list (srange 0 3))
+; expect => [0 1 2]
+(list3 72 105 33)
+; expect => "Hi!"
+(cons true (cons false nil))
+; expect => [true false]
+(list2 (list2 1 2) (list2 3 4))
+; expect => [[1 2] [3 4]]
+(list2 "ab" "cd")
+; expect => ["ab" "cd"]

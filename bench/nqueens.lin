@@ -1,0 +1,7 @@
+; n-queens (n = 14) by bitmask backtracking: count the solutions
+(define place (\all (\cols (\d1 (\d2 (\avail (if (eq avail 0) 0
+  (let ((bit (band avail (sub 0 avail))))
+    (add (let ((nc (bor cols bit)) (n1 (shl (bor d1 bit) 1)) (n2 (shr (bor d2 bit) 1)))
+           (if (eq nc all) 1 (place all nc n1 n2 (band all (bxor -1 (bor nc (bor n1 n2)))))))
+         (place all cols d1 d2 (bxor avail bit)))))))))))
+(place 16383 0 0 0 16383)

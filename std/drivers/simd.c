@@ -155,7 +155,8 @@ static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
    arith driver makes, because the two must agree on which redexes are theirs. */
 static int head_is_ffi(const Net *n, int lam) {
   LinMatch m;
-  return lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
+  return lin_pat_ffi_head(n, (Port){lam, 0}) &&      /* the header's own promises (pattern.h) */
+         lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
 }
 
 /* claim: a saturated `_op` (pure-Lin arith) or `_ffi` (float/legacy) closure (LAM x APP), the

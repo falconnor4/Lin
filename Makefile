@@ -8,9 +8,8 @@ DRIVERS := $(wildcard std/drivers/*.c)
 build:
 	nix build
 
-# Core engine only: the language/runtime is src/*.c + src/lin.h under a 4500-line budget
-# (test/run_tests.sh enforces the budget, because the comment here that said
-# "<= 3000 lines" had been wrong for a while without anything noticing).
+# Core engine only: the language/runtime is src/*.c + src/lin.h (test/run_tests.sh
+# reports its size on every run).
 # -rdynamic exports the core's symbols so dlopen'd driver
 # plugins (simd.so) can resolve net_alloc_scott / net_read_int / net_link &c.
 lin: $(SRCS) src/lin.h

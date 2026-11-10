@@ -66,7 +66,7 @@ else
   echo "  no usable cc: cone compilation not exercised here (the fallback is still checked below)"
 fi
 
-# ---- 3. semantics, pinned by hand -----------------------------------------
+# ---- 3. semantics, pinned by hand: 64-bit two's complement, wrapping (std/runtime/i64.h) ----
 cat > "$TMP/sem.lin" <<'LIN'
 (sub 1 2)
 (div 5 0)
@@ -75,15 +75,21 @@ cat > "$TMP/sem.lin" <<'LIN'
 (sub 5 3)
 (mul (add 1 2) (sub 5 3))
 (add (mul 6 7) (div 100 4))
+(add 9223372036854775807 1)
+(div -7 2)
+(mod -7 2)
 LIN
 cat > "$TMP/sem_expect" <<'LIN'
-=> 0
+=> -1
 => 0
 => 0
 => 1024
 => 2
 => 6
 => 67
+=> -9223372036854775808
+=> -3
+=> -1
 LIN
 got=$(LIN_STD="$NATIVE_STD" LIN_STD_DIR="$STD_DIR" LIN_NATIVE_CACHE="$CACHE" timeout 60 "$BIN" "$TMP/sem.lin" 2>/dev/null)
 if [ "$got" = "$(cat "$TMP/sem_expect")" ]; then ok; else fail "compiled semantics differ from the table"; printf '%s\n' "$got" | sed 's/^/    got: /'; fi

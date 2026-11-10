@@ -14,7 +14,7 @@ Lin uses [Nix](https://nixos.org/) for reproducible, hermetic builds and testing
 # Build the lin compiler/runtime
 nix build
 
-# Run the full test suite (61 suites, incl. .line containers and the Python oracles)
+# Run the full test suite (all suites, incl. .line containers and the Python oracles)
 nix flake check
 
 # Interactively run the test runner
@@ -29,7 +29,7 @@ nix develop
 
 ### Classic Makefile Build
 
-Lin is written in C99 and uses OpenMP for lock-free parallel graph reduction:
+Lin is written in C99 and uses pthreads for lock-free parallel graph reduction:
 
 ```bash
 # Build via Nix (default)
@@ -38,7 +38,7 @@ make build
 # Run tests via Nix (committed tree only - see note below)
 make nix-test
 
-# Trusted working-tree build + full suite (61 suites, incl. .line containers)
+# Trusted working-tree build + full suite (all suites, incl. .line containers)
 make test
 
 # Or compile directly with gcc/clang
@@ -92,16 +92,18 @@ Lin programs are written in S-expression syntax for curried lambda calculus.
 
 ### Data Types & Numerals
 
-Numerals use Scott encodings, providing an $\mathcal{O}(1)$ predecessor:
+Integers are 64-bit two's complement and wrap on overflow, exactly like `int64_t`
+(`x / 0` and `x % 0` are 0). They are plain net structure: a chain of bit cells, least
+significant first, ended by a terminal carrying the sign. The pure-Lin arithmetic in
+`std/num.lin` takes O(64) bit steps per operation; the fold drivers compute the same
+function natively (`std/runtime/i64.h`).
 
 ```scheme
-zero        ; => 0
-(succ 41)   ; => 42
-(pred 42)   ; => 41
-(is_zero 0) ; => true
+(sub 3 8)                     ; => -5
+(add 9223372036854775807 1)   ; => -9223372036854775808
+(div -7 2)                    ; => -3
+(if (lt -1 0) 1 2)            ; => 1   (`if` is a core form: no library needed)
 ```
-
-Arbitrary-magnitude integer literals are supported directly.
 
 ### User-Defined Algebraic Data Types & Pattern Matching
 
@@ -126,13 +128,29 @@ scrutinee is applied to one value (nullary / `_`) or field-binding lambda per
 case. Constructors type-check through ordinary Hindley-Milner let-generalization,
 so no special type machinery is required.
 
+Fields may state their types, and a datatype may take type parameters:
+
+```scheme
+(datatype (Tree a) (leaf) (node (v a) (l Tree a) (r Tree a)))
+(define build (\n (if (eq n 0) leaf (node n (build (sub n 1)) leaf))))
+(build 2)                    ; => (node 2 (node 1 leaf leaf) leaf)
+```
+
+A value is printed by its type: a datatype by its constructors' names, a list of
+text as a string, any other list element by element (`[10 20 30]`, `[true false]`).
+Declared field types make the printing exact; an undeclared field is read as its
+constructor states, as a number, or as the enclosing datatype.
+
 ### Standard Library
 
-The standard library (`std/`) is written in pure Lin:
+The standard library (`std/`) is written in pure Lin. A module whose top-level forms
+only define is read when a program first names something in it, so the library can grow
+without costing a program that does not use it (`LIN_EAGER_STD=1` loads everything up front):
 
 - `std/bool.lin`: Booleans and conditionals (`true`, `false`, `not`, `and`, `or`, `xor`, `if`, `ifl`).
 - `std/pair.lin`: Pairs and projections (`pair`, `fst`, `snd`, `swap`, `pair_map`, `curry`, `uncurry`).
 - `std/list.lin`: Inductive lists (`nil`, `cons`, `head`, `tail`, `list1`..`list5`, `first`..`eighth`).
+- `std/seq.lin`: A list as a datatype, `(Seq a)` (`snil`, `scons`, `srange`, `smap`, `sfilter`, `sfoldl`, `sfoldr`, `ssum`, `slength`, `stake`, `sdrop`, `sreverse`, `sappend`, `sany`, `sall`, `snth`, `seq_of_list`, `seq_to_list`). Typed by `match`, and compiled by the function driver, higher-order calls included: `(ssum (smap (\x (mul x x)) (srange 0 1000000)))` runs as C.
 - `std/maybe.lin`: Option monad (`nothing`, `just`, `is_nothing`, `is_just`, `from_maybe`, `maybe_map`, `maybe_bind`, `maybe_or`).
 - `std/either.lin`: Sum / Result type (`left`, `right`, `is_left`, `is_right`, `either`, `either_map`, `either_bind`, `from_right`).
 - `std/tree.lin`: Binary trees (`leaf`, `node`, `is_leaf`, `is_node`, `tree_val`, `tree_left`, `tree_right`, navigation helpers).
@@ -182,7 +200,17 @@ Lin executes lambda calculus terms directly as interaction nets using non-abelia
 
 - **Wavefront Parallelism**: Redexes whose 2-hop neighborhoods do not overlap form independent sets that are contracted simultaneously across CPU hardware threads without mutexes or global locks.
 - **Lévy Optimality**: Shared subcomputations are evaluated at most once, reducing functional expressions in optimal steps.
-- **Zero Garbage Collection**: Node allocation and reclamation occur linearly as part of cut-elimination with no stop-the-world pauses.
+- **No Garbage Collector**: memory is managed by the calculus itself. A rule frees the pair it consumes, and the
+  compiler wires an eraser (`ERA`, one of the four node kinds) wherever a value goes unused; erasers consume what
+  they reach (`ERA x LAM/APP/DUP`, a discarded application's inputs) with no tracing, no reachability walk and no
+  pause. Freed slots are reused only at a safepoint, so no held index ever names a different node.
+  `LIN_LEAKCHECK=1 lin -b f.lin` reports what the result still reaches (a diagnostic, never run otherwise).
+- **Compiled functions (a driver, not the core)**: `std/drivers/fn.c` reads a recursive function from its own
+  net and compiles it to C: arithmetic, conditionals, constructors and `match` (with in-place reuse of data
+  nothing else holds), calls among functions, and higher-order calls -- a function argument is inlined into a
+  copy of the callee specialised to it. Independent recursive calls run in parallel. Anything it cannot
+  compile, it declines, and the net computes it; the net's answer is the authority (`test/fn_compile.sh`).
+  `LIN_FN_OFF=1` turns it off, `LIN_FN_DEBUG=1` shows each decision and the C. See `bench/` for the numbers.
 - **Non-Resolution Graph Normalization**: Formula normalization bypasses classical $2^{\Omega(n)}$ resolution lower bounds on parity problems like Tseitin expanders ($82|E| - 3$ linear steps).
 
 ## Examples
@@ -217,7 +245,7 @@ Usage: lin [options] [file.lin]
 Options:
   -e, --eval <expr>       Evaluate expression string directly and exit
   -b, --bench [file]      Benchmark mode: report steps, nodes, time, and GoI determinant
-  -t, --threads <N>       Number of OpenMP worker threads (or LIN_THREADS env)
+  -t, --threads <N>       Number of worker threads (or LIN_THREADS env)
   -v, --version           Display version information
   -h, --help              Display help and usage information
 ```

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+void (*lin_ctor_demand)(const char *name);
 static const char *S;
 static int P;
 static jmp_buf PJ;
@@ -44,7 +45,12 @@ Term *term_new(int type, const char *name, Term *l, Term *r) {
   t->name = name ? name : ""; return t;
 }
 void term_free(Term *t) { if (t) { term_free(t->l); term_free(t->r); free(t); } }
-Term *term_copy(Term *t) { return t ? term_new(t->type, t->name, term_copy(t->l), term_copy(t->r)) : NULL; }
+Term *term_copy(Term *t) {
+  if (!t) return NULL;
+  Term *c = term_new(t->type, t->name, term_copy(t->l), term_copy(t->r));
+  c->annot = t->annot;            /* a stated type (a literal's, a field's) is part of the term */
+  return c;
+}
 Term *term_fix(const char *name, Term *body) {
   const char *H = "_fix_h", *X = "_fix_x";
   Term *xx = term_new(TAPP, "", term_new(TVAR, X, 0, 0), term_new(TVAR, X, 0, 0));
@@ -71,12 +77,19 @@ static const char *sym(void) {
   return P > start ? lin_intern(S + start, (size_t)(P - start)) : NULL;
 }
 
+/* An EXPLICIT thunk, in pure lambda calculus: `(lazy e)` is `(\_ e)` and `(force t)` applies it to the
+   identity.  Needed order already never reduces what nothing demands, so this is for code that wants to pass a
+   delayed value around as data.  The binder names contain a space, so no source program can capture them. */
+static Term *thunk(Term *e) { return term_new(TLAM, " t", e, NULL); }
+static Term *unit_id(void) { return term_new(TLAM, " i", term_new(TVAR, " i", NULL, NULL), NULL); }
+
 static int islambda(const char *s) {
   return !strcmp(s, "\\") || !strcmp(s, "lambda") || !strcmp(s, "lam") ||
          !strcmp(s, "\xce\xbb");
 }
 
 static int isnum(const char *s) {
+  if (*s == '-' && s[1]) s++;                        /* a negative integer literal */
   if (!*s) return 0;
   for (const char *p = s; *p; p++)
     if (!isdigit((unsigned char)*p)) return 0;
@@ -187,11 +200,17 @@ static Term *parse_term(void) {
     }
     if (S[P] != '"') pfail("unterminated string literal");
     P++;
-    Term *body = term_new(TVAR, "list.nil", NULL, NULL);
+    /* A string is a list of character codes, written as the list encoding ITSELF -- cells \c.\n.((c h) t) ending in
+       \c.\n.true -- so a literal needs no library.  Its type, `list num`, is stated on the term (the checker
+       trusts an annotated lambda), and the binder names contain a space so nothing can capture them. */
+    Term *body = term_new(TLAM, " c", term_new(TLAM, " n", term_new(TLAM, " t", term_new(TLAM, " f",
+                   term_new(TVAR, " t", NULL, NULL), NULL), NULL), NULL), NULL);
     for (int i = dlen - 1; i >= 0; i--) {
       char cb[8]; snprintf(cb, sizeof cb, "%d", dec[i]); Term *ch = term_new(TNUM, lin_intern(cb, strlen(cb)), NULL, NULL);
-      body = term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, "list.cons", NULL, NULL), ch), body);
+      body = term_new(TLAM, " c", term_new(TLAM, " n", term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, " c", NULL, NULL), ch), body), NULL), NULL);
     }
+    Type *ty = type_nominal("list"); ty->a = type_arg(type_nominal("num"));
+    body->annot = ty;
     return body;
   }
   if (S[P] == '(') {
@@ -236,6 +255,24 @@ static Term *parse_term(void) {
       skipws(); if (S[P] != ')') pfail("expected ')'"); else P++;
       return term_new(TEXPORT, name, NULL, NULL);
     }
+    /* (if c a b) is ((c a) b): a boolean IS a selector (\t.\f.t), so the form needs no library, and needed
+       order reduces only the branch that is chosen. */
+    if (!strcmp(kw, "if")) {
+      Term *c = parse_term(), *a = parse_term(), *b = parse_term(); skipws();
+      if (S[P] != ')') { pfail("if: expected (if cond then else)"); } P++;
+      return term_new(TAPP, "if", term_new(TAPP, "", c, a), b);   /* the name marks it for the type checker only */
+    }
+    /* (lazy e) delays e as data; (force t) runs a delayed value. */
+    if (!strcmp(kw, "lazy")) {
+      Term *e = parse_term(); skipws();
+      if (S[P] != ')') { pfail("lazy: expected (lazy expr)"); } P++;
+      return thunk(e);
+    }
+    if (!strcmp(kw, "force")) {
+      Term *e = parse_term(); skipws();
+      if (S[P] != ')') { pfail("force: expected (force expr)"); } P++;
+      return term_new(TAPP, "", e, unit_id());
+    }
     if (!strcmp(kw, "match")) {
       /* match => scrut applied to one lambda per case; pat is `_`, a lone name, or (Name v1...vk). Positional Scott dispatch: no type/registry dep. */
       Term *scrut = parse_term();
@@ -244,10 +281,11 @@ static Term *parse_term(void) {
       while (S[P] == '(') {
         P++; skipws();
         if (S[P] == ')') { P++; break; }
-        int k = 0; const char **vs = NULL;
+        int k = 0; const char **vs = NULL; const char *ctorname = "_";
         if (S[P] == '(') { /* (Ctor v1...vk) -> bind the fields */
           P++; skipws();
           const char *ctorhead = sym(); if (!ctorhead) pfail("match: bad pattern");
+          ctorname = ctorhead;
           int cap = 0;
           for (;;) {
             skipws(); if (S[P] == ')') { P++; break; }
@@ -257,12 +295,20 @@ static Term *parse_term(void) {
           }
         } else {
           const char *pn = sym(); if (!pn) pfail("match: bad pattern"); /* nullary/_ */
+          ctorname = pn;
         }
         Term *body = parse_tail(parse_term());
         Term *lam = body; /* nullary / wildcard: pass the value directly */
         for (int i = k - 1; i >= 0; i--) lam = term_new(TLAM, vs[i], lam, NULL);
         free(vs);
-        app = term_new(TAPP, "", app, lam);
+        /* a branch for a declared constructor states which (lin.h, the constructor registry): `((\_m BR) ID)` */
+        { long cid = lin_ctor_lookup(ctorname);
+          if (!cid && lin_ctor_demand && strcmp(ctorname, "_")) { lin_ctor_demand(ctorname); cid = lin_ctor_lookup(ctorname); }
+          const LinCtor *ci = cid ? lin_ctor_info(cid) : NULL;
+          if (ci && ci->k == k) lam = term_new(TAPP, "", term_new(TLAM, "_m", lam, NULL), term_new(TNUM, lin_internf("%ld", cid), NULL, NULL)); }
+        /* the application says which constructor this branch is for, so the checker can type the match
+           as one over that datatype (type.c) -- the term itself is still positional Scott dispatch */
+        app = term_new(TAPP, lin_internf("match:%s", ctorname), app, lam);
         skipws();
       }
       skipws(); if (S[P] == ')') P++; /* consume match close */

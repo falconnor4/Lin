@@ -40,7 +40,7 @@ run_test() {
 printf "Running Lin Confluence & Stability Test Suite against %s\n" "$LIN_BIN"
 
 printf "[Tier 1: Core Interaction Calculus & Primitives]\n"
-for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/adt_types.lin test/loop.lin; do
+for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/mutual.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/seq.lin test/adt_types.lin test/loop.lin; do
   run_test "$f"
 done
 
@@ -143,7 +143,7 @@ rm -f "$NC_LOG"
 #   silently dropped the rest and handed the constructor a different type.
 # ----------------------------------------------------------------------------
 DA_LOG=$(mktemp)
-if ./test/datatype_arity.sh "$LIN_BIN" >"$DA_LOG" 2>&1; then
+if bash test/datatype_arity.sh "$LIN_BIN" >"$DA_LOG" 2>&1; then
   pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/datatype_arity.sh ($(tail -1 "$DA_LOG"))"
 else
   fail=$((fail+1)); echo "FAIL test/datatype_arity.sh"; cat "$DA_LOG"
@@ -156,7 +156,7 @@ rm -f "$DA_LOG"
 #   call must be REFUSED -- not forwarded with the wrong count, which is what it used to do.
 # ----------------------------------------------------------------------------
 FA_LOG=$(mktemp)
-if ./test/ffi_arity.sh "$LIN_BIN" >"$FA_LOG" 2>&1; then
+if bash test/ffi_arity.sh "$LIN_BIN" >"$FA_LOG" 2>&1; then
   pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/ffi_arity.sh ($(tail -1 "$FA_LOG"))"
 else
   fail=$((fail+1)); echo "FAIL test/ffi_arity.sh"; cat "$FA_LOG"
@@ -171,7 +171,7 @@ rm -f "$FA_LOG"
 #   The check count is read from the test's own summary, so it cannot drift from the assertions.
 # ----------------------------------------------------------------------------
 DAB_LOG=$(mktemp)
-if ./test/driver_abi.sh "$LIN_BIN" "$STD_DIR" >"$DAB_LOG" 2>&1; then
+if bash test/driver_abi.sh "$LIN_BIN" "$STD_DIR" >"$DAB_LOG" 2>&1; then
   n=$(sed -n 's/.*(\([0-9]*\) checks.*/\1/p' "$DAB_LOG" | tail -1)
   pass=$((pass+1)); total_checks=$((total_checks + ${n:-0})); echo "PASS test/driver_abi.sh ($(tail -1 "$DAB_LOG"))"
 else
@@ -246,18 +246,61 @@ total_checks=$((total_checks + line_total))
 t1=$(date +%s%3N 2>/dev/null || date +%s)
 
 # ----------------------------------------------------------------------------
-# Tier 5.5: Reclamation soundness
-#   The collector never runs in a normal suite run (it needs a million live nodes),
-#   so it rotted into two independent defects without anything noticing.  This forces
-#   the threshold down until every wave is a collection point and requires the output
-#   to be byte-identical; see test/gc_forced.sh.
+# Tier 5.4: 64-bit integers -- the net's own arithmetic and the fold drivers are one function
 # ----------------------------------------------------------------------------
-GC_LOG=$(mktemp)
-if bash test/gc_forced.sh "$LIN_BIN" "$STD_DIR" >"$GC_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 10)); echo "PASS test/gc_forced.sh ($(tail -1 "$GC_LOG"))"
-  rm -f "$GC_LOG"
+I64_LOG=$(mktemp)
+if bash test/int64.sh "$LIN_BIN" "$STD_DIR" >"$I64_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 58)); echo "PASS test/int64.sh ($(tail -1 "$I64_LOG"))"
+  rm -f "$I64_LOG"
 else
-  fail=$((fail+1)); echo "FAIL test/gc_forced.sh"; cat "$GC_LOG"; rm -f "$GC_LOG"
+  fail=$((fail+1)); echo "FAIL test/int64.sh"; cat "$I64_LOG"; rm -f "$I64_LOG"
+fi
+
+# ----------------------------------------------------------------------------
+# Tier 5.45: the function compiler -- a recursive function compiled from its net equals the net
+# ----------------------------------------------------------------------------
+FN_LOG=$(mktemp)
+if bash test/fn_compile.sh "$LIN_BIN" "$STD_DIR" >"$FN_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 22)); echo "PASS test/fn_compile.sh ($(tail -1 "$FN_LOG"))"
+  rm -f "$FN_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/fn_compile.sh"; cat "$FN_LOG"; rm -f "$FN_LOG"
+fi
+
+# ----------------------------------------------------------------------------
+# Tier 5.46: floats are net structure -- the pure soft float equals the hardware's IEEE-754
+# ----------------------------------------------------------------------------
+SF_LOG=$(mktemp)
+if bash test/softfloat.sh "$LIN_BIN" "$STD_DIR" >"$SF_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 56)); echo "PASS test/softfloat.sh ($(tail -1 "$SF_LOG"))"
+  rm -f "$SF_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/softfloat.sh"; cat "$SF_LOG"; rm -f "$SF_LOG"
+fi
+
+# ----------------------------------------------------------------------------
+# Tier 5.3: the core language with NO standard library
+# ----------------------------------------------------------------------------
+NS_LOG=$(mktemp)
+if bash test/no_std.sh "$LIN_BIN" "$STD_DIR" >"$NS_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 10)); echo "PASS test/no_std.sh ($(tail -1 "$NS_LOG"))"
+  rm -f "$NS_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/no_std.sh"; cat "$NS_LOG"; rm -f "$NS_LOG"
+fi
+
+# ----------------------------------------------------------------------------
+# Tier 5.5: Erasure
+#   There is no collector: rules free what they consume and erasers consume what a
+#   program discards.  This pins that discarded structure is reclaimed and that no
+#   value something still needs is erased; see test/erasure.sh.
+# ----------------------------------------------------------------------------
+ER_LOG=$(mktemp)
+if bash test/erasure.sh "$LIN_BIN" "$STD_DIR" >"$ER_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 8)); echo "PASS test/erasure.sh ($(tail -1 "$ER_LOG"))"
+  rm -f "$ER_LOG"
+else
+  fail=$((fail+1)); echo "FAIL test/erasure.sh"; cat "$ER_LOG"; rm -f "$ER_LOG"
 fi
 
 # ----------------------------------------------------------------------------
@@ -280,14 +323,14 @@ fi
 #   The float box table used to be core state with a hardcoded container section.
 #   It is a driver's now, carried as an opaque named section, which is what makes
 #   an artifact self-describing and keeps the core ignorant of every value domain.
-#   See test/values_carry.sh.
+#   See test/floats_carry.sh.
 # ----------------------------------------------------------------------------
-VC_LOG=$(mktemp)
-if bash test/values_carry.sh "$LIN_BIN" "$STD_DIR" >"$VC_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 4)); echo "PASS test/values_carry.sh ($(tail -1 "$VC_LOG"))"
-  rm -f "$VC_LOG"
+FC_LOG=$(mktemp)
+if bash test/floats_carry.sh "$LIN_BIN" "$STD_DIR" >"$FC_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 4)); echo "PASS test/floats_carry.sh ($(tail -1 "$FC_LOG"))"
+  rm -f "$FC_LOG"
 else
-  fail=$((fail+1)); echo "FAIL test/values_carry.sh"; cat "$VC_LOG"; rm -f "$VC_LOG"
+  fail=$((fail+1)); echo "FAIL test/floats_carry.sh"; cat "$FC_LOG"; rm -f "$FC_LOG"
 fi
 
 # ----------------------------------------------------------------------------
@@ -303,7 +346,7 @@ fi
 # ----------------------------------------------------------------------------
 BR_LOG=$(mktemp)
 if bash test/bench_runtime.sh "$LIN_BIN" "$STD_DIR" >"$BR_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 17)); echo "PASS test/bench_runtime.sh (17 checks: build/run differential + LIN_GC=200)"
+  pass=$((pass+1)); total_checks=$((total_checks + 17)); echo "PASS test/bench_runtime.sh (17 checks: build/run differential + slot recycling)"
   rm -f "$BR_LOG"
 else
   fail=$((fail+1)); echo "FAIL test/bench_runtime.sh"; cat "$BR_LOG"; rm -f "$BR_LOG"
@@ -357,18 +400,10 @@ else
   fail=$((fail+1)); echo "FAIL test/test_cli_flags.sh"; bash test/test_cli_flags.sh "$LIN_BIN"
 fi
 
-# The core is deliberately small enough to read in one sitting, and that budget is the only
-# thing keeping the engine from accreting passes.  It has to be a test: the claim in the
-# Makefile ("<= 3000 lines") had silently drifted past 3500, and a number in a comment
-# cannot fail a build.  Raised to 4500 for the liveness work (free-on-consume reclamation),
-# which is core: the budget counts the .c and .h files here, so nothing can be parked in a
-# side-channel extension to dodge it.
+# The core's size is REPORTED, not gated: the hard line cap was retired by the project owner.  Keeping
+# the core small is still a goal -- this line makes its growth visible in every run.
 LOC=$(cat src/*.c src/*.h | wc -l)
-if [ "$LOC" -le 4500 ]; then
-  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS src/ line budget ($LOC / 4500)"
-else
-  fail=$((fail+1)); echo "FAIL src/ line budget: $LOC lines, budget 4500 (delete code, or move a pass out to std/)"
-fi
+echo "INFO src/ size: $LOC lines"
 
 t_end=$(date +%s%3N 2>/dev/null || date +%s)
 total_dur=$((t_end - t_start))

@@ -30,7 +30,7 @@
  *
  *   - THE MATH IS NEVER RE-IMPLEMENTED.  The compiled expression is the shared
  *     table's own line (std/drivers/arith.c) copied verbatim -- including
- *     `lin_sub`'s saturating form `a >= b ? a-b : 0` and `lin_mod`'s zero guard --
+ *     the 64-bit wrapping forms and the zero guards of std/runtime/i64.h --
  *     and the fallback calls that same table through `lin_arith_scalar`.  A driver
  *     that assumed `sub` meant `a-b` would be wrong for every operand pair, which
  *     is exactly why the whitelist carries the expression, not just the name.
@@ -68,6 +68,7 @@
  * ==========================================================================*/
 #include "../../src/lin.h"
 #include "../runtime/pattern.h"
+#include "../runtime/i64.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -91,7 +92,8 @@ static inline Port wire_at(const Net *n, int node, int port) { return n->wire[no
    name-free net can say -- `ctor_tag(nmof(n, lam))` is what this used to read. */
 static int head_is_ffi(const Net *n, int lam) {
   LinMatch m;
-  return lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
+  return lin_pat_ffi_head(n, (Port){lam, 0}) &&      /* the header's own promises (pattern.h) */
+         lin_pat_match((Net *)n, (Port){lam, 0}, lin_pat_enc_ffi, LIN_PAT_BUDGET_FOR(n), &m);
 }
 
 /* The scalar-table row an `_op` redex names: the OPERATOR INDEX is the FIRST SLOT of its operand list
@@ -133,13 +135,9 @@ static const int DOMS_NUM[1] = { DT_NUM };
 /* The helpers are the table's own lines from std/drivers/arith.c, verbatim, so the
    compiled cone and the interpreted fold cannot disagree: the only difference
    between the two paths is WHEN the arithmetic is done, not what it is. */
-static const char *PRELUDE =
-  "static long n_add(long a, long b) { return a + b; }\n"
-  "static long n_sub(long a, long b) { return a >= b ? a - b : 0; }\n"
-  "static long n_mul(long a, long b) { return a * b; }\n"
-  "static long n_div(long a, long b) { return b ? a / b : 0; }\n"
-  "static long n_mod(long a, long b) { return b ? a % b : 0; }\n"
-  "static long n_pow(long b, long e) { long r = 1; while (e > 0) { if (e & 1) r *= b; b *= b; e >>= 1; } return r; }\n";
+static const char *PRELUDE = LIN_I64_SRC
+  "#define n_add lin_i64_add\n#define n_sub lin_i64_sub\n#define n_mul lin_i64_mul\n"
+  "#define n_div lin_i64_div\n#define n_mod lin_i64_mod\n#define n_pow lin_i64_pow\n";
 
 /* ---- emitting the cone ---------------------------------------------------- */
 
@@ -469,8 +467,7 @@ static Port val_port(Net *n, const Val *v) {
 
 static void nat_kill(Net *n, int v) {
   if (!NAT_IN(n, v) || n->dead[v] || n->tag[v] == DUP) return;
-  for (int p = 0; p < 3; p++) net_sever(n, (Port){v, p});
-  n->dead[v] = 1;
+  net_drop(n, v);
 }
 
 /* Inject the value where the fold injects it: into `ar`, the APP's body-slot partner,
@@ -613,10 +610,19 @@ static int native_reduce(Net *n, Port *redexes, int nred, long limit, int *chang
       if (net_interact(n, (Port){lam, 0}, (Port){app, 0})) { (*changed)++; n->steps++; }
       continue;
     }
-    /* A shared result is not this driver's to compute once: hand the pair to the core's β, the same
-       exit the unreadable operator takes below.  (Precompile leaves the redex alone, as always.) */
+    /* A SHARED RESULT is not this driver's to COMPILE (a cone reaches its operands as structure, and a
+       shared one may hold one value per copy), but it is foldable exactly when arith's op_eval folds it:
+       when no operand read chose a copy at a fan-in -- a `let`-shared result is one value for all its
+       uses.  Otherwise the core's β, the exit the unreadable operator takes below. */
     if (result_shared(n, lam, app)) {
       if (lin_precompile_depth > 0) continue;
+      Val sv; memset(&sv, 0, sizeof sv);
+      long amb0 = lin_fan_ambiguous;
+      if (fold_via_table(n, fnp, &sv, args) && lin_fan_ambiguous == amb0) {   /* (fnp: the vocabulary's own static name) */
+        fold_cone(n, lam, app, &sv);
+        done++; (*changed)++; n->steps++;
+        continue;
+      }
       if (net_interact(n, (Port){lam, 0}, (Port){app, 0})) { (*changed)++; n->steps++; }
       continue;
     }

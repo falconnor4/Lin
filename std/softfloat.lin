@@ -1,0 +1,191 @@
+; ==============================================================================
+; Lin Standard Library: IEEE-754 binary64 in pure Lin (soft float)
+; ==============================================================================
+; A float is a 64-bit integer holding its IEEE-754 bit pattern, so it is net
+; structure like every other value.  These are the PURE meanings of the float
+; operations: the fold drivers compute the same functions in hardware
+; (std/runtime/i64.h), and test/softfloat.sh holds the two to bit equality.
+;
+; Round to nearest, ties to even.  add/sub/mul follow Berkeley SoftFloat 3's
+; f64 routines (roundPackToF64, normRoundPackToF64, addMags/subMags); div is a
+; bitwise long division and sqrt a digit-by-digit root, both feeding the same
+; rounding.  A NaN result is a NaN, but its PAYLOAD is unspecified, as in IEEE 754 and C:
+; hardware picks between two NaN operands in whatever order the C compiler wrote
+; the instruction, so no pure definition can promise its bits.  This one quiets a
+; NaN operand (the first, if both are NaN); an invalid operation gives 0xFFF8...
+; Every non-NaN result is bit-exact.
+; Every helper works on 64-bit integers, which drivers fold natively.
+; ==============================================================================
+
+(load "num.lin")
+
+(namespace num)
+
+; --- fields and packing ---
+(define _sgn (\x (band (shr x 63) 1)))
+(define _ex  (\x (band (shr x 52) 2047)))
+(define _fr  (\x (band x 4503599627370495)))
+(define _pk  (\s (\e (\m (add (shl s 63) (add (shl e 52) m))))))   ; + not |: a carry out of m bumps e
+(define _ult (\a (\b (lt (bxor a -9223372036854775808) (bxor b -9223372036854775808)))))
+(define _lshr (\a (\k (if (eq k 0) a (band (shr a k) (sub (shl 1 (sub 64 k)) 1))))))
+(define _clz1 (\x (if (lt x 0) 0 (add 1 (_clz1 (shl x 1))))))
+(define _clz (\x (if (eq x 0) 64 (_clz1 x))))
+(define _jam (\a (\d (if (_ult d 63)
+  (bor (_lshr a d) (if (eq (shl a (band (sub 0 d) 63)) 0) 0 1))
+  (if (eq a 0) 0 1)))))
+(define _isnan (\x (bool.and (eq (_ex x) 2047) (bool.not (eq (_fr x) 0)))))
+(define _dnan -2251799813685248)                                  ; 0xFFF8000000000000
+(define _prop (\a (\b (if (_isnan a) (bor a 2251799813685248) (bor b 2251799813685248)))))
+(define _pr (\x (\y (\p ((p x) y)))))                               ; a pair
+(define _p1 (\q (q (\x (\y x)))))
+(define _p2 (\q (q (\x (\y y)))))
+(define _nsub (\m ((\sh (_pr (sub 1 sh) (shl m sh))) (sub (_clz m) 11))))   ; a subnormal: (exponent, significand)
+
+; --- rounding: sig has its hidden bit at 62 and ten rounding bits ---
+(define _rpk2 (\s (\e (\m
+  (let ((rb (band m 1023)) (q (_lshr (add m 512) 10)))
+    (let ((q2 (if (eq rb 512) (band q -2) q)))
+      (_pk s (if (eq q2 0) 0 e) q2)))))))
+(define _rpk (\s (\e (\m
+  (if (lt e 0) (_rpk2 s 0 (_jam m (sub 0 e)))
+    (if (lt e 2045) (_rpk2 s e m)
+      (if (bool.or (lt 2045 e) (bool.not (_ult (add m 512) -9223372036854775808)))
+        (_pk s 2047 0)
+        (_rpk2 s e m))))))))
+(define _nrpk (\s (\e (\m
+  (let ((sd (sub (_clz m) 1)))
+    (let ((e2 (sub e sd)))
+      (if (bool.and (leq 10 sd) (_ult e2 2045))
+        (_pk s (if (eq m 0) 0 e2) (shl m (sub sd 10)))
+        (_rpk s e2 (shl m sd)))))))))
+
+; --- add / sub ---
+(define _addm2 (\s (\e (\sa (\sb
+  (let ((z (add 2305843009213693952 (add sa sb))))
+    (if (_ult z 4611686018427387904) (_rpk s (sub e 1) (shl z 1)) (_rpk s e z))))))))
+(define _addm (\a (\b (\s
+  (let ((ea (_ex a)) (ma (_fr a)) (eb (_ex b)) (mb (_fr b)))
+    (let ((d (sub ea eb)))
+      (if (eq d 0)
+        (if (eq ea 0) (add a mb)
+          (if (eq ea 2047) (if (eq (bor ma mb) 0) a (_prop a b))
+            (_rpk s ea (shl (add 9007199254740992 (add ma mb)) 9))))
+        (let ((sa (shl ma 9)) (sb (shl mb 9)))
+          (if (lt d 0)
+            (if (eq eb 2047) (if (eq mb 0) (_pk s 2047 0) (_prop a b))
+              (_addm2 s eb (_jam (if (eq ea 0) (shl sa 1) (add sa 2305843009213693952)) (sub 0 d)) sb))
+            (if (eq ea 2047) (if (eq ma 0) a (_prop a b))
+              (_addm2 s ea sa (_jam (if (eq eb 0) (shl sb 1) (add sb 2305843009213693952)) d))))))))))))
+(define _subm (\a (\b (\s
+  (let ((ea (_ex a)) (ma (_fr a)) (eb (_ex b)) (mb (_fr b)))
+    (let ((d (sub ea eb)))
+      (if (eq d 0)
+        (if (eq ea 2047) (if (eq (bor ma mb) 0) _dnan (_prop a b))
+          (let ((sd (sub ma mb)))
+            (if (eq sd 0) 0
+              (let ((ea1 (if (eq ea 0) 0 (sub ea 1))) (s1 (if (lt sd 0) (sub 1 s) s)) (sd1 (if (lt sd 0) (sub 0 sd) sd)))
+                (let ((sh (sub (_clz sd1) 11)))
+                  (let ((ez (sub ea1 sh)))
+                    (if (lt ez 0) (_pk s1 0 (shl sd1 ea1)) (_pk s1 ez (shl sd1 sh)))))))))
+        (let ((sa (shl ma 10)) (sb (shl mb 10)))
+          (if (lt d 0)
+            (if (eq eb 2047) (if (eq mb 0) (_pk (sub 1 s) 2047 0) (_prop a b))
+              (_nrpk (sub 1 s) (sub eb 1)
+                (sub (bor sb 4611686018427387904) (_jam (add sa (if (eq ea 0) sa 4611686018427387904)) (sub 0 d)))))
+            (if (eq ea 2047) (if (eq ma 0) a (_prop a b))
+              (_nrpk s (sub ea 1)
+                (sub (bor sa 4611686018427387904) (_jam (add sb (if (eq eb 0) sb 4611686018427387904)) d)))))))))))))
+(define _sfadd (\a (\b (if (eq (_sgn a) (_sgn b)) (_addm a b (_sgn a)) (_subm a b (_sgn a))))))
+(define _sfsub (\a (\b (if (eq (_sgn a) (_sgn b)) (_subm a b (_sgn a)) (_addm a b (_sgn a))))))
+
+; --- mul: a 128-bit product from 32-bit halves ---
+(define _m128 (\a (\b
+  (let ((a1 (_lshr a 32)) (a0 (band a 4294967295)) (b1 (_lshr b 32)) (b0 (band b 4294967295)))
+    (let ((z0 (mul a0 b0)) (m1 (mul a1 b0)))
+      (let ((m (add m1 (mul a0 b1))))
+        (let ((hi (add (mul a1 b1) (bor (shl (if (_ult m m1) 1 0) 32) (_lshr m 32)))) (ms (shl m 32)))
+          (let ((lo (add z0 ms)))
+            (_pr (add hi (if (_ult lo ms) 1 0)) lo)))))))))
+(define _norm (\e (\m (if (eq e 0) (_nsub m) (_pr e m)))))
+(define _sfmul (\a (\b
+  (let ((ea (_ex a)) (ma (_fr a)) (eb (_ex b)) (mb (_fr b)) (s (bxor (_sgn a) (_sgn b))))
+    (if (eq ea 2047)
+      (if (bool.or (bool.not (eq ma 0)) (bool.and (eq eb 2047) (bool.not (eq mb 0)))) (_prop a b)
+        (if (eq (bor eb mb) 0) _dnan (_pk s 2047 0)))
+    (if (eq eb 2047)
+      (if (bool.not (eq mb 0)) (_prop a b) (if (eq (bor ea ma) 0) _dnan (_pk s 2047 0)))
+    (if (eq (bor ea ma) 0) (_pk s 0 0)
+    (if (eq (bor eb mb) 0) (_pk s 0 0)
+      (let ((na (_norm ea ma)) (nb (_norm eb mb)))
+        (let ((ez (sub (add (_p1 na) (_p1 nb)) 1023))
+              (pr (_m128 (shl (bor (_p2 na) 4503599627370496) 10) (shl (bor (_p2 nb) 4503599627370496) 11))))
+          (let ((z (bor (_p1 pr) (if (eq (_p2 pr) 0) 0 1))))
+            (if (_ult z 4611686018427387904) (_rpk s (sub ez 1) (shl z 1)) (_rpk s ez z)))))))))))))
+
+; --- div: 63 quotient bits by restoring division, then the sticky bit ---
+; w = 1 returns the quotient, else the remainder (one integer, so the loop compiles)
+(define _qloop (\r (\d (\q (\k (\w (if (eq k 0) (if (eq w 1) q r)
+  (if (_ult r d) (_qloop (shl r 1) d (shl q 1) (sub k 1) w)
+                 (_qloop (shl (sub r d) 1) d (bor (shl q 1) 1) (sub k 1) w)))))))))
+(define _sfdiv (\a (\b
+  (let ((ea (_ex a)) (ma (_fr a)) (eb (_ex b)) (mb (_fr b)) (s (bxor (_sgn a) (_sgn b))))
+    (if (eq ea 2047)
+      (if (bool.not (eq ma 0)) (_prop a b)
+        (if (eq eb 2047) (if (eq mb 0) _dnan (_prop a b)) (_pk s 2047 0)))
+    (if (eq eb 2047) (if (bool.not (eq mb 0)) (_prop a b) (_pk s 0 0))
+    (if (eq (bor eb mb) 0) (if (eq (bor ea ma) 0) _dnan (_pk s 2047 0))
+    (if (eq (bor ea ma) 0) (_pk s 0 0)
+      (let ((na (_norm ea ma)) (nb (_norm eb mb)))
+        (let ((ez (add (sub (_p1 na) (_p1 nb)) 1022)) (n0 (bor (_p2 na) 4503599627370496)) (d0 (bor (_p2 nb) 4503599627370496)))
+          (let ((small (_ult n0 d0)))
+            (let ((nn (if small (shl n0 1) n0)))
+              (_rpk s (if small (sub ez 1) ez) (bor (_qloop nn d0 0 63 1) (if (eq (_qloop nn d0 0 63 0) 0) 0 1)))))))))))))))
+
+; --- sqrt (of a non-negative): 55 root bits digit by digit over m * 2^56, then the sticky bit ---
+(define _sq (\m (\i (\r (\q (\w
+  (if (lt i 0) (if (eq w 1) q r)
+    (let ((dig (if (lt i 28) 0 (band (shr m (sub (mul 2 i) 56)) 3))))
+      (let ((r2 (bor (shl r 2) dig)) (t (bor (shl q 2) 1)))
+        (if (_ult r2 t) (_sq m (sub i 1) r2 (shl q 1) w)
+                        (_sq m (sub i 1) (sub r2 t) (bor (shl q 1) 1) w)))))))))))
+(define _sfsqrt (\a
+  (let ((e (_ex a)) (ma (_fr a)))
+    (if (eq e 2047) a
+    (if (eq (bor e ma) 0) a
+      (let ((n (_norm e ma)))
+        (let ((ee (sub (_p1 n) 1075)) (m (bor (_p2 n) 4503599627370496)))
+          (let ((odd (eq (band ee 1) 1)))
+            (let ((mm (if odd (shl m 1) m)) (e2 (if odd (sub ee 1) ee)))
+              (_rpk 0 (add 1048 (shr e2 1)) (bor (shl (_sq mm 54 0 0 1) 8) (if (eq (_sq mm 54 0 0 0) 0) 0 1))))))))))))
+
+; --- compare, convert ---
+(define _bothzero (\a (\b (eq (band (bor a b) 9223372036854775807) 0))))
+(define _sfeq (\a (\b (if (bool.or (_isnan a) (_isnan b)) bool.false (bool.or (eq a b) (_bothzero a b))))))
+(define _sflt (\a (\b (if (bool.or (_isnan a) (_isnan b)) bool.false
+  (if (bool.not (eq (_sgn a) (_sgn b))) (bool.and (eq (_sgn a) 1) (bool.not (_bothzero a b)))
+    (bool.and (bool.not (eq a b)) (if (eq (_sgn a) 1) (_ult b a) (_ult a b))))))))
+(define _sfleq (\a (\b (if (bool.or (_isnan a) (_isnan b)) bool.false
+  (if (bool.not (eq (_sgn a) (_sgn b))) (bool.or (eq (_sgn a) 1) (_bothzero a b))
+    (bool.or (eq a b) (if (eq (_sgn a) 1) (_ult b a) (_ult a b))))))))
+; (long)floor(x), with x86's answer (the minimum integer) where C leaves it undefined
+(define _sffloor (\x
+  (let ((e (_ex x)) (s (_sgn x)) (m (_fr x)))
+    (if (bool.or (eq e 2047) (leq 1086 e)) -9223372036854775808
+      (if (lt e 1023) (if (bool.and (eq s 1) (bool.not (eq (bor e m) 0))) -1 0)
+        (let ((mm (bor m 4503599627370496)) (sh (sub e 1075)))
+          (let ((ip (if (lt sh 0) (shr mm (sub 0 sh)) (shl mm sh)))
+                (fz (if (lt sh 0) (bool.not (eq (band mm (sub (shl 1 (sub 0 sh)) 1)) 0)) bool.false)))
+            (if (eq s 1) (sub (sub 0 ip) (if fz 1 0)) ip))))))))
+(define _sfofint (\a (if (eq a 0) 0
+  (if (eq a -9223372036854775808) (_pk 1 1086 0)
+    (if (lt a 0) (_nrpk 1 1084 (sub 0 a)) (_nrpk 0 1084 a))))))
+(define _sfmin (\a (\b (if (_sflt a b) a b))))
+(define _sfmax (\a (\b (if (_sflt b a) a b))))
+(define _sfabs (\x (band x 9223372036854775807)))
+(define _sfsign (\x (if (_sfleq 0 x) 4607182418800017408 -4616189618054758400)))   ; 1.0, -1.0
+(define _sffloord (\x (if (bool.or (eq (band x 9223372036854775807) 0) (leq 1075 (_ex x))) x (_sfofint (_sffloor x)))))
+(define _sffract (\x (_sfsub x (_sffloord x))))
+(define _sfdivz (\a (\b (if (_sfeq b 0) 0 (_sfdiv a b)))))                     ; x / 0.0 = 0.0, as the table
+(define _sfsqrtz (\x (if (_sfleq 0 x) (_sfsqrt x) 0)))                          ; sqrt of a negative or NaN = 0.0
+
+(namespace _)

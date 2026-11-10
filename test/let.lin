@@ -107,3 +107,12 @@
 
 (let ((f (\x (\y (pair x y))))) (pair (f 1 2) (f 3 4)))
 ; expect => (\a ((a (\b ((b 1) 2))) (\b ((b 3) 4))))
+
+; A let-bound name shadows a library definition of the same name in the let's body too
+; (`pair` is std/pair.lin's): the body reads the local value, not the global.
+(define shadow_pair (\x (let ((pair (add x 1))) (mul pair 2))))
+(shadow_pair 5)
+; expect => 12
+(define shadow_two (\x (let ((pair (add x 1)) (q 3)) (mul pair q))))
+(shadow_two 5)
+; expect => 18

@@ -1,0 +1,52 @@
+; ==============================================================================
+; Lin Standard Library: Seq -- a list as a DATATYPE
+; ==============================================================================
+; `list.lin`'s lists share the cell encoding strings and numerals use, and a
+; recursive function over them is not typable (its scrutinee's type would mention
+; itself).  A Seq is a declared datatype instead: `match` types it, its
+; constructors state which they are in the net, and so the function compiler
+; reads a Seq function as C (std/drivers/fn.c) -- a match a switch, a
+; constructor a block, and a cell nothing else holds rebuilt in place.
+;
+; Everything here is ordinary Lin: no driver is needed to run it, only to run it
+; fast.  `seq_of_list` / `seq_to_list` convert to and from the cell encoding.
+; ==============================================================================
+
+(load "bool.lin")
+(load "num.lin")
+(load "list.lin")
+
+(namespace seq)
+
+(datatype (Seq a) (snil) (scons (h a) (t Seq a)))
+
+(define sempty (\s (match s (snil true) ((scons h t) false))))
+(define shead (\d (\s (match s (snil d) ((scons h t) h)))))
+(define stail (\s (match s (snil snil) ((scons h t) t))))
+
+; integers lo..hi-1
+(define srange (\lo (\hi (if (lt lo hi) (scons lo (srange (add lo 1) hi)) snil))))
+(define slength_acc (\s (\n (match s (snil n) ((scons h t) (slength_acc t (add n 1)))))))
+(define slength (\s (slength_acc s 0)))
+(define ssum_acc (\s (\n (match s (snil n) ((scons h t) (ssum_acc t (add n h)))))))
+(define ssum (\s (ssum_acc s 0)))
+(define snth (\i (\d (\s (match s (snil d) ((scons h t) (if (eq i 0) h (snth (sub i 1) d t))))))))
+
+(define smap (\f (\s (match s (snil snil) ((scons h t) (scons (f h) (smap f t)))))))
+(define sfilter (\p (\s (match s (snil snil) ((scons h t) (if (p h) (scons h (sfilter p t)) (sfilter p t)))))))
+(define sfoldl (\f (\z (\s (match s (snil z) ((scons h t) (sfoldl f (f z h) t)))))))
+(define sfoldr (\f (\z (\s (match s (snil z) ((scons h t) (f h (sfoldr f z t))))))))
+(define sany (\p (\s (match s (snil false) ((scons h t) (if (p h) true (sany p t)))))))
+(define sall (\p (\s (match s (snil true) ((scons h t) (if (p h) (sall p t) false))))))
+
+(define sappend (\a (\b (match a (snil b) ((scons h t) (scons h (sappend t b)))))))
+(define srev_acc (\s (\acc (match s (snil acc) ((scons h t) (srev_acc t (scons h acc)))))))
+(define sreverse (\s (srev_acc s snil)))
+(define stake (\k (\s (if (eq k 0) snil (match s (snil snil) ((scons h t) (scons h (stake (sub k 1) t))))))))
+(define sdrop (\k (\s (if (eq k 0) s (match s (snil snil) ((scons h t) (sdrop (sub k 1) t)))))))
+
+(define seq_of_list (\l (bool.if (list.is_empty l) snil (scons (list.head l) (seq_of_list (list.tail l))))))
+(define seq_to_list (\s (match s (snil list.nil) ((scons h t) (list.cons h (seq_to_list t))))))
+
+(namespace _)
+(export seq)

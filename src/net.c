@@ -127,7 +127,9 @@ Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s) {
 
 /* Install a level trie: level 0 is the root, levels 1..nlv come in id order (parents precede
    children), so depths follow from parents.  nlv == 0 is a valid net. */
+static void lvl_prefix_forget(const Net *n);
 void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit) {
+  lvl_prefix_forget(n);
   lv_ensure(n, nlv + 1);
   n->nlv = nlv;
   n->lv_parent[0] = 0; n->lv_bit[0] = 0; n->lv_depth[0] = 0;
@@ -141,6 +143,7 @@ void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit)
 int net_level_count(const Net *n) { return n->nlv; }
 
 void net_init(Net *n, int cap) {
+  lvl_prefix_forget(n);
   n->cap = cap; n->tag = malloc(cap); n->wire = malloc(cap * 3 * sizeof(Port));
   n->scope = malloc(cap * sizeof(Scope));
   n->act = NULL; n->atop = 0; n->actcap = 0; n->dead = calloc(cap, 1);
@@ -155,10 +158,13 @@ void net_init(Net *n, int cap) {
   n->vport = calloc((size_t)cap, 1);
   memset(n->drv, 0, sizeof n->drv);
   n->nheld = 0;
+  n->era = NULL; n->era_top = n->era_cap = 0;
+  n->pend = NULL; n->pend_top = n->pend_cap = 0;
   net_alloc(n, ROOT, scope_nil());
 }
 
 void net_free(Net *n) {
+  lvl_prefix_forget(n);
   for (int i = 0; i < n->nheld; i++) {
     LinDriver *d = n->held_drv[i];
     if (d && DRV_HAS(d, release_claim) && d->release_claim)
@@ -171,7 +177,7 @@ void net_free(Net *n) {
   memset(n->drv, 0, sizeof n->drv);
   free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->dem); free(n->vport); free(n->act_of); free(n->dem_out);
   free(n->lv_parent); free(n->lv_depth); free(n->lv_bit); free(n->lv_hash);
-  free(n->root);
+  free(n->root); free(n->era); free(n->pend);
 }
 
 void lin_demand(Net *n, Port p) {
@@ -238,7 +244,10 @@ Port net_alloc(Net *n, int tag, Scope sc) {
   return (Port){id, 0};
 }
 
+static void era_note(Net *n, int e);
 static void act_push(Net *n, Port a, Port b) {
+  if (n->tag[a.node] == ERA) { era_note(n, a.node); return; }   /* an eraser is never a queued redex: it acts eagerly */
+  if (n->tag[b.node] == ERA) { era_note(n, b.node); return; }
   if (n->act_of[a.node] >= 0 || n->act_of[b.node] >= 0) return;   /* a principal faces ONE other: this pair is already queued; a second entry would outlive its act_of slot and name a recycled node */
   if (n->atop + 2 > n->actcap)
     n->act = realloc(n->act, (size_t)(n->actcap = n->actcap ? n->actcap * 2 : 256) * sizeof(Port));
@@ -266,6 +275,8 @@ void lin_fold_bump(void) { __atomic_add_fetch(&fold_count, 1, __ATOMIC_RELAXED);
 long lin_fold_total(void) { return fold_count; }
 
 typedef struct { Port *p; int top, cap; } ActBuf;
+typedef struct { int *v; int top, cap; } IntBuf;
+static IntBuf *t_fr, *t_er;            /* per-worker freed nodes / noted erasers, merged after a wave */
 static __thread int my_tid;   /* 0 = a caller thread, i = pool worker i (the pool is not OpenMP) */
 static ActBuf *t_act;
 static int n_tact;
@@ -276,160 +287,171 @@ static int wave_threads(void) {
 #ifdef _OPENMP
   return omp_get_max_threads();
 #else
-  extern int lin_threads; const char *e = getenv("OMP_NUM_THREADS");
-  return lin_threads > 0 ? lin_threads : (e ? atoi(e) : 1);
+  /* Latched: this is asked twice per WAVE, and getenv scans the whole environment -- measured 29% of a
+     recursive fib's instructions.  -t sets lin_threads before the first reduction. */
+  extern int lin_threads; static int env_w = -1;
+  if (env_w < 0) { const char *e = getenv("OMP_NUM_THREADS"); env_w = e ? atoi(e) : 1; }
+  return lin_threads > 0 ? lin_threads : env_w;
 #endif
 }
 static void ensure_tact(void) {
   int m = wave_threads();
   if (m > n_tact) {
     t_act = realloc(t_act, (size_t)m * sizeof(ActBuf));
-    for (int i = n_tact; i < m; i++) t_act[i] = (ActBuf){0};
+    t_fr = realloc(t_fr, (size_t)m * sizeof(IntBuf)); t_er = realloc(t_er, (size_t)m * sizeof(IntBuf));
+    for (int i = n_tact; i < m; i++) { t_act[i] = (ActBuf){0}; t_fr[i] = t_er[i] = (IntBuf){0}; }
     n_tact = m;
   }
 }
-/* Cut the wire at `p`, at BOTH ends.  The calculus never needs this -- a rule relinks what it takes
-   over -- but DISPOSING of a subgraph does, or a live node points into one that no longer exists.
-   Cutting is also what erases: the subgraph becomes unreachable, and so reclaimable.  What
-   `pair_boundary` uses for a class whose other end was never wired, and a driver for a fold's
-   replaced subgraph.  Deliberately not a "free": it removes connections and nothing else. */
 void lin_pin(Net *n) { n->pins++; }
 void lin_unpin(Net *n) { if (n->pins > 0) n->pins--; }
 
-/* How many of `v`'s ports lead to a LIVE node.  A node whose connections all lead into freed nodes
-   is as unreachable as one with no wires at all, so the count has to look through to the target. */
-static int deg_live(const Net *n, int v) {
-  int d = 0;
-  for (int p = 0; p < 3; p++) {
-    Port w = n->wire[v * 3 + p];
-    if (w.node >= 0 && w.node < n->nn && !n->dead[w.node]) d++;
-  }
-  return d;
+/* ---------------- reclamation: the rules free what they consume ----------------
+   There is no collector.  A node leaves the net in exactly two ways: an interaction consumes it (its
+   pair is retired), or an ERASER reaches it.  Both are local and both are the calculus's own rules, so
+   memory is managed by reduction itself -- no tracing, no reachability, no pause.
+
+   A freed slot is not reusable at once: an index a wave's snapshot, a driver slice or a readback cursor
+   still names would otherwise be revived as a different node.  Freed slots therefore wait on a PENDING
+   list, published to the free list only at the safepoint (net_flush_free). */
+static void ib_push(IntBuf *b, int v) {
+  if (b->top >= b->cap) b->v = realloc(b->v, (size_t)(b->cap = b->cap ? b->cap * 2 : 256) * sizeof(int));
+  b->v[b->top++] = v;
 }
 
-/* Free `v`, and everything that loses its LAST live connection because of it -- which is the whole of
-   "reclamation is inherent to the node architecture": a node is garbage exactly when nothing live
-   reaches it, and cutting a wire is the only way that happens, so the cascade is local and needs no
-   traversal of the net.  An explicit worklist, because a subgraph can be arbitrarily deep and this
-   runs inside a rule. */
-/* Is `v` ours to free?  A node that a LIVE node is still wired TO is not: its ports are somebody
-   else's structure.  This is the ownership test that was missing, and its absence is what made an
-   unconditional free destroy live structure -- a closure reached through a fan is still tagged LAM,
-   so no test on the node's own tag can see the sharing.  A one-sided wire (a partner that no longer
-   points back) does not make us owned: that is a partner the rules have already relinked away. */
-static int unowned(const Net *n, int v) {
-  for (int p = 0; p < 3; p++) {
-    Port w = n->wire[v * 3 + p];
-    if (w.node < 0 || w.node >= n->nn) continue;
-    if (n->dead[w.node]) continue;                       /* a dying partner does not own us */
-    if (n->wire[w.node * 3 + w.port].node == v && n->wire[w.node * 3 + w.port].port == p) return 0;
-  }
-  return 1;
+/* Put `v` on the pending list.  Serial only.  `dead == 2` means "already on a list". */
+static void node_free(Net *n, int v) {
+  if (v <= 0 || v >= n->nn || n->dead[v] == 2) return;
+  act_drop(n, v);
+  if (n->nroot) { int w = 0; for (int i = 0; i < n->nroot; i++) if (n->root[i].node != v) n->root[w++] = n->root[i]; n->nroot = w; }
+  n->dead[v] = 2;
+  if (n->pend_top >= n->pend_cap) n->pend = realloc(n->pend, (size_t)(n->pend_cap = n->pend_cap ? n->pend_cap * 2 : 256) * sizeof(int));
+  n->pend[n->pend_top++] = v; n->nfree++;
 }
 
-/* The work itself.  `v` is already marked dead by the caller, which is how a pair that owns each
-   other is freed together (marking dead first is also what makes one's death invisible to the
-   other's ownership test). */
-static void release_now(Net *n, int v) {
-  int cap = 32, sp = 0, *st = malloc((size_t)cap * sizeof(int));
-  if (!st) return;
-  st[sp++] = v;
-  while (sp > 0) {
-    int u = st[--sp];
-    for (int p = 0; p < 3; p++) {
-      Port w = WIRE(n, ((Port){u, p}));
-      WIRE(n, ((Port){u, p})) = NONE;
-      if (w.node < 0 || w.node >= n->nn) continue;
-      /* Only clear the partner's wire if it still points back at u.  After a rule has relinked a
-         partner, it points somewhere else and that connection is LIVE -- cutting it here would be
-         the same mistake, from the other side, that abandoning a subgraph makes. */
-      if (WIRE(n, w).node == u && WIRE(n, w).port == p) WIRE(n, w) = NONE;
-      /* A partner that has lost its LAST live connection is garbage and goes too.  No ownership test
-         is needed here: with no live connections nothing live can be wired to it either. */
-      if (!n->dead[w.node] && deg_live(n, w.node) == 0) {
-        n->dead[w.node] = 1;
-        if (sp == cap) { cap *= 2; st = realloc(st, (size_t)cap * sizeof(int)); }
-        st[sp++] = w.node;
+/* An eraser's principal was wired: note it, so it acts whether or not anything demands it. */
+static void era_note(Net *n, int e) {
+  if (in_parallel) { ib_push(&t_er[my_tid], e); return; }
+  if (n->era_top >= n->era_cap) n->era = realloc(n->era, (size_t)(n->era_cap = n->era_cap ? n->era_cap * 2 : 256) * sizeof(int));
+  n->era[n->era_top++] = e;
+}
+
+static inline int mutual(const Net *n, Port q, Port from) {
+  if (q.node < 0 || q.node >= n->nn || n->dead[q.node]) return 0;
+  Port b = WIRE(n, q); return b.node == from.node && b.port == from.port;
+}
+/* `q` was wired to `from`, which is going away: give `q` an eraser (or reuse node `reuse` as it). */
+static void era_attach(Net *n, Port q, Port from, int reuse) {
+  if (!mutual(n, q, from)) { if (reuse > 0) node_free(n, reuse); return; }
+  int e;
+  if (reuse > 0) { e = reuse; act_drop(n, e); n->tag[e] = ERA; n->dead[e] = 0;
+                   n->wire[e * 3 + 1] = n->wire[e * 3 + 2] = NONE; }
+  else e = net_alloc(n, ERA, scope_nil()).node;
+  net_link(n, (Port){e, 0}, q, 1);
+}
+
+/* THE ERASURE RULES (no new node kinds -- ERA is one of the calculus's own):
+     ERA x ERA                  both vanish
+     ERA x LAM|APP|DUP (port 0) the node is consumed; its two other ports each get an eraser
+     ERA at an APP result port  the application is discarded: its function and argument are erased
+   An eraser at a LAM's binder is an unused variable and simply stays.  Erasers at BOTH of a DUP's copy
+   ports erase its input.  An eraser at ONE copy port WAITS: the fan erases that copy when it next interacts (its copy lands on the eraser).  Collapsing
+   the fan to a wire on the spot -- the classic "garbage fan" rule -- is NOT sound in this gauge calculus:
+   a fan's partner is found by its label, and removing one fan of a pair let the other meet the wrong one
+   (measured: `fib 2` read 2, `fib 3` never terminated, and either rule alone was fine).  Every rule removes one non-ERA
+   node or two erasers, so erasure terminates on any net, cyclic ones included. */
+static void era_drain(Net *n) {
+  /* The same safepoint as slot reuse: a nested reduce runs under a wave or a readback that holds ports,
+     and readers follow a consumed node's wires one hop -- erasing there rewires nodes they are walking. */
+  if (in_parallel || reduce_depth > 1 || n->pins) return;
+  while (n->era_top > 0) {
+    int e = n->era[--n->era_top];
+    if (e <= 0 || e >= n->nn || n->dead[e] || n->tag[e] != ERA) continue;
+    Port w = WIRE(n, ((Port){e, 0}));
+    if (w.node < 0) continue;                           /* an eraser on nothing yet: wait to be wired */
+    if (!mutual(n, w, (Port){e, 0})) {
+      if (w.node >= n->nn || n->dead[w.node]) { n->dead[e] = 1; node_free(n, e); }
+      continue;
+    }
+    int x = w.node, t = n->tag[x];
+    if (w.port == 0) {
+      if (t == ROOT) continue;
+      if (t == ERA) { n->dead[e] = n->dead[x] = 1; node_free(n, e); node_free(n, x); continue; }
+      Port q1 = WIRE(n, ((Port){x, 1})), q2 = WIRE(n, ((Port){x, 2}));
+      n->dead[x] = n->dead[e] = 1;
+      era_attach(n, q1, (Port){x, 1}, x);
+      era_attach(n, q2, (Port){x, 2}, e);
+    } else if (t == APP && w.port == 1) {
+      Port f = WIRE(n, ((Port){x, 0})), a = WIRE(n, ((Port){x, 2}));
+      n->dead[x] = n->dead[e] = 1;
+      era_attach(n, f, (Port){x, 0}, x);
+      era_attach(n, a, (Port){x, 2}, e);
+    } else if (t == DUP) {
+      /* BOTH copies erased: nobody needs what the fan copies, so its input is erased instead -- the
+         outcome of the fan meeting an eraser at its principal, reached from the other side.  (One copy
+         erased still WAITS: see the rules above.) */
+      Port o = WIRE(n, ((Port){x, 3 - w.port}));
+      if (o.node > 0 && o.node < n->nn && !n->dead[o.node] && n->tag[o.node] == ERA && o.port == 0 &&
+          mutual(n, o, (Port){x, 3 - w.port})) {
+        Port in = WIRE(n, ((Port){x, 0}));
+        n->dead[x] = n->dead[e] = n->dead[o.node] = 1;
+        node_free(n, o.node); node_free(n, e);
+        era_attach(n, in, (Port){x, 0}, x);
       }
     }
-    n->tag[u] = ERA;
-    n->wire[u * 3] = (Port){n->pend_head, 0};      /* held until the wave's snapshot is gone */
-    n->pend_head = u;
-    n->nfree++;
   }
-  free(st);
-}
-
-/* Publish this wave's freed slots: only here does an index become reusable, which is what makes it safe
-   for a snapshot, a slice or a readback cursor to hold one across the wave that freed it. */
-static void net_flush_free(Net *n) {
-  /* A NESTED reduce must not publish.  Reuse is what makes an index dangerous: a wave snapshot, a
-     driver slice or an active-list entry that merely names a FREED slot is rejected by redex_live,
-     but one that names a slot since handed to a fresh node passes it, and the stale holder then
-     fires a rule on a node it never saw.  Publication belongs to the outermost boundary, where no
-     holder of this wave's indices is left. */
-  if (reduce_depth > 1) return;
-  while (n->pend_head >= 0) {
-    int v = n->pend_head;
-    n->pend_head = n->wire[v * 3].node;
-    n->wire[v * 3] = (Port){n->free_head, 0};
-    n->free_head = v;
-  }
-}
-
-/* Free a node the caller OWNS.  Declines when something live is still wired to it, because then it
-   is not garbage, however dead it looks from the caller's side. */
-static void net_release(Net *n, int v) {
-  if (v < 0 || v >= n->nn || n->dead[v]) return;
-  if (!unowned(n, v)) return;
-  if (in_parallel || n->pins) return;   /* the SAFEPOINT: a readback walk is holding ports */
-  n->dead[v] = 1; act_drop(n, v);
-  release_now(n, v);
 }
 
 void net_sever(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn) return;
   Port w = WIRE(n, p);
   WIRE(n, p) = NONE;
-  if (w.node >= 0 && w.node < n->nn && WIRE(n, w).node == p.node && WIRE(n, w).port == p.port)
+  if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && WIRE(n, w).node == p.node && WIRE(n, w).port == p.port) {
     WIRE(n, w) = NONE;
-  /* Cutting a wire can be the event that makes a node garbage.  Reaping only when the degree has
-     reached ZERO is what keeps a shared node alive: it still has its other users. */
-  if (deg_live(n, p.node) == 0) net_release(n, p.node);
-  if (w.node >= 0 && w.node < n->nn && deg_live(n, w.node) == 0) net_release(n, w.node);
+    int e = net_alloc(n, ERA, scope_nil()).node;
+    net_link(n, (Port){e, 0}, w, 1);
+  }
 }
 
-/* Reclamation has ONE safepoint: `reduce_depth == 1` (the outermost reduce, so no readback force is in progress) and
-`pins == 0` (no walk is holding a port).  Both halves are load-bearing and were measured: without the depth test a nested
-reduce entered from a driver's reducer publishes slots the wave it is dispatched from still names, and without the pins
-test test/ffi.lin prints its closure unreduced.  REUSE turns a stale index into a wrong node -- redex_live rejects a dead
-slot but accepts the fresh node that replaced it. */
+/* Erasure follows the FLOW of values.  Every wire carries a value from a producer's OUTPUT port to a
+   consumer's INPUT port: LAM outputs its value (0) and its argument at the binder (1) and consumes its body
+   (2); APP consumes its function (0) and argument (2) and outputs its result (1).  An eraser is a consumer
+   that discards, so it may only ever sit on an OUTPUT; dropping a node erases the producers of its INPUTS
+   and merely cuts its outputs (their consumers are live, and in a sharing graph may lie outside anything
+   being discarded).  A fan's direction is not local, so a dropped fan erases nothing. */
+static int is_input(int tag, int port) { return (tag == LAM && port == 2) || (tag == APP && port != 1); }
+void net_drop(Net *n, int v) {
+  if (v <= 0 || v >= n->nn || n->dead[v] == 2 || n->tag[v] == ROOT) return;
+  n->dead[v] = 1;
+  for (int p = 0; p < 3; p++) if (is_input(n->tag[v], p)) era_attach(n, WIRE(n, ((Port){v, p})), (Port){v, p}, 0);
+  node_free(n, v);
+}
 
-/* Retire the two nodes a rule consumed: the rule owns exactly this pair, so they are freed together.  Both are marked dead
-   first, because their principals are wired to each other and the ownership test would otherwise find a live partner and
-   decline.  Reaping is sound here because every class pair_boundary sees is accounted for: a class needs s-1 edges to be
-   connected, has at most `i` internal wires plus 2 correspondence edges and s-2i-u outside ends, so `ne >= 4` would need more
-   correspondence edges than beta or delta-delta have: ne is 0, 1 or 2 (joined). */
-/* Env switches a hot path must not re-read: fixed for the process (the core never changes its own env) and `getenv` scans all of it -- per reducer entry it measured 1.07-1.46x of a run.  Latch idiom as lin_wstats. */
-static long gcenv = -2; static int noret = -1;
+/* Publish the pending slots.  Only at the outermost, unpinned boundary: a nested reduce runs inside a
+   wave whose snapshot still names this wave's indices, and a pinned readback walk holds ports. */
+static void net_flush_free(Net *n) {
+  if (reduce_depth > 1 || n->pins) return;
+  while (n->pend_top > 0) {
+    int v = n->pend[--n->pend_top];
+    n->tag[v] = ERA;
+    n->wire[v * 3 + 1] = n->wire[v * 3 + 2] = NONE;
+    n->wire[v * 3] = (Port){n->free_head, 0};
+    n->free_head = v;
+  }
+}
+
+/* Retire the two nodes a rule consumed.  Both are marked dead together (neither owns the other). */
 static void retire(Net *n, int a, int b) {
-  n->dead[a] = 1; n->dead[b] = 1; act_drop(n, a); act_drop(n, b);      /* both ends of the pair go together, so neither owns the other */
-  /* A demand root is a permanent claim, so it goes with its node -- here, where the node dies.  net_gc's sweep is a
-     whole collection too late: in between, the slot is handed out again and the root demands a node it never named. */
-  if (n->nroot) { int w = 0; for (int i = 0; i < n->nroot; i++) { int r = n->root[i].node; if (r != a && r != b) n->root[w++] = n->root[i]; } n->nroot = w; }
-  /* A NESTED reduce is entered from net_force, which READBACK calls while it holds ports of its own (its cursor, its stack,
-   the port it is about to inspect), so reaping there is the free-list twin of collecting at a non-safepoint: the slot is
-   handed out while a handle still names it.  The readback walk is the same case from the other side -- net_print pins the
-   walk and the reduce it enters is the OUTERMOST one (depth == 1), which `pins` catches and the depth test does not
-   (measured: with this guard removed, test/ffi.lin prints its closure unreduced). */
-  if (noret < 0) noret = getenv("LIN_NORETIRE") != NULL;
-  if (reduce_depth > 1 || n->pins || in_parallel || noret) return;
-  release_now(n, a); release_now(n, b);
+  n->dead[a] = 1; n->dead[b] = 1;
+  if (in_parallel) { ib_push(&t_fr[my_tid], a); ib_push(&t_fr[my_tid], b); return; }
+  node_free(n, a); node_free(n, b);
 }
 
 void net_link(Net *n, Port a, Port b, int enqueue) {
   if (a.node < 0 || b.node < 0) return;
   WIRE(n, a) = b; WIRE(n, b) = a;
+  if (a.port == 0 && n->tag[a.node] == ERA) { era_note(n, a.node); return; }
+  if (b.port == 0 && n->tag[b.node] == ERA) { era_note(n, b.node); return; }
   if (enqueue && a.port == 0 && b.port == 0 && n->tag[a.node] != ROOT && n->tag[b.node] != ROOT) {
     if (in_parallel) {
       int tid = my_tid;
@@ -523,20 +545,37 @@ static void link_copies(Net *n, int n1, int n2, const Port *t, const int *cp) {
 }
 
 /* The reference's commutation labels: path = [gen] ++ path(node) ++ path(dup), i.e. `1 : sLam ++ sDup`. */
-static int lvl_path(Net *n, Scope s, unsigned char *out) {
-  int d = lv_depth(n, s), l = (int)s;
-  for (int i = d - 1; i >= 0; i--) { out[i] = n->lv_bit[l]; l = n->lv_parent[l]; }
-  return d;
-}
 /* A commutation's copies are labelled INSIDE THE FAN: `[gen] ++ path(dup)`.  Concatenating the node's
    path too makes a level's depth the SUM of its parents' -- doubling per generation: measured path
    length 385 and 21.5 M `lv_intern` calls (72 % of a 20-step recursive countdown).  The generation bit
    still separates the two copies and the node's path adds nothing for well-nesting (see above). */
+/* [gen] ++ path(b) depends on (gen, b) only, and it is built one step from its parent's:
+   f(gen, 0) = intern(0, gen), f(gen, b) = intern(f(gen, up(b)), bit(b)).  Remembered per level (ids are
+   append-only within a net), so a commutation costs one lookup instead of re-interning the whole path. */
+static const Net *pf_net; static int *pf_memo[2], pf_cap, pf_nlv;
+static void lvl_prefix_forget(const Net *n) { if (pf_net == n) pf_net = NULL; }   /* its trie is being replaced */
+static int lvl_prefix_rec(Net *n, int gen, int b) {
+  if (!b) return lv_intern(n, 0, gen);
+  int *m = pf_memo[gen - 1];
+  if (b < pf_cap && m[b]) return m[b];
+  int r = lv_intern(n, lvl_prefix_rec(n, gen, lv_up(n, b)), n->lv_bit[b]);
+  if (b < pf_cap) m[b] = r;
+  return r;
+}
 static int lvl_prefix2(Net *n, int gen, Scope a, Scope b) {
-  unsigned char *pb = malloc((size_t)lv_depth(n, b) + 1); int db = lv_depth(n, b), cur = lv_intern(n, 0, gen);
-  (void)a; if (!pb) return (int)b;                    /* no room: keep the gauge rather than alias one */
-  lvl_path(n, b, pb); for (int i = 0; i < db; i++) cur = lv_intern(n, cur, pb[i]);
-  free(pb); return cur;
+  (void)a;
+  if (pf_net != n || n->nlv < pf_nlv) {               /* another net, or a trie that was replaced */
+    for (int g = 0; g < 2; g++) if (pf_memo[g]) memset(pf_memo[g], 0, (size_t)pf_cap * sizeof(int));
+    pf_net = n;
+  }
+  pf_nlv = n->nlv;
+  if (pf_cap <= n->nlv) {
+    int c = n->nlv * 2 + 256;
+    for (int g = 0; g < 2; g++) { pf_memo[g] = realloc(pf_memo[g], (size_t)c * sizeof(int));
+                                  memset(pf_memo[g] + pf_cap, 0, (size_t)(c - pf_cap) * sizeof(int)); }
+    pf_cap = c;
+  }
+  return lvl_prefix_rec(n, gen, (int)b);
 }
 /* the four rules of the scope-gauge calculus; ERA is inert (era pairs are dropped) */
 static int lin_trace = -1; static long dump_at = -2; static const char *dump_path;   /* LIN_TRACE; LIN_DUMP_AT_STEP x LIN_DUMP_NET dumps mid-reduction */
@@ -593,51 +632,6 @@ int net_interact(Net *n, Port p1, Port p2) {
     return 1;
   }
   return 0; /* era or stuck gauge pair: dropped, as in the reference */
-}
-
-/* Reclaim every node not reachable from an OBSERVABLE root, WITHOUT MOVING ANYTHING: reachability starts
-   from ALL anchors (a wave's queued pairs are live work), unreachable nodes go on a free list reused by
-   net_alloc, so an index stays valid and a handle stays safe.  SAFEPOINT: reclaiming only when
-   reduce_depth == 1 and nothing is pinned keeps "no handle is held" true by construction. */
-void net_gc(Net *n) {
-  if (n->nn <= 1) return;
-  unsigned char *reach = calloc((size_t)n->nn + 1, 1);
-  int *q = malloc(((size_t)n->nn + 1) * sizeof(int));
-  int qh = 0, qt = 0;
-  #define SEED(v) do { int _v = (v); if (_v >= 0 && _v < n->nn && !n->dead[_v] && !reach[_v]) { reach[_v] = 1; q[qt++] = _v; } } while (0)
-  SEED(0);
-  for (int i = 0; i < n->nroot; i++) SEED(n->root[i].node);
-  for (int i = 0; i + 1 < n->atop; i += 2) { SEED(n->act[i].node); SEED(n->act[i + 1].node); }
-  #undef SEED
-  while (qh < qt) { int u = q[qh++];
-    for (int p = 0; p < 3; p++) { Port w = n->wire[u * 3 + p];
-      if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && !reach[w.node]) { reach[w.node] = 1; q[qt++] = w.node; } } }
-  /* Anchors whose node the reduction consumed name nothing now; drop them rather than keep a
-     reference to a slot that is about to be reusable. */
-  int w = 0;
-  for (int i = 0; i < n->nroot; i++)
-    if (!n->dead[n->root[i].node]) n->root[w++] = n->root[i];
-  n->nroot = w;
-  w = 0;
-  for (int i = 0; i + 1 < n->atop; i += 2)
-    if (!n->dead[n->act[i].node] && !n->dead[n->act[i + 1].node]) {
-      n->act[w++] = n->act[i]; n->act[w++] = n->act[i + 1];
-    }
-  n->atop = w;
-  memset(n->act_of, 0xff, (size_t)n->cap * sizeof(int));
-  for (int i = 0; i + 1 < n->atop; i += 2) n->act_of[n->act[i].node] = n->act_of[n->act[i+1].node] = i;
-  long freed = 0;
-  for (int v = 1; v < n->nn; v++) {
-    if (n->dead[v] || reach[v]) continue;
-    n->dead[v] = 1;
-    n->tag[v] = ERA;
-    for (int p = 0; p < 3; p++) n->wire[v * 3 + p] = NONE;
-    n->wire[v * 3] = (Port){n->free_head, 0};      /* the free list threads through port 0 */
-    n->free_head = v;
-    freed++;
-  }
-  n->nfree += (int)freed;
-  free(reach); free(q);
 }
 
 typedef struct { Port p1, p2; } Pair;
@@ -954,15 +948,36 @@ static void dem_put(Net *n, int v) {
   n->dem_out[n->dem_cnt++] = n->act[i]; n->dem_out[n->dem_cnt++] = n->act[i+1]; act_drop(n, v);
 }
 
+/* THE RESUMABLE WALK.  Under needed order a wave usually fires ONE pair, at the tip of the spine, and a rule
+   rewrites only that pair and the wires of its neighbours -- so everything the walk crossed above the tip is
+   unchanged, and walking it again from the root every wave made each step cost the spine's depth (measured:
+   55% of a recursive fib).  The walk remembers the last arrival above the redex; the next wave resumes there,
+   with the same stamp, so the marks above stay valid.  Only when the previous wave was exactly that: one base
+   pair, no driver claim/slice, no nested reduce, ROOT the only demand root (`res_net` is cleared otherwise). */
+static const Net *res_net; static Port res_at;
+/* A FORCE WALKS ITS OWN ROOT.  net_force(p) exists to bring p to a value, and forces nest -- a fold reading
+   an operand forces it, that reduction meets another fold, which forces again -- so a walk from EVERY root on
+   every wave re-walked each enclosing force's spine for nothing (measured: 20 roots deep on a binary tree, 59M
+   of 63M walk steps, 200 per interaction fired).  Inside a force only its root is walked: everything fired is
+   still needed (it is needed by p, which is needed), and what the enclosing demands want waits until the
+   force returns -- which is when they would see it anyway.  -1: the top-level reduction, ROOT and all roots. */
+static const Net *floor_net; static int walk_floor = -1;
 static void net_mark_demand(Net *n) {
-  unsigned int stamp = ++n->dem_stamp; n->dem_cnt = 0;
-  if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; }
+  int first = (floor_net == n && walk_floor >= 0 && walk_floor < n->nroot) ? walk_floor : -1;
+  int resume = res_net == n && n->nroot == first + 1 && NAT_IN(n, res_at.node) && !n->dead[res_at.node];
+  res_net = NULL;
+  unsigned int stamp;
+  if (resume) { stamp = n->dem_stamp; n->vport[res_at.node] &= (unsigned char)~(1u << res_at.port); }
+  else { stamp = ++n->dem_stamp; if (!stamp) { for (int i = 0; i < n->cap; i++) n->dem[i] = 0; stamp = n->dem_stamp = 1; } }
+  n->dem_cnt = 0;
   /* One walk per root, ROOT first: the walk below never pushes, so the seeds need no stack. */
-  for (int r = -1; r < n->nroot; r++) {
-    Port p = r < 0 ? (Port){0, 0} : n->root[r];
+  for (int r = first; r < n->nroot; r++) {
+    Port p = r == first && resume ? res_at : r < 0 ? (Port){0, 0} : n->root[r];
+    Port arr[3] = {NONE, NONE, NONE};   /* the last arrivals: the resume point is the newest outside the redex */
     for (;;) {
       int u = p.node;
       if (u < 0 || u >= n->nn || n->dead[u]) break;
+      if (r == first) { arr[2] = arr[1]; arr[1] = arr[0]; arr[0] = p; }
       /* Visited PER PORT, not per node: an APP reached at its result and at its argument continues
          differently, so a node-level mark would cut the second path off and leave the redexes it
          leads to permanently un-demanded (measured: a Y-knot that stops reducing at depth 4). */
@@ -984,6 +999,10 @@ static void net_mark_demand(Net *n) {
         if ((t == LAM && (qt == APP || qt == DUP)) || (t != LAM && (qt == LAM || qt == DUP))) {
           if (n->dem[q.node] != stamp) { n->vport[q.node] = 0; if (n->act_of[q.node] >= 0) dem_put(n, q.node); }
           n->dem[q.node] = stamp;
+          if (r == first) {                                /* the walk's tip: remember where to resume */
+            Port a = arr[1].node == q.node ? arr[2] : arr[1];
+            if (a.node > 0 && a.node != u && a.node != q.node) { res_net = n; res_at = a; }
+          }
         }
       }
       break;
@@ -1007,11 +1026,43 @@ static int port_whnf(Net *n, Port p) {
            (n->tag[q.node] == APP || n->tag[q.node] == DUP));
 }
 
+/* Would the demand walk from p reach a redex?  The walk's own rules (net_mark_demand), followed without marking:
+   a force whose port reaches none has nothing to do, and skipping the reducer's whole wave machinery for it is
+   what makes reading a value cheap (readers force every layer they read). */
+static int walk_reaches_redex(Net *n, Port p) {
+  for (int i = 0; i < n->nn; i++) {
+    int u = p.node;
+    if (u < 0 || u >= n->nn || n->dead[u]) return 0;
+    int t = n->tag[u];
+    if (t == ROOT) { p = WIRE(n, p); continue; }
+    if (t == ERA) return 1;                          /* (the walk marks it, and a queued pair of marked ends fires) */
+    if (t == LAM && p.port != 0) return 0;
+    if ((t == APP || t == DUP) && p.port != 0) { p = WIRE(n, ((Port){u, 0})); continue; }
+    Port q = WIRE(n, p);
+    if (q.node < 0 || q.node >= n->nn || q.port != 0 || n->dead[q.node]) return 0;
+    int qt = n->tag[q.node];
+    /* any interacting pair at the tip (conservative: the walk also fires a queued pair whose ends it passed) */
+    return !((t == LAM && qt == LAM) || (t == APP && qt == APP) || (t == ROOT || qt == ROOT));
+  }
+  return 1;                                          /* (a cycle the walk cannot settle: let the reducer decide) */
+}
+
 long net_force(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || port_whnf(n, p)) return n->steps;
+  /* (only for a port that is not a root already: forcing an existing root walks every demand, as before) */
+  { int is_root = 0; for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) { is_root = 1; break; }
+    if (!is_root && !walk_reaches_redex(n, p)) {
+      res_net = NULL;
+      if (reduce_depth) nested_reduce = 1;          /* what a force inside a wave means for reclaiming (net_reduce) */
+      return n->steps;
+    } }   /* (a force is where an outside
+       rewrite -- a driver reading, then folding -- invalidates the walk's resume point, as the reducer itself does) */
   int save = n->nroot;
   lin_demand(n, p);
+  const Net *sfn = floor_net; int sfl = walk_floor;
+  if (n->nroot > save) { floor_net = n; walk_floor = n->nroot - 1; }   /* (an existing root: walk as before) */
   long s = net_reduce(n, n->steps + (1L << 22));
+  floor_net = sfn; walk_floor = sfl;
   /* Only ever TRUNCATE.  A reduction here can reclaim, which rewrites the root array and can drop
      the root this call added; restoring the old COUNT would then claim entries that no longer name
      anything, and the next demand walk would seed itself from stale indices. */
@@ -1156,6 +1207,9 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       for (int t = 0; t < nth; t++) {
         for (int j = 0; j < t_act[t].top; j += 2) act_push(n, t_act[t].p[j], t_act[t].p[j + 1]);
         t_act[t].top = 0;
+        for (int j = 0; j < t_fr[t].top; j++) node_free(n, t_fr[t].v[j]);
+        for (int j = 0; j < t_er[t].top; j++) era_note(n, t_er[t].v[j]);
+        t_fr[t].top = t_er[t].top = 0;
       }
       if (lin_wstats) { wv_batch++; wv_par += n_int; }
     }
@@ -1196,12 +1250,10 @@ long net_reduce(Net *n, long limit) {
 }
 
 static long net_reduce_body(Net *n, long limit) {
+  res_net = NULL;   /* the net may have been rewritten since the last reduce (a driver, readback, the compiler) */
   /* Each wave re-marks demand and fires only the pairs the walk reached; one off that path never leaves
      `act`, so it is still there when something needs it.  A wave firing nothing means WHNF: stop. */
   Port *curr = NULL, *base_rx = NULL; int curr_cap = 0, base_cap = 0;
-  /* When reclamation runs: the mark is DERIVED (garbage outgrowing what is live is what pays), never chosen; LIN_GC forces it on. */
-  if (gcenv == -2) { const char *g = getenv("LIN_GC"); gcenv = g ? atol(g) : -1; }
-  long gcmark = gcenv >= 0 ? gcenv : ((long)(n->nn - n->nfree) * 2 + 64);
   if (lin_wstats < 0) { lin_wstats = getenv("LIN_WAVE_STATS") != NULL; if (lin_wstats) atexit(wv_report); }
   int nsl = ndrv > 0 ? ndrv : 1;   /* the pipeline's OWN size: one scratch slot per registered driver, never a fixed table */
   Port *slices[nsl]; int scaps[nsl], scnts[nsl]; unsigned char have[nsl];
@@ -1210,9 +1262,11 @@ static long net_reduce_body(Net *n, long limit) {
   LinClaim claimed[nsl];   /* a VLA like its neighbours: a force enters here once per observation (net_force), so a malloc/free per force is pure per-entry cost, and `have[]` already gates every read of it */
   while (n->steps < limit) {
     int changed = 0;
+    era_drain(n);
     while (n->atop > 0 && n->steps < limit) {
       int before = changed;
       if (reduce_depth == 1) nested_reduce = 0;
+      era_drain(n);
       net_mark_demand(n); unsigned int dsnap = n->dem_stamp;   /* the snapshot's stamp: a driver's force bumps the live one */
       int cnt = n->dem_cnt ? wave_snapshot(n, &curr, &curr_cap) : 0;   /* 98% of waves emit nothing: skip the (exported, un-inlinable) call */
       int np = cnt / 2, base_cnt = 0; cand_cnt = 0; memset(scnts, 0, sizeof scnts);
@@ -1325,20 +1379,16 @@ static long net_reduce_body(Net *n, long limit) {
       }
       /* base engine handles the unclaimed remainder */
       if (base_cnt) lin_reduce_wave_parallel(n, base_rx, base_cnt, &changed);
+      /* Resume needs the wave to have been one LOCAL rewrite at the tip by the base engine, with no reduction
+         nested inside it that might have rewritten the spine above.  (Not after a driver: a split re-aims the
+         result's consumer, and resuming above it was measured wrong.) */
+      if (cnt != 2 || base_cnt != 2 || wtotal != 1 || n->nheld || nested_reduce) res_net = NULL;
       if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (real_base > wv_max) wv_max = real_base; if (wtotal > wv_width) wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);
       if (changed == before) break;
     }
-    /* Reclaim only at a safepoint (the outermost reduce), and only when there is something to gain:
-       out of reusable slots, with the net above the threshold.  `nn - nfree` is the live node count,
-       so the hysteresis tracks what is actually in use rather than what has been allocated. */
-    if (reduce_depth == 1 && n->pins == 0 && n->free_head < 0 && (long)(n->nn - n->nfree) > gcmark) {
-      net_gc(n);
-      gcmark = (long)(n->nn - n->nfree) * 2 + 64;
-      /* No resume-seed: remapping the anchors after compaction made rebuilding the active list
-         unnecessary, and it re-enqueued pairs the demand filter set aside (test/map.lin hung). */
-    }
+    era_drain(n);
     if (changed == 0) break;
   }
   if (reduce_depth == 1) {
@@ -1350,6 +1400,7 @@ static long net_reduce_body(Net *n, long limit) {
     }
   }
   net_flush_free(n);
+  res_net = NULL;
   /* EVERY buffer this body owns: net_force enters here once per readback force, so one left behind leaks per observation
      (measured: 47x the resident memory on queue.lin).  Each free is GUARDED -- 98% of waves emit no pair, so nearly all are free(NULL). */
   void *heap[] = {curr, base_rx, cand, owned};
@@ -1371,6 +1422,8 @@ Net *net_copy(const Net *n) {
   net_level_set(c, n->nlv, n->lv_parent + 1, n->lv_bit + 1);   /* rebuild the trie: parents precede children, ids reload directly */
   c->act = NULL; c->actcap = c->atop = 0; c->steps = 0; c->dem_out = NULL; c->dem_cnt = c->dem_cap = 0; c->act_of = malloc((size_t)c->cap * sizeof(int)); memset(c->act_of, 0xff, (size_t)c->cap * sizeof(int));
   c->root = NULL; c->nroot = 0; c->rootcap = 0; c->free_head = -1; c->nfree = 0; c->pend_head = -1; c->pins = 0;
+  c->era = NULL; c->era_top = c->era_cap = 0; c->pend = NULL; c->pend_top = c->pend_cap = 0;
+  for (int i = 0; i < n->era_top; i++) era_note(c, n->era[i]);
   /* The copy starts with its own state: a table keyed by node index belongs to the net it came
      from.  A driver that cannot copy starts empty, which is safe because state is always a
      derivation of the net and never the authority. */

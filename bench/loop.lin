@@ -1,0 +1,3 @@
+; a tail-recursive loop: the sum of i*i mod 7 for i below 100 million
+(define go (\i (\acc (if (eq i 0) acc (go (sub i 1) (add acc (mod (mul i i) 7)))))))
+(go 100000000 0)

@@ -46,9 +46,12 @@ pkgs.stdenv.mkDerivation {
     mkdir -p $out/bin $out/share/lin/std
     cp lin $out/bin/
     cp -r std/* $out/share/lin/std/
+    # The function compiler (std/drivers/fn.c) emits C and compiles it at run time, so the C compiler is
+    # part of the runtime closure; without one it declines and the net computes the same values, slower.
     wrapProgram $out/bin/lin \
       --set-default LIN_STD "$out/share/lin/std/std.lin" \
-      --set-default LIN_STD_DIR "$out/share/lin/std"
+      --set-default LIN_STD_DIR "$out/share/lin/std" \
+      --prefix PATH : ${pkgs.stdenv.cc}/bin
     runHook postInstall
   '';
 

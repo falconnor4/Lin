@@ -32,6 +32,7 @@ ok() { PASS=$((PASS+1)); }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 cp -r "$STD_DIR" "$TMP/std"
+chmod -R u+w "$TMP/std"   # a packaged std (the nix store) is read-only, and its copy would be too
 
 # A probe that DECLINES every redex (so an accepted probe cannot change a value) and counts the
 # redexes the core offers it -- the only way to observe whether the core consults it at all.

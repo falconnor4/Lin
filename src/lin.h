@@ -85,11 +85,10 @@ typedef struct {
   /* Reclaimed node slots, threaded through their own port 0.  Reclamation never moves a node, so
      every index stays valid and an external handle (a memo key, a port readback holds) is safe. */
   int free_head, nfree;
-  /* Slots freed during a wave.  They are NOT published to free_head until the wave's snapshot is
-     gone: an index the snapshot still holds would otherwise be revived as a different node. */
-  int pend_head;
+  int pend_head;   /* unused since ABI 7 (see `pend` below); kept so no later field moves */
   /* Nonzero while readback is walking the net holding ports.  A reclaimed slot is REUSED, so a
-     cursor held across a collection would silently name a different node; readback therefore pins. */
+     cursor held across a reuse would silently name a different node; readback therefore pins, and
+     neither erasure nor slot reuse runs while pinned. */
   int pins;
   unsigned int *dem, dem_stamp; unsigned char *vport;
   /* A driver's tables for THIS net: kept here so their lifetime is the net's -- created lazily,
@@ -106,6 +105,15 @@ typedef struct {
      shift every later offset and misdirect every plugin; appended here it shifts nothing.  `act_of[i]` =
      node i's queued-pair index in `act` or -1; `dem_out`/`dem_cnt`/`dem_cap` = this wave's emitted pairs. */
   int *act_of; Port *dem_out; int dem_cnt, dem_cap;
+  /* ERASERS WAITING TO ACT: every ERA whose principal port was just wired.  Erasure is the calculus's
+     own memory management -- an eraser meeting a principal consumes that node and erases what it held --
+     so there is no collector: a node is freed by the rule that consumes it, or by the eraser that reaches
+     it.  Erasure is not demand-filtered (garbage is never demanded, and must still be reclaimed). */
+  int *era; int era_top, era_cap;
+  /* Slots freed and not yet reusable (see net_flush_free).  A pending node keeps its tag and its wires:
+     a reader that held a port into a pair a rule just consumed follows the consumed node's old wire one
+     hop to where the value went (net_force_val), so wiping it at once would lose the value. */
+  int *pend; int pend_top, pend_cap;
 } Net;
 
 /* wire of a port (drivers read the graph directly) */
@@ -116,8 +124,13 @@ static inline Port net_wire(const Net *n, Port p) { return n->wire[p.node * 3 + 
    expects (LIN_ENC_* above, and the readers that take one). */
 Port net_alloc(Net *n, int tag, Scope sc);
 void net_link(Net *n, Port a, Port b, int enqueue);
-/* Cut the wire at `p` at both ends: what disposes of a subgraph, and what erases (see net.c). */
+/* Cut the wire at `p` at both ends and ERASE what was on the other side: the partner end gets an eraser,
+   so the subgraph behind it is reclaimed by the erasure rules (a shared one, behind a DUP, survives for its
+   other user -- the eraser only collapses the fan).  `p`'s own end is left unconnected. */
 void net_sever(Net *n, Port p);
+/* Consume node `v`: free it and erase every live neighbour still wired to it.  What a driver uses to
+   dispose of structure it rewrote; mark the nodes of a group dead FIRST and their mutual wires are skipped. */
+void net_drop(Net *n, int v);
 /* Readback holds ports across nested reductions, so it pins the net: no reclamation while pinned. */
 void lin_pin(Net *n); void lin_unpin(Net *n);
 void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, Port a, Port b);
@@ -131,9 +144,6 @@ Port net_force_val(Net *n, Port p);
 /* Register an extra demand root: a port whose weak head normal form the caller is about to observe. */
 void lin_demand(Net *n, Port p);
 Net *net_copy(const Net *n); Scope scope_nil(void);
-/* reclaim every node not reachable from ROOT (identity-preserving; safe at any point a
-   net is a value or a residual -- the AOT build compacts before serialising) */
-void net_gc(Net *n);
 int scope_eq(const Net *n, Scope a, Scope b);
 Scope scope_app(Net *n, Scope s, int bit);   /* one step deeper */
 Scope scope_meet(Net *n, Scope a, Scope b);   /* lowest common ancestor */
@@ -162,8 +172,10 @@ enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC
    field added to Net shifts every offset and it silently reads the wrong memory -- measured, a `fold`
    that simply stopped firing with the plugin still passing every ABI check.  ABI 6 is the ENCODING
    change: a net carries no carrier names, so `read_value`/`print` take the encoding (LIN_ENC_*) /
-   the domain (DT_*) the caller expects, and the number moves. */
-#define LIN_DRIVER_ABI   6u
+   the domain (DT_*) the caller expects, and the number moves.  ABI 7 is ERASURE: there is no collector,
+   so `net_sever` now ERASES what it cuts loose and `net_drop` consumes a node, and a driver that disposed
+   of structure by cutting it and waiting for a sweep would now leak. */
+#define LIN_DRIVER_ABI   7u
 #define LIN_CAP_NATIVE_NUM 0x01u                 /* satur `_ffi` arithmetic */
 #define LIN_CAP_FIXED      0x02u                 /* beta / annihilate / erase */
 #define LIN_CAP_COMMUTE    0x04u                 /* LAM|APP x DUP (allocating) */
@@ -313,6 +325,7 @@ Term *term_fix(const char *name, Term *body);
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
+char *type_desc(Type *t);   /* the type as a reader's descriptor (type.c): malloc'd */
 Type *type_var(void); Type *type_arrow(Type *a, Type *b); Type *type_nominal(const char *name); Type *type_arg(Type *arg); Type *type_param(int idx);
 int nominal_lookup(const char *name); int nominal_register(const char *name, int arity);
 int nominal_arity(const char *name);
@@ -330,6 +343,7 @@ int lin_driver_aot(Net *n, const Term *t, const Scheme *sch);
 /* The term -> port map the core hands a pass: {-1,0} for a term it did not compile itself. */
 Port lin_node_of(void *ctx, const Term *t);
 int net_save_line(Net *n, const char *path); int net_load_line(Net *n, const char *path);
+extern int lin_line_domain;   /* an artifact's result domain (DT_*, or -1): set by a build before saving, by a load */
 void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
 
 /* ---------------- the ENCODING REGISTRY: domain -> the shape it is written in ----------------
@@ -337,6 +351,9 @@ void lin_set_self_path(const char *p); /* .line shebang = this absolute path */
    for; the shape behind each is the registry's business, and it is keyed by ENCODING, never by a
    carrier string: nothing about a node says which domain it belongs to (see LIN_ENC_* above). */
 enum { DT_NUM, DT_BOOL, DT_STR, DT_FFI, DT_FLOAT, DT_OP, DT_MAX };
+/* Not a value domain but an expectation: the result is a user DATATYPE's value (its constructors name it;
+   no numeral or string reading applies). */
+#define LIN_DOM_DATA (DT_MAX + 1)
 /* Register the builtin domains.  A `datatype` form registers its own (main.c): a user constructor
    gets no encoding of its own -- it is a pure-Lin term, and whoever reads it reads the term. */
 void lin_domains_init(void);
@@ -345,6 +362,11 @@ void lin_domains_init(void);
    encoding -- including one that is still an unreduced thunk -- is DECLINED, never guessed. */
 long net_read_int(Net *n, Port p, int enc);          /* layers: a numeral's value, a list's length,
                                                         a BOOL's 1/0; -1 when `p` is not that encoding */
+/* The integer width: a numeral's value is a `long`, so the width is the type's, never a number chosen here. */
+#define LIN_INT_BITS ((int)(sizeof(long) * 8))
+/* A numeral's VALUE as a 64-bit two's complement integer: 1 and *out on success, 0 when `p` is not a
+   numeral.  (net_read_int's -1 "not this encoding" cannot tell a failure from the number -1.) */
+int  net_read_i64(Net *n, Port p, long *out);
 int  net_read_string_arena(Net *n, Port p, int pay_enc, const char **out); /* cell chain into the arena; pay_enc = the char-code encoding */
 /* One cell of the language's cons encoding: `*head`/`*tail` when `p` is a cell, 0 otherwise.  The
    cell shape is the one every spine walk agrees on, so it is exported once (readback walks it to
@@ -369,6 +391,31 @@ extern FILE *lin_out;
    programs still reduce exactly, by plain β of the pure-Lin fallback bodies. ---- */
 /* ---- Shared on-net FFI decoder (std/runtime/decoder.c): driver plugins reuse the one arg-spine / DUP-hop walker for the `_ffi` `_cl`-spine decode ---- */
 Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
+/* How many times a reader arrived at a fan's PRINCIPAL and had to pick a copy (src/io.c).  A fold whose operand
+   reads moved it read a value that is one per copy, not one value, and must not compute a shared result. */
+/* THE CONSTRUCTOR REGISTRY.  A datatype's constructor states which it is in the net -- its body is
+   `((\_c (d_i f1..fk)) ID)` and a match branch for it `((\_m BRANCH) ID)`, redexes that beta away -- and ID
+   names an entry here: the datatype, the constructor, its index among the m constructors and its k fields.
+   Drivers and readback ask by ID; nothing in the core's reduction depends on it. */
+typedef struct { const char *dt, *name; int m, i, k; const char *fdesc; } LinCtor;
+long lin_ctor_register(const char *dt, const char *name, int m, int i, int k);   /* its ID, >= 1 */
+const LinCtor *lin_ctor_info(long id);                                          /* NULL: no such ID */
+long lin_ctor_lookup(const char *name);
+/* The constructor's FIELD TYPES as descriptors (type_desc), concatenated: what lets a reader print a value of a
+   declared datatype by its type alone, markers or not.  NULL until stated. */
+void lin_ctor_set_fdesc(long id, const char *fdesc);
+/* The observed result's type as a descriptor (NULL: none): set beside the domain (main.c, an artifact's load). */
+extern const char *lin_result_desc;
+/* One layer of a value of an m-constructor datatype, `\d0..\d(m-1). (d_i f1..fk)`, read with forcing: writes i
+   and up to kmax fields (in order) and returns k, or -1 when `p` is not such a layer. */
+int net_read_scott(Net *n, Port p, int m, int *idx, Port *fields, int kmax);
+/* Called by the reader for a match pattern naming no declared constructor yet: a module that declares it is
+   loaded then (main.c's lazy modules), so the branch states its constructor as it would have. */
+extern void (*lin_ctor_demand)(const char *name);                                         /* 0: not a constructor */
+extern long lin_fan_ambiguous;
+extern int lin_fan_undecided;            /* the first un-chosen fan whose principal a crossing walk reached (-1: none) */
+void lin_fan_choose(int node, int port);  /* read the superposition at `node` as its copy `port` (1 or 2) */
+void lin_fan_unchoose_all(void);
 Port net_dup_hop(Net *n, Port p);                       /* deref it the way an arriving port implies */
 int  net_ffi_fn(Net *n, Port p, char *fn, int fnmax);   /* fn name of a _ffi closure */
 int  net_ffi_header(Net *n, Port lam, Port *fnp, Port *argp); /* dig \_ffi.\_ret.((_ffi fn) args) */
@@ -407,7 +454,9 @@ long long goi_det(Net *n);
 
 /* ---------------- main / defs ---------------- */
 typedef struct { const char *name; Term *term, *expanded, *raw; Scheme sch; int typed, rec;
-                 Net *compiled; int comp_tried; } Def;
+                 Net *compiled; int comp_tried;
+                 int typing; Scheme hole;           /* typing: its type is being inferred (mutual recursion reaches it) */
+                 Term *expanded_sh; } Def;          /* its expansion inside an operator's MEANING (main.c: in_meaning) */
 extern Def *defs;
 extern int ndefs, lin_threads;
 Def *def_find(const char *name);

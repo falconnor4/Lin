@@ -1,51 +1,74 @@
 ; ==============================================================================
 ; Lin Standard Library: Floating-Point Arithmetic & Trigonometry
 ; ==============================================================================
-; A float is a Scott numeral carrying the IEEE-754 bit pattern of a double,
-; keyed under the _fsz/_fss spine (so it never collides with integer numerals).
-; All operations reduce through FFI closures (lin_fadd, lin_fsin, ...) to the
-; C math library; the SIMD driver may later fold these natively during
-; reduction.  Readback renders a float as %g.
+; A float IS a numeral: its 64-bit IEEE-754 pattern, the same net structure as an
+; integer.  Only the TYPE says float (a literal like 2.5 has type float), so a
+; float is shared, copied and erased like every other value, and nothing outside
+; the net holds it.
+;
+; Every arithmetic operation is an `_op` head (std/num.lin explains the shape)
+; whose pure meaning is std/softfloat.lin: the net computes it with integer
+; operations alone, round to nearest even, bit-equal to the hardware
+; (test/softfloat.sh).  The arith driver folds the head to the hardware row in one
+; step, and the fn driver compiles it to the same row.  The codes are pattern.h's
+; LIN_OP_F*; a one-operand operation carries 0 as its second operand.
+;
+; The transcendentals (sin cos tan pow atan2) and parsing text are FFI calls to
+; the C library: they have no pure meaning here yet, so they need a driver.
 ; ==============================================================================
 
 (load "bool.lin")
 (load "num.lin")
+(load "softfloat.lin")
 (load "ffi.lin")
 
 (namespace float)
 
+; --- Bits ---
+; The same numeral, seen as the other type: a float's bit pattern, and back.
+(define! bits (float -> num) (\x x))
+(define! of_bits (num -> float) (\x x))
+
 ; --- Construction ---
-; Parse a decimal string into a float, e.g. (float "2.5").
+; Parse a decimal string into a float, e.g. (float "2.5").  (A literal 2.5 needs no call.)
 (define! float (a -> float) (\s (ccall "lin_parse_float" (cons s nil))))
-; Promote an integer to a float.
-(define! i2f (num -> float) (\i (ccall "lin_float" (cons i nil))))
+; An integer as a float, and a float floored to an integer.
+(define! i2f (num -> float) (\i ((\_op ((\_k (num._sfofint i)) _op)) (num._cl_cons 28 (num._cl_cons i (num._cl_cons 0 num._cl_nil))))))
+(define! f2i (float -> num) (\x ((\_op ((\_k (num._sffloor x)) _op)) (num._cl_cons 27 (num._cl_cons x (num._cl_cons 0 num._cl_nil))))))
 
 ; --- Arithmetic (binary) ---
-(define! fadd (float -> float -> float) (\a (\b (ccall "lin_fadd" (cons a (cons b nil))))))
-(define! fsub (float -> float -> float) (\a (\b (ccall "lin_fsub" (cons a (cons b nil))))))
-(define! fmul (float -> float -> float) (\a (\b (ccall "lin_fmul" (cons a (cons b nil))))))
-(define! fdiv (float -> float -> float) (\a (\b (ccall "lin_fdiv" (cons a (cons b nil))))))
+(define! fadd (float -> float -> float) (\a (\b ((\_op ((\_k (num._sfadd a b)) _op)) (num._cl_cons 16 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+(define! fsub (float -> float -> float) (\a (\b ((\_op ((\_k (num._sfsub a b)) _op)) (num._cl_cons 17 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+(define! fmul (float -> float -> float) (\a (\b ((\_op ((\_k (num._sfmul a b)) _op)) (num._cl_cons 18 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+; x / 0.0 is 0.0 (the language defines the case IEEE leaves to an exception)
+(define! fdiv (float -> float -> float) (\a (\b ((\_op ((\_k (num._sfdivz a b)) _op)) (num._cl_cons 19 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+(define! fmin (float -> float -> float) (\a (\b ((\_op ((\_k (num._sfmin a b)) _op)) (num._cl_cons 23 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+(define! fmax (float -> float -> float) (\a (\b ((\_op ((\_k (num._sfmax a b)) _op)) (num._cl_cons 24 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
 (define! fpow (float -> float -> float) (\a (\b (ccall "lin_fpow" (cons a (cons b nil))))))
 (define! fatan2 (float -> float -> float) (\a (\b (ccall "lin_fatan2" (cons a (cons b nil))))))
 
 ; --- Unary ---
-(define! fsqrt (float -> float) (\x (ccall "lin_fsqrt" (cons x nil))))
+; sqrt of a negative (or NaN) is 0.0
+(define! fsqrt (float -> float) (\x ((\_op ((\_k (num._sfsqrtz x)) _op)) (num._cl_cons 25 (num._cl_cons x (num._cl_cons 0 num._cl_nil))))))
+(define! ffloor (float -> float) (\x ((\_op ((\_k (num._sffloord x)) _op)) (num._cl_cons 26 (num._cl_cons x (num._cl_cons 0 num._cl_nil))))))
+(define! fabs (float -> float) (\x ((\_op ((\_k (num._sfabs x)) _op)) (num._cl_cons 29 (num._cl_cons x (num._cl_cons 0 num._cl_nil))))))
+(define! fsign (float -> float) (\x ((\_op ((\_k (num._sfsign x)) _op)) (num._cl_cons 30 (num._cl_cons x (num._cl_cons 0 num._cl_nil))))))
+(define! ffract (float -> float) (\x ((\_op ((\_k (num._sffract x)) _op)) (num._cl_cons 31 (num._cl_cons x (num._cl_cons 0 num._cl_nil))))))
+(define! fneg (float -> float) (\x (bxor x -9223372036854775808)))
 (define! fsin  (float -> float) (\x (ccall "lin_fsin" (cons x nil))))
 (define! fcos  (float -> float) (\x (ccall "lin_fcos" (cons x nil))))
 (define! ftan  (float -> float) (\x (ccall "lin_ftan" (cons x nil))))
 
 ; --- Comparison (bool) ---
-(define! feq  (float -> float -> bool) (\a (\b (ccall "lin_feq" (cons a (cons b nil))))))
-(define! flt  (float -> float -> bool) (\a (\b (ccall "lin_flt" (cons a (cons b nil))))))
-(define! fleq (float -> float -> bool) (\a (\b (ccall "lin_fleq" (cons a (cons b nil))))))
-(define! fgt (float -> float -> bool) (\a (\b (not (fleq a b)))))
-(define! fgeq (float -> float -> bool) (\a (\b (not (flt a b)))))
+(define! feq  (float -> float -> bool) (\a (\b ((\_op ((\_k (num._sfeq a b)) _op)) (num._cl_cons 20 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+(define! flt  (float -> float -> bool) (\a (\b ((\_op ((\_k (num._sflt a b)) _op)) (num._cl_cons 21 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+(define! fleq (float -> float -> bool) (\a (\b ((\_op ((\_k (num._sfleq a b)) _op)) (num._cl_cons 22 (num._cl_cons a (num._cl_cons b num._cl_nil)))))))
+(define! fgt (float -> float -> bool) (\a (\b (flt b a))))
+(define! fgeq (float -> float -> bool) (\a (\b (fleq b a))))
 
-; --- Coercion / constants ---
-; Truncate toward zero (floor) to an integer-valued float.
-(define! ffloor (float -> float) (\x (ccall "lin_ffloor" (cons x nil))))
-(define pi (float "3.14159265358979323846"))
-(define e  (float "2.71828182845904523536"))
+; --- Constants ---
+(define pi 3.141592653589793)
+(define e  2.718281828459045)
 
 (namespace _)
 (export float)
