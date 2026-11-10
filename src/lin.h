@@ -389,6 +389,14 @@ extern FILE *lin_out;
 Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) chain */
 /* How many times a reader arrived at a fan's PRINCIPAL and had to pick a copy (src/io.c).  A fold whose operand
    reads moved it read a value that is one per copy, not one value, and must not compute a shared result. */
+/* THE CONSTRUCTOR REGISTRY.  A datatype's constructor states which it is in the net -- its body is
+   `((\_c (d_i f1..fk)) ID)` and a match branch for it `((\_m BRANCH) ID)`, redexes that beta away -- and ID
+   names an entry here: the datatype, the constructor, its index among the m constructors and its k fields.
+   Drivers and readback ask by ID; nothing in the core's reduction depends on it. */
+typedef struct { const char *dt, *name; int m, i, k; } LinCtor;
+long lin_ctor_register(const char *dt, const char *name, int m, int i, int k);   /* its ID, >= 1 */
+const LinCtor *lin_ctor_info(long id);                                          /* NULL: no such ID */
+long lin_ctor_lookup(const char *name);                                         /* 0: not a constructor */
 extern long lin_fan_ambiguous;
 extern int lin_fan_undecided;            /* the first un-chosen fan whose principal a crossing walk reached (-1: none) */
 void lin_fan_choose(int node, int port);  /* read the superposition at `node` as its copy `port` (1 or 2) */

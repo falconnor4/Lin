@@ -300,6 +300,10 @@ static Term *parse_term(void) {
         Term *lam = body; /* nullary / wildcard: pass the value directly */
         for (int i = k - 1; i >= 0; i--) lam = term_new(TLAM, vs[i], lam, NULL);
         free(vs);
+        /* a branch for a declared constructor states which (lin.h, the constructor registry): `((\_m BR) ID)` */
+        { long cid = lin_ctor_lookup(ctorname);
+          const LinCtor *ci = cid ? lin_ctor_info(cid) : NULL;
+          if (ci && ci->k == k) lam = term_new(TAPP, "", term_new(TLAM, "_m", lam, NULL), term_new(TNUM, lin_internf("%ld", cid), NULL, NULL)); }
         /* the application says which constructor this branch is for, so the checker can type the match
            as one over that datatype (type.c) -- the term itself is still positional Scott dispatch */
         app = term_new(TAPP, lin_internf("match:%s", ctorname), app, lam);

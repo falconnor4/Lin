@@ -135,7 +135,7 @@ static Term *shrink_subst(Term *t, const char *x, const Term *a) {
   t->r = shrink_subst(t->r, x, a);
   return t;
 }
-static int shrink_protocol(const char *x) { return !strcmp(x, "_op") || !strcmp(x, "_k"); }
+static int shrink_protocol(const char *x) { return !strcmp(x, "_op") || !strcmp(x, "_k") || !strcmp(x, "_c") || !strcmp(x, "_m"); }
 static Term *shrink(Term *t) {
   if (!t) return NULL;
   t->l = shrink(t->l);
@@ -430,12 +430,14 @@ static void qualify_free(Term *t, Guard *b) {
 
 /* (datatype Name (Ctor f...) ...): Scott-encode each constructor C_i (\f1..\fk \d0..\d_{m-1}).  Each becomes an ordinary inferred def, so it type-checks like hand-written Scott encoding */
 static void process_def(Term *t);
-static Term *scott_ctor(const char *dn, int idx, Term *fields, int m) {
+static Term *scott_ctor(const char *dn, int idx, Term *fields, int m, long id) {
   (void)dn;
   const char *dslot = lin_internf("_d%d", idx);
   /* curried application (d_idx f1 f2 ...) */
   Term *app = term_new(TVAR, dslot, NULL, NULL);
   for (Term *f = fields; f; f = f->r) app = term_new(TAPP, "", app, term_new(TVAR, f->name, NULL, NULL));
+  /* ...stating which constructor it is: `((\_c APP) ID)` (lin.h, the constructor registry) */
+  app = term_new(TAPP, "", term_new(TLAM, "_c", app, NULL), term_new(TNUM, lin_internf("%ld", id), NULL, NULL));
   /* dispatch binders are innermost: \f1..\fk \d0..\d_{m-1} (d_i f1..fk) */
   Term *lam = app;
   for (int i = m - 1; i >= 0; i--) { const char *dn2 = lin_internf("_d%d", i); lam = term_new(TLAM, dn2, lam, NULL); }
@@ -466,7 +468,9 @@ static void process_datatype(Term *t) {
   int m = 0; for (Term *c = t->l; c; c = c->r) m++;
   int idx = 0;
   for (Term *c = t->l; c; c = c->r, idx++) {
-    Term *lam = scott_ctor(t->name, idx, c->l, m);
+    int nfields = 0; for (Term *f = c->l; f; f = f->r) nfields++;
+    long id = lin_ctor_register(t->name, curr_ns[0] && !strchr(c->name, '.') ? lin_internf("%s.%s", curr_ns, c->name) : c->name, m, idx, nfields);
+    Term *lam = scott_ctor(t->name, idx, c->l, m, id);
     /* constructor type: fresh-params -> Name p1..pk.  A field with a declared
        type (annot) contributes that type (param refs resolved); an untyped field
        (no annot) contributes a fresh polymorphic var. */

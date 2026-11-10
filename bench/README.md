@@ -22,27 +22,27 @@ The rules, so the numbers mean something:
 
 | benchmark | C -O3 | Lin | Lin -t 1 | C / Lin | what it exercises |
 |-----------|-------|-----|----------|---------|-------------------|
-| collatz | 261 ms | 71 ms | 232 ms | 3.68x | a loop calling a helper loop; a max-reduction |
-| fib | 176 ms | 67 ms | 186 ms | 2.63x | tree recursion |
-| loop | 115 ms | 46 ms | 115 ms | 2.50x | a tail-recursive sum-reduction |
-| mandel | 139 ms | 50 ms | 150 ms | 2.78x | floats (numerals with soft-float meanings); three nested loops |
-| nqueens | 224 ms | 193 ms | 254 ms | 1.16x | bitmask backtracking, unbalanced tree |
-| tak | 105 ms | 52 ms | 111 ms | 2.02x | calls whose arguments are calls |
-| bintree | ~1 ms | 2.6 s | | ~0.0004x | constructors + `match`: a depth-7 tree built and counted |
-| bst | ~1 ms | 40 s | | ~0.00003x | a search tree: 20 inserts, a weighted walk |
+| bintree | 52 ms | 12 ms | 13 ms | 4.33x | constructors + `match`: a depth-20 tree (2M nodes) built and counted |
+| bst | 52 ms | 58 ms | 60 ms | 0.90x | a search tree: 200,000 inserts (updated in place), a weighted walk |
+| collatz | 263 ms | 68 ms | 233 ms | 3.87x | a loop calling a helper loop; a max-reduction |
+| fib | 176 ms | 67 ms | 215 ms | 2.63x | tree recursion |
+| loop | 116 ms | 35 ms | 112 ms | 3.31x | a tail-recursive sum-reduction |
+| mandel | 147 ms | 52 ms | 153 ms | 2.83x | floats (numerals with soft-float meanings); three nested loops |
+| nqueens | 233 ms | 198 ms | 243 ms | 1.18x | bitmask backtracking, unbalanced tree |
+| tak | 101 ms | 43 ms | 127 ms | 2.35x | calls whose arguments are calls |
 
 Measured on a 4-core x86-64 container (gcc 15, nixpkgs). Re-run before quoting.
 
-## Where Lin is not fast yet
+## Data structures
 
-The last two rows are the honest gap.  The function compiler compiles recursive *numeric* functions;
-code over data structures (constructors and `match`) runs on the interaction-net oracle, and there the
-recursion itself is the problem: the oracle copies a recursive function's body lazily, so an arithmetic
-operator inside it sees its operands *superposed* (one per copy, until the copy has moved through), no
-single number is the answer, and the fold declines to the operator's bitwise pure meaning -- thousands of
-interactions per `add`.  Two fixes are planned, both general:
+`bintree` and `bst` are compiled by the same driver: a datatype's constructors and matches state which
+constructor they are in the net (the constructor registry, src/lin.h), so the function compiler reads a
+constructor as a C block and a match as a switch.  Memory comes from an arena freed when the call returns, and
+OWNERSHIP decides reuse: the unit's DAG shows sharing exactly, so a match on a value nothing else holds rebuilds
+the branch's constructor in the block it took apart -- the insert updates the path in place, as C does.  A
+datatype with one boxed constructor (trees, lists) carries no tag at all.  Lin is lazy and the C strict: a unit
+whose structure outgrows memory or the stack (an infinite one, of which the program reads a part) is abandoned
+and the net computes the call -- the answer is always the net's.
 
-- **an operator meeting a superposition duplicates itself** (each copy then waits for its own operand,
-  and folds) -- the interaction-level rule, which keeps the reduction optimal;
-- **the function compiler compiles data structures**: constructors to C objects, `match` to a switch,
-  with memory reclaimed by ownership derived from the net's own sharing (DUP) and erasure (ERA).
+Without the function compiler (the oracle alone) these two are still far behind C: the oracle copies a
+recursive body per call.  `LIN_FN_OFF=1` shows it.

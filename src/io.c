@@ -35,6 +35,23 @@ void lin_domains_init(void) {
    value but one per copy, and the walk takes copy 1.  That is right for a reader that only wants a shape, and
    wrong for one that wants THE value -- so every such choice is counted, and a fold whose operands needed one
    knows its value is not the same for every copy (std/drivers/arith.c). */
+static LinCtor *ctors; static long nctors, cctors;
+long lin_ctor_register(const char *dt, const char *name, int m, int i, int k) {
+  for (long j = nctors; j-- > 0; )                   /* a reloaded declaration keeps its ID */
+    if (!strcmp(ctors[j].dt, dt) && !strcmp(ctors[j].name, name) && ctors[j].m == m && ctors[j].i == i && ctors[j].k == k) return j + 1;
+  if (nctors >= cctors) ctors = realloc(ctors, (size_t)(cctors = cctors ? cctors * 2 : 32) * sizeof *ctors);
+  ctors[nctors] = (LinCtor){ lin_intern(dt, strlen(dt)), lin_intern(name, strlen(name)), m, i, k };
+  return ++nctors;
+}
+const LinCtor *lin_ctor_info(long id) { return id >= 1 && id <= nctors ? &ctors[id - 1] : NULL; }
+long lin_ctor_lookup(const char *name) {             /* the latest declaration of that name wins, as a definition does */
+  const char *dot = strrchr(name, '.');
+  for (long j = nctors; j-- > 0; ) {
+    const char *cn = ctors[j].name, *cd = strrchr(cn, '.');
+    if (!strcmp(cn, name) || (cd && !strcmp(cd + 1, name)) || (dot && !strcmp(dot + 1, cd ? cd + 1 : cn))) return j + 1;
+  }
+  return 0;
+}
 long lin_fan_ambiguous;
 /* CHOOSING A COPY.  A reader that stands for ONE copy of a superposition (a fold driver reading a redex it
    split per copy) says which: fan node -> the auxiliary port of that copy.  A crossing walk arriving at a

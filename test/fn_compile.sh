@@ -39,6 +39,30 @@ prog ifl '(define c (\n (ifl (leq n 1) (\_ 0) (\_ (add 1 (c (ifl (eq (mod n 2) 0
 prog calls '(define steps (\n (\acc (if (leq n 1) acc (steps (if (eq (mod n 2) 0) (div n 2) (add (mul 3 n) 1)) (add acc 1))))))
 (define best (\i (\m (if (eq i 0) m (best (sub i 1) (if (gt (steps i 0) m) (steps i 0) m))))))
 (best 7 0)' 16
+# DATA: constructors and `match` compile too -- a datatype's values become words and blocks in C, a match a switch
+prog bintree '(datatype Tree (leaf) (node l r))
+(define make (\d (if (eq d 0) leaf (node (make (sub d 1)) (make (sub d 1))))))
+(define check (\t (match t (leaf 1) ((node l r) (add 1 (add (check l) (check r)))))))
+(check (make 6))' 127
+prog bst '(datatype T (tip) (bin k l r))
+(define ins (\x (\t (match t (tip (bin x tip tip)) ((bin k l r) (if (lt x k) (bin k (ins x l) r) (bin k l (ins x r))))))))
+(define build (\i (\t (if (eq i 0) t (build (sub i 1) (ins (mod (mul i 37) 101) t))))))
+(define walk (\t (\d (match t (tip 0) ((bin k l r) (add (mul k d) (add (walk l (add d 1)) (walk r (add d 1)))))))))
+(walk (build 30 tip) 1)' 7600
+# a function that may not look at its data argument (lazy in Lin, strict in C): still the net's answer
+prog lazydata '(datatype S (snil) (scons h t))
+(define upto (\n (if (eq n 0) snil (scons n (upto (sub n 1))))))
+(define take_sum (\k (\s (if (eq k 0) 0 (match s (snil 0) ((scons h t) (add h (take_sum (sub k 1) t))))))))
+(take_sum 5 (upto 100))' 490
+# an INFINITE structure, of which a lazy program uses a part: the compiled unit's guard abandons the call and the
+# net computes it -- the answer, not a hang
+printf '%s\n' '(datatype S (snil) (scons h t))
+(define from (\n (scons n (from (add n 1)))))
+(define take_sum (\k (\s (if (eq k 0) 0 (match s (snil 0) ((scons h t) (add h (take_sum (sub k 1) t))))))))
+(take_sum 5 (from 1))' > "$TMP/inf.lin"
+got=$(timeout 120 "$LIN_BIN" "$TMP/inf.lin" 2>/dev/null); guard=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/inf.lin" 2>&1 >/dev/null | grep -c "guard fired")
+if [ "$got" = "=> 15" ] && [ "$guard" -ge 1 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL infinite: got '$got', guard fired $guard time(s)"; fi
+
 # FLOATS are checked against known values only: float operations are FFI calls with no pure-Lin fallback yet,
 # so the net alone cannot be the reference for them (it mis-reduces an undispatched float closure).
 progc() {

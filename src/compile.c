@@ -415,7 +415,7 @@ static void eg_saturate(EGraph *g) {
                  is the shape the fold drivers recognize (pattern.h), and beta-ing either reserved binder
                  replaces the operator by its pure meaning for good (measured: `(fmul 2.0 3.0)` shipped its
                  whole soft-float meaning and its artifact ran it). */
-              if (!strcmp(vn, "_op") || !strcmp(vn, "_k")) continue;
+              if (!strcmp(vn, "_op") || !strcmp(vn, "_k") || !strcmp(vn, "_c") || !strcmp(vn, "_m")) continue;
               int before = eg_find(g, cls);
               g->capture = 0;
               int sub = eg_subst(g, g->nodes[bn].l, vn, n.r, 0, g->nc);
