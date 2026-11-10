@@ -9,18 +9,17 @@
 (namespace either)
 
 ; --- Constructors ---
-(define left  (\x (\l (\r (l x)))))
-(define right (\y (\l (\r (r y)))))
+; A value or an error, as a declared datatype -- the shape of a fallible result.  (Scott order as before:
+; left, then right.)  By convention `right` is the success and `left` the error.
+(datatype (Either a b) (left (l a)) (right (r b)))
 
-; --- Predicates ---
-(define is_left  (\e ((e (\_ bool.true)) (\_ bool.false))))
-(define is_right (\e ((e (\_ bool.false)) (\_ bool.true))))
+(define is_left  (\e (match e ((left x) bool.true) ((right y) bool.false))))
+(define is_right (\e (match e ((left x) bool.false) ((right y) bool.true))))
 
-; --- Eliminators & Combinators ---
-(define either      (\fl (\fr (\e ((e fl) fr)))))
-(define either_map  (\f (\e ((e either.left) (\y (either.right (f y)))))))
-(define either_bind (\e (\f ((e either.left) (\y (f y))))))
-(define from_right  (\d (\e ((e (\_ d)) (\y y)))))
+(define either      (\fl (\fr (\e (match e ((left x) (fl x)) ((right y) (fr y)))))))
+(define either_map  (\f (\e (match e ((left x) (left x)) ((right y) (right (f y)))))))
+(define either_bind (\e (\f (match e ((left x) (left x)) ((right y) (f y))))))
+(define from_right  (\d (\e (match e ((left x) d) ((right y) y)))))
 
 (namespace _)
 (export either)
