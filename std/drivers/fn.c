@@ -795,6 +795,12 @@ static int has_call(const Expr *e) {
 }
 static int nsite;
 static int emitting;   /* the unit function being written: a parameter of another one cannot appear in it */
+/* DESTINATION PASSING.  `(scons (f h) (smap f t))` is not a tail call -- the cell is built after the call returns
+   -- so a list a million long was a million frames.  A function with such a tail gets a second form, `fN_d(dst,
+   ...)`, that writes its result through `dst` instead of returning it: the cell is built FIRST, with a hole where
+   the call's result goes, and the call becomes a tail call given the hole's address.  cc turns that into a loop.
+   `hasd[f]`: f has the form; `tailpos`: the expression about to be written is in tail position of one. */
+static unsigned char *hasd; static int tailpos;
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 
 /* SHARING, KEPT IN THE C.  The evaluator builds a DAG -- a `let`-bound or shared value is ONE node -- and C
@@ -906,6 +912,7 @@ static void certain(const Expr *e, ISet c, const Expr ***out, int *n, int *cap) 
   (*out)[(*n)++] = e;
 }
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
+  int tp = tailpos; tailpos = 0;
   st_grow(); stamp += 2;
   count_uses(e);
   const Expr **cand = NULL; int nc = 0, cc = 0;
@@ -926,7 +933,9 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     x->var = k; x->vscope = fscope;
     cand[i] = x;                                   /* still listed, so it is unbound below */
   }
+  tailpos = tp;
   ok = ok && emitx(b, pre, e, par, budget - 1);
+  tailpos = 0;
   if (nb) put(b, "; })");
   for (int i = 0; i < nc; i++) if (cand[i]->var >= 0 && cand[i]->vscope == fscope) ((Expr *)cand[i])->var = -1;
   free(cand);
@@ -1131,9 +1140,19 @@ static void fre_fields(const Expr *e, const Expr *s, Expr ***out, int *n, int *c
   if (e->c && e->op != E_CTOR) fre_fields(e->c, s, out, n, cap);
   for (int i = 0; i < e->nargs && e->args; i++) fre_fields(e->args[i], s, out, n, cap);
 }
+static int call_fv(Buf *b, long k) {                 /* the callee's lifted parameters: ours, or passed on */
+  for (int i = 0; k < lifted && i < nfv[k]; i++) {
+    const FV *v = &fvs[k][i];
+    if (v->h == emitting) put(b, ", p%ld", v->k);
+    else if (emitting >= 0 && emitting < lifted && fv_has(emitting, v->h, v->k)) put(b, ", l%d_%ld", v->h + 1, v->k);
+    else { DBG("declined: a lifted parameter with no source\n"); return 0; }
+  }
+  return 1;
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
+  int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
-  if (bound(e)) { put(b, "v%d", e->var); return 1; }
+  if (bound(e)) { put(b, tp ? "(*dst = v%d, 0L)" : "v%d", e->var); return 1; }
   if (e->fre && !par) {                              /* a tail that frees the block its match consumed */
     Expr t = *e; t.fre = NULL;
     /* the fields of the block this tail still reads go into locals first; then the block is released, so what
@@ -1148,10 +1167,43 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     }
     put(b, "lin_free((long *)("); int ok = emitx(b, pre, e->fre, par, budget - 1);
     put(b, "), %d); ", e->fren);
+    tailpos = tp;
     ok = ok && emitx(b, pre, &t, par, budget - 1); put(b, "; })");
+    tailpos = 0;
     for (int j = 0; j < nfl; j++) if (fl[j]) fl[j]->var = -1;
     free(fl);
     return ok;
+  }
+  if (tp) {
+    const Expr *K, *S; long off;
+    if (e->op == E_CALL && hasd[e->k]) {              /* a tail call: the destination goes with it */
+      put(b, "f%ld_d(dst", e->k);
+      for (int i = 0; i < e->nargs; i++) { put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
+      if (!call_fv(b, e->k)) return 0;
+      put(b, ")"); return 1;
+    }
+    int hole = -1;
+    if (e->op == E_CTOR && e->nargs)
+      for (int i = 0; i < e->nargs && hole < 0; i++)
+        if (e->args[i]->op == E_CALL && hasd[e->args[i]->k] && !bound(e->args[i]) && (!e->ci || field_live(e->ci, i))) hole = i;
+    if (hole >= 0) {
+      /* the call's arguments first (they may read the block this cell is rebuilt in), then the cell with a hole,
+         then the call, told where its result goes */
+      Expr *c = (Expr *)e->args[hole]; int hv = nvar++, ov = nvar++, a0 = nvar; nvar += c->nargs;
+      put(b, "({ long v%d = 0; ", hv);
+      for (int i = 0; i < c->nargs; i++) { put(b, "long v%d = ", a0 + i); if (!emitx(b, pre, c->args[i], par, budget - 1)) return 0; put(b, "; "); }
+      int sv = c->var, ss = c->vscope; c->var = hv; c->vscope = fscope;
+      put(b, "long *v%d = (long *)(", ov); int ok = emitx(b, pre, e, par, budget - 1);
+      c->var = sv; c->vscope = ss;
+      if (!ok) return 0;
+      put(b, "); *dst = (long)v%d; f%ld_d(&v%d[%d]", ov, c->k, ov, hole + !e->untag);
+      for (int i = 0; i < c->nargs; i++) put(b, ", v%d", a0 + i);
+      if (!call_fv(b, c->k)) return 0;
+      put(b, "); })"); return 1;
+    }
+    if (!(e->op == E_MATCH || (e->op == E_IF && !indexed_pick(e, &K, &S, &off)))) {   /* a leaf: the result itself */
+      put(b, "(*dst = "); if (!emitx(b, pre, e, par, budget - 1)) return 0; put(b, ", 0L)"); return 1;
+    }
   }
   switch (e->op) {
   case E_CONST: if (e->k == (long)(1UL << (LIN_INT_BITS - 1))) put(b, "(-%ldL-1)", -(e->k + 1)); else put(b, "(%ldL)", e->k); return 1;
@@ -1180,8 +1232,8 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       put(b, "))[("); if (!emitx(b, pre, K, par, budget - 1)) return 0; put(b, ") + %ld])", off); return 1;
     } }
     put(b, "("); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
-    put(b, " ? "); if (!emit_region(b, pre, e->b, par, budget - 1)) return 0;
-    put(b, " : "); if (!emit_region(b, pre, e->c, par, budget - 1)) return 0;
+    put(b, " ? "); tailpos = tp; if (!emit_region(b, pre, e->b, par, budget - 1)) return 0;
+    put(b, " : "); tailpos = tp; if (!emit_region(b, pre, e->c, par, budget - 1)) return 0;
     put(b, ")"); return 1;
   /* DATA in C: a constructor with fields is a block {index, fields...} from the unit's arena; one with none is
      the immediate 2*index+1 (a block is word-aligned, so the low bit tells them apart).  A match reads the index
@@ -1265,11 +1317,12 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
           int k = nvar++; put(b, "long v%d = ((long *)_s)[%d]; ", k, j + !e->untag);
           fx[j]->var = k; fx[j]->vscope = fscope;
         }
+        tailpos = tp;
         int ok = emit_region(b, pre, e->args[i], par, budget - 1);
         put(b, "; })");
         for (int j = 0; j < nfx; j++) fx[j]->var = -1;
         if (!ok) return 0;
-      } else if (!emit_region(b, pre, e->args[i], par, budget - 1)) return 0;
+      } else if ((tailpos = tp, !emit_region(b, pre, e->args[i], par, budget - 1))) return 0;
       if (i < e->nargs - 1) put(b, " : ");
     }
     put(b, "); })");
@@ -1293,18 +1346,28 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       } }
     if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
     for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
-    for (int i = 0; !par && e->k < lifted && i < nfv[e->k]; i++) {   /* the callee's lifted parameters: ours, or passed on */
-      const FV *v = &fvs[e->k][i];
-      if (v->h == emitting) put(b, ", p%ld", v->k);
-      else if (emitting >= 0 && emitting < lifted && fv_has(emitting, v->h, v->k)) put(b, ", l%d_%ld", v->h + 1, v->k);
-      else { DBG("declined: a lifted parameter with no source\n"); return 0; }
-    }
+    if (!par && !call_fv(b, e->k)) return 0;
     put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
     return 1;
   }
   return 0;
 }
 
+/* the tails of f's body: a cell holding f's own call in a field makes f a destination-passing function, and so is
+   whatever one of those tail-calls (the destination goes along, so their mutual loops stay loops) */
+static int dp_scan(const Expr *e, int f, unsigned char *hd) {
+  const Expr *K, *S; long off;
+  switch (e->op) {
+  case E_IF: if (indexed_pick(e, &K, &S, &off)) return 0; return dp_scan(e->b, f, hd) | dp_scan(e->c, f, hd);
+  case E_MATCH: { int r = 0; for (int i = 0; i < e->nargs; i++) r |= dp_scan(e->args[i], f, hd); return r; }
+  case E_CTOR:
+    for (int i = 0; i < e->nargs; i++)
+      if (e->args[i]->op == E_CALL && e->args[i]->k == f && (!e->ci || field_live(e->ci, i)) && !hd[f]) { hd[f] = 1; return 1; }
+    return 0;
+  case E_CALL: if (hd[f] && e->k >= 0 && e->k < nfun && !hd[e->k]) { hd[e->k] = 1; return 1; } return 0;
+  default: return 0;
+  }
+}
 static unsigned long fnv1a(const char *s) { unsigned long h = 1469598103934665603UL; for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211UL; } return h; }
 static const char *cache_dir(char *out, size_t n) {
   const char *env = getenv("LIN_NATIVE_CACHE"), *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
@@ -1786,8 +1849,9 @@ static void uniq_calls(const Expr *e, const Expr *body) {   /* demote a callee's
   if (e->op == E_CALL)
     for (int i = 0; i < e->nargs; i++) {
       const Expr *a = e->args[i];
-      int ok = uniq(a) && (a->op == E_CONST || occ_through(body, a, e) <= 1);   /* (on the paths through this call: one value given twice -- a field, a parameter, or a block the expression shares -- is not unique) */
-      if (!ok && uparam[e->k][i]) { if (dbg > 1) DBG("[not unique: f%ld's parameter %d: arg op %d uniq %d through %u]\n", e->k, i, a->op, uniq(a), a->op != E_CONST ? occ_through(body, a, e) : 0); uparam[e->k][i] = 0; uq_changed = 1; }
+      int imm = a->op == E_CONST || (a->op == E_CTOR && !a->nargs);   /* (an immediate is no block) */
+      int ok = uniq(a) && (imm || occ_through(body, a, e) <= 1);   /* (on the paths through this call: one value given twice -- a field, a parameter, or a block the expression shares -- is not unique) */
+      if (!ok && uparam[e->k][i]) { if (dbg > 1) DBG("[not unique: f%ld's parameter %d: arg op %d uniq %d through %u]\n", e->k, i, a->op, uniq(a), imm ? 0 : occ_through(body, a, e)); uparam[e->k][i] = 0; uq_changed = 1; }
     }
   if (e->a) uniq_calls(e->a, body);
   if (e->b) uniq_calls(e->b, body);
@@ -2067,8 +2131,13 @@ static const char *DATA_RT =
   "extern LIN_TLS jmp_buf lin_jb; extern LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
   "extern LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch;\n"
   "static pthread_mutex_t lin_chm = PTHREAD_MUTEX_INITIALIZER;\n"
+  "#ifdef __linux__\nextern int madvise(void *, unsigned long, int);\n#define LIN_HUGE(p, n) madvise((p), (n), 14)\n#else\n#define LIN_HUGE(p, n) ((void)0)\n#endif\n"
   "static __attribute__((noinline, cold)) void lin_refill(long n) {\n"
-  "  long sz = n > 65536 ? n : 65536; long *c = malloc((size_t)sz * 8);\n"
+  "  /* (the arena grows by doubling chunks; a large one is asked for in huge pages, where the OS has them: a fresh\n"
+  "     page is the dearest thing a list costs, and a 2 MB page is one fault where 4 KB pages are 512) */\n"
+  "  long g = lin_nch < 6 ? lin_nch : 6, sz = 65536L << g; if (sz < n) sz = n; long *c;\n"
+  "  if (sz >= (1L << 18) && !(sz & ((1L << 18) - 1))) { c = aligned_alloc((size_t)1 << 21, (size_t)sz * 8); if (c) LIN_HUGE(c, (size_t)sz * 8); }\n"
+  "  else c = malloc((size_t)sz * 8);\n"
   "  if (!c || lin_fn_aborted || lin_used > (1L << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) { free(c); lin_fn_aborted = 1; longjmp(lin_jb, 1); }\n"
   "  pthread_mutex_lock(&lin_chm);\n"
   "  if (lin_nch >= lin_cch) { lin_cch = lin_cch ? lin_cch * 2 : 64; lin_ch = realloc(lin_ch, (size_t)lin_cch * sizeof *lin_ch); }\n"
@@ -2246,9 +2315,19 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       lift();
       for (int i = 0; i < nfun; i++) { put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ");\n"); }
       int ok = 1;
+      unsigned char *hd = A((size_t)nfun + 1);         /* which functions get a destination-passing form */
+      for (int i = 0; i < nfun; i++) dp_scan(funs[i].body, i, hd);
+      for (int ch = 1; ch; ) { ch = 0; for (int i = 0; i < nfun; i++) if (hd[i]) ch |= dp_scan(funs[i].body, i, hd); }
+      for (int i = 0; i < nfun; i++) if (hd[i]) { put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ");\n"); }
+      hasd = hd;
       for (int i = 0; ok && i < nfun; i++) {
-        put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ") { LIN_ENTER; return ");
-        emitting = i; fscope++; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n");
+        put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0);
+        emitting = i; fscope++;
+        if (hd[i]) {                                   /* the plain form: the other, given a local to write */
+          put(&fb, ") { long r; f%d_d(&r", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", p%d", j); fv_params(&fb, i, 0, 1); put(&fb, "); return r; }\n");
+          put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ") { LIN_ENTER; return ");
+          tailpos = 1; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+        } else { put(&fb, ") { LIN_ENTER; return "); ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n"); }
       }
       Buf eb = nbuf(1024);                             /* the entry's call, as an expression of its parameters */
       emitting = -1; fscope++; ok = ok && emit_region(&eb, &pre, entry, 0, 4096);

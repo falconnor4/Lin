@@ -144,5 +144,13 @@ sites=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/par.lin" 2>&1 >/dev/null | g
 # the three selectors below share one list, and each must leave it whole for the next.
 printf '%s\n' '(v3y (v3scale 2.0 (vec3 1.0 2.0 3.0)))' > "$TMP/shared.lin"
 [ "$(LIN_NO_SHRINK=1 timeout 120 "$LIN_BIN" "$TMP/shared.lin" 2>/dev/null)" = "=> 4" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a shared block was consumed"; }
+# DESTINATION PASSING: a recursion that builds a cell around its own call is a loop, so a list far deeper than
+# any stack is mapped, filtered and appended -- and the answers are what the short lists give.
+printf '%s\n' '(ssum (sfilter (\x (eq (mod x 3) 0)) (smap (\x (add x 1)) (sappend (srange 0 3000000) (srange 0 3000000)))))' \
+  '(slength (stake 2500000 (srange 0 3000000)))' '(ssum (smap (\x (mul x 2)) (srange 0 10)))' > "$TMP/dp.lin"
+dp=$(timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>/dev/null | tr '\n' ' ')
+[ "$dp" = "=> 3000003000000 => 2500000 => 90 " ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL destination passing: '$dp'"; }
+dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep -c "_d(long \*dst")
+[ "$dn" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no destination-passing form was written"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
