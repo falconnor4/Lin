@@ -255,7 +255,7 @@ static Term *shrink_spine(Term *t) {                  /* NULL: not such a redex 
   b = sp_subst(b, &T, once, arg, &C);
   for (int i = n - 1; i >= 0; i--) {                 /* a parameter used more than once keeps its redex */
     if (cnt[i] >= 2) { lam[i]->l = b; lam[i]->nl = 1; app[i]->l = lam[i]; app[i]->r = arg[i]; b = app[i]; }
-    else { lam[i]->l = NULL; free(lam[i]); app[i]->l = app[i]->r = NULL; free(app[i]); }
+    else { term_release(lam[i]); term_release(app[i]); }
   }
   return again ? shrink(b) : b;
 }
@@ -286,7 +286,7 @@ static Term *shrink(Term *t) {
         body = shrink_subst(body, lam->name, arg);
         ss_names = sv;
       }
-      term_free(arg); free(lam); t->l = t->r = NULL; free(t);
+      term_free(arg); term_release(lam); term_release(t);
       return again ? shrink(body) : body;
     }
   }

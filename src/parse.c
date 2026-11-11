@@ -40,11 +40,22 @@ static void skipws(void) {
   }
 }
 
+/* Terms come from a pool: a program's front end makes and drops millions of them (every expansion of a
+   definition is a copy), and one at a time from malloc that was a quarter of its time.  A released node heads
+   the free list (through `l`); a fresh one is carved from a block that doubles. */
+static Term *term_pool; static Term *term_blk; static size_t term_left, term_next;
 Term *term_new(int type, const char *name, Term *l, Term *r) {
-  Term *t = malloc(sizeof *t); *t = (Term){.type = type, .l = l, .r = r};
+  Term *t = term_pool;
+  if (t) term_pool = t->l;
+  else {
+    if (!term_left) { term_next = term_next ? term_next * 2 : 1024; term_blk = malloc(term_next * sizeof *term_blk); if (!term_blk) { fprintf(stderr, "Error: out of memory\n"); exit(1); } term_left = term_next; }
+    t = term_blk++; term_left--;
+  }
+  *t = (Term){.type = type, .l = l, .r = r};
   t->name = name ? name : ""; return t;
 }
-void term_free(Term *t) { if (t) { term_free(t->l); term_free(t->r); free(t); } }
+void term_release(Term *t) { t->l = term_pool; term_pool = t; }   /* one node, not what it points at */
+void term_free(Term *t) { while (t) { Term *r = t->r; term_free(t->l); term_release(t); t = r; } }
 Term *term_copy(Term *t) {
   if (!t) return NULL;
   Term *c = term_new(t->type, t->name, term_copy(t->l), term_copy(t->r));

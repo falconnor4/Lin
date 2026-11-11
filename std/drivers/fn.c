@@ -1843,12 +1843,25 @@ static int uniq_r(const Expr *e) {
 }
 static int uniq(const Expr *e) { return uniq_r(e); }
 static int uq_changed;
+/* how many places name each value (over the whole unit): one named once is given to its one call once, on every
+   path -- no need to walk the paths for it */
+static unsigned *nrefs; static int nrefs_cap;
+static void count_refs(const Expr *e) {
+  if (!e || mm_has(MM_NUM, e)) return;
+  mm_put(MM_NUM, e, 1);
+#define REF(x) do { const Expr *x_ = (x); if (x_) { if (x_->id >= nrefs_cap) { int o = nrefs_cap; nrefs_cap = x_->id * 2 + 64; nrefs = realloc(nrefs, sizeof *nrefs * (size_t)nrefs_cap); memset(nrefs + o, 0, sizeof *nrefs * (size_t)(nrefs_cap - o)); } nrefs[x_->id]++; count_refs(x_); } } while (0)
+  REF(e->a); REF(e->b); if (e->op != E_CTOR) REF(e->c);
+  for (int i = 0; i < e->nargs && e->args; i++) REF(e->args[i]);
+#undef REF
+}
 static void uniq_calls(const Expr *e, const Expr *body) {   /* demote a callee's parameter given something shared */
   if (!e || mm_has(MM_NUM, e)) return;
   mm_put(MM_NUM, e, 1);
   if (e->op == E_CALL)
     for (int i = 0; i < e->nargs; i++) {
       const Expr *a = e->args[i];
+      if (!uparam[e->k][i]) continue;
+      if (a->id < nrefs_cap && nrefs[a->id] <= 1 && uniq(a)) continue;   /* (named once: moved once) */
       int imm = a->op == E_CONST || (a->op == E_CTOR && !a->nargs);   /* (an immediate is no block) */
       int ok = uniq(a) && (imm || occ_through(body, a, e) <= 1);   /* (on the paths through this call: one value given twice -- a field, a parameter, or a block the expression shares -- is not unique) */
       if (!ok && uparam[e->k][i]) { if (dbg > 1) DBG("[not unique: f%ld's parameter %d: arg op %d uniq %d through %u]\n", e->k, i, a->op, uniq(a), imm ? 0 : occ_through(body, a, e)); uparam[e->k][i] = 0; uq_changed = 1; }
@@ -1959,6 +1972,9 @@ static void ownership(Expr *entry) {
   fown_n = 0; while (lin_ctor_info(fown_n + 1)) fown_n++;
   fown = A(sizeof *fown * (size_t)(fown_n + 1));
   for (long k = 1; k <= fown_n; k++) { int nk = lin_ctor_info(k)->k + 1; fown[k] = A((size_t)nk); memset(fown[k], 1, (size_t)nk); }
+  if (nrefs_cap) memset(nrefs, 0, sizeof *nrefs * (size_t)nrefs_cap);
+  mm_new(MM_NUM); for (int i = 0; i < nfun; i++) count_refs(funs[i].body);
+  count_refs(entry);
   for (int round = 0; round <= nfun * 64 + 64 + fown_n; round++) {
     uq_changed = 0;
     mm_new(MM_UNIQ);
