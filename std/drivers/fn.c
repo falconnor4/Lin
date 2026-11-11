@@ -547,6 +547,13 @@ static Expr *to_expr(V *v);
 static int numeral_shape(const Net *n, Port p);
 static int inp_on;
 static int input_of(Port p);
+/* the END of a list, by itself: an immediate, so a constant of the unit (never a runtime input -- an input is
+   not known to be unshared, and an empty accumulator must not cost the list built on it its ownership) */
+static int list_end(const Net *n, Port p) {
+  Port c = dhop(n, p); if (!is(n, c, LAM, 0)) return 0;
+  Port nn = dhop(n, W(n, (Port){c.node, 2})); if (!is(n, nn, LAM, 0)) return 0;
+  return is(n, dhop(n, W(n, (Port){nn.node, 2})), LAM, 0);
+}
 /* A constant list: the cells answer the markers one by one, the end answers with a boolean.  Speculative: a value
    that is not a list leaves no trace. */
 static Expr *const_cells(V *v) {
@@ -606,7 +613,7 @@ static Expr *to_expr_v(V *v) {
     fail_quiet++; int bk = const_bool(v, &ok); if (failed) ok = 0; fail_quiet--;
     if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
     if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
-    if (inp_on && !v->env && numeral_shape(N, (Port){v->lam, 0})) {   /* a list already built: read in at call time */
+    if (inp_on && !v->env && numeral_shape(N, (Port){v->lam, 0}) && !list_end(N, (Port){v->lam, 0})) {   /* a list already built: read in at call time */
       Expr *pe = mke(E_PARAM, 1); pe->k = input_of((Port){v->lam, 0}); pe->nargs = -1; return hc(pe);
     }
     Expr *cl = const_cells(v);                       /* a list (a string): its cells, as constructors */
@@ -1676,7 +1683,8 @@ static unsigned occ_r(const Expr *e) {               /* how often occ_x is MOVED
   case E_IF: { unsigned b = occ_r(e->b), c = occ_r(e->c); r = occ_r(e->a) + (b > c ? b : c); break; }
   case E_MATCH: { unsigned m = 0; for (int i = 0; i < e->nargs; i++) { unsigned x = occ_r(e->args[i]); if (x > m) m = x; } r = (occ_reads && e->a == occ_x ? 0 : occ_r(e->a)) + m; break; }
   case E_BIN: r = occ_r(e->a) + occ_r(e->b); break;
-  case E_CALL: case E_CTOR: case E_FOP: for (int i = 0; i < e->nargs; i++) r += occ_r(e->args[i]); break;
+  case E_CTOR: for (int i = 0; i < e->nargs; i++) if (!e->ci || field_live(e->ci, i)) r += occ_r(e->args[i]); break;   /* (a field nobody reads is not computed: nothing moves into it) */
+  case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) r += occ_r(e->args[i]); break;
   default: break;
   }
   if (r > 2) r = 2;
@@ -2085,6 +2093,65 @@ static const char *DATA_RT =
    compiles `make` too, instead of asking the net to build the tree first. */
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum);
 static Compiled *compile_fn(Net *n, int F) { return compile_fn_ex(n, F, NULL, NULL); }
+/* ONE MATCH PER VALUE.  Code written with tests and selectors -- `(if (is_empty s) a (f (head s) (tail s)))` --
+   takes one value apart three times: a test whose answer is a constant per constructor, then a match per field.
+   Inside each answer the constructor is KNOWN, so the conditional moves inside the test's match and every
+   further match on that value becomes its known branch: one match per path, its fields read from it.  That is
+   the shape ownership understands -- the value is consumed once, so its block is reused or freed -- and it is
+   what `match` would have written.  (Case-of-known-constructor; nothing is evaluated that was not before.) */
+typedef struct { const Expr *s; int i; } Known;
+static Known *kn; static int nkn, ckn;
+static Expr **r0_memo; static unsigned *r0_gen, r0_g; static int r0_cap;
+static int contains(const Expr *e, const Expr *x, int depth);
+static Expr *rw(Expr *e);
+static Expr *rw_kids(Expr *e) {                      /* e with its children rewritten (itself when none changed) */
+  Expr *a = e->a ? rw(e->a) : NULL, *b = e->b ? rw(e->b) : NULL, *c = e->c && e->op != E_CTOR ? rw(e->c) : e->c;
+  Expr **args = NULL; int ch = a != e->a || b != e->b || c != e->c;
+  if (e->nargs && e->args) {
+    args = A(sizeof *args * (size_t)e->nargs);
+    for (int i = 0; i < e->nargs; i++) { args[i] = rw(e->args[i]); ch |= args[i] != e->args[i]; }
+  }
+  if (!ch) return e;
+  Expr *n = A(sizeof *n); *n = *e; n->id = eid++; n->var = -1; n->a = a; n->b = b; n->c = c; n->args = args ? args : e->args;
+  return hc(n);
+}
+static Expr *rw(Expr *e) {
+  if (!e) return e;
+  if (nkn) {                                         /* under a known constructor: only what mentions that value changes */
+    int any = 0;
+    for (int k = 0; k < nkn && !any; k++) any = contains(e, kn[k].s, 0);
+    if (!any) { int sv = nkn; nkn = 0; Expr *r = rw(e); nkn = sv; return r; }
+  } else if (e->id < r0_cap && r0_gen[e->id] == r0_g) return r0_memo[e->id];
+  Expr *r = NULL;
+  if (e->op == E_MATCH)
+    for (int k = nkn - 1; k >= 0 && !r; k--) if (kn[k].s == e->a && kn[k].i < e->nargs) r = rw(e->args[kn[k].i]);
+  if (!r && e->op == E_IF && e->a->op == E_MATCH && e->a->ci) {
+    Expr *m = e->a; int consts = 1, known = 0;
+    for (int i = 0; i < m->nargs && consts; i++) consts = m->args[i]->op == E_CONST;
+    for (int k = 0; k < nkn; k++) known |= kn[k].s == m->a;
+    if (consts && !known && m->a->op != E_CALL) {    /* (a call's value is one evaluation: left to its own match) */
+      Expr *n = A(sizeof *n); *n = *m; n->id = eid++; n->var = -1; n->kind = e->kind;
+      n->args = A(sizeof(Expr *) * (size_t)m->nargs);
+      n->a = rw(m->a);
+      for (int i = 0; i < m->nargs; i++) {
+        if (nkn >= ckn) kn = realloc(kn, sizeof *kn * (size_t)(ckn = ckn ? ckn * 2 : 8));
+        kn[nkn].s = m->a; kn[nkn].i = i; nkn++;
+        n->args[i] = rw(m->args[i]->k ? e->b : e->c);
+        nkn--;
+      }
+      r = hc(n);
+    }
+  }
+  if (!r) r = rw_kids(e);
+  if (!nkn && e->id < r0_cap) { r0_gen[e->id] = r0_g; r0_memo[e->id] = r; }
+  return r;
+}
+static Expr *one_match(Expr *e) {
+  if (r0_cap < eid + 1) { int c = eid * 2 + 64; r0_memo = realloc(r0_memo, sizeof *r0_memo * (size_t)c); r0_gen = realloc(r0_gen, sizeof *r0_gen * (size_t)c); memset(r0_gen + r0_cap, 0, sizeof *r0_gen * (size_t)(c - r0_cap)); r0_cap = c; }
+  nkn = 0;
+  return rw(e);
+}
+
 /* THE CALL'S CONTEXT.  A recursive call is where the driver notices a unit, but the call's value is often taken
    apart at once -- `(alen (fill a 0 n))` is fill's result applied to a match branch -- and folding a structure back
    into the net only for the net to read one field of it is the slow way round.  So the applications around the
@@ -2141,6 +2208,9 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       if (!x || failed) { arena_free(); return NULL; }
       entry = x; nnum = nesh;
     }
+    r0_g++;
+    for (int i = 0; i < nfun; i++) funs[i].body = one_match(funs[i].body);
+    entry = one_match(entry);
     mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
       changed = 0;
@@ -2571,7 +2641,7 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         if (!is(n, nx, APP, 0)) { shape = 0; break; }
         cl = nx.node; ap[k] = W(n, (Port){cl, 2});
         long dummy; an[k] = numeral_shape(n, ap[k]) && net_read_i64(n, ap[k], &dummy);
-        if (!an[k] && data_value(n, ap[k])) an[k] = 2;   /* data already in the net: passed in at call time */
+        if (!an[k] && data_value(n, ap[k]) && !list_end(n, ap[k])) an[k] = 2;   /* data already in the net: passed in at call time */
         if (dbg > 1) { long x = 0; int ns = numeral_shape(n, ap[k]); int ok = ns && net_read_i64(n, ap[k], &x); DBG("[arg %d: shape %d read %d (%ld) -> %d]\n", k, ns, ok, x, an[k]); }
         nexpr += an[k] != 1;
       }
