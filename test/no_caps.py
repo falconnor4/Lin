@@ -101,6 +101,7 @@ PATTERNS = [
     (r"\.c$", r"^skip\[\d+\]$", "artifact-format skip buffer while scanning back from a wire (known limit)"),
     (r"\.(c|h)$", r"^\w*\[PATH_MAX\]$", "path buffer at the OS's own limit, not one of ours"),
     (r"\.(c|h)$", r"^<< 1[046]$", "initial net capacity: grows on demand, so not a ceiling"),
+    (r"main\.c$", r"^\w+\[SP_(ARGS|SLOTS)\]$", "shrinking's batched beta: one 64-bit mask of parameters; a longer list takes the one-at-a-time path, so not a ceiling"),
     (r"\.(c|h)$", r"^slots\[LIN_PAT_SLOTS\]$", "pattern matcher: its per-match slot array, at the matcher's own capacity"),
     (r"\.(c|h)$", r"^\w+\[EFF_N\]$", "enum-sized table: exactly one entry per kind, so structure, not a limit"),
     (r"pattern\.h$", r"^\w+\[LIN_PAT_\w+\]$", "pattern matcher: a per-match array at the matcher's own capacity"),

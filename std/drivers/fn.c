@@ -1786,8 +1786,8 @@ static void uniq_calls(const Expr *e, const Expr *body) {   /* demote a callee's
   if (e->op == E_CALL)
     for (int i = 0; i < e->nargs; i++) {
       const Expr *a = e->args[i];
-      int ok = uniq(a) && ((a->op != E_FIELD && a->op != E_PARAM) || occ_through(body, a, e) <= 1);   /* (on the paths through this call) */
-      if (!ok && uparam[e->k][i]) { if (dbg > 1) DBG("[not unique: f%ld's parameter %d: arg op %d uniq %d through %u]\n", e->k, i, a->op, uniq(a), (a->op == E_FIELD || a->op == E_PARAM) ? occ_through(body, a, e) : 0); uparam[e->k][i] = 0; uq_changed = 1; }
+      int ok = uniq(a) && (a->op == E_CONST || occ_through(body, a, e) <= 1);   /* (on the paths through this call: one value given twice -- a field, a parameter, or a block the expression shares -- is not unique) */
+      if (!ok && uparam[e->k][i]) { if (dbg > 1) DBG("[not unique: f%ld's parameter %d: arg op %d uniq %d through %u]\n", e->k, i, a->op, uniq(a), a->op != E_CONST ? occ_through(body, a, e) : 0); uparam[e->k][i] = 0; uq_changed = 1; }
     }
   if (e->a) uniq_calls(e->a, body);
   if (e->b) uniq_calls(e->b, body);

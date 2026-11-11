@@ -49,6 +49,7 @@ Term *term_copy(Term *t) {
   if (!t) return NULL;
   Term *c = term_new(t->type, t->name, term_copy(t->l), term_copy(t->r));
   c->annot = t->annot;            /* a stated type (a literal's, a field's) is part of the term */
+  c->nl = t->nl;
   return c;
 }
 Term *term_fix(const char *name, Term *body) {

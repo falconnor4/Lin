@@ -140,5 +140,9 @@ done
 [ "$(timeout 120 "$LIN_BIN" "$TMP/max.lin" 2>/dev/null)" = "=> 278" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL max-reduction value"; }
 sites=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/par.lin" 2>&1 >/dev/null | grep -c "1 parallel site")
 [ "$sites" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL the tree recursion was not compiled with a parallel site"; }
+# ONE block given to several calls that each take it apart is not theirs to free: with the term left unshrunk
+# the three selectors below share one list, and each must leave it whole for the next.
+printf '%s\n' '(v3y (v3scale 2.0 (vec3 1.0 2.0 3.0)))' > "$TMP/shared.lin"
+[ "$(LIN_NO_SHRINK=1 timeout 120 "$LIN_BIN" "$TMP/shared.lin" 2>/dev/null)" = "=> 4" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a shared block was consumed"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

@@ -18,6 +18,7 @@ typedef struct Term {
   const char *name;
   struct Term *l, *r;
   Type *annot;
+  unsigned char nl;   /* (shrinking: this lambda's binder is known to occur more than once) */
 } Term;
 /* A type scheme, declared here because the driver ABI hands a pass the inferred types and that hook
    is defined long before the type interface below. */
