@@ -22,18 +22,18 @@ The rules, so the numbers mean something:
 
 | benchmark | C -O3 | Lin | Lin -t 1 | C / Lin | what it exercises |
 |-----------|-------|-----|----------|---------|-------------------|
-| array | 7 ms | 61 ms | 64 ms | 0.11x | `std/array.lin` (a 32-way trie, updated in place): 1M strided writes, 1M reads -- against a flat C array |
-| bintree | 30 ms | 6 ms | 6 ms | 5.00x | constructors + `match`: a depth-20 tree (2M nodes) built and counted |
-| bst | 33 ms | 36 ms | 35 ms | 0.92x | a search tree: 200,000 inserts (updated in place), a weighted walk |
-| collatz | 201 ms | 46 ms | 145 ms | 4.37x | a loop calling a helper loop; a max-reduction |
-| fib | 155 ms | 45 ms | 153 ms | 3.44x | tree recursion |
-| loop | 71 ms | 32 ms | 85 ms | 2.22x | a tail-recursive sum-reduction |
-| mandel | 116 ms | 41 ms | 113 ms | 2.83x | floats (numerals with soft-float meanings); three nested loops |
-| nqueens | 147 ms | 130 ms | 184 ms | 1.13x | bitmask backtracking, unbalanced tree |
-| omap | 118 ms | 96 ms | 133 ms | 1.23x | `std/omap.lin` (a red-black tree): 200,000 inserts, 200,000 lookups (the lookups split across threads) |
-| seqs | 57 ms | 39 ms | 37 ms | 1.46x | `std/seq.lin`: map, filter, fold over a million-element list (higher-order, specialised) |
-| tak | 69 ms | 34 ms | 62 ms | 2.03x | calls whose arguments are calls |
-| words | 4 ms | 28 ms | 27 ms | 0.14x | text: a 1M-character string built, its words counted -- against a C scan of a char buffer |
+| array | 7 ms | 61 ms | 59 ms | 0.11x | `std/array.lin` (a 32-way trie, updated in place): 1M strided writes, 1M reads -- against a flat C array |
+| bintree | 45 ms | 7 ms | 8 ms | 6.43x | constructors + `match`: a depth-20 tree (2M nodes) built and counted |
+| bst | 51 ms | 32 ms | 32 ms | 1.59x | a search tree: 200,000 inserts (updated in place), a weighted walk |
+| collatz | 259 ms | 68 ms | 237 ms | 3.81x | a loop calling a helper loop; a max-reduction |
+| fib | 183 ms | 69 ms | 188 ms | 2.65x | tree recursion |
+| loop | 103 ms | 32 ms | 110 ms | 3.22x | a tail-recursive sum-reduction |
+| mandel | 138 ms | 46 ms | 145 ms | 3.00x | floats (numerals with soft-float meanings); three nested loops |
+| nqueens | 230 ms | 194 ms | 257 ms | 1.19x | bitmask backtracking, unbalanced tree |
+| omap | 129 ms | 111 ms | 147 ms | 1.16x | `std/omap.lin` (a red-black tree): 200,000 inserts, 200,000 lookups (the lookups split across threads) |
+| seqs | 77 ms | 16 ms | 15 ms | 4.81x | `std/seq.lin`: map, filter, fold over a million-element list (higher-order, specialised; each a loop, in place) |
+| tak | 102 ms | 42 ms | 114 ms | 2.43x | calls whose arguments are calls |
+| words | 4 ms | 14 ms | 18 ms | 0.29x | text: a 1M-character string built, its words counted -- against a C scan of a char buffer |
 
 Measured on a 4-core x86-64 container (gcc 15, nixpkgs). Re-run before quoting.
 
@@ -41,8 +41,19 @@ Measured on a 4-core x86-64 container (gcc 15, nixpkgs). Re-run before quoting.
 
 `array` and `words` compare a persistent, pure structure with C's mutable flat memory, and that gap is real:
 an array element is four pointer hops down a trie where C does one indexed load, and a string is a linked list of
-cells where C scans bytes.  Both run as compiled C with in-place update and no garbage -- the remaining cost is
-the representation.  Closing it (wider nodes, fusing a producer with its consumer) is open work.
+16-byte cells where C scans bytes.  Both run as compiled C with in-place update and no garbage -- the remaining
+cost is the representation, and for `array` also the front end: a program that uses the trie spends about 20 ms
+being parsed, expanded and compiled before it runs (C's figure has no compiler in it).
+
+Three things the compiled code does that these two lean on:
+
+- **Destination passing.**  A recursion that builds a cell around its own call (`map`, `filter`, `append`,
+  splitting text) is written as a loop: the cell is built first with a hole, and the call is a tail call given
+  the hole's address.  A list of any length is processed in constant stack.
+- **A field is stored only if it changed.**  An update in place hands back the block it was given; storing that
+  pointer again would make the next operation's load wait on the store, putting a loop's steps in series.
+- **Huge pages.**  The arena grows by doubling chunks and asks for 2 MB pages for the large ones; fresh 4 KB
+  pages were most of what building a million-cell list cost.
 
 ## Data structures
 

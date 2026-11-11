@@ -1249,11 +1249,14 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         put(b, "); long v%d = _o[v%d + %ld]; ", ov, kv, off);
         Expr *fx = (Expr *)f0; int sv = fx->var, ss = fx->vscope; fx->var = ov; fx->vscope = fscope;   /* field 0 stands for field K */
         Expr *kx = (Expr *)K; int skv = kx->var, sks = kx->vscope; kx->var = kv; kx->vscope = fscope;
-        put(b, "_o[v%d + %ld] = ", kv, off);
+        /* written only if it CHANGED: an update in place hands back the block it was given, and storing that
+           pointer again would make the next operation's load of it wait on this store -- every step of a loop
+           over the structure in series, where they could overlap */
+        put(b, "long _n = ");
         int ok = emit_region(b, pre, x0, par, budget - 1);
         fx->var = sv; fx->vscope = ss; kx->var = skv; kx->vscope = sks;
         if (!ok) return 0;
-        put(b, "; (long)_o; })"); return 1;
+        put(b, "; if (_n != v%d) _o[v%d + %ld] = _n; (long)_o; })", ov, kv, off); return 1;
       } }
     if (e->c && !(par && e->c->op != E_PARAM)) {      /* REUSE: the block the enclosing match took apart (ownership) */
       /* only what changed is written: the same constructor keeps its tag, a field that IS the old one stays */
@@ -1278,6 +1281,9 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         const Expr *a = e->args[i];
         if (SAMEF(a)) continue;
         if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) { put(b, "if (%s_c%d) _o[%d] = _a%d; ", SAMEF(a->c) ? "" : "!", i, i + !e->untag, i); continue; }
+        /* (a field a call computed is often the very block it was given, rebuilt in place: see above) */
+        if ((e->untag || e->rtag - 1 == e->k) && !bound(a) && (a->op == E_CALL || a->op == E_MATCH || a->op == E_IF))
+          put(b, "if (_o[%d] != _a%d) ", i + !e->untag, i);
         put(b, "_o[%d] = _a%d; ", i + !e->untag, i);
       }
 #undef SAMEF
