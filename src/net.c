@@ -18,6 +18,7 @@
 Scope scope_nil(void) { return 0; }
 static int in_parallel;   /* a wave is running threaded: no interning there (see below) */
 static int reduce_depth;  /* how deep the reducer is; only the outermost may publish or reclaim */
+int lin_reduce_nested(void) { return reduce_depth > 1; }   /* (inside a force made from within a reduction: someone above holds ports of this net) */
 static int nested_reduce; /* a driver's reducer ran inside the wave being dispatched (see net_flush_free) */
 
 /* The driver table, here because net_alloc/net_free consult it: as long as it has drivers, priority-ordered, lower pre-empts. */
@@ -1309,6 +1310,7 @@ static long net_reduce_body(Net *n, long limit) {
          inspect and force what it must read, where a per-pair predicate could not.  Nothing offered and
          nothing held means no driver can claim or act. */
       int offer = cand_cnt > 0 || n->nheld > 0, steps_before = n->steps;
+      Port root_before = n->wire[0];
       for (int di = 0; offer && di < ndrv; di++) {
         LinDriver *d = drv[di];
         if (!DRV_HAS(d, match) || !d->match) continue;
@@ -1340,6 +1342,10 @@ static long net_reduce_body(Net *n, long limit) {
         have[di] = 1;
       }
       changed += (int)(n->steps - steps_before);   /* a match that forced made real progress */
+      /* ...and a match that REPLACED WHAT IS OBSERVED (a driver may answer the whole expression at once) left
+         this wave's snapshot describing an expression already dropped: take the next wave from what is there
+         now, rather than offer anyone its pairs. */
+      { Port r1 = n->wire[0]; if (r1.node != root_before.node || r1.port != root_before.port) continue; }
 
       /* Legacy drivers (a pure per-pair predicate) are consulted over what is left. */
       for (int i = 0; offer && i < np; i++) {

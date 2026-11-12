@@ -972,6 +972,25 @@ static int emit_op(Buf *b, long k, const char *x, const char *y) {
    (while `d < dmax`), the last runs here, and the rest are plain.  Writes "({ ...;" -- the caller writes the
    use of names[i] and closes it with "; })". */
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+/* Operands run side by side are each written as a function of the PARAMETERS: a value they share -- a node
+   both reach, or one the enclosing code already holds in a local -- would be computed again inside each.  That
+   is the opposite of what sharing is for (`(fdiv (dot u v) (dot v v))` built `v` on both threads), so such
+   operands are evaluated in turn, the shared value once. */
+static int ps_walk(const Expr *e, unsigned char *mark, int who) {
+  if (!e || e->op == E_PARAM || e->op == E_CONST) return 0;
+  if (mark[e->id] == who) return 0;
+  if ((mark[e->id] || bound(e)) && has_call(e)) return 1;
+  mark[e->id] = (unsigned char)who;
+  if (bound(e)) return 0;
+  if (ps_walk(e->a, mark, who) || ps_walk(e->b, mark, who) || (e->op != E_CTOR && ps_walk(e->c, mark, who))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (ps_walk(e->args[i], mark, who)) return 1;
+  return 0;
+}
+static int par_shares(const Expr **xs, int n) {
+  unsigned char *mark = calloc((size_t)eid + 1, 1); int r = 0;
+  for (int i = 0; i < n && !r; i++) r = ps_walk(xs[i], mark, i + 1);
+  free(mark); return r;
+}
 static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int budget) {
   int last = -1, ok = 1;
   for (int i = 0; i < n; i++) if (has_self(xs[i])) last = i;
@@ -1243,7 +1262,8 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   case E_BIN: {
     Buf x = nbuf(256), y = nbuf(256);
     int ok = 1;
-    if (par && has_self(e->a) && has_self(e->b)) {
+    const Expr *xs2[2] = { e->a, e->b };
+    if (par && has_self(e->a) && has_self(e->b) && !par_shares(xs2, 2)) {
       const Expr *xs[2] = { e->a, e->b }; Buf nm[2] = { nbuf(32), nbuf(32) };
       ok = par_group(b, pre, xs, 2, nm, budget);
       if (ok) { emit_op(b, e->k, nm[0].s, nm[1].s); put(b, "; })"); }
@@ -1373,7 +1393,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   case E_CALL:
     par = par && e->k == 0;                        /* only the entry function has a parallel version */
     { int calls = 0; for (int i = 0; i < e->nargs; i++) calls += has_self(e->args[i]);
-      if (par && calls >= 2) {                     /* independent calls among the arguments: at once */
+      if (par && calls >= 2 && !par_shares((const Expr **)e->args, e->nargs)) {   /* independent calls among the arguments: at once */
         Buf *nm = calloc((size_t)e->nargs, sizeof *nm);
         for (int i = 0; i < e->nargs; i++) nm[i] = nbuf(32);
         int ok = par_group(b, pre, (const Expr **)e->args, e->nargs, nm, budget);
@@ -2372,6 +2392,7 @@ static Expr *one_match(Expr *e) {
    call join the unit: the result applied to arguments (kind 0: a match, a function result applied), or passed to a
    function whose value is known (kind 1).  fn_reduce collects them, outermost last; the unit's value is theirs. */
 static Port *cx_port; static int *cx_kind, cx_n, cx_cap;
+static int root_mode;   /* fn_match: the unit is the whole expression the program observes, or nothing */
 static void cx_push(int kind, Port p) {
   if (cx_n >= cx_cap) { cx_cap = cx_cap ? cx_cap * 2 : 8; cx_port = realloc(cx_port, sizeof *cx_port * (size_t)cx_cap); cx_kind = realloc(cx_kind, sizeof *cx_kind * (size_t)cx_cap); }
   cx_port[cx_n] = p; cx_kind[cx_n] = kind; cx_n++;
@@ -2417,7 +2438,8 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     if (aports && cx_n) {                              /* the context, applied to the call's value */
       V *v = mkv(V_SYM); v->e = entry; cur_fid = -1;
       for (int i = 0; i < cx_n && v && !failed; i++)
-        v = cx_kind[i] == 0 ? apply(v, lzp(cx_port[i], NULL)) : apply(eval(cx_port[i], NULL), ready(v));
+        v = cx_kind[i] == 2 ? eval(cx_port[i], NULL)   /* (the whole expression: the call is met again inside it) */
+          : cx_kind[i] == 0 ? apply(v, lzp(cx_port[i], NULL)) : apply(eval(cx_port[i], NULL), ready(v));
       Expr *x = v && !failed ? to_expr(v) : NULL;
       if (!x || failed) { arena_free(); return NULL; }
       entry = x; nnum = nesh;
@@ -2931,7 +2953,8 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         if (dbg > 1) { long x = 0; int ns = numeral_shape(n, ap[k]); int ok = ns && net_read_i64(n, ap[k], &x); DBG("[arg %d: shape %d read %d (%ld) -> %d]\n", k, ns, ok, x, an[k]); }
         nexpr += an[k] != 1;
       }
-      if (shape && nexpr) {
+      if (root_mode && (!shape || W(n, (Port){0, 0}).node == cl)) return folded;   /* (the call IS the expression: the ordinary way) */
+      if (shape && (nexpr || root_mode)) {
         /* the context first (see cx_push): the widest that compiles, else the call alone */
         int top = cl; cx_n = 0;
         for (int k = 0; k < n->nn; k++) {
@@ -2945,13 +2968,21 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         int *tops = malloc(sizeof *tops * (size_t)(cx_n + 1)), all = cx_n;   /* each context's node, to cut back to */
         { int t = cl; tops[0] = cl;
           for (int i = 0; i < all; i++) { Port o = W(n, (Port){t, 1}); t = o.node; tops[i + 1] = t; } }
+        if (root_mode) {                              /* (see fn_match) */
+          Port rp = W(n, (Port){0, 0});
+          cx_n = 0; cx_push(2, rp);
+          c2 = compile_fn_ex(n, F, ap, an);
+          cx_n = 0; all = 0;
+          if (!c2) { free(tops); return folded; }
+          cl = rp.node; DBG("(the whole expression is the unit)\n");
+        }
         for (; cx_n > 0 && !c2; cx_n--) {             /* the widest context that compiles */
           c2 = compile_fn_ex(n, F, ap, an);
           if (c2) cl = tops[cx_n];
         }
         if (all && !c2) DBG("(no context of the call compiles: the call alone)\n");
         free(tops); cx_n = 0;
-        if (!c2) c2 = compile_fn_ex(n, F, ap, an);
+        if (!c2 && !root_mode) c2 = compile_fn_ex(n, F, ap, an);
         double t_c1 = now_ms();
         if (c2) {
           int nn = 0, pi = 0;
@@ -2996,6 +3027,7 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         }
       }
     }
+    if (root_mode) return folded;
     c = lin_precompile_depth ? NULL : compile_fn(n, F);
     ok = c != NULL;
     for (int k = 0; ok && k < c->arity; k++) {         /* the call chain: (Y F) a1 .. ak */
@@ -3042,6 +3074,49 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
   return folded;
 }
 
+/* THE WHOLE EXPRESSION, BEFORE ANYTHING ELSE TOUCHES IT.  A call's context is a chain, and a chain ends at a
+   fan -- every operand of an arithmetic operation is shared with the operation's own definition.  So each call
+   under an operation was a unit of its own, and a value two of them used (`v` in `(fdiv (dot u v) (dot v v))`)
+   was computed by both, where the net computes it once.  The expression the program observes is the widest
+   context there is: compiled as one unit, what it shares is one node of the unit.
+
+   It can only be replaced while nobody holds a port inside it -- not from within a force, which is how an
+   operation reaches its operands -- so this runs from `match`, on a net no rule has fired in yet: find a
+   recursive call in the expression, and try the expression as that call's unit.  Declined, nothing changed. */
+static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed);
+static int fn_match(Net *n, void *st, LinView *view, LinClaim *out) {
+  (void)st; (void)view; (void)out;
+  if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
+  if (fn_off || n->steps != 0 || lin_reduce_nested() || lin_precompile_depth || n->tag[0] != ROOT) return 0;
+  Port rp = W(n, (Port){0, 0});
+  if (!is(n, rp, APP, 1)) return 0;
+  unsigned char *seen = calloc((size_t)n->nn, 1); int *stk = malloc(sizeof *stk * (size_t)n->nn), sp = 0, found = 0;
+  Port rx[2];
+  stk[sp++] = rp.node; seen[rp.node] = 1;
+  while (sp > 0 && !found) {                         /* the applications and fans of the expression, outermost first */
+    int a = stk[--sp];
+    if (n->tag[a] == APP) {
+      Port f = W(n, (Port){a, 0});
+      if (live(n, f) && f.port == 0 && n->tag[f.node] == LAM && (fn_claim(n, (Port){a, 0}, f) || fn_claim(n, f, (Port){a, 0}))) {
+        int h, ay, F; rx[0] = (Port){a, 0}; rx[1] = f;
+        if (!y_call(n, rx[0], rx[1], &h, &ay, &F)) { rx[0] = f; rx[1] = (Port){a, 0}; }
+        found = 1; break;
+      }
+    }
+    for (int k = 0; k < 3; k += 2) {                 /* (an application's function and argument; a fan's source) */
+      if (n->tag[a] == DUP && k == 2) break;
+      Port w = W(n, (Port){a, k});
+      if (!live(n, w) || seen[w.node]) continue;
+      int t = n->tag[w.node];
+      if ((t == APP && w.port == 1) || (t == DUP && w.port != 0)) { seen[w.node] = 1; stk[sp++] = w.node; }
+    }
+  }
+  free(seen); free(stk);
+  if (!found) return 0;
+  int ch = 0;
+  root_mode = 1; fn_reduce(n, rx, 1, 0, &ch); root_mode = 0;
+  return 0;
+}
 LinDriver lin_fn_driver;
 static void __attribute__((constructor)) fn_load(void) {
   if (dbg < 0) dbg = getenv("LIN_FN_DEBUG") ? atoi(getenv("LIN_FN_DEBUG")) : 0;
@@ -3057,5 +3132,5 @@ LinDriver lin_fn_driver = {
   .size = (uint32_t)sizeof(LinDriver),
   .name = "fn", .description = "function compiler: a recursive integer function, compiled to C from its net",
   .caps = LIN_CAP_PREEMPT, .priority = 3,
-  .claim = fn_claim, .reduce = fn_reduce,
+  .claim = fn_claim, .reduce = fn_reduce, .match = fn_match,
 };

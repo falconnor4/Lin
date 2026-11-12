@@ -442,6 +442,7 @@ int  net_spine_slots(Net *n, Port argp); /* operand count of a cell-spine (-1: n
 /* !=0 while def_precompile reduces an open body: a driver must not fold there, since the operands are free vars
    that never become concrete and a baked closure would capture a stale value */
 extern int lin_precompile_depth;
+int lin_reduce_nested(void);   /* inside a force made from within a reduction: someone above holds ports of this net */
 /* !=0 while the AOT build is partially evaluating: a driver must not bake anything the
    program would observe at RUN time (e.g. a (lin_folds) probe) into the artifact */
 extern int lin_build_depth;
