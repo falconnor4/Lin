@@ -109,6 +109,12 @@ structure, which shows exactly where a value is shared:
 - **Reuse along every path.** A path that consumes a block either rebuilds in it
   or returns it to a free list, so a loop that builds and consumes cells runs in
   constant memory.
+- **Dropping.** A value a function owns, and only lends to the call that last
+  uses it, is freed when that call returns, provided the call's result holds
+  none of it. This is the net's eraser in compiled code: a loop that computes
+  each state from the last keeps one state, not all of them.
+- **Copying to own.** A small flat value given to an accumulating loop is given
+  as a copy, so the loop owns it and updates it in place at every step.
 - **Unread fields are not computed.** A constructor field that no part of the
   program reads is never evaluated or stored, matching lazy semantics.
 
@@ -122,16 +128,34 @@ structure, which shows exactly where a value is shared:
 - **Indexed fields.** Reading or replacing field `k` of a wide constructor, as the
   array trie does, is one indexed load or store.
 
+### Sharing
+
+Compiled code computes a shared value once, as the net does.
+
+- **One unit for the whole expression.** Before reduction starts, the compiler
+  tries the entire expression the program observes as a single unit, so a value
+  used by two calls in it is one node of the unit rather than work repeated in
+  two separately compiled calls.
+- **Captured values.** A function passed to `map` or `fold` may use a value
+  from the enclosing scope. When that value is itself a computation, it is
+  evaluated once and handed to the loop as a parameter, not re-evaluated at
+  every step.
+- **Equal expressions.** Within a unit, two occurrences of the same expression
+  are the same node and are computed once.
+
 ### Parallelism
 
 - **Independent calls.** When a function's result combines two or more recursive
   calls, as in `fib` or a tree traversal, they run on separate threads down to a
   depth chosen from the thread count.
+- **Maps.** A loop that builds a list from a list, each element by a call, is
+  split into stretches that run on separate threads; each builds its part of the
+  result, and the parts are joined in order.
 - **Reductions.** A loop that folds an associative operation over a range
   (wrapping `add` or `mul`, the bitwise operations, `max` and `min`) is split
   into chunks that run on separate threads.
 
-Both are checked to give the same answer at every thread count
+All are checked to give the same answer at every thread count
 (`test/fn_compile.sh`).
 
 ### Caching
