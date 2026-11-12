@@ -268,6 +268,19 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Tier 5.455: the program cache -- a cached run runs the compiled units again and prints the same
+#   (test/program_cache.sh).
+# ----------------------------------------------------------------------------
+PC_LOG=$(mktemp)
+if bash test/program_cache.sh "$LIN_BIN" "$STD_DIR" > "$PC_LOG" 2>&1; then
+  pass=$((pass+1)); pcn=$(grep -o '[0-9]* checks' "$PC_LOG" | grep -o '[0-9]*' | head -1); total_checks=$((total_checks + ${pcn:-0}))
+  echo "PASS test/program_cache.sh ($(tail -1 "$PC_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/program_cache.sh"; cat "$PC_LOG"
+fi
+rm -f "$PC_LOG"
+
+# ----------------------------------------------------------------------------
 # Tier 5.46: floats are net structure -- the pure soft float equals the hardware's IEEE-754
 # ----------------------------------------------------------------------------
 SF_LOG=$(mktemp)

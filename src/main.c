@@ -501,6 +501,18 @@ static int type_domain(Type *t) {
   return -1;
 }
 
+/* ---- the program cache (see lin.h) ---- */
+uint64_t lin_form_key; int lin_form_idx = -1, lin_form_domain; void *lin_form_net;
+static LinFormRecall form_recall; static LinFormCommit form_commit;
+void lin_form_register(LinFormRecall r, LinFormCommit c) { form_recall = r; form_commit = c; }
+static int form_count, form_bad, form_nest, form_skip;   /* expressions seen; one was not cacheable; inside a load; results already printed */
+static int term_impure(const Term *t) {              /* an effect or a foreign call: its answer is not the source's alone */
+  for (; t; t = t->r) {
+    if (t->type == TLAM && t->name && (!strcmp(t->name, "_ffi") || !strcmp(t->name, "_eff"))) return 1;
+    if (term_impure(t->l)) return 1;
+  }
+  return 0;
+}
 static void run_and_report(Net *net, int domain) {
   struct timespec t0, t1;
   { const char *dp = getenv("LIN_DUMP_NET"); if (dp) net_save_line(net, dp); }   /* test/netdump.py reads the dump */
@@ -519,9 +531,12 @@ static void run_and_report(Net *net, int domain) {
   clock_gettime(CLOCK_MONOTONIC, &t1);
   /* net_print is what OBSERVES the value -- FFI dispatch (and so a prelude's `(set_driver ...)`)
      happens there -- so it always runs; only the `=> ` line is suppressed for the prelude. */
-  if (no_io && !quiet_forms) printf("=> ");
-  if (no_io) net_print(net, domain);
-  if (no_io && !quiet_forms) putchar('\n');
+  int shown = lin_form_key && !form_nest && form_skip > 0;   /* (a run from the cache printed this one before it gave up) */
+  if (shown) form_skip--;
+  if (no_io && !quiet_forms && !shown) printf("=> ");
+  if (no_io && !shown) net_print(net, domain);
+  if (no_io && !quiet_forms && !shown) putchar('\n');
+  if (!no_io && lin_form_key) form_bad = 1;
   if (bench_mode) {
     fprintf(stderr, "[bench] %ld steps | %d nodes (%d live) | %.2f ms | GoI det: %lld -> %lld\n",
             net->steps, net->nn, net->nn - net->nfree, bench_ms + ms_since(t0, t1), bench_goi0, bench_goi1);
@@ -544,9 +559,16 @@ static void run_and_report(Net *net, int domain) {
 void eval_form(Term *t) {
   char err[512]; Scheme sch;
   if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
-  if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); return; }
+  int track = lin_form_key && !form_nest && !quiet_forms;
+  if (track) { form_count++; lin_form_idx = -1; }
+  if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); if (track) form_bad = 1; return; }
   Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 10);
-  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); return; }
+  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); if (track) form_bad = 1; return; }
+  if (track) {
+    int dom = type_domain(sch.t);
+    if (form_bad || term_impure(ex) || !(dom == DT_NUM || dom == DT_BOOL || dom == DT_FLOAT)) form_bad = 1;
+    else { lin_form_idx = form_count - 1; lin_form_domain = dom; lin_form_net = &net; }
+  }
   struct timespec b0, b1;
   bench_measured = bench_mode;
   if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
@@ -557,6 +579,7 @@ void eval_form(Term *t) {
      exit status 0: measured, `(fib 12)` printed 0 where the answer is 144. */
   if (steps >= STEP_LIMIT) printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
   else run_and_report(&net, type_domain(sch.t));
+  if (track) { lin_form_idx = -1; lin_form_net = NULL; }
   net_free(&net); term_free(ex);
 }
 
@@ -826,7 +849,7 @@ static int lazy_try(const char *cand) {               /* 1: this candidate settl
   int sq = quiet_forms, sl = lazy_ok; const char *prev_ns = curr_ns; int prev_open = n_open_ns;
   quiet_forms = 1; lazy_ok = 1;                        /* (its own dependencies stay lazy) */
   char path[PATH_MAX]; snprintf(path, sizeof path, "%s", lzm[m].path);
-  load_file(path);
+  form_nest++; load_file(path); form_nest--;         /* (a library module: the key covers the library) */
   quiet_forms = sq; lazy_ok = sl; curr_ns = prev_ns; n_open_ns = prev_open;
   return 1;
 }
@@ -882,7 +905,10 @@ static void form_cb(Term *t, const char *perr, void *ud) {
   build_read_err = 0;
   if (t->type == TDEF || t->type == TDEFX || (t->type != TLOAD && t->type != TNS && t->type != TOPEN && t->type != TEXPORT && t->type != TDATATYPE))
     lazy_demand_term(t->type == TDEF || t->type == TDEFX ? t->l : t);   /* (what this form names, loaded first) */
-  if (t->type == TLOAD) { if (!load_file(t->name)) printf("error: cannot load '%s'\n", t->name); }
+  if (t->type == TLOAD) {
+    if (lin_form_key && !form_nest && strncmp(t->name, "std/", 4)) form_bad = 1;   /* (another source file: not in the key) */
+    form_nest++; if (!load_file(t->name)) printf("error: cannot load '%s'\n", t->name); form_nest--;
+  }
   else if (t->type == TNS) set_namespace(t->name);
   else if (t->type == TOPEN) open_namespace(t->name);
   else if (t->type == TEXPORT) export_namespace(t->name);
@@ -1173,6 +1199,69 @@ static void print_usage(const char *prog) {
   printf("usage: %s [build <file.lin> [-o <file.line>]] [-e expr] [-b] [-t threads] [-h] [-v] [files...]\n", prog);
 }
 
+/* THE PROGRAM, FROM THE CACHE.  The key is everything the program's answers can depend on: its text, the library
+   and drivers on disk, this binary, and the settings in the environment (not the thread count: a pure program's
+   answer does not depend on it). */
+#include <dirent.h>
+#include <sys/stat.h>
+extern char **environ;
+static uint64_t key_mix(uint64_t h, const void *p, size_t n) { const unsigned char *b = p; for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ULL; return h; }
+static uint64_t key_stat(uint64_t h, const char *path) {
+  struct stat st; if (stat(path, &st)) return key_mix(h, "?", 1);
+  h = key_mix(h, path, strlen(path)); h = key_mix(h, &st.st_size, sizeof st.st_size);
+  h = key_mix(h, &st.st_mtim, sizeof st.st_mtim); return h;
+}
+static uint64_t key_dir(uint64_t h, const char *dir) {   /* (names in directory order: a reordering is a miss, never a wrong hit) */
+  DIR *d = opendir(dir); if (!d) return key_mix(h, "!", 1);
+  for (struct dirent *e; (e = readdir(d)); ) {
+    if (e->d_name[0] == '.') continue;
+    const char *p = lin_internf("%s/%s", dir, e->d_name);
+    h = key_stat(h, p);
+  }
+  closedir(d); return h;
+}
+static uint64_t program_key(const char *src) {
+  uint64_t h = 1469598103934665603ULL;
+  h = key_mix(h, "lin-form-1", 10);
+  h = key_mix(h, src, strlen(src));
+  h = key_stat(h, "/proc/self/exe");
+  const char *sd = getenv("LIN_STD_DIR") ?: "std";
+  h = key_dir(h, sd); h = key_dir(h, lin_internf("%s/drivers", sd)); h = key_dir(h, lin_internf("%s/runtime", sd));
+  for (char **e = environ; e && *e; e++) if (!strncmp(*e, "LIN_", 4) && strncmp(*e, "LIN_THREADS=", 12) && strncmp(*e, "LIN_CACHE_DEBUG=", 16)) h = key_mix(h, *e, strlen(*e));
+  return h ? h : 1;
+}
+static int load_main_file(const char *path) {
+  char full[PATH_MAX]; char *src;
+  int dbgc = getenv("LIN_CACHE_DEBUG") != NULL;
+  /* (a diagnostic setting, or one that changes how a program is run, asks for the run in full) */
+  static const char *const full_run[] = { "LIN_FN_", "LIN_NO_", "LIN_DUMP_", "LIN_GPU_", "LIN_AOT_", "LIN_NATIVE_DEBUG=", "LIN_TRACE=", "LIN_STEPS=",
+    "LIN_LEAKCHECK=", "LIN_WAVE_STATS=", "LIN_PASSES=", "LIN_EGRULES=", "LIN_PRECOMPILE=", "LIN_READBACK=", "LIN_EAGER_STD=" };
+  for (char **e = environ; e && *e; e++) if (!strncmp(*e, "LIN_", 4))
+    for (int k = 0; k < N_OF(full_run); k++) if (!strncmp(*e, full_run[k], strlen(full_run[k]))) return load_file(path);
+  if (!form_recall || !resolve_path(path, full, sizeof full) || !(src = read_file(full))) return load_file(path);
+  if (!strncmp(src, "#!", 2) && strstr(path, ".line")) { free(src); return load_file(path); }   /* (an artifact) */
+  uint64_t key = program_key(src); free(src);
+  int idx = 0;
+  for (;; idx++) {
+    long w; int kind, dom;
+    int r = form_recall(key, idx, lin_threads, &w, &kind, &dom);
+    if (r == 0 && idx > 0) { if (dbgc) fprintf(stderr, "[cache] %d expression%s run from compiled units\n", idx, idx == 1 ? "" : "s"); return 1; }   /* every expression ran from its compiled unit */
+    if (r <= 0) break;
+    Net net; net_init(&net, 16);
+    Port v = kind == 3 ? net_alloc_bool(&net, w != 0) : net_alloc_scott(&net, w);
+    net_link(&net, (Port){0, 0}, v, 0);
+    lin_result_desc = NULL;
+    run_and_report(&net, dom);
+    net_free(&net);
+  }
+  form_skip = idx; form_count = 0; form_bad = 0; lin_form_key = key;
+  int ok = load_file(path);
+  lin_form_key = 0;
+  if (dbgc) fprintf(stderr, "[cache] %s\n", ok && !form_bad && form_count > 0 ? "evaluated; offered to the cache" : "evaluated; not cacheable");
+  if (ok && !form_bad && form_count > 0 && form_commit) form_commit(key, form_count);
+  return ok;
+}
+
 int main(int argc, char **argv) {
   bump_stack();
   lin_domains_init();
@@ -1220,7 +1309,8 @@ int main(int argc, char **argv) {
       parse_forms(argv[i], form_cb, NULL); ran_eval = 1; continue;
     }
     if (argv[i][0] == '-') { fprintf(stderr, "unknown option: %s\n", argv[i]); print_usage(argv[0]); return 1; }
-    if (!load_file(argv[i])) fprintf(stderr, "error: cannot read '%s'\n", argv[i]);
+    /* (the one program of the run: the cache may answer for it) */
+    if (!(i == argc - 1 && !ran_eval && !bench_mode ? load_main_file(argv[i]) : load_file(argv[i]))) fprintf(stderr, "error: cannot read '%s'\n", argv[i]);
     ran_eval = 1;
   }
   if (!ran_eval) repl();

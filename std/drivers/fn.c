@@ -2472,6 +2472,60 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
 }
 
 /* ---- the driver --------------------------------------------------------------------------------- */
+/* THE PROGRAM CACHE (src/lin.h): which unit, on which constants, answered an expression -- so the next run of an
+   unchanged program runs the units and nothing else.  A record is one line per expression; a file of them is
+   committed only when every expression of the program has one. */
+static FILE *fr_f; static uint64_t fr_key; static int fr_n;
+static void form_path(char *out, size_t sz, uint64_t key, const char *ext) { char dir[4096]; cache_dir(dir, sizeof dir); snprintf(out, sz, "%s/form-%016llx.%s", dir, (unsigned long long)key, ext); }
+static void form_note(const Net *n, const Compiled *c, const long *a, int na) {
+  if (!lin_form_key || lin_form_idx < 0 || (const void *)n != lin_form_net || c->kind == 5 || c->npsh) return;
+  if (fr_key != lin_form_key) {
+    if (fr_f) fclose(fr_f);
+    char path[4300]; form_path(path, sizeof path, lin_form_key, "tmp"); mkdir_p(path); rmdir(path);
+    fr_f = fopen(path, "w"); fr_key = lin_form_key; fr_n = 0;
+  }
+  if (!fr_f || lin_form_idx != fr_n) return;        /* (one record per expression, in order: anything else never commits) */
+  fprintf(fr_f, "%016lx %d %d %d", c->h, c->kind, lin_form_domain, na);
+  for (int i = 0; i < na; i++) fprintf(fr_f, " %ld", a[i]);
+  fputc('\n', fr_f); fr_n++;
+  lin_form_idx = -1;
+}
+static void form_commit(uint64_t key, int count) {
+  if (!fr_f || fr_key != key) return;
+  fclose(fr_f); fr_f = NULL; fr_key = 0;
+  char tmp[4300], full[4300]; form_path(tmp, sizeof tmp, key, "tmp"); form_path(full, sizeof full, key, "txt");
+  if (fr_n == count) rename(tmp, full); else unlink(tmp);
+}
+static char *fc_text; static uint64_t fc_key; static char *fc_pos;
+static int form_recall(uint64_t key, int idx, int threads, long *word, int *kind, int *domain) {
+  if (getenv("LIN_FN_OFF")) return -1;
+  if (idx == 0 || fc_key != key) {
+    free(fc_text); fc_text = NULL; fc_key = key;
+    char path[4300]; form_path(path, sizeof path, key, "txt");
+    FILE *fp = fopen(path, "r"); if (!fp) return -1;
+    fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+    fc_text = malloc((size_t)sz + 1); if (fread(fc_text, 1, (size_t)sz, fp) != (size_t)sz) sz = 0; fc_text[sz] = 0; fclose(fp);
+    fc_pos = fc_text;
+  }
+  if (!fc_text) return -1;
+  if (!*fc_pos) return 0;
+  char *e; unsigned long h = strtoul(fc_pos, &e, 16); int k = (int)strtol(e, &e, 10), d = (int)strtol(e, &e, 10), na = (int)strtol(e, &e, 10);
+  if (na < 0) return -1;
+  long *a = malloc(sizeof *a * (size_t)(na + 1));
+  for (int i = 0; i < na; i++) a[i] = strtol(e, &e, 10);
+  if (*e != '\n') { free(a); return -1; }
+  fc_pos = e + 1;
+  char dir[4096], so[4300]; cache_dir(dir, sizeof dir); snprintf(so, sizeof so, "%s/fn-%016lx.so", dir, h);
+  void *hnd = dlopen(so, RTLD_NOW | RTLD_LOCAL);
+  Entry en = hnd ? (Entry)(intptr_t)dlsym(hnd, "lin_fn_entry") : NULL;
+  int *ab = hnd ? (int *)dlsym(hnd, "lin_fn_aborted") : NULL;
+  if (!en) { free(a); return -1; }
+  long r = en(a, threads > 0 ? threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
+  free(a);
+  if (ab && *ab) return -1;                          /* (its guard fired: the net computes the program) */
+  *word = r; *kind = k; *domain = d;
+  return 1;
+}
 static int fn_off = -1;   /* LIN_FN_OFF: refuse every call (the differential's control run) */
 static int fn_claim(const Net *n, Port p1, Port p2) {
   if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
@@ -2826,6 +2880,10 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
             ms_free(&M);                                 /* (after the result is read: it may hold blocks passed in) */
             if (val.node < 0) goto decline_ex;
             Port out = W(n, (Port){cl, 1});
+            { int plain = n_inp == 0; for (int k = 0; plain && k < car; k++) plain = an[k] != 2;   /* (nothing read in at run time) */
+              if (plain && n->tag[out.node] == ROOT) { long *ka = malloc(sizeof *ka * (size_t)(car + 1)); int kn = 0;
+                for (int k = 0; k < car; k++) if (an[k] == 1) net_read_i64(n, ap[k], &ka[kn++]);
+                form_note(n, c2, ka, kn); free(ka); } }
             net_link(n, val, out, 1);
             net_drop(n, cl);
             DBG("folded a call with %d expression argument%s -> %s\n", nexpr, nexpr == 1 ? "" : "s", c2->kind == 5 ? "a structure" : "a word");
@@ -2873,6 +2931,7 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
       continue;
     }
     Port out = W(n, (Port){call, 1});
+    if (n->tag[out.node] == ROOT) form_note(n, c, args, c->arity);
     net_link(n, val, out, 1);
     net_drop(n, call);                                  /* erases the call chain, Y and F behind it */
     DBG("folded a call of arity %d -> %s\n", c->arity, c->kind == 5 ? "a structure" : "a word");
@@ -2888,6 +2947,7 @@ static void __attribute__((constructor)) fn_load(void) {
   if (registered) return;
   registered = 1;
   lin_driver_add(&lin_fn_driver);
+  lin_form_register(form_recall, form_commit);
   cells_init();                                      /* (the cell datatype, registered once) */
 }
 LinDriver lin_fn_driver = {
