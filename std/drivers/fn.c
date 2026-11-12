@@ -809,6 +809,10 @@ static int emitting;   /* the unit function being written: a parameter of anothe
    the call's result goes, and the call becomes a tail call given the hole's address.  cc turns that into a loop.
    `hasd[f]`: f has the form; `tailpos`: the expression about to be written is in tail position of one. */
 static unsigned char *hasd; static int tailpos; static const struct Expr *dp_hole;
+static int emitting;
+static int dp_self;   /* how the function being written names ITSELF: 0 `_d`, 1 `_ds` (its loop), 2 `_dp` (a stretch of its loop) */
+static const char *dp_name(long k) { return k != emitting || !dp_self ? "_d" : dp_self == 1 ? "_ds" : "_dp"; }
+static const char *dp_stop(long k) { return k == emitting && dp_self == 2 ? ", stop" : ""; }
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 
 /* SHARING, KEPT IN THE C.  The evaluator builds a DAG -- a `let`-bound or shared value is ONE node -- and C
@@ -1204,10 +1208,10 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   if (tp) {
     const Expr *K, *S; long off;
     if (e->op == E_CALL && hasd[e->k]) {              /* a tail call: the destination goes with it */
-      put(b, "f%ld_d(dst", e->k);
+      put(b, "f%ld%s(dst", e->k, dp_name(e->k));
       for (int i = 0; i < e->nargs; i++) { put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
       if (!call_fv(b, e->k)) return 0;
-      put(b, ")"); return 1;
+      put(b, "%s)", dp_stop(e->k)); return 1;
     }
     { const Expr *K2, *f0, *x0; long off2;          /* slot K of a block rebuilt in place, given to a call: the loop of a trie update */
       if (e->op == E_CTOR && e->nargs && e->c && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K2, &off2, &f0, &x0) &&
@@ -1222,10 +1226,10 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         for (int i = 0; ok && i < x0->nargs; i++) { put(b, "long v%d = ", a0 + i); ok = emitx(b, pre, x0->args[i], par, budget - 1); put(b, "; "); }
         fx->var = sv; fx->vscope = ss; kx->var = skv; kx->vscope = sks;
         if (!ok) return 0;
-        put(b, "LIN_PUT(dst, (long)v%d); f%ld_d(&v%d[v%d + %ld]", pv, x0->k, pv, kv, off2);
+        put(b, "LIN_PUT(dst, (long)v%d); f%ld%s(&v%d[v%d + %ld]", pv, x0->k, dp_name(x0->k), pv, kv, off2);
         for (int i = 0; i < x0->nargs; i++) put(b, ", v%d", a0 + i);
         if (!call_fv(b, x0->k)) return 0;
-        put(b, "); })"); return 1;
+        put(b, "%s); })", dp_stop(x0->k)); return 1;
       } }
     int hole = -1;
     if (e->op == E_CTOR && e->nargs)
@@ -1243,10 +1247,10 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       dp_hole = sh;
       c->var = sv; c->vscope = ss;
       if (!ok) return 0;
-      put(b, "); LIN_SET(dst, (long)v%d); f%ld_d(&v%d[%d]", ov, c->k, ov, hole + !e->untag);
+      put(b, "); LIN_SET(dst, (long)v%d); f%ld%s(&v%d[%d]", ov, c->k, dp_name(c->k), ov, hole + !e->untag);
       for (int i = 0; i < c->nargs; i++) put(b, ", v%d", a0 + i);
       if (!call_fv(b, c->k)) return 0;
-      put(b, "); })"); return 1;
+      put(b, "%s); })", dp_stop(c->k)); return 1;
     }
     if (!(e->op == E_MATCH || (e->op == E_IF && !indexed_pick(e, &K, &S, &off)))) {   /* a leaf: the result itself */
       /* (a block rebuilt in place is usually where it was: LIN_PUT; anything else is new: LIN_SET) */
@@ -1412,6 +1416,53 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
 
 /* the tails of f's body: a cell holding f's own call in a field makes f a destination-passing function, and so is
    whatever one of those tail-calls (the destination goes along, so their mutual loops stay loops) */
+/* A MAP IN PARALLEL.  A destination-passing loop that walks ONE list -- each call of itself takes the rest of
+   that list and every other parameter unchanged -- computes each cell from the cell alone, so stretches of the
+   list can be done at once: each thread builds its stretch through a destination of its own and reports the
+   hole it stopped at, and the stretches are joined end to end.  Worth it when a cell's value takes a call to
+   compute.  `pm_k`: the list parameter; `pm_tf`: the field holding the rest. */
+static int ho_f; static unsigned ho_info(const Expr *e);
+static int pm_k, pm_tf, pm_heavy, pm_holes;
+static int pm_self(const Expr *c, int f) {           /* is this call of f the next step of the walk? */
+  int K = -1;
+  for (int j = 0; j < c->nargs; j++) {
+    const Expr *a = c->args[j];
+    if (a->op == E_PARAM && a->nargs == f && a->k == j) continue;
+    if (a->op == E_CONST && funs[f].known && j < funs[f].arity && funs[f].known[j]) continue;   /* (a function bound in this copy) */
+    if (a->op == E_FIELD && a->untag && a->a && a->a->op == E_PARAM && a->a->nargs == f && a->a->k == j && K < 0) { K = j; if (pm_tf >= 0 && pm_tf != (int)a->k) return 0; pm_tf = (int)a->k; continue; }
+    return 0;
+  }
+  if (K < 0 || (pm_k >= 0 && pm_k != K)) return 0;
+  pm_k = K; return 1;
+}
+static int pm_tail(const Expr *e, int f) {
+  const Expr *K, *S; long off;
+  ho_f = f;
+  switch (e->op) {
+  case E_IF: if (indexed_pick(e, &K, &S, &off)) return !(ho_info(e) & 4u);
+    return !(ho_info(e->a) & 4u) && pm_tail(e->b, f) && pm_tail(e->c, f);
+  case E_MATCH: if (ho_info(e->a) & 4u) return 0;
+    for (int i = 0; i < e->nargs; i++) if (!pm_tail(e->args[i], f)) return 0;
+    return 1;
+  case E_CALL: if (e->k == f) return pm_self(e, f);
+    return !(ho_info(e) & 4u);
+  case E_CTOR: {
+    int hole = -1;
+    for (int i = 0; i < e->nargs; i++) if (e->args[i]->op == E_CALL && e->args[i]->k == f && (!e->ci || field_live(e->ci, i))) { if (hole >= 0) return 0; hole = i; }
+    if (hole < 0) return !(ho_info(e) & 4u);
+    if (!pm_self(e->args[hole], f)) return 0;
+    for (int i = 0; i < e->nargs; i++) if (i != hole) { if (ho_info(e->args[i]) & 4u) return 0; if (has_call(e->args[i])) pm_heavy = 1; }
+    pm_holes++; return 1; }
+  default: return !(ho_info(e) & 4u);
+  }
+}
+static int pm_cand(int f) {
+  if (!funs[f].body || funs[f].body->op != E_MATCH || !funs[f].body->untag) return 0;
+  const Expr *sc = funs[f].body->a;
+  if (sc->op != E_PARAM || sc->nargs != f) return 0;
+  pm_k = pm_tf = -1; pm_heavy = pm_holes = 0; ho_f = f; mm_new(MM_SSTR);
+  return pm_tail(funs[f].body, f) && pm_holes > 0 && pm_heavy && pm_k == (int)sc->k && pm_tf >= 0;
+}
 static int dp_scan(const Expr *e, int f, unsigned char *hd) {
   const Expr *K, *S; long off;
   switch (e->op) {
@@ -2493,8 +2544,44 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         emitting = i; fscope++;
         if (hd[i]) {                                   /* the plain form: the other, given a local to write */
           put(&fb, ") { long r = 0; f%d_d(&r", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", p%d", j); fv_params(&fb, i, 0, 1); put(&fb, "); return r; }\n");
+          if (pm_cand(i)) {                             /* (see pm_cand) its loop, a stretch of its loop, and who decides */
+            int K = pm_k, tf = pm_tf, np = funs[i].arity + nfv[i];
+            Buf pt = nbuf(256), pu = nbuf(256);          /* the parameters, typed and not */
+            for (int j = 0; j < funs[i].arity; j++) { put(&pt, ", long p%d", j); put(&pu, ", p%d", j); }
+            fv_params(&pt, i, 1, 1); fv_params(&pu, i, 0, 1);
+            put(&fb, "static long f%d_ds(long *dst%s);\nstatic long f%d_dp(long *dst%s, long stop);\n", i, pt.s, i, pt.s);
+            put(&fb, "static long f%d_ds(long *dst%s) { LIN_ENTER; return ", i, pt.s);
+            dp_self = 1; tailpos = 1; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+            fscope++;
+            put(&fb, "static long f%d_dp(long *dst%s, long stop) { LIN_ENTER; if (p%d == stop) return (long)dst; return ", i, pt.s, K);
+            dp_self = 2; tailpos = 1; ok = ok && emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+            dp_self = 0;
+            put(&fb, "typedef struct { long *dst; long p[%d]; long stop, r; } PM%d;\n", np ? np : 1, i);
+            put(&fb, "static void *pmrun%d(void *v) { PM%d *s = v; LIN_TASK_START((size_t)256 << 20); s->r = f%d_dp(s->dst", i, i, i);
+            for (int j = 0; j < np; j++) put(&fb, ", s->p[%d]", j);
+            put(&fb, ", s->stop); return 0; }\n");
+            put(&fb, "static int lin_threads_; static int lin_pm_busy;\n");
+            put(&fb, "static long f%d_d(long *dst%s) {\n  int T = lin_threads_; long n = 0;\n", i, pt.s);
+            put(&fb, "  if (T < 2 || lin_pm_busy) return f%d_ds(dst%s);\n", i, pu.s);
+            put(&fb, "  for (long q = p%d; !(q & 1) && n < (long)T * 4; q = ((long *)q)[%d]) n++;\n", K, tf);
+            put(&fb, "  if (n < (long)T * 4 || !__sync_bool_compare_and_swap(&lin_pm_busy, 0, 1)) return f%d_ds(dst%s);\n", i, pu.s);
+            put(&fb, "  for (long q = p%d; !(q & 1); q = ((long *)q)[%d]) n++;\n  n -= (long)T * 4;\n", K, tf);
+            put(&fb, "  pthread_t t[T]; PM%d s[T]; long head[T]; long q = p%d; int started = 0;\n", i, K);
+            put(&fb, "  pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setstacksize(&ra, (size_t)256 << 20);\n");
+            put(&fb, "  for (int k = 0; k < T; k++) {\n    PM%d x = { k ? &head[k] : dst, {", i);
+            { int c = 0; for (int j = 0; j < funs[i].arity; j++) put(&fb, j == K ? "%sq" : "%sp%d", c++ ? ", " : "", j);
+              Buf fu = nbuf(64); fv_params(&fu, i, 0, 0); if (nfv[i]) put(&fb, "%s%s", c ? ", " : "", fu.s); free(fu.s); if (!np) put(&fb, "0"); }
+            put(&fb, "}, 0, 0 };\n    if (k < T - 1) { for (long j = n / T; j > 0; j--) q = ((long *)q)[%d]; x.stop = q; }\n    s[k] = x;\n  }\n", tf);
+            put(&fb, "  for (int k = 0; k < T; k++) { if (pthread_create(&t[k], &ra, pmrun%d, &s[k])) break; started++; }\n", i);
+            put(&fb, "  for (int k = 0; k < started; k++) pthread_join(t[k], 0);\n  pthread_attr_destroy(&ra);\n");
+            put(&fb, "  if (started < T) lin_fn_aborted = 1;\n  lin_pm_busy = 0;\n  (void)LIN_JOINED;\n");
+            put(&fb, "  for (int k = 0; k < T - 1; k++) *(long *)s[k].r = head[k + 1];\n  return 0;\n}\n");
+            free(pt.s); free(pu.s);
+            if (dbg) DBG("f%d maps its list in parallel\n", i);
+          } else {
           put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ") { LIN_ENTER; return ");
           tailpos = 1; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+          }
         } else { put(&fb, ") { LIN_ENTER; return "); ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n"); }
       }
       Buf eb = nbuf(1024);                             /* the entry's call, as an expression of its parameters */

@@ -174,5 +174,20 @@ printf '%s\n' '(define row (\i (\u (\acc (match u (snil acc) ((scons h t) (row i
 nest=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/nest.lin" 2>"$TMP/nest.err")
 [ "$nest" = "=> 243" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL nested closures of one lambda: '$nest'"; }
 grep -q "computed once" "$TMP/nest.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a captured value was not made a parameter"; }
+# A MAP IN PARALLEL: a loop that builds a list from a list, each cell by a call, does stretches of the list at
+# once and joins them.  The list it builds must be the one a single thread builds -- same cells, same order --
+# at every width, uneven splits included (a list of 1,003 over 3, 7 and 8 threads), and through a filter, which
+# drops cells at the joins too.
+printf '%s\n' '(define tri (\n (\a (if (eq n 0) a (tri (sub n 1) (add a n))))))' \
+  '(define weigh (\s (\i (\a (match s (snil a) ((scons h t) (weigh t (add i 1) (add a (mul h i)))))))))' \
+  '(weigh (smap (\x (tri (mod x 50) x)) (srange 0 1003)) 1 0)' \
+  '(weigh (sfilter (\x (eq (mod (tri (mod x 7) 0) 2) 0)) (srange 0 1003)) 1 0)' > "$TMP/pm.lin"
+pm1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pm.lin" 2>/dev/null)
+pmok=1; for t in 2 3 7 8; do [ "$(timeout 120 "$LIN_BIN" -t $t "$TMP/pm.lin" 2>/dev/null)" = "$pm1" ] || pmok=0; done
+sed 's/(srange 0 1003)/(srange 0 40)/' "$TMP/pm.lin" > "$TMP/pms.lin"   # (the net's own answer, on a list it can walk in time)
+pmn=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pms.lin" 2>/dev/null); pmc=$(timeout 120 "$LIN_BIN" -t 8 "$TMP/pms.lin" 2>/dev/null)
+[ -n "$pm1" ] && [ "$pmok" = 1 ] && [ -n "$pmn" ] && [ "$pmc" = "$pmn" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL parallel map: -t 1 '$pm1' widths agree $pmok; short list compiled '$pmc' net '$pmn'"; }
+pmd=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" -t 4 "$TMP/pm.lin" 2>&1 >/dev/null | grep -c "maps its list in parallel")
+[ "$pmd" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no map was run in parallel"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
