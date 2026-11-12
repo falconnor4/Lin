@@ -104,7 +104,7 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
        E_CTOR, E_MATCH, E_FIELD };   /* data: constructor k (its index) of args; match on a over args (one result per
                                         constructor, in order); field k of a */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; } Expr;   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; const struct Expr *dropx; int dropfn; } Expr;   /* dropx: a parameter this call only borrowed and nothing needs after it -- freed (by drop function dropfn) once the call returns */   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
@@ -1418,10 +1418,13 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         for (int i = 0; i < e->nargs; i++) free(nm[i].s);
         free(nm); return ok;
       } }
-    if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
-    for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emit_arg(b, pre, e, i, par, budget - 1)) return 0; }
-    if (!par && !call_fv(b, e->k)) return 0;
-    put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
+    { int dr = !par && e->dropx && e->dropx->nargs == emitting;   /* (see `drops`) */
+      if (dr) put(b, "({ long r_ = ");
+      if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
+      for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emit_arg(b, pre, e, i, par, budget - 1)) return 0; }
+      if (!par && !call_fv(b, e->k)) return 0;
+      put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
+      if (dr) { uses_data = 1; put(b, "; lin_drop%d(p%ld); r_; })", e->dropfn, e->dropx->k); } }
     return 1;
   }
   return 0;
@@ -2154,6 +2157,88 @@ static void captured(const Expr *e, int f) {
   captured(e->a, f); captured(e->b, f); if (e->op != E_CTOR) captured(e->c, f);
   for (int i = 0; i < e->nargs && e->args; i++) captured(e->args[i], f);
 }
+/* THE ERASER, IN COMPILED CODE.  In the net a value nothing uses is erased where it stops being used.  A unit
+   had two ways to give a block back -- rebuild in it, or free it where a match took it apart -- and so a value
+   that was only READ and then abandoned stayed until the unit returned: `(run (sub n 1) (step bs))` kept every
+   `bs` it had ever stepped from.  A parameter is now DROPPED after the call that last uses it, when
+     - the function owns it (every caller hands over something fresh),
+     - on the path through that call it appears nowhere but as the call's arguments,
+     - the callee does not take it apart itself (then it would already be gone), and
+     - the call's result holds none of it: fresh, and every field of its datatypes owned.
+   Dropping walks what the value owns and frees each block. */
+static const char **drop_dt; static int ndrop, drop_cap;
+static int drop_fn(const char *dt) {
+  for (int i = 0; i < ndrop; i++) if (drop_dt[i] == dt) return i;
+  if (ndrop >= drop_cap) drop_dt = realloc(drop_dt, sizeof *drop_dt * (size_t)(drop_cap = drop_cap ? drop_cap * 2 : 8));
+  drop_dt[ndrop] = dt; return ndrop++;
+}
+static int deep_owned(const char *dt, int depth) {   /* every data field of dt's values, all the way down, is owned */
+  if (depth > 8) return 0;
+  const LinCtor *c;
+  for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == dt)
+    for (int j = 0; j < c->k; j++) {
+      if (!field_live(c, j) || k > sh_nctor) continue;
+      Shape f = sh_fld[k][j];
+      if (f.k == 1 || f.k == 3) continue;
+      if (f.k != 5 || k > fown_n || !fown[k][j]) return 0;
+      if (f.dt != dt && !deep_owned(f.dt, depth + 1)) return 0;
+    }
+  return 1;
+}
+static unsigned char **uown;
+static void own_sites(const Expr *e) {               /* a parameter is OWNED if every call hands it a fresh value */
+  if (!e || mm_has(MM_NUM, e)) return;
+  mm_put(MM_NUM, e, 1);
+  if (e->op == E_PARAM || e->op == E_CONST) return;
+  if (e->op == E_CALL && e->k >= 0 && e->k < nfun)
+    for (int i = 0; i < e->nargs && i < funs[e->k].arity; i++) {
+      const Expr *a = e->args[i];
+      if (!((a->op == E_CTOR || a->op == E_CALL) && uniq(a))) uown[e->k][i] = 0;
+    }
+  own_sites(e->a); own_sites(e->b); if (e->op != E_CTOR) own_sites(e->c);
+  for (int i = 0; i < e->nargs && e->args; i++) own_sites(e->args[i]);
+}
+/* in e, is p named only as a direct argument of ONE call (returned in *call)? 1 yes, 0 no; *call stays NULL if p is not named */
+static int drop_only(const Expr *e, const Expr *p, const Expr **call) {
+  if (!e || e == p) return 0;
+  if (!contains(e, p, 0)) return 1;
+  if (e->op == E_CALL) {
+    int direct = 0;
+    for (int i = 0; i < e->nargs; i++) { if (e->args[i] == p) direct = 1; else if (contains(e->args[i], p, 0)) { direct = -1; break; } }
+    if (direct == 1) { if (*call && *call != e) return 0; *call = e; return 1; }
+    if (direct == 0) return 1;
+  }
+  if (e->a && !drop_only(e->a, p, call)) return 0;
+  if (e->b && !drop_only(e->b, p, call)) return 0;
+  if (e->c && e->op != E_CTOR && !drop_only(e->c, p, call)) return 0;
+  for (int i = 0; i < e->nargs && e->args; i++) if (!drop_only(e->args[i], p, call)) return 0;
+  return 1;
+}
+static void drop_tails(Expr *e, int g, int k) {      /* each path of g's body: p handed on whole, unnamed, or lent to one call */
+  const Expr *p = funs[g].pnode[k];
+  if (e == p || !contains(e, p, 0)) return;
+  if (e->op == E_IF && !contains(e->a, p, 0)) { drop_tails(e->b, g, k); drop_tails(e->c, g, k); return; }
+  const Expr *call = NULL;
+  if (!drop_only(e, p, &call) || !call || call->dropx) return;
+  int h = (int)call->k;
+  for (int i = 0; i < call->nargs; i++) if (call->args[i] == p && (i >= funs[h].arity || uparam[h][i])) return;   /* (the callee takes it apart) */
+  if (!ufresh[h]) return;
+  Shape rs = shape_of(call), ps = shape_of(p);
+  if (ps.k != 5 || !ps.dt) return;
+  if (!(rs.k == 1 || rs.k == 3 || (rs.k == 5 && rs.dt && deep_owned(rs.dt, 0)))) return;
+  ((Expr *)call)->dropx = p; ((Expr *)call)->dropfn = drop_fn(ps.dt);
+  if (dbg > 1) DBG("[f%d's parameter %d is dropped after its call of f%d]\n", g, k, h);
+}
+static void drops(Expr *entry) {
+  ndrop = 0;
+  uown = A(sizeof *uown * (size_t)(nfun ? nfun : 1));
+  for (int i = 0; i < nfun; i++) { int a = funs[i].arity ? funs[i].arity : 1; uown[i] = A((size_t)a); memset(uown[i], 1, (size_t)a); }
+  mm_new(MM_UNIQ); mm_new(MM_NUM);
+  for (int i = 0; i < nfun; i++) own_sites(funs[i].body);
+  own_sites(entry);
+  for (int g = 0; g < nfun; g++) for (int k = 0; k < funs[g].arity; k++)
+    if (uown[g][k] && funs[g].pnode && funs[g].pnode[k] && funs[g].body) drop_tails(funs[g].body, g, k);
+}
 static void ownership(Expr *entry) {
   uparam = A(sizeof *uparam * (size_t)nfun); ufresh = A((size_t)nfun);
   for (int i = 0; i < nfun; i++) { int a = funs[i].arity ? funs[i].arity : 1; uparam[i] = A((size_t)a); memset(uparam[i], 1, (size_t)a); ufresh[i] = 1; }
@@ -2181,6 +2266,7 @@ static void ownership(Expr *entry) {
     for (int i = 0; i < nfun; i++) { int f = uniq(funs[i].body); if (ufresh[i] && !f) { ufresh[i] = 0; uq_changed = 1; } }
     if (!uq_changed) break;
   }
+  drops(entry);
   for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); mark_reuse(funs[i].body, i); }
   if (dbg > 1) {
     for (int i = 0; i < nfun; i++) { DBG("[own f%d fresh %d:", i, ufresh[i]); for (int k = 0; k < funs[i].arity; k++) fprintf(stderr, " %d", uparam[i][k]); fprintf(stderr, "]\n"); }
@@ -2426,7 +2512,7 @@ static Expr *ho_apply(Expr *body, const Expr *x, Expr *p, Expr *extra) {
 static Expr *hoist_captured(Expr *entry) {
   for (int round = 0; round <= nfun * 4 + 16; round++) {
     int f = -1; const Expr *x = NULL;
-    for (int i = 1; i < nfun && !x; i++) {           /* (not the unit's own function: it is nobody's inner function) */
+    for (int i = 0; i < nfun && !x; i++) {
       if (funs[i].arity + 1 >= (int)(sizeof(unsigned) * 8) || !funs[i].body) continue;
       ho_f = i; mm_new(MM_SSTR); mm_new(MM_NUM);
       if ((x = ho_find(funs[i].body))) f = i;
@@ -2567,7 +2653,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       if (!x || failed) { arena_free(); return NULL; }
       entry = x; nnum = nesh;
     }
-    entry = hoist_captured(entry);
+    entry = hoist_captured(entry); arity = funs[0].arity;   /* (the unit's own function may have gained a parameter) */
     r0_g++;
     for (int i = 0; i < nfun; i++) funs[i].body = one_match(funs[i].body);
     entry = one_match(entry);
@@ -2661,6 +2747,27 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       int data = uses_data;
       put(&b, "%s%s\n#include <pthread.h>\n", LIN_I64_SRC, LIN_F64_SRC);
       if (data) put(&b, "%s", DATA_RT); else put(&b, "#define LIN_ENTER\n#define LIN_LEAVE\n#define LIN_TASK_START(ss)\n#define LIN_JOINED 0\nint lin_fn_aborted;\n");
+      { Buf db = nbuf(256);                            /* (written first: a drop function may call for another datatype's) */
+      for (int d = 0; d < ndrop; d++) {                /* (drop_fn may add datatypes while these are written) */
+        const char *dt = drop_dt[d]; int box = -1, untag = dt_boxed(dt, &box) == 1; const LinCtor *c;
+        put(&db, "static void lin_drop%d(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1;%s", d, untag ? " {" : " switch (o[0]) {");
+        for (long k = 1; (c = lin_ctor_info(k)); k++) {
+          if (c->dt != dt || c->k == 0) continue;
+          if (!untag) put(&db, " case %d: {", c->i);
+          int last = -1;
+          for (int j = 0; j < c->k; j++) if (field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j]) last = j;
+          for (int j = 0; j < c->k; j++) {
+            if (!(field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j])) continue;
+            if (j == last && sh_fld[k][j].dt == dt) put(&db, " nx = o[%d];", j + !untag);     /* (the rest of a list: the loop, not a call) */
+            else put(&db, " lin_drop%d(o[%d]);", drop_fn(sh_fld[k][j].dt), j + !untag);
+          }
+          put(&db, " lin_free(o, %d);", c->k + !untag);
+          if (!untag) put(&db, " break; }");
+        }
+        put(&db, " } v = nx; } }\n");
+      }
+        for (int d = 0; d < ndrop; d++) put(&b, "static void lin_drop%d(long v);\n", d);
+        put(&b, "%s", db.s); free(db.s); }
       put(&b, "%s", fb.s);
       if (ok && data) {                                /* data: on its own large stack, the tree recursions forked */
         Buf ebp = nbuf(1024);

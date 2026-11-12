@@ -159,6 +159,24 @@ dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep 
 sed 's/(run 200000 /(run 1000 /' "$ROOT/bench/nbody.lin" > "$TMP/cap.lin"
 cap=$(timeout 120 "$LIN_BIN" "$TMP/cap.lin" 2>/dev/null)
 [ "$cap" = "=> -169301064" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a captured list was taken apart: n-body after 1,000 steps is '$cap'"; }
+# The same program states three more things the compiler must do, each named in its report: the fold over the
+# bodies starts from a COPY of a body and rebuilds in it; the list a step was computed from is DROPPED once the
+# step is built (the eraser, in compiled code); and the simulation the energy is read from is computed ONCE,
+# though the energy's inner loop names it at every body.
+LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/cap.lin" >/dev/null 2>"$TMP/cap.err"
+for what in "is given a copy" "is dropped after its call" "is computed once"; do
+  grep -q "$what" "$TMP/cap.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL n-body: no parameter '$what'"; }
+done
+# ...and dropping keeps a long run in a few blocks: thirty million steps of a two-body state allocate what one
+# step does (kept, they would be gigabytes; the unit's memory guard must not fire).
+printf '%s\n' '(datatype P (p (x num) (v num)))' \
+  '(define nudge (\\b (\\o (match b ((p x v) (match o ((p ox ov) (p x (add v (sub ox x))))))))))' \
+  '(define step (\\bs (smap (\\b (match (sfoldl nudge b bs) ((p x v) (p (add x v) v)))) bs)))' \
+  '(define run (\\n (\\bs (if (eq n 0) bs (run (sub n 1) (step bs))))))' \
+  '(define total (\\bs (sfoldl (\\a (\\b (match b ((p x v) (add a (band (add x v) 255)))))) 0 bs)))' \
+  '(total (run 30000000 (scons (p 0 0) (scons (p 7 1) snil))))' > "$TMP/long.lin"
+lg=$(LIN_FN_DEBUG=1 timeout 300 "$LIN_BIN" "$TMP/long.lin" 2>"$TMP/long.err")
+[ -n "$lg" ] && ! grep -q "guard fired" "$TMP/long.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a long stepping loop did not stay in bounded memory: '$lg'"; }
 # A FUNCTION WHOSE BODY IS A LITERAL is a function: `(\i 7)` is three lambdas deep, as a numeral's last cell is,
 # and read as data it was passed in as a list and then applied.
 printf '%s\n' '(ssum (smap (\i 7) (srange 0 5)))' > "$TMP/lit.lin"
