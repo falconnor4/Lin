@@ -132,6 +132,14 @@ static Net *N; static long fuel; static int failed;
 typedef struct { int lam, arity; Expr *body; unsigned strict; Expr **pnode; struct V **known; struct Env *outer; } Fun;   /* pnode: each parameter's node */
 /* known: a FUNCTION-VALUED parameter this copy is specialised to (NULL: a parameter like any other) -- see spec_call */
 static Fun *funs; static int nfun, funcap;
+/* A SPECULATIVE read that fails leaves the functions it began half-built.  They are not handed their numbers
+   back: a value computed (and remembered) during the read may name a function that DID complete, and giving its
+   number to another function made two different closures one -- `(av n (av n u))`, nested, called itself.
+   The half-built ones are closed off instead: no call can find them, and each is a constant. */
+static Expr *hc(Expr *e); static Expr *mke(int op, int kind);
+static void fun_rollback(int from) {
+  for (int i = from; i < nfun; i++) if (!funs[i].body) { funs[i].lam = -1; funs[i].known = NULL; Expr *z = mke(E_CONST, 1); z->k = 0; funs[i].body = hc(z); }
+}
 static int arity;   /* funs[0]'s, which the entry point and the parallel sites are written for */
 static int fail_quiet;   /* a speculative read (is_fun_value): its failures are answers, not declines */
 static void fail(const char *why) { if (!failed && !fail_quiet) DBG("declined: %s\n", why); failed = 1; }
@@ -577,7 +585,7 @@ static Expr *const_cells(V *v) {
     break;
   }
   fail_quiet--;
-  if (!ok) { failed = sf; fuel = sfu; nfun = snf; return NULL; }
+  if (!ok) { failed = sf; fuel = sfu; fun_rollback(snf); return NULL; }
   int box = 0, untag = dt_boxed(cell_cons->dt, &box) == 1;
   Expr *l = tailx;
   if (!l) { l = mke(E_CTOR, 5); l->k = cell_nil->i; l->nargs = 0; l->untag = untag; l->ci = cell_nil; l = hc(l); }
@@ -608,10 +616,10 @@ static Expr *to_expr_v(V *v) {
     /* (speculative: applying a cell to the markers takes its symbolic parts apart, which is no failure) */
     int ok, sf = failed, snf = nfun; long sfu = fuel;
     fail_quiet++; long k = const_int(v, &ok); if (failed) ok = 0; fail_quiet--;
-    if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
+    if (!ok) { failed = sf; fuel = sfu; fun_rollback(snf); }
     if (ok) { Expr *e = mke(E_CONST, 1); e->k = k; return hc(e); }
     fail_quiet++; int bk = const_bool(v, &ok); if (failed) ok = 0; fail_quiet--;
-    if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
+    if (!ok) { failed = sf; fuel = sfu; fun_rollback(snf); }
     if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
     if (inp_on && !v->env && numeral_shape(N, (Port){v->lam, 0}) && !list_end(N, (Port){v->lam, 0})) {   /* a list already built: read in at call time */
       Expr *pe = mke(E_PARAM, 1); pe->k = input_of((Port){v->lam, 0}); pe->nargs = -1; return hc(pe);
@@ -1598,7 +1606,7 @@ static int is_fun_value(V *v) {
   const_int(v, &ok); if (!failed && ok) isf = 0;
   failed = 0; if (isf) { const_bool(v, &ok); if (!failed && ok) isf = 0; }
   failed = 0; if (isf && ffi_expr(v)) isf = 0;
-  failed = sf; fuel = sfu; nfun = snf; (void)seid; fail_quiet--;
+  failed = sf; fuel = sfu; fun_rollback(snf); (void)seid; fail_quiet--;
   return isf;
 }
 static int known_eq(V **a, V **b, int ar) {
@@ -2219,6 +2227,81 @@ static const char *DATA_RT =
   "#define LIN_PUT(d, x) ({ long x_ = (x); if (*(d) != x_) *(d) = x_; 0L; })\n"
   "#define LIN_SET(d, x) (*(d) = (x), 0L)\n";
 
+/* A CAPTURED VALUE IS COMPUTED ONCE.  A function specialised to a closure has the closure's variables in its
+   body; one that is an EXPRESSION of the enclosing function's parameters -- `(av n u)` in
+   `(smap (\i (col i 0 (av n u) 0.0)) (srange 0 n))` -- would be evaluated again at every step of the loop, where
+   the net shares it and evaluates it once.  Such an expression (a call, of other functions' parameters only) is
+   made a PARAMETER of the function: whoever calls it computes the value and hands it over, and the function's own
+   recursive calls pass it on. */
+static int ho_f;
+static unsigned ho_info(const Expr *e) {             /* 1: reads ho_f's own parameter (or an input); 2: has a call; 4: calls ho_f */
+  if (!e) return 0;
+  if (mm_has(MM_SSTR, e)) return mm_val[MM_SSTR][e->id];
+  unsigned r = 0;
+  if (e->op == E_PARAM) r = (e->nargs == ho_f || e->nargs < 0) ? 1u : 0u;
+  else {
+    if (e->op == E_CALL) r |= e->k == ho_f ? 6u : 2u;
+    r |= ho_info(e->a) | ho_info(e->b); if (e->op != E_CTOR) r |= ho_info(e->c);
+    for (int i = 0; i < e->nargs && e->args; i++) r |= ho_info(e->args[i]);
+  }
+  return mm_put(MM_SSTR, e, r);
+}
+static const Expr *ho_find(const Expr *e) {          /* the first, largest, such expression in e */
+  if (!e || mm_has(MM_NUM, e)) return NULL;
+  mm_put(MM_NUM, e, 1);
+  if (e->op == E_PARAM || e->op == E_CONST) return NULL;
+  if (ho_info(e) == 2u) return e;
+  const Expr *r = ho_find(e->a); if (!r) r = ho_find(e->b); if (!r && e->op != E_CTOR) r = ho_find(e->c);
+  for (int i = 0; !r && i < e->nargs && e->args; i++) r = ho_find(e->args[i]);
+  return r;
+}
+static Expr **ho_map; static int ho_cap; static const Expr *ho_x; static Expr *ho_p, *ho_extra;
+static Expr *ho_rep(Expr *e) {                       /* x -> p (when p), and every call of ho_f given `extra` */
+  if (!e) return NULL;
+  if (e == ho_x && ho_p) return ho_p;
+  if (e->op == E_PARAM || e->op == E_CONST) return e;   /* (a parameter's `nargs` is its function, not a count) */
+  if (e->id < ho_cap && ho_map[e->id]) return ho_map[e->id];
+  Expr *a = ho_rep(e->a), *b = ho_rep(e->b), *c = e->op != E_CTOR ? ho_rep(e->c) : e->c;
+  int grow = e->op == E_CALL && e->k == ho_f, ch = grow || a != e->a || b != e->b || c != e->c;
+  Expr **args = e->args;
+  if ((e->nargs > 0 && e->args) || grow) {
+    Expr **na = A(sizeof *na * (size_t)(e->nargs + 1));
+    for (int i = 0; i < e->nargs && e->args; i++) { na[i] = ho_rep(e->args[i]); ch |= na[i] != e->args[i]; }
+    if (grow) na[e->nargs] = ho_extra;
+    if (ch) args = na;
+  }
+  Expr *r = e;
+  if (ch) { Expr *n = A(sizeof *n); *n = *e; n->id = eid++; n->var = -1; n->a = a; n->b = b; n->c = c; n->args = args; n->nargs = e->nargs + grow; r = hc(n); }
+  if (e->id < ho_cap) ho_map[e->id] = r;
+  return r;
+}
+static Expr *ho_apply(Expr *body, const Expr *x, Expr *p, Expr *extra) {
+  ho_cap = eid; ho_map = A(sizeof *ho_map * (size_t)(ho_cap ? ho_cap : 1));
+  ho_x = x; ho_p = p; ho_extra = extra;
+  return ho_rep(body);
+}
+static Expr *hoist_captured(Expr *entry) {
+  for (int round = 0; round <= nfun * 4 + 16; round++) {
+    int f = -1; const Expr *x = NULL;
+    for (int i = 1; i < nfun && !x; i++) {           /* (not the unit's own function: it is nobody's inner function) */
+      if (funs[i].arity + 1 >= (int)(sizeof(unsigned) * 8) || !funs[i].body) continue;
+      ho_f = i; mm_new(MM_SSTR); mm_new(MM_NUM);
+      if ((x = ho_find(funs[i].body))) f = i;
+    }
+    if (!x) break;
+    ho_f = f;
+    Expr *p = mke(E_PARAM, x->kind); p->k = funs[f].arity; p->nargs = f; p = hc(p);
+    Expr **pn = A(sizeof *pn * (size_t)(funs[f].arity + 1));
+    for (int k = 0; k < funs[f].arity; k++) pn[k] = funs[f].pnode ? funs[f].pnode[k] : NULL;
+    pn[funs[f].arity] = p; funs[f].pnode = pn;
+    if (dbg) DBG("a captured value of f%d is computed once: its parameter %d\n", f, funs[f].arity);
+    funs[f].arity++;
+    for (int g = 0; g < nfun; g++) if (funs[g].body) funs[g].body = g == f ? ho_apply(funs[g].body, x, p, p) : ho_apply(funs[g].body, NULL, NULL, (Expr *)x);
+    entry = ho_apply(entry, NULL, NULL, (Expr *)x);
+  }
+  return entry;
+}
+
 /* Compile F and everything it calls, or return NULL.  `aports`, when given, are the call's arguments: a NUMBER
    one (anum[k]) is passed to the entry, any other is compiled into it as an expression -- `(check (make 7))`
    compiles `make` too, instead of asking the net to build the tree first. */
@@ -2339,6 +2422,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       if (!x || failed) { arena_free(); return NULL; }
       entry = x; nnum = nesh;
     }
+    entry = hoist_captured(entry);
     r0_g++;
     for (int i = 0; i < nfun; i++) funs[i].body = one_match(funs[i].body);
     entry = one_match(entry);
@@ -2804,7 +2888,14 @@ static int numeral_shape(const Net *n, Port p) {
   Port nn = dhop(n, W(n, (Port){c.node, 2}));
   if (!is(n, nn, LAM, 0)) return 0;
   Port b = dhop(n, W(n, (Port){nn.node, 2}));
-  if (is(n, b, LAM, 0)) return 1;                    /* a terminal: \c.\n.<sign> */
+  if (is(n, b, LAM, 0)) {                            /* a terminal: \c.\n.<sign>, the sign a boolean \t.\f.t or \t.\f.f */
+    /* (exactly that: `\i.7` -- a function whose body is a literal -- is three lambdas deep too, and read as data
+       it was passed in as a list and then applied) */
+    Port f = dhop(n, W(n, (Port){b.node, 2}));
+    if (!is(n, f, LAM, 0)) return 0;
+    Port v = dhop(n, W(n, (Port){f.node, 2}));
+    return v.port == 1 && (v.node == b.node || v.node == f.node);
+  }
   if (!is(n, b, APP, 1)) return 0;
   Port ia = dhop(n, W(n, (Port){b.node, 0}));
   if (!is(n, ia, APP, 1)) return 0;

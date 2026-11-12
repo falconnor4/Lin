@@ -159,5 +159,20 @@ dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep 
 sed 's/(run 200000 /(run 1000 /' "$ROOT/bench/nbody.lin" > "$TMP/cap.lin"
 cap=$(timeout 120 "$LIN_BIN" "$TMP/cap.lin" 2>/dev/null)
 [ "$cap" = "=> -169301064" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a captured list was taken apart: n-body after 1,000 steps is '$cap'"; }
+# A FUNCTION WHOSE BODY IS A LITERAL is a function: `(\i 7)` is three lambdas deep, as a numeral's last cell is,
+# and read as data it was passed in as a list and then applied.
+printf '%s\n' '(ssum (smap (\i 7) (srange 0 5)))' > "$TMP/lit.lin"
+lit=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/lit.lin" 2>"$TMP/lit.err")
+[ "$lit" = "=> 35" ] && ! grep -q declined "$TMP/lit.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a literal-bodied function: '$lit'"; }
+# TWO CLOSURES OF ONE LAMBDA with different captured values are two functions.  (After a speculative read failed,
+# a function's number was given to another, and a remembered value still named the first: the four nested maps
+# below became two, each defined by the other.)  And a captured value is COMPUTED ONCE, as the net shares it:
+# the captured list is a parameter of the loop, not an expression evaluated at every step.
+printf '%s\n' '(define row (\i (\u (\acc (match u (snil acc) ((scons h t) (row i t (add acc (mul i h)))))))))' \
+  '(define av (\n (\u (smap (\i (row i u 0)) (srange 0 n)))))' '(define atav (\n (\u (av n (av n u)))))' \
+  '(ssum (atav 3 (atav 3 (srange 0 3))))' > "$TMP/nest.lin"
+nest=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/nest.lin" 2>"$TMP/nest.err")
+[ "$nest" = "=> 243" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL nested closures of one lambda: '$nest'"; }
+grep -q "computed once" "$TMP/nest.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a captured value was not made a parameter"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
