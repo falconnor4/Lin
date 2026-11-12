@@ -22,7 +22,7 @@
 ; expect => 9
 
 (fst (pair true false))
-; expect => (\a (\b a))
+; expect => true
 
 (snd (pair 42 7))
 ; expect => 7

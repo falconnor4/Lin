@@ -13,8 +13,10 @@
 (define pair (\x (\y (\f ((f x) y)))))
 
 ; --- Projections ---
-(define fst (\p (p bool.true)))
-(define snd (\p (p bool.false)))
+; (the selectors are written out, not `bool.true` / `bool.false`: a boolean is a nominal type, and a pair
+;  applied to one would not type -- so a projection's result would have no type to be printed by)
+(define fst (\p (p (\a (\b a)))))
+(define snd (\p (p (\a (\b b)))))
 
 ; --- Combinators ---
 (define swap (\p (pair (snd p) (fst p))))

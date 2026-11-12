@@ -10,8 +10,7 @@
 ; Bindings used:
 ;   (puts s)            -> write string + newline to stdout, return chars written
 ;   (getenv name)       -> return the environment variable's value (or "")
-;   (ccall1 fn arg)     -> call a unary C function
-;   (ccall0 fn)         -> call a nullary C function
+;   (ccall fn args)     -> call a C function by name with a list of arguments
 ;   (load_lib lib)      -> dlopen a shared library, return its handle pointer
 ;   (system cmd)        -> run a shell command, print its stdout, return exit code
 ;
@@ -33,14 +32,14 @@
 (getenv "PATH")
 ; expect => /...
 
-; --- ccall1: unary C function, here libc atoi (deterministic) ----------------
-(ccall1 "atoi" "42")
+; --- ccall: a C function of one argument, here libc atoi (deterministic) ----------------
+(ccall "atoi" (cons "42" nil))
 ; expect => 42
-(ccall1 "atoi" "-7")
+(ccall "atoi" (cons "-7" nil))
 ; expect => -7
 
-; --- ccall0: nullary C function, libc getpid (varies per process) ------------
-(ccall0 "getpid")
+; --- ccall: a C function of no arguments, libc getpid (varies per process) ------------
+(ccall "getpid" nil)
 ; expect ...
 
 ; --- load_lib: dlopen a shared library, returns an opaque handle -------------
