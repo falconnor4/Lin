@@ -9,18 +9,17 @@
 (namespace maybe)
 
 ; --- Constructors ---
-(define nothing (\n (\j n)))
-(define just    (\x (\n (\j (j x)))))
+; An optional value, as a declared datatype: `match` types it, the function compiler reads it as C, and a value
+; prints by name.  (The constructor order is the Scott order the encoding always had: nothing, then just.)
+(datatype (Maybe a) (nothing) (just (v a)))
 
-; --- Predicates ---
-(define is_nothing (\m ((m bool.true) (\_ bool.false))))
-(define is_just    (\m ((m bool.false) (\_ bool.true))))
+(define is_nothing (\m (match m (nothing bool.true) ((just x) bool.false))))
+(define is_just    (\m (match m (nothing bool.false) ((just x) bool.true))))
 
-; --- Eliminators & Combinators ---
-(define from_maybe (\d (\m ((m d) (\x x)))))
-(define maybe_map  (\f (\m ((m maybe.nothing) (\x (maybe.just (f x)))))))
-(define maybe_bind (\m (\f ((m maybe.nothing) (\x (f x))))))
-(define maybe_or   (\m1 (\m2 ((m1 m2) (\x (maybe.just x))))))
+(define from_maybe (\d (\m (match m (nothing d) ((just x) x)))))
+(define maybe_map  (\f (\m (match m (nothing nothing) ((just x) (just (f x)))))))
+(define maybe_bind (\m (\f (match m (nothing nothing) ((just x) (f x))))))
+(define maybe_or   (\m1 (\m2 (match m1 (nothing m2) ((just x) (just x))))))
 
 (namespace _)
 (export maybe)

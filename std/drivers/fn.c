@@ -51,7 +51,10 @@
 __thread __attribute__((tls_model("initial-exec"))) jmp_buf lin_jb;
 __thread __attribute__((tls_model("initial-exec"))) char *lin_stack_lo;
 __thread __attribute__((tls_model("initial-exec"))) long *lin_hp, *lin_he;
+__thread __attribute__((tls_model("initial-exec"))) long *lin_fl[8];   /* freed blocks by size (words), for reuse */
 static int dbg = -1;
+#include <time.h>
+static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 #define DBG(...) do { if (dbg) { fprintf(stderr, "fn: " __VA_ARGS__); fflush(stderr); } } while (0)
 #define IN(n, i) ((i) >= 0 && (i) < (n)->nn)
 #define NONE ((Port){-1, 0})
@@ -101,11 +104,11 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
        E_CTOR, E_MATCH, E_FIELD };   /* data: constructor k (its index) of args; match on a over args (one result per
                                         constructor, in order); field k of a */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; } Expr;   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; } Expr;   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
-typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; } V;   /* x: to_expr's answer */
+typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; int cells; } V;   /* cells: a match on the cell encoding */   /* x: to_expr's answer */
 typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int busy; } Lz;   /* 0 port, 1 application, 2 value */
 
 /* One compile attempt's memory: everything is freed together. */
@@ -276,7 +279,43 @@ static int dt_boxed(const char *dt, int *box) {      /* how many constructors of
 static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci) {
   Expr *e = mke(E_FIELD, 1); e->a = scrut; e->k = j; e->untag = untag; e->ci = ci; return hc(e);
 }
+/* THE CELL ENCODING AS A DATATYPE.  Lists, strings and the std's sequences are cells `\c.\n.((c h) t)` ended by
+   `\c.\n.true` -- no constructor marker, but two constructors all the same, and the compiler gives them the
+   datatype treatment under a name no source can write: a cell is a block {h, t}, the end an immediate.  A value
+   applied to branches with no marker is taken apart as cells; whether it really is a list is the SHAPE analysis'
+   question (a numeral is cells too, of bits -- one used both ways is not compiled).  The end answers `true` to
+   whatever it is given, which a program reads only as a boolean: here it is a constant every shape accepts. */
+static const LinCtor *cell_cons, *cell_nil;
+static const char *cells_dt;
+static void cells_init(void) {
+  if (cell_cons && lin_ctor_info(1)) {               /* (re-read: the registry may have moved) */
+    cell_cons = lin_ctor_info(lin_ctor_lookup(" cons")); cell_nil = lin_ctor_info(lin_ctor_lookup(" nil"));
+    return;
+  }
+  lin_ctor_register(" cells", " cons", 2, 0, 2); lin_ctor_register(" cells", " nil", 2, 1, 0);
+  cell_cons = lin_ctor_info(lin_ctor_lookup(" cons")); cell_nil = lin_ctor_info(lin_ctor_lookup(" nil"));
+  cells_dt = cell_cons ? cell_cons->dt : NULL;
+}
+static Expr *end_true(void) { Expr *e = mke(E_CONST, 3); e->k = 3; e->box = 1; return hc(e); }   /* (3: true, and the end) */
+static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci);
+static V *cells_add(V *m, Lz *x) {
+  if (m->nargs == 0) {                               /* the cell branch is a FUNCTION of the cell's two parts */
+    V *bv = force(x); if (!bv) return NULL;
+    if (bv->k != V_CLO && bv->k != V_FIX && bv->k != V_SELF) { fail("a value applied to something that is not a branch"); return NULL; } V *v = mkv(V_MATCH); v->e = m->e; v->cells = 1; v->nargs = 1; v->args = A(sizeof(Lz *)); v->args[0] = x; v->lam = 2; return v; }
+  cells_init();
+  if (!cell_cons || !cell_nil) { fail("no cell datatype"); return NULL; }
+  Expr *r = mke(E_MATCH, 1); r->a = m->e; r->nargs = 2; r->args = A(sizeof(Expr *) * 2);
+  int box = 0; r->untag = dt_boxed(cell_cons->dt, &box) == 1; r->box = box; r->ci = cell_cons;
+  V *b = force(m->args[0]);
+  for (int j = 0; b && j < 2; j++) { V *fv = mkv(V_SYM); fv->e = field_expr(m->e, j, r->untag, cell_cons); b = apply(b, ready(fv)); }
+  if (!(r->args[0] = to_expr(b))) return NULL;
+  r->args[1] = end_true();                           /* the end answers true, whatever the second branch was */
+  r->kind = r->args[0]->kind;
+  V *res = mkv(V_SYM); res->e = hc(r); return res;
+}
 static V *match_add(V *m, Lz *x) {
+  if (m->cells || (m->nargs == 0 && !(x->state == 0 && ({ Port b_, i_; int l_; marker_app(x->p, &b_, &l_, &i_); }))))
+    return cells_add(m, x);
   if (x->state != 0) { fail("a match branch that is not net structure"); return NULL; }
   Port body, idp; int lam; long id;
   if (!marker_app(x->p, &body, &lam, &idp)) { fail("a parameter applied to something that is not a match branch (a function parameter?)"); return NULL; }
@@ -472,7 +511,9 @@ static Expr *ffi_expr(V *v) {
      shape alone says nothing: only a head that reads as a NAME the table knows makes this an FFI call.  The
      read is speculative: a head that is not a string is "not mine", never a failure. */
   char name[64]; long sfuel = fuel; int sfail = failed;
+  fail_quiet++;
   int named = const_str(eval(W(N, (Port){fa.node, 2}), v->env), name, (int)sizeof name);
+  fail_quiet--;
   if (!named) { failed = sfail; fuel = sfuel; return NULL; }
   int known = !strcmp(name, "lin_parse_float");
   for (int k = 0; k < N_OF(FROW); k++) known |= !strcmp(name, FROW[k].name);
@@ -502,6 +543,50 @@ static Expr *ffi_expr(V *v) {
 }
 
 static Expr *to_expr_v(V *v);
+static Expr *to_expr(V *v);
+static int numeral_shape(const Net *n, Port p);
+static int inp_on;
+static int input_of(Port p);
+/* the END of a list, by itself: an immediate, so a constant of the unit (never a runtime input -- an input is
+   not known to be unshared, and an empty accumulator must not cost the list built on it its ownership) */
+static int list_end(const Net *n, Port p) {
+  Port c = dhop(n, p); if (!is(n, c, LAM, 0)) return 0;
+  Port nn = dhop(n, W(n, (Port){c.node, 2})); if (!is(n, nn, LAM, 0)) return 0;
+  return is(n, dhop(n, W(n, (Port){nn.node, 2})), LAM, 0);
+}
+/* A constant list: the cells answer the markers one by one, the end answers with a boolean.  Speculative: a value
+   that is not a list leaves no trace. */
+static Expr *const_cells(V *v) {
+  cells_init(); if (!cell_cons || !cell_nil) return NULL;
+  int sf = failed, snf = nfun; long sfu = fuel;
+  Expr **hs = NULL, *tailx = NULL; int nh = 0, cap = 0, ok = 0;
+  fail_quiet++;
+  for (int k = 0; k <= N->nn && v && !failed; k++) {
+    if (v->k != V_CLO) {                           /* a cell built on a list computed elsewhere: its tail */
+      if (nh && (tailx = to_expr(v))) ok = 1;
+      break;
+    }
+    V *r = apply(apply(v, ready(mkv(V_MCONS))), ready(mkv(V_MNIL)));
+    if (!r) break;
+    if (r->k == V_MCELL) {
+      Expr *h = to_expr(force(r->a)); if (!h) break;
+      if (nh == cap) { Expr **o = hs; hs = A(sizeof *hs * (size_t)(cap = cap ? cap * 2 : 16)); if (nh) memcpy(hs, o, sizeof *hs * (size_t)nh); }
+      hs[nh++] = h; v = force(r->b); continue;
+    }
+    if (r->k == V_CLO) { int bo; const_bool(r, &bo); ok = bo && !failed; }
+    break;
+  }
+  fail_quiet--;
+  if (!ok) { failed = sf; fuel = sfu; nfun = snf; return NULL; }
+  int box = 0, untag = dt_boxed(cell_cons->dt, &box) == 1;
+  Expr *l = tailx;
+  if (!l) { l = mke(E_CTOR, 5); l->k = cell_nil->i; l->nargs = 0; l->untag = untag; l->ci = cell_nil; l = hc(l); }
+  for (int i = nh - 1; i >= 0; i--) {
+    Expr *c = mke(E_CTOR, 5); c->k = cell_cons->i; c->nargs = 2; c->args = A(sizeof(Expr *) * 2);
+    c->args[0] = hs[i]; c->args[1] = l; c->untag = untag; c->ci = cell_cons; l = hc(c);
+  }
+  return l;
+}
 static Expr *to_expr(V *v) {                       /* one answer per value: a shared value is one node */
   if (failed || !v) return NULL;
   if (v->k == V_SYM) return v->e;
@@ -520,13 +605,23 @@ static Expr *to_expr_v(V *v) {
     if (d || failed) return d;
     Expr *f = ffi_expr(v);
     if (f || failed) return f;
-    int ok; long k = const_int(v, &ok);
+    /* (speculative: applying a cell to the markers takes its symbolic parts apart, which is no failure) */
+    int ok, sf = failed, snf = nfun; long sfu = fuel;
+    fail_quiet++; long k = const_int(v, &ok); if (failed) ok = 0; fail_quiet--;
+    if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
     if (ok) { Expr *e = mke(E_CONST, 1); e->k = k; return hc(e); }
-    int bk = const_bool(v, &ok);
+    fail_quiet++; int bk = const_bool(v, &ok); if (failed) ok = 0; fail_quiet--;
+    if (!ok) { failed = sf; fuel = sfu; nfun = snf; }
     if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
+    if (inp_on && !v->env && numeral_shape(N, (Port){v->lam, 0}) && !list_end(N, (Port){v->lam, 0})) {   /* a list already built: read in at call time */
+      Expr *pe = mke(E_PARAM, 1); pe->k = input_of((Port){v->lam, 0}); pe->nargs = -1; return hc(pe);
+    }
+    Expr *cl = const_cells(v);                       /* a list (a string): its cells, as constructors */
+    if (cl || failed) return cl;
     fail("a closure where a number belongs"); return NULL;
   }
   if (v->k == V_MATCH) { fail("a match with branches missing"); return NULL; }
+  if (dbg > 1) DBG("[no number: V kind %d]\n", v->k);
   fail("a value with no number"); return NULL;
 }
 
@@ -700,6 +795,12 @@ static int has_call(const Expr *e) {
 }
 static int nsite;
 static int emitting;   /* the unit function being written: a parameter of another one cannot appear in it */
+/* DESTINATION PASSING.  `(scons (f h) (smap f t))` is not a tail call -- the cell is built after the call returns
+   -- so a list a million long was a million frames.  A function with such a tail gets a second form, `fN_d(dst,
+   ...)`, that writes its result through `dst` instead of returning it: the cell is built FIRST, with a hole where
+   the call's result goes, and the call becomes a tail call given the hole's address.  cc turns that into a loop.
+   `hasd[f]`: f has the form; `tailpos`: the expression about to be written is in tail position of one. */
+static unsigned char *hasd; static int tailpos; static const struct Expr *dp_hole;
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 
 /* SHARING, KEPT IN THE C.  The evaluator builds a DAG -- a `let`-bound or shared value is ONE node -- and C
@@ -811,6 +912,7 @@ static void certain(const Expr *e, ISet c, const Expr ***out, int *n, int *cap) 
   (*out)[(*n)++] = e;
 }
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
+  int tp = tailpos; tailpos = 0;
   st_grow(); stamp += 2;
   count_uses(e);
   const Expr **cand = NULL; int nc = 0, cc = 0;
@@ -818,7 +920,7 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int nb = 0, ok = 1, nk = 0;
   for (int i = 0; i < nc; i++) {                   /* choose first: emitting a binding runs nested regions' passes */
     const Expr *x = cand[i];
-    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM) cand[nk++] = x;
+    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD) cand[nk++] = x;   /* (a field read is one load: not worth a local) */
   }
   nc = nk;
   for (int i = 0; i < nc && ok; i++) {
@@ -831,7 +933,9 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     x->var = k; x->vscope = fscope;
     cand[i] = x;                                   /* still listed, so it is unbound below */
   }
+  tailpos = tp;
   ok = ok && emitx(b, pre, e, par, budget - 1);
+  tailpos = 0;
   if (nb) put(b, "; })");
   for (int i = 0; i < nc; i++) if (cand[i]->var >= 0 && cand[i]->vscope == fscope) ((Expr *)cand[i])->var = -1;
   free(cand);
@@ -935,9 +1039,193 @@ static void lift(void) {
 static void fv_params(Buf *b, int f, int typed, int lead) {   /* a function's extra parameters, after its own */
   for (int i = 0; i < nfv[f]; i++) put(b, typed ? "%slong l%d_%ld" : "%sl%d_%ld", (lead || i) ? ", " : "", fvs[f][i].h + 1, fvs[f][i].k);
 }
+/* INDEXED FIELDS.  A datatype with many fields of one kind is how a program says "an array of k slots" in pure Lin
+   (std/array.lin's trie nodes): choosing slot k is a decision tree of comparisons, and replacing it is one
+   conditional per field.  When the tree provably picks field k+off for every value k can take (k is masked,
+   so its range is known), that is ONE indexed load; and a constructor whose every field j is
+   `k == j+off ? f(field j) : field j`, with f the same for all j, is ONE indexed read-modify-write. */
+static int key_hi(const Expr *k, long *hi) {
+  if (k->op != E_BIN || k->k != LIN_OP_BAND) return 0;
+  const Expr *m = k->b->op == E_CONST ? k->b : k->a->op == E_CONST ? k->a : NULL;
+  long most = 0; const LinCtor *c;                  /* (no constructor has more slots than the widest declared) */
+  for (long id = 1; (c = lin_ctor_info(id)); id++) if (c->k > most) most = c->k;
+  if (!m || m->k <= 0 || m->k >= most || (m->k & (m->k + 1))) return 0;
+  *hi = m->k; return 1;
+}
+static int cmp_int(long code, long x, long y) {
+  switch (code) { case LIN_OP_EQ: return x == y; case LIN_OP_LT: return x < y; case LIN_OP_LEQ: return x <= y;
+                  case LIN_OP_GT: return x > y; case LIN_OP_GEQ: return x >= y; }
+  return -1;
+}
+static const Expr *dt_key(const Expr *e) {           /* the compared expression at the root of a decision tree */
+  if (e->op != E_IF || e->a->op != E_BIN || cmp_int(e->a->k, 0, 0) < 0) return NULL;
+  return e->a->b->op == E_CONST ? e->a->a : e->a->a->op == E_CONST ? e->a->b : NULL;
+}
+static const Expr *dt_leaf(const Expr *e, const Expr *K, long v) {
+  while (e->op == E_IF) {
+    const Expr *c = e->a; int r;
+    if (c->op != E_BIN) return NULL;
+    if (c->a == K && c->b->op == E_CONST) r = cmp_int(c->k, v, c->b->k);
+    else if (c->b == K && c->a->op == E_CONST) r = cmp_int(c->k, c->a->k, v);
+    else return NULL;
+    if (r < 0) return NULL;
+    e = r ? e->b : e->c;
+  }
+  return e;
+}
+/* Is e the selection of field K+off of one block?  Writes the block and off. */
+static int indexed_pick(const Expr *e, const Expr **K, const Expr **S, long *off) {
+  long hi; const Expr *k = dt_key(e);
+  if (!k || !key_hi(k, &hi)) return 0;
+  const Expr *base = NULL; const LinCtor *ci = NULL; long o = 0; int untag = 0;
+  for (long v = 0; v <= hi; v++) {
+    const Expr *l = dt_leaf(e, k, v);
+    if (!l || l->op != E_FIELD) return 0;
+    if (!v) { base = l->a; ci = l->ci; o = l->k; untag = l->untag; }
+    else if (l->a != base || l->ci != ci || l->untag != untag || l->k != v + o) return 0;
+  }
+  if (!ci || hi + o >= ci->k) return 0;
+  *K = k; *S = base; *off = o + !untag; return 1;
+}
+static unsigned *ct_gen, ct_g; static unsigned char *ct_val; static int ct_cap;   /* one answer per node per question */
+static int contains_r(const Expr *e, const Expr *x) {
+  if (e == x) return 1;
+  if (e->id < ct_cap && ct_gen[e->id] == ct_g) return ct_val[e->id];
+  int r = (e->a && contains_r(e->a, x)) || (e->b && contains_r(e->b, x)) || (e->c && contains_r(e->c, x));
+  for (int i = 0; !r && i < e->nargs && e->args; i++) r = contains_r(e->args[i], x);
+  if (e->id < ct_cap) { ct_gen[e->id] = ct_g; ct_val[e->id] = (unsigned char)r; }
+  return r;
+}
+static int contains(const Expr *e, const Expr *x, int depth) {
+  (void)depth;
+  if (ct_cap < eid) { int c = eid * 2 + 64; ct_gen = realloc(ct_gen, sizeof *ct_gen * (size_t)c); ct_val = realloc(ct_val, (size_t)c); memset(ct_gen + ct_cap, 0, sizeof *ct_gen * (size_t)(c - ct_cap)); ct_cap = c; }
+  ct_g++;
+  return contains_r(e, x);
+}
+static int eq_mod(const Expr *a, const Expr *b, const Expr *f0, const Expr *fj, int depth) {   /* a[f0] == b[fj] */
+  if (a == f0) return b == fj;
+  if (a == b) return !contains(a, f0, 0);
+  if (depth > eid || a->op != b->op || a->k != b->k || a->kind != b->kind || a->nargs != b->nargs || a->ci != b->ci || a->untag != b->untag) return 0;
+  if (!a->a != !b->a || !a->b != !b->b || !a->c != !b->c) return 0;
+  if (a->a && !eq_mod(a->a, b->a, f0, fj, depth + 1)) return 0;
+  if (a->b && !eq_mod(a->b, b->b, f0, fj, depth + 1)) return 0;
+  if (a->c && !eq_mod(a->c, b->c, f0, fj, depth + 1)) return 0;
+  for (int i = 0; i < a->nargs; i++) if (!eq_mod(a->args[i], b->args[i], f0, fj, depth + 1)) return 0;
+  return 1;
+}
+/* A reused constructor that rewrites exactly field K+off as f(that field)?  Writes K, off and f's field-0 instance. */
+static int indexed_update(const Expr *e, const Expr **K, long *off, const Expr **f0, const Expr **x0) {
+  if (!e->c || e->nargs < 2) return 0;
+  const Expr *k = NULL; long o = 0;
+  for (int j = 0; j < e->nargs; j++) {
+    const Expr *a = e->args[j];
+    if (a->op != E_IF || a->a->op != E_BIN || a->a->k != LIN_OP_EQ) return 0;
+    const Expr *kk = a->a->b->op == E_CONST ? a->a->a : a->a->a->op == E_CONST ? a->a->b : NULL;
+    long cv = a->a->b->op == E_CONST ? a->a->b->k : a->a->a->k;
+    const Expr *old = a->c;
+    if (!kk || old->op != E_FIELD || old->a != e->c || old->k != j) return 0;
+    if (!j) { k = kk; o = cv; } else if (kk != k || cv != j + o) return 0;
+    if (j && !eq_mod(e->args[0]->b, a->b, e->args[0]->c, old, 0)) return 0;
+  }
+  long hi; if (!key_hi(k, &hi) || hi != e->nargs - 1 || o != 0) return 0;
+  *K = k; *off = !e->untag; *f0 = e->args[0]->c; *x0 = e->args[0]->b; return 1;
+}
+static int field_live(const LinCtor *ci, int j);
+static void fre_fields(const Expr *e, const Expr *s, Expr ***out, int *n, int *cap) {   /* the reads of s's fields in e */
+  if (!e) return;
+  if (e->id < mm_cap[MM_SITE]) { if (mm_has(MM_SITE, e)) return; mm_put(MM_SITE, e, 1); }
+  if (e->op == E_FIELD && e->a == s) { if (*n >= *cap) *out = realloc(*out, sizeof **out * (size_t)(*cap = *cap ? *cap * 2 : 8)); (*out)[(*n)++] = (Expr *)e; return; }
+  if (e->a) fre_fields(e->a, s, out, n, cap);
+  if (e->b) fre_fields(e->b, s, out, n, cap);
+  if (e->c && e->op != E_CTOR) fre_fields(e->c, s, out, n, cap);
+  for (int i = 0; i < e->nargs && e->args; i++) fre_fields(e->args[i], s, out, n, cap);
+}
+static int call_fv(Buf *b, long k) {                 /* the callee's lifted parameters: ours, or passed on */
+  for (int i = 0; k < lifted && i < nfv[k]; i++) {
+    const FV *v = &fvs[k][i];
+    if (v->h == emitting) put(b, ", p%ld", v->k);
+    else if (emitting >= 0 && emitting < lifted && fv_has(emitting, v->h, v->k)) put(b, ", l%d_%ld", v->h + 1, v->k);
+    else { DBG("declined: a lifted parameter with no source\n"); return 0; }
+  }
+  return 1;
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
+  int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
-  if (bound(e)) { put(b, "v%d", e->var); return 1; }
+  if (bound(e)) { put(b, tp ? "LIN_SET(dst, v%d)" : "v%d", e->var); return 1; }
+  if (e->fre && !par) {                              /* a tail that frees the block its match consumed */
+    Expr t = *e; t.fre = NULL;
+    /* the fields of the block this tail still reads go into locals first; then the block is released, so what
+       the tail allocates can be it */
+    Expr **fl = NULL; int nfl = 0, cfl = 0;
+    mm_new(MM_SITE); fre_fields(&t, e->fre, &fl, &nfl, &cfl);
+    put(b, "({ ");
+    for (int j = 0; j < nfl; j++) {
+      if (bound(fl[j])) { fl[j] = NULL; continue; }
+      int k = nvar++; put(b, "long v%d = ", k); if (!emitx(b, pre, fl[j], par, budget - 1)) { free(fl); return 0; } put(b, "; ");
+      fl[j]->var = k; fl[j]->vscope = fscope;
+    }
+    put(b, "lin_free((long *)("); int ok = emitx(b, pre, e->fre, par, budget - 1);
+    put(b, "), %d); ", e->fren);
+    tailpos = tp;
+    ok = ok && emitx(b, pre, &t, par, budget - 1); put(b, "; })");
+    tailpos = 0;
+    for (int j = 0; j < nfl; j++) if (fl[j]) fl[j]->var = -1;
+    free(fl);
+    return ok;
+  }
+  if (tp) {
+    const Expr *K, *S; long off;
+    if (e->op == E_CALL && hasd[e->k]) {              /* a tail call: the destination goes with it */
+      put(b, "f%ld_d(dst", e->k);
+      for (int i = 0; i < e->nargs; i++) { put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
+      if (!call_fv(b, e->k)) return 0;
+      put(b, ")"); return 1;
+    }
+    { const Expr *K2, *f0, *x0; long off2;          /* slot K of a block rebuilt in place, given to a call: the loop of a trie update */
+      if (e->op == E_CTOR && e->nargs && e->c && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K2, &off2, &f0, &x0) &&
+          x0->op == E_CALL && hasd[x0->k] && !bound(x0)) {
+        int kv = nvar++, pv = nvar++, ov = nvar++, a0 = nvar; nvar += x0->nargs;
+        put(b, "({ long v%d = ", kv); if (!emitx(b, pre, K2, par, budget - 1)) return 0;
+        put(b, "; long *v%d = (long *)(", pv); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
+        put(b, "); long v%d = v%d[v%d + %ld]; ", ov, pv, kv, off2);
+        Expr *fx = (Expr *)f0; int sv = fx->var, ss = fx->vscope; fx->var = ov; fx->vscope = fscope;
+        Expr *kx = (Expr *)K2; int skv = kx->var, sks = kx->vscope; kx->var = kv; kx->vscope = fscope;
+        int ok = 1;
+        for (int i = 0; ok && i < x0->nargs; i++) { put(b, "long v%d = ", a0 + i); ok = emitx(b, pre, x0->args[i], par, budget - 1); put(b, "; "); }
+        fx->var = sv; fx->vscope = ss; kx->var = skv; kx->vscope = sks;
+        if (!ok) return 0;
+        put(b, "LIN_PUT(dst, (long)v%d); f%ld_d(&v%d[v%d + %ld]", pv, x0->k, pv, kv, off2);
+        for (int i = 0; i < x0->nargs; i++) put(b, ", v%d", a0 + i);
+        if (!call_fv(b, x0->k)) return 0;
+        put(b, "); })"); return 1;
+      } }
+    int hole = -1;
+    if (e->op == E_CTOR && e->nargs)
+      for (int i = 0; i < e->nargs && hole < 0; i++)
+        if (e->args[i]->op == E_CALL && hasd[e->args[i]->k] && !bound(e->args[i]) && (!e->ci || field_live(e->ci, i))) hole = i;
+    if (hole >= 0) {
+      /* the call's arguments first (they may read the block this cell is rebuilt in), then the cell with a hole,
+         then the call, told where its result goes */
+      Expr *c = (Expr *)e->args[hole]; int hv = nvar++, ov = nvar++, a0 = nvar; nvar += c->nargs;
+      put(b, "({ long v%d = 0; ", hv);
+      for (int i = 0; i < c->nargs; i++) { put(b, "long v%d = ", a0 + i); if (!emitx(b, pre, c->args[i], par, budget - 1)) return 0; put(b, "; "); }
+      int sv = c->var, ss = c->vscope; c->var = hv; c->vscope = fscope;
+      const Expr *sh = dp_hole; dp_hole = c;
+      put(b, "long *v%d = (long *)(", ov); int ok = emitx(b, pre, e, par, budget - 1);
+      dp_hole = sh;
+      c->var = sv; c->vscope = ss;
+      if (!ok) return 0;
+      put(b, "); LIN_SET(dst, (long)v%d); f%ld_d(&v%d[%d]", ov, c->k, ov, hole + !e->untag);
+      for (int i = 0; i < c->nargs; i++) put(b, ", v%d", a0 + i);
+      if (!call_fv(b, c->k)) return 0;
+      put(b, "); })"); return 1;
+    }
+    if (!(e->op == E_MATCH || (e->op == E_IF && !indexed_pick(e, &K, &S, &off)))) {   /* a leaf: the result itself */
+      /* (a block rebuilt in place is usually where it was: LIN_PUT; anything else is new: LIN_SET) */
+      put(b, e->op == E_CTOR && e->c ? "LIN_PUT(dst, " : "LIN_SET(dst, "); if (!emitx(b, pre, e, par, budget - 1)) return 0; put(b, ")"); return 1;
+    }
+  }
   switch (e->op) {
   case E_CONST: if (e->k == (long)(1UL << (LIN_INT_BITS - 1))) put(b, "(-%ldL-1)", -(e->k + 1)); else put(b, "(%ldL)", e->k); return 1;
   case E_PARAM:   /* an outer function's parameter: lifted into this one's extra parameters */
@@ -958,10 +1246,15 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     }
     free(x.s); free(y.s); return ok;
   }
-  case E_IF:
+  case E_IF: {
+    const Expr *K, *S; long off;
+    if (indexed_pick(e, &K, &S, &off)) {
+      put(b, "(((long *)("); if (!emitx(b, pre, S, par, budget - 1)) return 0;
+      put(b, "))[("); if (!emitx(b, pre, K, par, budget - 1)) return 0; put(b, ") + %ld])", off); return 1;
+    } }
     put(b, "("); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
-    put(b, " ? "); if (!emit_region(b, pre, e->b, par, budget - 1)) return 0;
-    put(b, " : "); if (!emit_region(b, pre, e->c, par, budget - 1)) return 0;
+    put(b, " ? "); tailpos = tp; if (!emit_region(b, pre, e->b, par, budget - 1)) return 0;
+    put(b, " : "); tailpos = tp; if (!emit_region(b, pre, e->c, par, budget - 1)) return 0;
     put(b, ")"); return 1;
   /* DATA in C: a constructor with fields is a block {index, fields...} from the unit's arena; one with none is
      the immediate 2*index+1 (a block is word-aligned, so the low bit tells them apart).  A match reads the index
@@ -969,41 +1262,102 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   case E_CTOR:
     uses_data = 1;
     if (!e->nargs) { put(b, "(%ldL)", e->k * 2 + 1); return 1; }
-    if (e->c) {                                       /* REUSE: the block the enclosing match took apart (ownership) */
+    { const Expr *K, *f0, *x0; long off;
+      if (e->c && !(par && e->c->op != E_PARAM) && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K, &off, &f0, &x0)) {
+        int kv = nvar++, ov = nvar++;
+        put(b, "({ long v%d = ", kv); if (!emitx(b, pre, K, par, budget - 1)) return 0;
+        put(b, "; long *_o = (long *)("); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
+        put(b, "); long v%d = _o[v%d + %ld]; ", ov, kv, off);
+        Expr *fx = (Expr *)f0; int sv = fx->var, ss = fx->vscope; fx->var = ov; fx->vscope = fscope;   /* field 0 stands for field K */
+        Expr *kx = (Expr *)K; int skv = kx->var, sks = kx->vscope; kx->var = kv; kx->vscope = fscope;
+        /* written only if it CHANGED: an update in place hands back the block it was given, and storing that
+           pointer again would make the next operation's load of it wait on this store -- every step of a loop
+           over the structure in series, where they could overlap */
+        put(b, "long _n = ");
+        int ok = emit_region(b, pre, x0, par, budget - 1);
+        fx->var = sv; fx->vscope = ss; kx->var = skv; kx->vscope = sks;
+        if (!ok) return 0;
+        if (x0->op == E_CALL || x0->op == E_MATCH || x0->op == E_IF) put(b, "; if (_n != v%d) _o[v%d + %ld] = _n; (long)_o; })", ov, kv, off);
+        else put(b, "; _o[v%d + %ld] = _n; (long)_o; })", kv, off);   /* (a plain value: stored without reading the old one) */
+        return 1;
+      } }
+    if (e->c && !(par && e->c->op != E_PARAM)) {      /* REUSE: the block the enclosing match took apart (ownership) */
       /* only what changed is written: the same constructor keeps its tag, a field that IS the old one stays */
       put(b, "({ ");
+#define SAMEF(x) (((x)->op == E_FIELD && (x)->a == e->c && (x)->k == i) || (e->ci && !field_live(e->ci, i)))
       for (int i = 0; i < e->nargs; i++) {
         const Expr *a = e->args[i];
-        if (a->op == E_FIELD && a->a == e->c && a->k == i) continue;
+        if (SAMEF(a) || a == dp_hole) continue;   /* (the hole of a destination-passing cell: its call writes it) */
+        /* `cond ? new : old` (or `cond ? old : new`): the field is written only when it changes */
+        if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) {
+          int keep_else = SAMEF(a->c);
+          put(b, "long _c%d = ", i); if (!emitx(b, pre, a->a, par, budget - 1)) return 0;
+          put(b, "; long _a%d = %s_c%d ? ", i, keep_else ? "" : "!", i);
+          if (!emitx(b, pre, keep_else ? a->b : a->c, par, budget - 1)) return 0; put(b, " : 0; ");
+          continue;
+        }
         put(b, "long _a%d = ", i); if (!emitx(b, pre, a, par, budget - 1)) return 0; put(b, "; ");
       }
       put(b, "long *_o = (long *)("); if (!emitx(b, pre, e->c, par, budget - 1)) return 0; put(b, "); ");
       if (!e->untag && e->rtag - 1 != e->k) put(b, "_o[0] = %ldL; ", e->k);
       for (int i = 0; i < e->nargs; i++) {
         const Expr *a = e->args[i];
-        if (a->op == E_FIELD && a->a == e->c && a->k == i) continue;
+        if (SAMEF(a) || a == dp_hole) continue;   /* (the hole of a destination-passing cell: its call writes it) */
+        if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) { put(b, "if (%s_c%d) _o[%d] = _a%d; ", SAMEF(a->c) ? "" : "!", i, i + !e->untag, i); continue; }
+        /* (a field a call computed is often the very block it was given, rebuilt in place: see above) */
+        if ((e->untag || e->rtag - 1 == e->k) && !bound(a) && (a->op == E_CALL || a->op == E_MATCH || a->op == E_IF))
+          put(b, "if (_o[%d] != _a%d) ", i + !e->untag, i);
         put(b, "_o[%d] = _a%d; ", i + !e->untag, i);
       }
+#undef SAMEF
       put(b, "(long)_o; })"); return 1;
     }
     if (e->untag) put(b, "({ long *_o = lin_alloc(%d); ", e->nargs);
     else put(b, "({ long *_o = lin_alloc(%d); _o[0] = %ldL; ", e->nargs + 1, e->k);
-    for (int i = 0; i < e->nargs; i++) { put(b, "_o[%d] = ", i + !e->untag); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; put(b, "; "); }
+    for (int i = 0; i < e->nargs; i++) {
+      if (e->ci && !field_live(e->ci, i)) continue;   /* (a field nobody reads is not computed) */
+      put(b, "_o[%d] = ", i + !e->untag); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; put(b, "; ");
+    }
     put(b, "(long)_o; })"); return 1;
   case E_FIELD:
     uses_data = 1;
     put(b, "(((long *)("); if (!emitx(b, pre, e->a, par, budget - 1)) return 0; put(b, "))[%ld])", e->k + !e->untag); return 1;
-  case E_MATCH:
+  case E_MATCH: {
     uses_data = 1;
-    put(b, "({ long _s = "); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
+    /* the scrutinee once, in a local the branches read it by (a reused block is named by it, never recomputed) */
+    int sv = nvar++;
+    put(b, "({ long v%d = ", sv); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
+    put(b, "; long _s = v%d", sv);
+    Expr *sx = (Expr *)e->a; int sx_var = sx->var, sx_scope = sx->vscope;
+    if (sx->op != E_PARAM && sx->op != E_CONST) { sx->var = sv; sx->vscope = fscope; }
     if (e->untag) put(b, "; long _t = (_s & 1) ? (_s >> 1) : %dL; (", e->box);
     else put(b, "; long _t = (_s & 1) ? (_s >> 1) : ((long *)_s)[0]; (");
     for (int i = 0; i < e->nargs; i++) {
       if (i < e->nargs - 1) put(b, "_t == %d ? ", i);
-      if (!emit_region(b, pre, e->args[i], par, budget - 1)) return 0;
+      const LinCtor *bc = NULL;
+      if (0 && e->freeb && e->freeb[i] && !par && e->ci)   /* (fields are bound where a tail frees: emitx, e->fre) */
+        for (long k = 1; (bc = lin_ctor_info(k)); k++) if (bc->dt == e->ci->dt && bc->i == i) break;
+      if (bc && bc->k > 0) {
+        /* the fields first, then the block back to the allocator, then the branch over the copies */
+        int nfx = bc->k; Expr **fx = A(sizeof *fx * (size_t)nfx);
+        put(b, "({ ");
+        for (int j = 0; j < nfx; j++) {
+          Expr *t = mke(E_FIELD, 1); t->a = e->a; t->k = j; t->untag = e->untag; t->ci = bc; fx[j] = hc(t);
+          int k = nvar++; put(b, "long v%d = ((long *)_s)[%d]; ", k, j + !e->untag);
+          fx[j]->var = k; fx[j]->vscope = fscope;
+        }
+        tailpos = tp;
+        int ok = emit_region(b, pre, e->args[i], par, budget - 1);
+        put(b, "; })");
+        for (int j = 0; j < nfx; j++) fx[j]->var = -1;
+        if (!ok) return 0;
+      } else if ((tailpos = tp, !emit_region(b, pre, e->args[i], par, budget - 1))) return 0;
       if (i < e->nargs - 1) put(b, " : ");
     }
-    put(b, "); })"); return 1;
+    put(b, "); })");
+    sx->var = sx_var; sx->vscope = sx_scope;
+    return 1;
+  }
   case E_FOP:
     put(b, "%s(", FROW[e->k].c);
     for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
@@ -1021,18 +1375,30 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       } }
     if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
     for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
-    for (int i = 0; !par && e->k < lifted && i < nfv[e->k]; i++) {   /* the callee's lifted parameters: ours, or passed on */
-      const FV *v = &fvs[e->k][i];
-      if (v->h == emitting) put(b, ", p%ld", v->k);
-      else if (emitting >= 0 && emitting < lifted && fv_has(emitting, v->h, v->k)) put(b, ", l%d_%ld", v->h + 1, v->k);
-      else { DBG("declined: a lifted parameter with no source\n"); return 0; }
-    }
+    if (!par && !call_fv(b, e->k)) return 0;
     put(b, par ? "%sd + 1)" : ")", e->nargs ? ", " : "");
     return 1;
   }
   return 0;
 }
 
+/* the tails of f's body: a cell holding f's own call in a field makes f a destination-passing function, and so is
+   whatever one of those tail-calls (the destination goes along, so their mutual loops stay loops) */
+static int dp_scan(const Expr *e, int f, unsigned char *hd) {
+  const Expr *K, *S; long off;
+  switch (e->op) {
+  case E_IF: if (indexed_pick(e, &K, &S, &off)) return 0; return dp_scan(e->b, f, hd) | dp_scan(e->c, f, hd);
+  case E_MATCH: { int r = 0; for (int i = 0; i < e->nargs; i++) r |= dp_scan(e->args[i], f, hd); return r; }
+  case E_CTOR:
+    { const Expr *K2, *f0, *x0; long off2;
+      if (e->nargs && e->c && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K2, &off2, &f0, &x0) && x0->op == E_CALL && x0->k == f && !hd[f]) { hd[f] = 1; return 1; } }
+    for (int i = 0; i < e->nargs; i++)
+      if (e->args[i]->op == E_CALL && e->args[i]->k == f && (!e->ci || field_live(e->ci, i)) && !hd[f]) { hd[f] = 1; return 1; }
+    return 0;
+  case E_CALL: if (hd[f] && e->k >= 0 && e->k < nfun && !hd[e->k]) { hd[e->k] = 1; return 1; } return 0;
+  default: return 0;
+  }
+}
 static unsigned long fnv1a(const char *s) { unsigned long h = 1469598103934665603UL; for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211UL; } return h; }
 static const char *cache_dir(char *out, size_t n) {
   const char *env = getenv("LIN_NATIVE_CACHE"), *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
@@ -1059,7 +1425,7 @@ static int run_cc(const char *src, const char *so) {
 typedef long (*Entry)(const long *, int threads);
 typedef struct { unsigned char k; const char *dt; } Shape;     /* (see SHAPES below) */
 typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; int *aborted;
-                 Shape res; Shape **fld; long nctor; void (*release)(void); } Compiled;   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
+                 Shape res; Shape **fld; long nctor; void (*release)(void); Shape *psh; int npsh; } Compiled;   /* psh: each runtime argument's shape */   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
 static Compiled **done; static int ndone, donecap;   /* (pointers: a call holds one while another compiles) */
 /* -march=native code must never be loaded on a different CPU, so the cache key includes this one's identity. */
 static unsigned long cpu_key(void) {
@@ -1076,6 +1442,17 @@ static unsigned long cpu_key(void) {
   return k;
 }
 static Shape **sh_fld; static long sh_nctor;
+static Shape *esh; static int nesh, esh_data, esh_cap;
+/* RUNTIME INPUTS: a closed list met while compiling (a string the program read, nested in an argument
+   expression) is not expanded as a constant -- it is an extra runtime argument, read in at call time. */
+static Port *inp_port; static int n_inp, inp_cap;
+static int input_of(Port p) {                       /* its runtime index (a new one the first time) */
+  for (int i = 0; i < n_inp; i++) if (inp_port[i].node == p.node) return nesh - n_inp + i;
+  if (n_inp >= inp_cap) inp_port = realloc(inp_port, sizeof *inp_port * (size_t)(inp_cap = inp_cap ? inp_cap * 2 : 8));
+  if (nesh >= esh_cap) esh = realloc(esh, sizeof *esh * (size_t)(esh_cap = esh_cap ? esh_cap * 2 : 16));
+  inp_port[n_inp++] = p; esh[nesh] = (Shape){ 0, NULL }; esh_data = 1;
+  return nesh++;
+}   /* the entry's runtime arguments' shapes (data ones: passed in) */
 static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
   unsigned long h = fnv1a(src) ^ cpu_key();
   for (int i = 0; i < ndone; i++) if (done[i]->h == h) return done[i]->fn ? done[i] : NULL;
@@ -1095,11 +1472,12 @@ static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
   if (ndone >= donecap) done = realloc(done, (size_t)(donecap = donecap ? donecap * 2 : 32) * sizeof *done);
   Compiled *cp = calloc(1, sizeof *cp);
   *cp = (Compiled){ h, e, ar, kind, 0, ab, res, NULL, 0, NULL };
-  if (kind == 5 && hnd) {                            /* the field shapes the result is read by, kept with the code */
+  if (esh_data && nesh) { cp->npsh = nesh; cp->psh = malloc(sizeof *cp->psh * (size_t)nesh); memcpy(cp->psh, esh, sizeof *esh * (size_t)nesh); }
+  if ((kind == 5 || esh_data) && hnd) {             /* the field shapes the result (and the arguments) are read by */
     cp->release = (void (*)(void))(intptr_t)dlsym(hnd, "lin_fn_release");
     cp->nctor = sh_nctor; cp->fld = calloc((size_t)sh_nctor + 1, sizeof *cp->fld);
     for (long k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; cp->fld[k] = malloc(sizeof **cp->fld * (size_t)nk); memcpy(cp->fld[k], sh_fld[k], sizeof **cp->fld * (size_t)nk); }
-    if (!cp->release) e = NULL;
+    if (kind == 5 && !cp->release) e = NULL;
   }
   done[ndone++] = cp;
   return e ? cp : NULL;
@@ -1110,7 +1488,7 @@ static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
    mul, band / bor / bxor, or max / min written as a conditional -- folds g over the range (c, i0] in ANY order
    to the same value.  So the range is split among the threads, each folds its blocks from (+)'s identity, and
    the partial results are combined with the initial acc.  Every g(i) is still evaluated exactly once. */
-typedef struct { int iv, acc, op, ismax; long c; const Expr *g; } Red;
+typedef struct { int iv, acc, op, ismax; long c; const Expr *g; int up, bnd; } Red;   /* up: counts up to parameter bnd (or to c) */
 static int is_param(const Expr *e, int k) { return e && e->op == E_PARAM && e->k == k && e->nargs == 0; }
 static int mentions(const Expr *e, int k) {
   switch (e->op) {
@@ -1128,15 +1506,25 @@ static int find_reduction(Red *r) {
   if (e->op != E_IF || e->a->op != E_BIN || e->a->k != LIN_OP_EQ) return 0;
   const Expr *c = e->a, *base = e->b, *step = e->c;
   int iv; long cv;
+  int bnd = -1, up = 0; cv = 0;
   if (c->a->op == E_PARAM && c->a->nargs == 0 && c->b->op == E_CONST) { iv = (int)c->a->k; cv = c->b->k; }
   else if (c->b->op == E_PARAM && c->b->nargs == 0 && c->a->op == E_CONST) { iv = (int)c->b->k; cv = c->a->k; }
+  else if (c->a->op == E_PARAM && c->a->nargs == 0 && c->b->op == E_PARAM && c->b->nargs == 0 && c->a != c->b) { iv = (int)c->a->k; bnd = (int)c->b->k; }
   else return 0;
   if (base->op != E_PARAM || base->nargs != 0 || base->k == iv) return 0;
   int acc = (int)base->k;
   if (step->op != E_CALL || step->k != 0 || step->nargs != arity) return 0;
+  if (bnd >= 0) {                                    /* which of the two compared parameters moves: the other is the bound */
+    const Expr *a = step->args[iv];
+    if (is_param(a, iv)) { int t = iv; iv = bnd; bnd = t; }
+    if (bnd == acc || iv == acc) return 0;
+  }
   for (int j = 0; j < arity; j++) {
     const Expr *a = step->args[j];
-    if (j == iv) { if (!(a->op == E_BIN && a->k == LIN_OP_SUB && is_param(a->a, iv) && a->b->op == E_CONST && a->b->k == 1)) return 0; }
+    if (j == iv) {
+      if (!(a->op == E_BIN && (a->k == LIN_OP_SUB || a->k == LIN_OP_ADD) && is_param(a->a, iv) && a->b->op == E_CONST && a->b->k == 1)) return 0;
+      up = a->k == LIN_OP_ADD;
+    }
     else if (j != acc && !is_param(a, j)) return 0;
   }
   const Expr *u = step->args[acc], *g = NULL; int op = -1, ismax = 0;
@@ -1153,7 +1541,7 @@ static int find_reduction(Red *r) {
     g = x; op = LIN_OP_ADD;                         /* unused when ismax */
   } else return 0;
   if (mentions(g, acc)) return 0;
-  r->iv = iv; r->acc = acc; r->op = op; r->ismax = ismax; r->c = cv; r->g = g;
+  r->iv = iv; r->acc = acc; r->op = op; r->ismax = ismax; r->c = cv; r->g = g; r->up = up; r->bnd = bnd;
   return 1;
 }
 static void red_combine(Buf *b, const Red *r, const char *x, const char *y) {
@@ -1220,6 +1608,81 @@ static int known_eq(V **a, V **b, int ar) {
   }
   return 1;
 }
+/* FIELDS NOBODY READS.  Lin is lazy: a constructor's field that no match ever looks at is never computed.  The C
+   is strict, so the same economy is made statically: a field of a constructor is LIVE if some read of it is
+   reachable from a result (through live fields only -- a fixpoint from "none"), and a dead field's value is not
+   computed at all: `(slength (str_words s))` builds no words.  A structure that leaves the unit is read by
+   whoever gets it, so then every field is live. */
+static unsigned char **fld_live; static long fl_n; static int fl_changed;
+static long ctor_id(const LinCtor *ci);
+static int field_live(const LinCtor *ci, int j) {
+  if (!fld_live) return 1;
+  long id = ctor_id(ci);
+  return !(id > 0 && id <= fl_n && j < ci->k) || fld_live[id][j];
+}
+static void live_walk(const Expr *e) {
+  if (!e || mm_has(MM_SITE, e)) return;
+  mm_put(MM_SITE, e, 1);
+  if (e->op == E_FIELD && e->ci) { long id = ctor_id(e->ci); if (id > 0 && id <= fl_n && e->k < e->ci->k && !fld_live[id][e->k]) { fld_live[id][e->k] = 1; fl_changed = 1; } }
+  if (e->op == E_CTOR && e->ci) {
+    for (int i = 0; i < e->nargs; i++) if (field_live(e->ci, i)) live_walk(e->args[i]);
+    return;
+  }
+  if (e->a) live_walk(e->a);
+  if (e->b) live_walk(e->b);
+  if (e->c) live_walk(e->c);
+  for (int i = 0; i < e->nargs && e->args; i++) live_walk(e->args[i]);
+}
+static void fields_live(const Expr *entry, int all) {
+  fl_n = 0; while (lin_ctor_info(fl_n + 1)) fl_n++;
+  fld_live = A(sizeof *fld_live * (size_t)(fl_n + 1));
+  for (long k = 1; k <= fl_n; k++) { int nk = lin_ctor_info(k)->k + 1; fld_live[k] = A((size_t)nk); memset(fld_live[k], all ? 1 : 0, (size_t)nk); }
+  if (all) return;
+  for (int round = 0; round <= fl_n * 64 + 64; round++) {
+    fl_changed = 0; mm_new(MM_SITE);
+    for (int i = 0; i < nfun; i++) live_walk(funs[i].body);
+    live_walk(entry);
+    if (!fl_changed) break;
+  }
+}
+
+/* The reduction's code: g (one step's value), the worker, and the statement that runs it over the range.
+   The range is (lo, hi] of j, the induction variable being j (counting down to lo) or j - 1 (counting up to hi);
+   an empty or backwards range is not ours (the caller's sequential code decides what that means). */
+static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+static int red_defs(Buf *b, Buf *pre, const Red *red, int data) {
+  long id = red->ismax > 0 ? (long)(1UL << (LIN_INT_BITS - 1)) : red->ismax < 0 ? (long)~(1UL << (LIN_INT_BITS - 1))
+          : (red->op == LIN_OP_MUL) ? 1 : (red->op == LIN_OP_BAND) ? -1 : 0;   /* (+)'s identity */
+  put(b, "static long g("); plist(b, 1); put(b, ") { return ");
+  emitting = 0; fscope++; int ok = emit_region(b, pre, red->g, 0, 4096); put(b, "; }\n");
+  put(b, "typedef struct { long p[%d]; long lo, block, r; long *next; } R;\n", arity);
+  put(b, "static void *rrun(void *v) { R *q = v; long acc = %ldL;%s\n", id, data ? " LIN_TASK_START((size_t)256 << 20);" : "");
+  for (int i = 0; i < arity; i++) put(b, "  long p%d = q->p[%d];\n", i, i);
+  put(b, "  for (;;) { long hi = __atomic_fetch_sub(q->next, q->block, __ATOMIC_RELAXED); if (hi <= q->lo) break;\n");
+  put(b, "    long lo = hi - q->block; if (lo < q->lo) lo = q->lo;\n    for (long i = hi; i > lo; i--) { p%d = i%s; long x = g(", red->iv, red->up ? " - 1" : "");
+  plist(b, 0); put(b, "); acc = "); red_combine(b, red, "x", "acc"); put(b, "; } }\n");
+  put(b, "  q->r = acc; return 0; }\n");
+  return ok;
+}
+static void red_run(Buf *b, const Red *red, int data, const char *threads, const char *done) {
+  Buf lob = nbuf(32), hib = nbuf(32);
+  Buf *mv = red->up ? &lob : &hib, *bd = red->up ? &hib : &lob;   /* the moving end, and the bound */
+  put(mv, "p%d", red->iv);
+  if (red->bnd >= 0) put(bd, "p%d", red->bnd); else put(bd, "%ldL", red->c);
+  const char *lo = lob.s, *hi = hib.s;
+  /* a cheap step needs some thousands of iterations to pay for a thread; a step that CALLS (a whole inner loop)
+     pays from a few per thread */
+  if (has_call(red->g)) put(b, "  if (%s > 1 && %s > %s && %s - %s >= (long)%s * 4) {\n", threads, hi, lo, hi, lo, threads);
+  else put(b, "  if (%s > 1 && %s > %s && %s - %s >= 4096) {\n", threads, hi, lo, hi, lo);
+  put(b, "    long next = %s; pthread_t t[%s]; R q[%s];%s\n", hi, threads, threads,
+      data ? " pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setstacksize(&ra, (size_t)256 << 20);" : "");
+  put(b, "    for (int k = 0; k < %s; k++) { R r = { {", threads); plist(b, 0);
+  put(b, "}, %s, (%s - %s) / ((long)%s * 64) + 1, 0, &next }; q[k] = r; pthread_create(&t[k], %s, rrun, &q[k]); }\n", lo, hi, lo, threads, data ? "&ra" : "0");
+  put(b, "    long acc = p%d;\n    for (int k = 0; k < %s; k++) { pthread_join(t[k], 0); acc = ", red->acc, threads);
+  red_combine(b, red, "q[k].r", "acc"); put(b, "; }\n    %s }\n", done);
+  free(lob.s); free(hib.s);
+}
+
 /* Evaluate G = \self.\p1..\pk. body into the unit (specialised to `known`); its index, or -1. */
 static int compile_body_spec(int G, Env *outer, V **known) {
   int params[sizeof(unsigned) * 8]; Port body;
@@ -1301,24 +1764,100 @@ static void num_walk(const Expr *e) {                 /* demote what this expres
    on any path (reading its fields does not count).  Then a match on a unique parameter can build the branch's
    constructor of the same size IN THE BLOCK IT JUST TOOK APART -- its fields are all computed before anything
    is written -- which is what a functional insert into a tree costs in C: the path is updated, not copied. */
-static const Expr *occ_x;
+static const Expr *occ_x; static int occ_reads;   /* occ_reads: a match taking occ_x apart only reads it */
 static unsigned occ_r(const Expr *e) {               /* how often occ_x is MOVED on the worst path through e */
   if (e == occ_x) return 1;
-  if (mm_has(MM_OCC, e)) return mm_val[MM_OCC][e->id];
+  /* a DAG node is ONE evaluation (the emitter binds a value used twice): what moves inside it, moves once --
+     the second reference to it moves nothing more */
+  if (mm_has(MM_OCC, e)) return 0;
   unsigned r = 0;
   switch (e->op) {
-  case E_FIELD: r = e->a == occ_x ? 0 : occ_r(e->a); break;      /* reading a field consumes nothing */
+  case E_FIELD: r = 0; break;   /* reading a field consumes nothing -- and its base is an enclosing match's scrutinee,
+                                    evaluated (and counted) once, there */
   case E_IF: { unsigned b = occ_r(e->b), c = occ_r(e->c); r = occ_r(e->a) + (b > c ? b : c); break; }
-  case E_MATCH: { unsigned m = 0; for (int i = 0; i < e->nargs; i++) { unsigned x = occ_r(e->args[i]); if (x > m) m = x; } r = occ_r(e->a) + m; break; }
+  case E_MATCH: { unsigned m = 0; for (int i = 0; i < e->nargs; i++) { unsigned x = occ_r(e->args[i]); if (x > m) m = x; } r = (occ_reads && e->a == occ_x ? 0 : occ_r(e->a)) + m; break; }
   case E_BIN: r = occ_r(e->a) + occ_r(e->b); break;
-  case E_CALL: case E_CTOR: case E_FOP: for (int i = 0; i < e->nargs; i++) r += occ_r(e->args[i]); break;
+  case E_CTOR: for (int i = 0; i < e->nargs; i++) if (!e->ci || field_live(e->ci, i)) r += occ_r(e->args[i]); break;   /* (a field nobody reads is not computed: nothing moves into it) */
+  case E_CALL: case E_FOP: for (int i = 0; i < e->nargs; i++) r += occ_r(e->args[i]); break;
   default: break;
   }
   if (r > 2) r = 2;
   return mm_put(MM_OCC, e, r);
 }
-static unsigned occ(const Expr *in, const Expr *x) { occ_x = x; mm_new(MM_OCC); return occ_r(in); }
+/* PATH-SENSITIVE: the most moves of occ_x on a path that evaluates node `through` (-1: no path does). */
+static const Expr *ot_node;
+static const Expr **ot_ev; static int ot_nev, ot_cev;   /* values already evaluated on this path (scrutinees) */
+static void ot_fresh(void) { mm_new(MM_OCC); for (int i = 0; i < ot_nev; i++) mm_put(MM_OCC, ot_ev[i], 0); }
+static int ot_r_dbg(const Expr *e);
+static int ot_r(const Expr *e) {
+  for (int i = 0; i < ot_nev; i++) if (ot_ev[i] == e) return -1;   /* (evaluated already on this path) */
+  if (e == ot_node) {                                /* the node itself: what it moves */
+    int r = 0; occ_reads = 0;
+    for (int i = 0; i < e->nargs && e->args; i++) { ot_fresh(); r += (int)occ_r(e->args[i]); }
+    if (e->a) { ot_fresh(); r += (int)occ_r(e->a); }
+    return r;
+  }
+  if (e->op == E_FIELD) return -1;                   /* (its base was evaluated at its match: a field read evaluates nothing) */
+  for (int i = 0; i < ot_nev; i++) if (ot_ev[i] == e) return -1;   /* (evaluated already: a second reference is the same value) */
+  if (!contains(e, ot_node, 0)) return -1;
+  ot_fresh();
+  switch (e->op) {
+  case E_IF: case E_MATCH: {
+    const Expr *sc = e->a; int best = -1;
+    int ts = ot_r_dbg(sc);
+    ot_fresh(); int sa = (int)occ_r(sc);
+    if (ot_nev >= ot_cev) ot_ev = realloc(ot_ev, sizeof *ot_ev * (size_t)(ot_cev = ot_cev ? ot_cev * 2 : 16));
+    ot_ev[ot_nev++] = sc;                            /* in the branches, the scrutinee is a value in hand */
+    unsigned bmax = 0;
+    int nb = e->op == E_IF ? 2 : e->nargs;
+    for (int i = 0; i < nb; i++) { const Expr *br = e->op == E_IF ? (i ? e->c : e->b) : e->args[i]; ot_fresh(); unsigned u = occ_r(br); if (u > bmax) bmax = u; }
+    if (ts >= 0) best = ts + (int)bmax;
+    for (int i = 0; i < nb; i++) { const Expr *br = e->op == E_IF ? (i ? e->c : e->b) : e->args[i]; int t = ot_r_dbg(br); if (t >= 0 && sa + t > best) best = sa + t; }
+    ot_nev--;
+    return best;
+  }
+  default: {
+    int cap = 2 + e->nargs, nk = 0;
+    const Expr **kid = A(sizeof *kid * (size_t)cap); int *any = A(sizeof *any * (size_t)cap);
+    if (e->a) kid[nk++] = e->a;
+    if (e->b) kid[nk++] = e->b;
+    for (int i = 0; i < e->nargs && e->args; i++) kid[nk++] = e->args[i];
+    int best = -1;
+    for (int i = 0; i < nk; i++) { ot_fresh(); any[i] = (int)occ_r(kid[i]); }
+    for (int i = 0; i < nk; i++) {
+      int t = ot_r_dbg(kid[i]); if (t < 0) continue;
+      int sum = t; for (int j = 0; j < nk; j++) if (j != i) sum += any[j];
+      if (sum > best) best = sum;
+    }
+    return best;
+  }
+  }
+}
+static int contains(const Expr *e, const Expr *x, int depth);
+static int ot_depth;
+static int ot_r_dbg(const Expr *e) {
+  ot_depth++; int r = ot_r(e); ot_depth--;
+  if (dbg > 3) { static const char *nm[] = { "CONST","PARAM","BIN","IF","CALL","FOP","CTOR","MATCH","FIELD" }; DBG("%*s[ot %s k%ld id %d -> %d]\n", ot_depth, "", nm[e->op], e->k, e->id, r); }
+  return r;
+}
+static unsigned occ_through(const Expr *in, const Expr *x, const Expr *node) {
+  occ_x = x; occ_reads = 0; ot_node = node; ot_nev = 0;
+  int r = ot_r_dbg(in);
+  return r < 0 ? 0 : (unsigned)r;
+}
+static unsigned occ(const Expr *in, const Expr *x) { occ_x = x; occ_reads = 0; mm_new(MM_OCC); return occ_r(in); }
+/* the moves of x other than being taken apart: whether a STORED value is shared (a match that consumes it is
+   decided separately, counting itself: mark_reuse) */
+static unsigned occ_stored(const Expr *in, const Expr *x) { occ_x = x; occ_reads = 1; mm_new(MM_OCC); unsigned r = occ_r(in); occ_reads = 0; return r; }
 static unsigned char **uparam, *ufresh;
+/* A FIELD IS OWNED only if every constructor that writes it is given something fresh that nothing else holds:
+   `(node t t)` stores ONE block in two fields, and taking either apart in place would corrupt the other. */
+static unsigned char **fown; static long fown_n;
+static long ctor_id(const LinCtor *ci);
+static int field_owned(const Expr *e) {
+  long id = e->ci ? ctor_id(e->ci) : 0;
+  return id > 0 && id <= fown_n && e->k < e->ci->k && fown[id][e->k];
+}
 static int uniq_r(const Expr *e) {
   if (mm_has(MM_UNIQ, e)) return (int)mm_val[MM_UNIQ][e->id];
   int r = 0;
@@ -1328,26 +1867,58 @@ static int uniq_r(const Expr *e) {
   case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun && uparam[e->nargs][e->k]; break;
   case E_IF: r = uniq_r(e->b) && uniq_r(e->c); break;
   case E_MATCH: r = 1; for (int i = 0; i < e->nargs; i++) r = r && uniq_r(e->args[i]); break;
-  case E_FIELD: r = uniq_r(e->a); break;
+  case E_FIELD: r = uniq_r(e->a) && field_owned(e); break;
   default: break;
   }
   return (int)mm_put(MM_UNIQ, e, (unsigned)r);
 }
 static int uniq(const Expr *e) { return uniq_r(e); }
 static int uq_changed;
+/* how many places name each value (over the whole unit): one named once is given to its one call once, on every
+   path -- no need to walk the paths for it */
+static unsigned *nrefs; static int nrefs_cap;
+static void count_refs(const Expr *e) {
+  if (!e || mm_has(MM_NUM, e)) return;
+  mm_put(MM_NUM, e, 1);
+#define REF(x) do { const Expr *x_ = (x); if (x_) { if (x_->id >= nrefs_cap) { int o = nrefs_cap; nrefs_cap = x_->id * 2 + 64; nrefs = realloc(nrefs, sizeof *nrefs * (size_t)nrefs_cap); memset(nrefs + o, 0, sizeof *nrefs * (size_t)(nrefs_cap - o)); } nrefs[x_->id]++; count_refs(x_); } } while (0)
+  REF(e->a); REF(e->b); if (e->op != E_CTOR) REF(e->c);
+  for (int i = 0; i < e->nargs && e->args; i++) REF(e->args[i]);
+#undef REF
+}
 static void uniq_calls(const Expr *e, const Expr *body) {   /* demote a callee's parameter given something shared */
   if (!e || mm_has(MM_NUM, e)) return;
   mm_put(MM_NUM, e, 1);
   if (e->op == E_CALL)
     for (int i = 0; i < e->nargs; i++) {
       const Expr *a = e->args[i];
-      int ok = uniq(a) && (a->op != E_FIELD || occ(body, a) <= 1) && (a->op != E_PARAM || occ(body, a) <= 1);
-      if (!ok && uparam[e->k][i]) { uparam[e->k][i] = 0; uq_changed = 1; }
+      if (!uparam[e->k][i]) continue;
+      if (a->id < nrefs_cap && nrefs[a->id] <= 1 && uniq(a)) continue;   /* (named once: moved once) */
+      int imm = a->op == E_CONST || (a->op == E_CTOR && !a->nargs);   /* (an immediate is no block) */
+      int ok = uniq(a) && (imm || occ_through(body, a, e) <= 1);   /* (on the paths through this call: one value given twice -- a field, a parameter, or a block the expression shares -- is not unique) */
+      if (!ok && uparam[e->k][i]) { if (dbg > 1) DBG("[not unique: f%ld's parameter %d: arg op %d uniq %d through %u]\n", e->k, i, a->op, uniq(a), imm ? 0 : occ_through(body, a, e)); uparam[e->k][i] = 0; uq_changed = 1; }
     }
   if (e->a) uniq_calls(e->a, body);
   if (e->b) uniq_calls(e->b, body);
   if (e->c) uniq_calls(e->c, body);
   for (int i = 0; i < e->nargs && e->args; i++) uniq_calls(e->args[i], body);
+}
+static Shape *sh_memo; static unsigned *sh_gen, sh_g; static int sh_cap;
+static void own_ctors(const Expr *e, const Expr *body) {   /* demote a field some constructor writes shared */
+  if (!e || mm_has(MM_NUM, e)) return;
+  mm_put(MM_NUM, e, 1);
+  if (e->op == E_CTOR && e->ci) {
+    long id = ctor_id(e->ci);
+    for (int j = 0; id > 0 && id <= fown_n && j < e->nargs && j < e->ci->k; j++) {
+      const Expr *a = e->args[j];
+      if (!fown[id][j] || a->op == E_CONST || (a->op == E_CTOR && !a->nargs)) continue;   /* (an immediate is no block) */
+      if (sh_cap > a->id && sh_gen[a->id] == sh_g && sh_memo[a->id].k != 5) continue;   /* (nor a number: only data is owned) */
+      if (!uniq(a) || occ_stored(body, a) > 1) { if (dbg > 1) DBG("[disown %s.%d: arg op %d k %ld uniq %d occ %u body id %d]\n", e->ci->name, j, a->op, a->k, uniq(a), occ(body, a), body->id); fown[id][j] = 0; uq_changed = 1; }
+    }
+  }
+  if (e->a) own_ctors(e->a, body);
+  if (e->b) own_ctors(e->b, body);
+  if (e->c) own_ctors(e->c, body);
+  for (int i = 0; i < e->nargs && e->args; i++) own_ctors(e->args[i], body);
 }
 static int only_reads(const Expr *e, const Expr *x) { /* x appears in e only as the base of field reads */
   if (e == x) return 0;
@@ -1358,26 +1929,67 @@ static int only_reads(const Expr *e, const Expr *x) { /* x appears in e only as 
   for (int i = 0; i < e->nargs && e->args; i++) if (!only_reads(e->args[i], x)) return 0;
   return 1;
 }
-static Expr **ctor_slot_tail(Expr **slot, Expr *s, int nf, int branch) {   /* mark the tail constructors of a branch */
+/* EVERY PATH of a branch that consumes a block settles it: a tail constructor of its size is built IN it; any
+   other tail (through conditionals and matches, whose own tails are tails) FREES it first, so what that tail
+   allocates can be the block just released.  Each marked node is a private copy: the mark is this place's. */
+static void ctor_slot_tail(Expr **slot, Expr *s, int nf, int branch, int words) {
   Expr *e = *slot;
-  if (e->op == E_CTOR && e->nargs == nf && nf > 0 && !e->c) {
-    Expr *c2 = A(sizeof *c2); *c2 = *e; c2->c = s; c2->rtag = branch + 1; c2->id = eid++; c2->var = -1; *slot = c2;   /* (a private copy: the mark is this place's) */
-    return slot;
+  Expr *c2 = A(sizeof *c2); *c2 = *e; c2->id = eid++; c2->var = -1; *slot = c2;
+  if (e->op == E_CTOR && e->nargs == nf && nf > 0 && !e->c) { c2->c = s; c2->rtag = branch + 1; return; }
+  if (e->op == E_IF) { ctor_slot_tail(&c2->b, s, nf, branch, words); ctor_slot_tail(&c2->c, s, nf, branch, words); return; }
+  if (e->op == E_MATCH) {
+    c2->args = A(sizeof(Expr *) * (size_t)(e->nargs ? e->nargs : 1)); memcpy(c2->args, e->args, sizeof(Expr *) * (size_t)e->nargs);
+    if (e->freeb) { c2->freeb = A((size_t)e->nargs); memcpy(c2->freeb, e->freeb, (size_t)e->nargs); }
+    for (int i = 0; i < e->nargs; i++) ctor_slot_tail(&c2->args[i], s, nf, branch, words);
+    return;
   }
-  if (e->op == E_IF) {
-    Expr *c2 = A(sizeof *c2); *c2 = *e; c2->id = eid++; c2->var = -1; *slot = c2;
-    ctor_slot_tail(&c2->b, s, nf, branch); ctor_slot_tail(&c2->c, s, nf, branch);
+  c2->fre = s; c2->fren = words;
+}
+/* A FIELD's block may be consumed only where its parent's is: the parent still points at it.  So every match on
+   the parent that has this match in a branch must, in that branch, only READ the parent (never pass it on or store
+   it whole) -- then nothing that survives the branch reaches the field's block but the field itself. */
+static int fc_ok;
+static void fc_walk(const Expr *e, const Expr *X, const Expr *M) {
+  if (!e || !fc_ok || mm_has(MM_SITE, e)) return;
+  mm_put(MM_SITE, e, 1);
+  if (e->op == E_MATCH && e->a == X)
+    for (int i = 0; i < e->nargs && fc_ok; i++) if (contains(e->args[i], M, 0) && !only_reads(e->args[i], X)) fc_ok = 0;
+  if (e->a) fc_walk(e->a, X, M);
+  if (e->b) fc_walk(e->b, X, M);
+  if (e->c && e->op != E_CTOR) fc_walk(e->c, X, M);
+  for (int i = 0; i < e->nargs && e->args; i++) fc_walk(e->args[i], X, M);
+}
+static int field_consumable(const Expr *body, const Expr *M) {
+  for (const Expr *x = M->a; x->op == E_FIELD; x = x->a) {   /* each ancestor up to the value the chain reads from */
+    fc_ok = 1; mm_new(MM_SITE); fc_walk(body, x->a, M);
+    if (!fc_ok) return 0;
   }
-  return NULL;
+  return 1;
+}
+static int reuses(const Expr *e, const Expr *s) {   /* does a constructor in e rebuild in s's block? */
+  if (!e) return 0;
+  if (e->op == E_CTOR && e->c == s) return 1;
+  if (e->op == E_IF) return reuses(e->b, s) || reuses(e->c, s);
+  return 0;
 }
 static void mark_reuse(Expr *e, int f) {
   if (!e || mm_has(MM_NUM, e)) return;
   mm_put(MM_NUM, e, 1);
-  if (e->op == E_MATCH && e->a->op == E_PARAM && e->a->nargs == f && uparam[f][e->a->k]) {
+  /* a match on a value it CONSUMES: unique (a unique parameter, an owned field of one, a fresh call's result), and
+     moved nowhere else on any path of the function */
+  int owned_scrut = e->op == E_MATCH && e->ci &&
+    (e->a->op == E_PARAM ? (e->a->nargs == f && uparam[f][e->a->k])
+                         : ((e->a->op == E_FIELD || e->a->op == E_CALL) && (mm_new(MM_UNIQ), uniq(e->a)) && occ(funs[f].body, e->a) <= 1
+                            && (e->a->op != E_FIELD || field_consumable(funs[f].body, e))));
+  if (owned_scrut) {
     for (int i = 0; i < e->nargs; i++) {
       const LinCtor *c2 = NULL; int nf = -1;
-      for (long k = 1; (c2 = lin_ctor_info(k)); k++) if (c2->i == i && c2->m == e->nargs) { nf = c2->k; break; }
-      if (nf > 0 && only_reads(e->args[i], e->a)) ctor_slot_tail(&e->args[i], e->a, nf, i);
+      for (long k = 1; (c2 = lin_ctor_info(k)); k++) if (c2->i == i && e->ci && c2->dt == e->ci->dt) { nf = c2->k; break; }
+      if (nf > 0 && only_reads(e->args[i], e->a)) {
+        ctor_slot_tail(&e->args[i], e->a, nf, i, nf + !e->untag);
+        if (!e->freeb) e->freeb = A((size_t)e->nargs);
+        e->freeb[i] = 1;                               /* (its fields are read into locals first: emitx, E_MATCH) */
+      }
     }
   }
   if (e->a) mark_reuse(e->a, f);
@@ -1388,8 +2000,17 @@ static void mark_reuse(Expr *e, int f) {
 static void ownership(Expr *entry) {
   uparam = A(sizeof *uparam * (size_t)nfun); ufresh = A((size_t)nfun);
   for (int i = 0; i < nfun; i++) { int a = funs[i].arity ? funs[i].arity : 1; uparam[i] = A((size_t)a); memset(uparam[i], 1, (size_t)a); ufresh[i] = 1; }
-  for (int round = 0; round <= nfun * 64 + 64; round++) {
+  fown_n = 0; while (lin_ctor_info(fown_n + 1)) fown_n++;
+  fown = A(sizeof *fown * (size_t)(fown_n + 1));
+  for (long k = 1; k <= fown_n; k++) { int nk = lin_ctor_info(k)->k + 1; fown[k] = A((size_t)nk); memset(fown[k], 1, (size_t)nk); }
+  if (nrefs_cap) memset(nrefs, 0, sizeof *nrefs * (size_t)nrefs_cap);
+  mm_new(MM_NUM); for (int i = 0; i < nfun; i++) count_refs(funs[i].body);
+  count_refs(entry);
+  for (int round = 0; round <= nfun * 64 + 64 + fown_n; round++) {
     uq_changed = 0;
+    mm_new(MM_UNIQ);
+    for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); own_ctors(funs[i].body, funs[i].body); }
+    mm_new(MM_NUM); own_ctors(entry, entry);
     mm_new(MM_UNIQ);
     for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); uniq_calls(funs[i].body, funs[i].body); }
     mm_new(MM_NUM); uniq_calls(entry, entry);
@@ -1400,6 +2021,10 @@ static void ownership(Expr *entry) {
     if (!uq_changed) break;
   }
   for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); mark_reuse(funs[i].body, i); }
+  if (dbg > 1) {
+    for (int i = 0; i < nfun; i++) { DBG("[own f%d fresh %d:", i, ufresh[i]); for (int k = 0; k < funs[i].arity; k++) fprintf(stderr, " %d", uparam[i][k]); fprintf(stderr, "]\n"); }
+    for (long k = 1; k <= fown_n; k++) { const LinCtor *c = lin_ctor_info(k); if (c->k == 0) continue; DBG("[own %s:", c->name); for (int j = 0; j < c->k; j++) fprintf(stderr, " %d", fown[k][j]); fprintf(stderr, "]\n"); }
+  }
 }
 
 static int has_data(const Expr *e) {               /* (memoised in MM_NUM: call after mm_new(MM_NUM)) */
@@ -1438,30 +2063,67 @@ static Shape sh_join(Shape a, Shape b) {
   return (Shape){ 9, NULL };
 }
 static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt; }
-static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed;
-static Shape *sh_memo; static unsigned *sh_gen, sh_g; static int sh_cap;
+static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad;
 static long ctor_id(const LinCtor *ci) { for (long k = 1; lin_ctor_info(k); k++) if (lin_ctor_info(k) == ci) return k; return 0; }
 static void sh_upd(Shape *slot, Shape v) { Shape j = sh_join(*slot, v); if (!sh_eq(j, *slot)) { *slot = j; sh_changed = 1; } }
+static unsigned char *sh_fneed;                     /* a function whose result is needed as a number (once each) */
+static void sh_need_num(const Expr *x) {
+  if (x->op == E_IF) { sh_need_num(x->b); sh_need_num(x->c); return; }   /* (what the value may be, everywhere) */
+  if (x->op == E_CALL && sh_fneed && x->k >= 0 && x->k < nfun) {       /* ...and what a call returns */
+    if (!sh_fneed[x->k]) { sh_fneed[x->k] = 1; sh_changed = 1; sh_need_num(funs[x->k].body); }
+    return;
+  }
+  if (x->op == E_MATCH) { for (int i = 0; i < x->nargs; i++) if (!(x->args[i]->op == E_CONST && x->args[i]->box)) sh_need_num(x->args[i]); return; }
+  if (x->op == E_FIELD && x->ci) { long id = ctor_id(x->ci); if (id > 0 && id <= sh_nctor && x->k < x->ci->k) sh_upd(&sh_fld[id][x->k], (Shape){ 1, NULL }); }
+  else if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], (Shape){ 1, NULL });
+  else if (x->op == E_PARAM && x->nargs >= 0 && x->nargs < nfun) sh_upd(&sh_par[x->nargs][x->k], (Shape){ 1, NULL });
+}
 static Shape shape_of(const Expr *e) {
   if (e->id < sh_cap && sh_gen[e->id] == sh_g) return sh_memo[e->id];
   Shape r = { 0, NULL };
   switch (e->op) {
-  case E_CONST: case E_BIN: case E_FOP: r.k = e->kind == 3 ? 3 : 1; break;
-  case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun ? sh_par[e->nargs][e->k] : (Shape){ 1, NULL }; break;
+  case E_CONST: if (e->box) break;                 /* the cells' end answering true: every shape takes it */
+    r.k = e->kind == 3 ? 3 : 1; break;
+  case E_BIN: case E_FOP:                            /* an operation's operands are numbers: what they were read from too */
+    for (int i = 0; i < (e->op == E_BIN ? 2 : e->nargs); i++) {
+      const Expr *x = e->op == E_BIN ? (i ? e->b : e->a) : e->args[i];
+      shape_of(x); sh_need_num(x);
+    }
+    r.k = e->kind == 3 ? 3 : 1; break;
+  case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun ? sh_par[e->nargs][e->k] : e->k < nesh ? esh[e->k] : (Shape){ 1, NULL }; break;
   case E_IF: shape_of(e->a); r = sh_join(shape_of(e->b), shape_of(e->c)); break;
-  case E_MATCH: shape_of(e->a); for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i])); break;
+  case E_MATCH: {
+    if (e->a->op == E_PARAM && e->ci) {             /* (a parameter taken apart: its use says what it is) */
+      if (e->a->nargs < 0 && e->a->k < nesh) sh_upd(&esh[e->a->k], (Shape){ 5, e->ci->dt });
+      else if (e->a->nargs >= 0 && e->a->nargs < nfun) sh_upd(&sh_par[e->a->nargs][e->a->k], (Shape){ 5, e->ci->dt });
+    }
+    Shape sc = shape_of(e->a);                       /* what is taken apart must be that datatype's */
+    if (sc.k && !(sc.k == 5 && e->ci && sc.dt == e->ci->dt)) sh_bad = 1;
+    for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i]));
+    break;
+  }
   case E_CALL:
-    for (int i = 0; i < e->nargs; i++) { Shape a = shape_of(e->args[i]); if (!(funs[e->k].known && funs[e->k].known[i])) sh_upd(&sh_par[e->k][i], a); }
+    for (int i = 0; i < e->nargs; i++) {
+      Shape a = shape_of(e->args[i]);
+      if (funs[e->k].known && funs[e->k].known[i]) continue;
+      sh_upd(&sh_par[e->k][i], a);
+      const Expr *x = e->args[i];                    /* an argument passed in takes the parameter's shape */
+      if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], sh_par[e->k][i]);
+    }
     r = sh_fun[e->k]; break;
   case E_CTOR: {
     long id = ctor_id(e->ci);
     if (id <= 0 || id > sh_nctor) { r.k = 9; break; }
     sh_built[id] = 1;
-    for (int j = 0; j < e->nargs; j++) sh_upd(&sh_fld[id][j], shape_of(e->args[j]));
+    for (int j = 0; j < e->nargs; j++) {
+      sh_upd(&sh_fld[id][j], shape_of(e->args[j]));
+      const Expr *x = e->args[j];
+      if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], sh_fld[id][j]);
+    }
     r.k = 5; r.dt = e->ci->dt; break;
   }
   case E_FIELD: {
-    shape_of(e->a);
+    { Shape sc = shape_of(e->a); if (sc.k && !(sc.k == 5 && e->ci && sc.dt == e->ci->dt)) sh_bad = 1; }
     long id = ctor_id(e->ci);
     r = id > 0 && id <= sh_nctor && e->k < e->ci->k ? sh_fld[id][e->k] : (Shape){ 9, NULL }; break;
   }
@@ -1475,12 +2137,12 @@ static Shape unit_shapes(const Expr *entry) {
   sh_nctor = 0; while (lin_ctor_info(sh_nctor + 1)) sh_nctor++;
   sh_par = A(sizeof *sh_par * (size_t)nfun); sh_fun = A(sizeof *sh_fun * (size_t)(nfun ? nfun : 1));
   for (int i = 0; i < nfun; i++) sh_par[i] = A(sizeof **sh_par * (size_t)(funs[i].arity ? funs[i].arity : 1));
-  sh_fld = A(sizeof *sh_fld * (size_t)(sh_nctor + 1)); sh_built = A((size_t)(sh_nctor + 1));
+  sh_fld = A(sizeof *sh_fld * (size_t)(sh_nctor + 1)); sh_built = A((size_t)(sh_nctor + 1)); sh_fneed = A((size_t)(nfun ? nfun : 1));
   for (long k = 1; k <= sh_nctor; k++) sh_fld[k] = A(sizeof **sh_fld * (size_t)(lin_ctor_info(k)->k + 1));
   if (sh_cap < eid) { sh_cap = eid * 2 + 64; sh_memo = realloc(sh_memo, sizeof *sh_memo * (size_t)sh_cap); sh_gen = realloc(sh_gen, sizeof *sh_gen * (size_t)sh_cap); memset(sh_gen, 0, sizeof *sh_gen * (size_t)sh_cap); }
   Shape res = { 0, NULL };
   for (int round = 0; round < 1000; round++) {
-    sh_changed = 0;
+    sh_changed = 0; sh_bad = 0;
     sh_g++;
     for (int i = 0; i < nfun; i++) sh_upd(&sh_fun[i], shape_of(funs[i].body));
     res = shape_of(entry);
@@ -1516,14 +2178,23 @@ static const char *DATA_RT =
   "extern LIN_TLS jmp_buf lin_jb; extern LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
   "extern LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch;\n"
   "static pthread_mutex_t lin_chm = PTHREAD_MUTEX_INITIALIZER;\n"
+  "#ifdef __linux__\nextern int madvise(void *, unsigned long, int);\n#define LIN_HUGE(p, n) madvise((p), (n), 14)\n#else\n#define LIN_HUGE(p, n) ((void)0)\n#endif\n"
   "static __attribute__((noinline, cold)) void lin_refill(long n) {\n"
-  "  long sz = n > 65536 ? n : 65536; long *c = malloc((size_t)sz * 8);\n"
+  "  /* (the arena grows by doubling chunks; a large one is asked for in huge pages, where the OS has them: a fresh\n"
+  "     page is the dearest thing a list costs, and a 2 MB page is one fault where 4 KB pages are 512) */\n"
+  "  long g = lin_nch < 6 ? lin_nch : 6, sz = 65536L << g; if (sz < n) sz = n; long *c;\n"
+  "  if (sz >= (1L << 18) && !(sz & ((1L << 18) - 1))) { c = aligned_alloc((size_t)1 << 21, (size_t)sz * 8); if (c) LIN_HUGE(c, (size_t)sz * 8); }\n"
+  "  else c = malloc((size_t)sz * 8);\n"
   "  if (!c || lin_fn_aborted || lin_used > (1L << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) { free(c); lin_fn_aborted = 1; longjmp(lin_jb, 1); }\n"
   "  pthread_mutex_lock(&lin_chm);\n"
   "  if (lin_nch >= lin_cch) { lin_cch = lin_cch ? lin_cch * 2 : 64; lin_ch = realloc(lin_ch, (size_t)lin_cch * sizeof *lin_ch); }\n"
   "  lin_ch[lin_nch++] = c; lin_used += sz; pthread_mutex_unlock(&lin_chm); lin_hp = c; lin_he = c + sz; }\n"
-  "static inline long *lin_alloc(long n) { if (__builtin_expect(lin_hp + n > lin_he, 0)) lin_refill(n); long *r = lin_hp; lin_hp += n; return r; }\n"
-  "static void lin_free_all(void) { for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; }\n"
+  "extern LIN_TLS long *lin_fl[8];\n"
+  "static inline long *lin_alloc(long n) { long *f = lin_fl[n & 7]; if (n < 8 && f) { lin_fl[n] = (long *)f[0]; return f; }\n"
+  "  if (__builtin_expect(lin_hp + n > lin_he, 0)) lin_refill(n); long *r = lin_hp; lin_hp += n; return r; }\n"
+  /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
+  "static inline void lin_free(long *p, long n) { if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
+  "static void lin_free_all(void) { for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; for (int i = 0; i < 8; i++) lin_fl[i] = 0; }\n"
   /* The guard lives where an infinite STRUCTURE must go -- the arena's refill, once per chunk -- and checks memory and
      the stack there; a compiled function carries nothing (measured: a per-call check doubled a tree insert).  A call
      whose runaway recursion builds nothing is not caught -- the exposure numeric units have always had.  A task on
@@ -1531,13 +2202,86 @@ static const char *DATA_RT =
      abandons the joiner too, so a half-computed value is never used. */
   "#define LIN_ENTER\n#define LIN_LEAVE\n"
   "#define LIN_TASK_START(ss) if (setjmp(lin_jb)) { lin_fn_aborted = 1; return 0; } lin_stack_lo = (char *)__builtin_frame_address(0) - (ss) + ((size_t)1 << 24)\n"
-  "#define LIN_JOINED (lin_fn_aborted ? (longjmp(lin_jb, 1), 0) : 0)\n";
+  "#define LIN_JOINED (lin_fn_aborted ? (longjmp(lin_jb, 1), 0) : 0)\n"
+  /* a result through its destination: LIN_PUT stores it only if it is not there already (a block rebuilt in place
+     is, and storing it again would hold up the next load of that slot); LIN_SET is for a value that is new */
+  "#define LIN_PUT(d, x) ({ long x_ = (x); if (*(d) != x_) *(d) = x_; 0L; })\n"
+  "#define LIN_SET(d, x) (*(d) = (x), 0L)\n";
 
 /* Compile F and everything it calls, or return NULL.  `aports`, when given, are the call's arguments: a NUMBER
    one (anum[k]) is passed to the entry, any other is compiled into it as an expression -- `(check (make 7))`
    compiles `make` too, instead of asking the net to build the tree first. */
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum);
 static Compiled *compile_fn(Net *n, int F) { return compile_fn_ex(n, F, NULL, NULL); }
+/* ONE MATCH PER VALUE.  Code written with tests and selectors -- `(if (is_empty s) a (f (head s) (tail s)))` --
+   takes one value apart three times: a test whose answer is a constant per constructor, then a match per field.
+   Inside each answer the constructor is KNOWN, so the conditional moves inside the test's match and every
+   further match on that value becomes its known branch: one match per path, its fields read from it.  That is
+   the shape ownership understands -- the value is consumed once, so its block is reused or freed -- and it is
+   what `match` would have written.  (Case-of-known-constructor; nothing is evaluated that was not before.) */
+typedef struct { const Expr *s; int i; } Known;
+static Known *kn; static int nkn, ckn;
+static Expr **r0_memo; static unsigned *r0_gen, r0_g; static int r0_cap;
+static int contains(const Expr *e, const Expr *x, int depth);
+static Expr *rw(Expr *e);
+static Expr *rw_kids(Expr *e) {                      /* e with its children rewritten (itself when none changed) */
+  Expr *a = e->a ? rw(e->a) : NULL, *b = e->b ? rw(e->b) : NULL, *c = e->c && e->op != E_CTOR ? rw(e->c) : e->c;
+  Expr **args = NULL; int ch = a != e->a || b != e->b || c != e->c;
+  if (e->nargs && e->args) {
+    args = A(sizeof *args * (size_t)e->nargs);
+    for (int i = 0; i < e->nargs; i++) { args[i] = rw(e->args[i]); ch |= args[i] != e->args[i]; }
+  }
+  if (!ch) return e;
+  Expr *n = A(sizeof *n); *n = *e; n->id = eid++; n->var = -1; n->a = a; n->b = b; n->c = c; n->args = args ? args : e->args;
+  return hc(n);
+}
+static Expr *rw(Expr *e) {
+  if (!e) return e;
+  if (nkn) {                                         /* under a known constructor: only what mentions that value changes */
+    int any = 0;
+    for (int k = 0; k < nkn && !any; k++) any = contains(e, kn[k].s, 0);
+    if (!any) { int sv = nkn; nkn = 0; Expr *r = rw(e); nkn = sv; return r; }
+  } else if (e->id < r0_cap && r0_gen[e->id] == r0_g) return r0_memo[e->id];
+  Expr *r = NULL;
+  if (e->op == E_MATCH)
+    for (int k = nkn - 1; k >= 0 && !r; k--) if (kn[k].s == e->a && kn[k].i < e->nargs) r = rw(e->args[kn[k].i]);
+  if (!r && e->op == E_IF && e->a->op == E_MATCH && e->a->ci) {
+    Expr *m = e->a; int consts = 1, known = 0;
+    for (int i = 0; i < m->nargs && consts; i++) consts = m->args[i]->op == E_CONST;
+    for (int k = 0; k < nkn; k++) known |= kn[k].s == m->a;
+    if (consts && !known && m->a->op != E_CALL) {    /* (a call's value is one evaluation: left to its own match) */
+      Expr *n = A(sizeof *n); *n = *m; n->id = eid++; n->var = -1; n->kind = e->kind;
+      n->args = A(sizeof(Expr *) * (size_t)m->nargs);
+      n->a = rw(m->a);
+      for (int i = 0; i < m->nargs; i++) {
+        if (nkn >= ckn) kn = realloc(kn, sizeof *kn * (size_t)(ckn = ckn ? ckn * 2 : 8));
+        kn[nkn].s = m->a; kn[nkn].i = i; nkn++;
+        n->args[i] = rw(m->args[i]->k ? e->b : e->c);
+        nkn--;
+      }
+      r = hc(n);
+    }
+  }
+  if (!r) r = rw_kids(e);
+  if (!nkn && e->id < r0_cap) { r0_gen[e->id] = r0_g; r0_memo[e->id] = r; }
+  return r;
+}
+static Expr *one_match(Expr *e) {
+  if (r0_cap < eid + 1) { int c = eid * 2 + 64; r0_memo = realloc(r0_memo, sizeof *r0_memo * (size_t)c); r0_gen = realloc(r0_gen, sizeof *r0_gen * (size_t)c); memset(r0_gen + r0_cap, 0, sizeof *r0_gen * (size_t)(c - r0_cap)); r0_cap = c; }
+  nkn = 0;
+  return rw(e);
+}
+
+/* THE CALL'S CONTEXT.  A recursive call is where the driver notices a unit, but the call's value is often taken
+   apart at once -- `(alen (fill a 0 n))` is fill's result applied to a match branch -- and folding a structure back
+   into the net only for the net to read one field of it is the slow way round.  So the applications around the
+   call join the unit: the result applied to arguments (kind 0: a match, a function result applied), or passed to a
+   function whose value is known (kind 1).  fn_reduce collects them, outermost last; the unit's value is theirs. */
+static Port *cx_port; static int *cx_kind, cx_n, cx_cap;
+static void cx_push(int kind, Port p) {
+  if (cx_n >= cx_cap) { cx_cap = cx_cap ? cx_cap * 2 : 8; cx_port = realloc(cx_port, sizeof *cx_port * (size_t)cx_cap); cx_kind = realloc(cx_kind, sizeof *cx_kind * (size_t)cx_cap); }
+  cx_port[cx_n] = p; cx_kind[cx_n] = kind; cx_n++;
+}
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum) {
   N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
@@ -1552,6 +2296,17 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       }
     failed = 0; nfun = 0;
   }
+  nesh = 0; esh_data = 0; n_inp = 0; inp_on = aports != NULL;
+  int *rt_of = NULL;
+  if (aports) {                                      /* the runtime arguments: numbers, and data passed in (anum 2) */
+    int ar = fun_arity(F);
+    if (esh_cap < ar + 1) esh = realloc(esh, sizeof *esh * (size_t)(esh_cap = ar + 16));
+    rt_of = A(sizeof *rt_of * (size_t)(ar + 1));
+    for (int k = 0; k < ar; k++) {
+      rt_of[k] = -1;
+      if (anum[k] && !(known && known[k])) { rt_of[k] = nesh; esh[nesh++] = anum[k] == 2 ? (Shape){ 0, NULL } : (Shape){ 1, NULL }; esh_data |= anum[k] == 2; }
+    }
+  }
   if (compile_body_spec(F, NULL, known) == 0 && !failed) {
     arity = funs[0].arity;
     /* THE ENTRY: f0 applied to the call's arguments -- the entry's own parameters, or expressions */
@@ -1559,11 +2314,23 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     Expr *entry = mke(E_CALL, funs[0].body->kind); entry->k = 0; entry->nargs = arity; entry->args = A(sizeof(Expr *) * (size_t)(arity ? arity : 1));
     for (int k = 0; k < arity && !failed; k++) {
       if (known && known[k]) { Expr *z = mke(E_CONST, 1); z->k = 0; entry->args[k] = hc(z); }   /* (bound in the copy) */
-      else if (!aports || anum[k]) { Expr *pe = mke(E_PARAM, 1); pe->k = nnum++; pe->nargs = -1; entry->args[k] = hc(pe); }
+      else if (!aports || anum[k]) { Expr *pe = mke(E_PARAM, 1); pe->k = aports ? rt_of[k] : nnum; nnum++; pe->nargs = -1; entry->args[k] = hc(pe); }
       else { cur_fid = -1; entry->args[k] = to_expr(eval(aports[k], NULL)); if (!entry->args[k]) failed = 1; }
     }
     if (failed) { arena_free(); return NULL; }        /* (a function the entry reached may be half-built) */
+    if (aports) nnum = nesh;                         /* (the inputs met in the arguments come after them) */
     entry = hc(entry);
+    if (aports && cx_n) {                              /* the context, applied to the call's value */
+      V *v = mkv(V_SYM); v->e = entry; cur_fid = -1;
+      for (int i = 0; i < cx_n && v && !failed; i++)
+        v = cx_kind[i] == 0 ? apply(v, lzp(cx_port[i], NULL)) : apply(eval(cx_port[i], NULL), ready(v));
+      Expr *x = v && !failed ? to_expr(v) : NULL;
+      if (!x || failed) { arena_free(); return NULL; }
+      entry = x; nnum = nesh;
+    }
+    r0_g++;
+    for (int i = 0; i < nfun; i++) funs[i].body = one_match(funs[i].body);
+    entry = one_match(entry);
     mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
       changed = 0;
@@ -1578,10 +2345,18 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
        data the rule above is relaxed: work may be wasted on a value nobody reads, but the answer is the net's. */
     if (!safe) { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) safe = 1; }
     if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
-    int numeric = safe && result_numeric(entry);
-    Shape rshape = { 1, NULL };
+    Shape rshape = safe ? unit_shapes(entry) : (Shape){ 1, NULL };
+    if (safe && sh_bad) { safe = 0; DBG("declined: a value taken apart as something it is not (a number read as cells?)\n"); }
+    for (int k = 0; safe && k < nesh; k++)            /* a data argument is read in by its shape: it must be known */
+      if (esh[k].k && !shape_closed(esh[k], 0)) {
+        safe = 0; DBG("declined: argument %d's shape is not known (%d %s)\n", k, esh[k].k, esh[k].dt ? esh[k].dt : "");
+        if (dbg > 1) for (long c = 1; c <= sh_nctor; c++) { const LinCtor *ci = lin_ctor_info(c); if (!sh_built[c]) continue; DBG("  %s built:", ci->name); for (int jj = 0; jj < ci->k; jj++) fprintf(stderr, " %d", sh_fld[c][jj].k); fprintf(stderr, "\n"); }
+      }
+    int numeric = safe && (result_numeric(entry) || rshape.k == 1 || rshape.k == 3);   /* (a field read the shapes prove a number) */
+    int rbool = rshape.k == 3 || (rshape.k != 1 && entry->kind == 3);
+    fld_live = NULL;
+    if (safe) fields_live(entry, !numeric);
     if (safe && !numeric) {                            /* a STRUCTURE: folded if its shape is known to the leaves */
-      rshape = unit_shapes(entry);
       if (!shape_closed(rshape, 0) || rshape.k != 5) { safe = 0; DBG("declined: the result's shape is not known (a field holding different kinds of value)\n"); }
     }
     if (!safe) {}
@@ -1591,9 +2366,19 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       lift();
       for (int i = 0; i < nfun; i++) { put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ");\n"); }
       int ok = 1;
+      unsigned char *hd = A((size_t)nfun + 1);         /* which functions get a destination-passing form */
+      for (int i = 0; i < nfun; i++) dp_scan(funs[i].body, i, hd);
+      for (int ch = 1; ch; ) { ch = 0; for (int i = 0; i < nfun; i++) if (hd[i]) ch |= dp_scan(funs[i].body, i, hd); }
+      for (int i = 0; i < nfun; i++) if (hd[i]) { put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ");\n"); }
+      hasd = hd;
       for (int i = 0; ok && i < nfun; i++) {
-        put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ") { LIN_ENTER; return ");
-        emitting = i; fscope++; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n");
+        put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0);
+        emitting = i; fscope++;
+        if (hd[i]) {                                   /* the plain form: the other, given a local to write */
+          put(&fb, ") { long r = 0; f%d_d(&r", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", p%d", j); fv_params(&fb, i, 0, 1); put(&fb, "); return r; }\n");
+          put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ") { LIN_ENTER; return ");
+          tailpos = 1; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+        } else { put(&fb, ") { LIN_ENTER; return "); ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n"); }
       }
       Buf eb = nbuf(1024);                             /* the entry's call, as an expression of its parameters */
       emitting = -1; fscope++; ok = ok && emit_region(&eb, &pre, entry, 0, 4096);
@@ -1612,8 +2397,26 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         if (pok) { put(&b, "static long fp("); plist(&b, 1); put(&b, "%sint d) { if (d >= dmax) return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s); }
         else { put(&b, "static long fp("); plist(&b, 1); put(&b, "%sint d) { (void)d; return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); }\n"); }
         put(&b, "static const long *lin_args; static long lin_res; static int lin_threads_;\n");
+        /* a loop folding an associative operation over a range, its other parameters only READ: split among the
+           threads, as for numbers -- what a step builds is its thread's own, what the loop shares nobody writes */
+        Red red; int has_red = numeric && !nfv[0] && entry->op == E_CALL && entry->k == 0 && !entry->fre && find_reduction(&red);
+        Buf rq = nbuf(256);
+        if (has_red) {
+          emitting = 0; fscope++;
+          has_red = red_defs(&b, &pre, &red, 1);
+          emitting = -1; fscope++;
+          for (int i = 0; has_red && i < arity; i++) { put(&rq, "  long q%d = ", i); has_red = emit_region(&rq, &pre, entry->args[i], 0, 4096); put(&rq, ";\n"); }
+          if (has_red) DBG("parallel reduction over p%d (%s), accumulator p%d, in a data unit\n", red.iv, red.up ? "up" : "down", red.acc);
+        }
         put(&b, "static void *lin_run(void *u) { (void)u; const long *a = lin_args; LIN_TASK_START((size_t)1 << 30);\n");
         for (int i = 0; i < nnum; i++) put(&b, "  long p%d = a[%d];\n", i, i);
+        if (has_red) {
+          put(&b, "  if (lin_threads_ > 1) {\n%s  {\n", rq.s);
+          for (int i = 0; i < arity; i++) put(&b, "  long p%d = q%d;\n", i, i);
+          red_run(&b, &red, 1, "lin_threads_", "lin_res = acc; (void)LIN_JOINED; return 0;");
+          put(&b, "  lin_res = f0("); plist(&b, 0); put(&b, "); return 0; } }\n");
+        }
+        free(rq.s);
         if (pok && nsite) {
           put(&b, "  if (lin_threads_ > 1) { int lg = 0; while ((1 << lg) < lin_threads_) lg++; dmax = lg + 2;\n");
           put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); int d = -1; lin_res = %s; return 0; }\n", ebp.s);
@@ -1627,14 +2430,14 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
             numeric ? " lin_free_all();" : "");
         put(&b, "void lin_fn_release(void) { lin_free_all(); }\n");
         DBG("compiling a data unit (%d function%s, %d numeric argument%s, %d parallel site%s%s):\n%s\n", nfun, nfun == 1 ? "" : "s", nnum, nnum == 1 ? "" : "s", nsite, nsite == 1 ? "" : "s", numeric ? "" : ", a structure result", b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, nnum, numeric ? (entry->kind == 3 ? 3 : 1) : 5, rshape);
+        r = compile_src(b.s, nnum, numeric ? (rbool ? 3 : 1) : 5, rshape);
         if (r) r->strict = funs[0].strict;
       } else if (ok && aports) {                       /* numbers only, with expression arguments: the plain entry */
         put(&b, "%slong lin_fn_entry(const long *a, int threads) { (void)threads;\n", pre.s);
         for (int i = 0; i < nnum; i++) put(&b, "  long p%d = a[%d];\n", i, i);
         put(&b, "  return %s; }\n", eb.s);
         DBG("compiling (%d functions, entry with expression arguments):\n%s\n", nfun, b.s + strlen(LIN_I64_SRC));
-        r = compile_src(b.s, nnum, entry->kind == 3 ? 3 : 1, (Shape){ 1, NULL });
+        r = compile_src(b.s, nnum, rbool ? 3 : 1, (Shape){ 1, NULL });
         if (r) r->strict = funs[0].strict;
       }
       nsite = 0; emitting = 0; fscope++;
@@ -1646,31 +2449,12 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         put(&b, "%sint d) { if (d >= dmax) return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s);
         Red red; int has_red = find_reduction(&red);
         if (has_red) {
-          long id = red.ismax > 0 ? (long)(1UL << (LIN_INT_BITS - 1)) : red.ismax < 0 ? (long)~(1UL << (LIN_INT_BITS - 1))
-                  : (red.op == LIN_OP_MUL) ? 1 : (red.op == LIN_OP_BAND) ? -1 : 0;   /* (+)'s identity */
-          put(&b, "static long g("); plist(&b, 1); put(&b, ") { return ");
-          emitting = 0; fscope++; ok = emit_region(&b, &pre, red.g, 0, 4096); put(&b, "; }\n");
-          put(&b, "typedef struct { long p[%d]; long lo, block, r; long *next; } R;\n", arity);
-          put(&b, "static void *rrun(void *v) { R *q = v; long acc = %ldL;\n", id);
-          for (int i = 0; i < arity; i++) put(&b, "  long p%d = q->p[%d];\n", i, i);
-          put(&b, "  for (;;) { long hi = __atomic_fetch_sub(q->next, q->block, __ATOMIC_RELAXED); if (hi <= q->lo) break;\n");
-          put(&b, "    long lo = hi - q->block; if (lo < q->lo) lo = q->lo;\n    for (long i = hi; i > lo; i--) { p%d = i; long x = g(", red.iv);
-          plist(&b, 0); put(&b, "); acc = "); red_combine(&b, &red, "x", "acc"); put(&b, "; } }\n");
-          put(&b, "  q->r = acc; return 0; }\n");
-          DBG("parallel reduction over p%d down to %ld, accumulator p%d\n", red.iv, red.c, red.acc);
+          ok = red_defs(&b, &pre, &red, 0);
+          DBG("parallel reduction over p%d (%s), accumulator p%d\n", red.iv, red.up ? "up" : "down", red.acc);
         }
         put(&b, "long lin_fn_entry(const long *a, int threads) {\n");
         for (int i = 0; i < arity; i++) put(&b, "  long p%d = a[%d];\n", i, i);
-        if (has_red) {   /* a cheap step needs some thousands of iterations to pay for a thread; a step that CALLS
-                            (a whole inner loop) pays from a few per thread */
-          if (has_call(red.g)) put(&b, "  if (threads > 1 && p%d > %ldL && p%d - %ldL >= (long)threads * 4) {\n", red.iv, red.c, red.iv, red.c);
-          else put(&b, "  if (threads > 1 && p%d > %ldL && p%d - %ldL >= 4096) {\n", red.iv, red.c, red.iv, red.c);
-          put(&b, "    long next = p%d; pthread_t t[threads]; R q[threads];\n", red.iv);
-          put(&b, "    for (int k = 0; k < threads; k++) { R r = { {"); plist(&b, 0);
-          put(&b, "}, %ldL, (p%d - %ldL) / ((long)threads * 64) + 1, 0, &next }; q[k] = r; pthread_create(&t[k], 0, rrun, &q[k]); }\n", red.c, red.iv, red.c);
-          put(&b, "    long acc = p%d;\n    for (int k = 0; k < threads; k++) { pthread_join(t[k], 0); acc = ", red.acc);
-          red_combine(&b, &red, "q[k].r", "acc"); put(&b, "; }\n    return acc; }\n");
-        }
+        if (has_red) red_run(&b, &red, 0, "threads", "return acc;");
         /* the depth that keeps about four tasks per thread in flight */
         put(&b, "  if (%d && threads > 1) { int lg = 0; while ((1 << lg) < threads) lg++; dmax = lg + 2;\n", nsite);
         put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); return fp(");
@@ -1755,6 +2539,21 @@ static Scope fresh_label(Reif *R) {                   /* a sharing point no othe
 }
 static Port rf_ctor(Reif *R, const LinCtor *ci, const Port *fields) {
   Net *n = R->n; Scope sc = scope_nil();
+  if (cells_dt && ci->dt == cells_dt) {             /* a cell `\c.\n.((c h) t)`, or the end `\c.\n.true`: no marker */
+    Port c = net_alloc(n, LAM, sc), nn = net_alloc(n, LAM, sc);
+    net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 1);
+    net_link(n, (Port){nn.node, 1}, net_alloc(n, ERA, sc), 1);
+    if (ci->k == 2) {
+      Port a1 = net_alloc(n, APP, sc), a2 = net_alloc(n, APP, sc);
+      net_link(n, (Port){a1.node, 0}, (Port){c.node, 1}, 1); net_link(n, (Port){a1.node, 2}, fields[0], 1);
+      net_link(n, (Port){a2.node, 0}, (Port){a1.node, 1}, 1); net_link(n, (Port){a2.node, 2}, fields[1], 1);
+      net_link(n, (Port){nn.node, 2}, (Port){a2.node, 1}, 1);
+    } else {
+      net_link(n, (Port){c.node, 1}, net_alloc(n, ERA, sc), 1);
+      net_link(n, (Port){nn.node, 2}, net_alloc_bool(n, 1), 1);
+    }
+    return (Port){c.node, 0};
+  }
   Port *lam = malloc(sizeof *lam * (size_t)ci->m);
   for (int j = 0; j < ci->m; j++) lam[j] = net_alloc(n, LAM, sc);
   for (int j = 0; j + 1 < ci->m; j++) net_link(n, (Port){lam[j].node, 2}, (Port){lam[j + 1].node, 0}, 1);
@@ -1826,6 +2625,111 @@ static Port result_port(Net *n, const Compiled *c, long r) {
   return R.bad ? NONE : v;
 }
 
+static int numeral_shape(const Net *n, Port p);
+/* DATA PASSED IN.  An argument that is already a value in the net -- a string the program read, a structure an
+   earlier call built -- is not compiled as a constant (a megabyte of input is not a C literal): the driver reads it
+   at call time into blocks of the layout the unit uses, by the shape the compiler inferred from how the unit uses
+   it.  The blocks live in a driver arena freed after the call (and after the result is read back, which may hold
+   them: a block the unit owned may have been rebuilt in place). */
+typedef struct { Net *n; const Compiled *c; void **ch; int nch, cch; long *hp, *he; long *mk; Port *mp; long mcap, mcnt; int bad; long steps0; } Marsh;
+static long *ms_alloc(Marsh *M, long words) {
+  if (M->hp + words > M->he) {
+    long sz = words > 65536 ? words : 65536; long *c = malloc((size_t)sz * sizeof *c);
+    if (!c) { M->bad = 1; return NULL; }
+    if (M->nch >= M->cch) M->ch = realloc(M->ch, sizeof *M->ch * (size_t)(M->cch = M->cch ? M->cch * 2 : 16));
+    M->ch[M->nch++] = c; M->hp = c; M->he = c + sz;
+  }
+  long *r = M->hp; M->hp += words; return r;
+}
+static void ms_free(Marsh *M) { for (int i = 0; i < M->nch; i++) free(M->ch[i]); free(M->ch); free(M->mk); free(M->mp); }
+static long ms_value(Marsh *M, Port p, Shape s, int depth);
+static long *ms_seen(Marsh *M, int node, int make) {   /* a value reached twice is one block (the net's sharing kept) */
+  if (make && (M->mcnt + 1) * 2 > M->mcap) {
+    long *ok = M->mk; Port *op = M->mp; long oc = M->mcap; M->mcap = M->mcap ? M->mcap * 2 : 1024;
+    M->mk = calloc((size_t)M->mcap, sizeof *M->mk); M->mp = calloc((size_t)M->mcap, sizeof *M->mp); M->mcnt = 0;
+    for (long i = 0; i < oc; i++) if (op[i].node > 0) { long *w = ms_seen(M, op[i].node, 1); *w = ok[i]; }
+    free(ok); free(op);
+  }
+  if (!M->mcap) return NULL;
+  for (unsigned long h = ((unsigned long)node * 0x9E3779B97F4A7C15UL >> 7) & (unsigned long)(M->mcap - 1);; h = (h + 1) & (unsigned long)(M->mcap - 1)) {
+    if (M->mp[h].node == node) return &M->mk[h];
+    if (M->mp[h].node <= 0) { if (!make) return NULL; M->mp[h].node = node; M->mk[h] = 0; M->mcnt++; return &M->mk[h]; }
+  }
+}
+static long ms_value(Marsh *M, Port p, Shape s, int depth) {
+  Net *n = M->n;
+  if (M->bad || depth > n->nn) { M->bad = 1; return 0; }
+  if (n->steps - M->steps0 > (long)n->nn) { M->bad = 1; return 0; }   /* (a value in hand needs no reduction to read) */
+  if (s.k == 0) {                                    /* a field the analysis saw no use of: what the value IS decides */
+    long x; if (net_read_i64(n, p, &x)) return x;
+    long b = net_read_int(n, p, LIN_ENC_BOOL); if (b >= 0) return b;
+    M->bad = 1; return 0;
+  }
+  if (s.k == 1) { long x; if (!net_read_i64(n, p, &x)) M->bad = 1; return x; }
+  if (s.k == 3) { long b = net_read_int(n, p, LIN_ENC_BOOL); if (b < 0) M->bad = 1; return b; }
+  if (s.k != 5) { M->bad = 1; return 0; }
+  int box = 0, untag = dt_boxed(s.dt, &box) == 1;
+  if (cells_dt && s.dt == cells_dt) {               /* a list: its spine read in a loop */
+    long first = 0, *link = &first;
+    Shape hs = M->c->fld[ctor_id(cell_cons)][0];
+    for (long k = 0; !M->bad; k++) {
+      Port h, t;
+      if (k > n->nn) { M->bad = 1; break; }
+      if (!net_read_cell(n, p, &h, &t)) {
+        if (net_read_int(n, p, LIN_ENC_STR) != 0) { M->bad = 1; break; }
+        *link = ((long)cell_nil->i << 1) | 1; break;
+      }
+      long *blk = ms_alloc(M, 2); if (!blk) break;
+      blk[0] = ms_value(M, h, hs, depth + 1); *link = (long)blk; link = &blk[1]; p = t;
+    }
+    return first;
+  }
+  int m = 0, kmax = 0; const LinCtor *c;
+  for (long id = 1; (c = lin_ctor_info(id)); id++) if (c->dt == s.dt) { m = c->m; if (c->k > kmax) kmax = c->k; }
+  Port v = net_dhop(n, net_force_val(n, p));
+  long *seen = v.node > 0 ? ms_seen(M, v.node, 0) : NULL;
+  if (seen && *seen) return *seen;
+  Port *fp = malloc(sizeof *fp * (size_t)(kmax + 1)); int i = -1;
+  int k = m ? net_read_scott(n, p, m, &i, fp, kmax) : -1;
+  const LinCtor *ci = k >= 0 ? dt_ctor(s.dt, i) : NULL;
+  long w = 0;
+  if (!ci || ci->k != k) M->bad = 1;
+  else if (!k) w = ((long)ci->i << 1) | 1;
+  else {
+    long *blk = ms_alloc(M, k + !untag);
+    if (blk) {
+      if (!untag) blk[0] = ci->i;
+      long id = ctor_id(ci);
+      for (int j = 0; j < k && !M->bad; j++) blk[j + !untag] = ms_value(M, fp[j], M->c->fld[id][j], depth + 1);
+      w = (long)blk;
+    }
+  }
+  free(fp);
+  if (!M->bad && v.node > 0 && !(w & 1)) { long *slot = ms_seen(M, v.node, 1); if (slot) *slot = w; }
+  return w;
+}
+typedef struct { Marsh *M; Port p; Shape s; long w; } MsArg;
+static void *ms_thread(void *u) { MsArg *a = u; a->w = ms_value(a->M, a->p, a->s, 0); return NULL; }
+static long marshal(Marsh *M, Port p, Shape s) {   /* (on a large stack: data is deep) */
+  MsArg a = { M, p, s, 0 };
+  pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);
+  pthread_t t;
+  if (pthread_create(&t, &at, ms_thread, &a)) M->bad = 1; else pthread_join(t, NULL);
+  pthread_attr_destroy(&at);
+  return a.w;
+}
+/* Is this argument a DATA value already -- a list or a constructor -- rather than a number or a function? */
+static int data_value(const Net *n, Port p) {
+  Port q = dhop(n, p);
+  if (!is(n, q, LAM, 0)) return 0;
+  if (numeral_shape(n, q)) return 1;                 /* (a cell or an end: a list, a string) */
+  int nl = 0;
+  for (int i = 0; i < n->nn && is(n, q, LAM, 0); i++) { nl++; q = dhop(n, W(n, (Port){q.node, 2})); }
+  Port mb, mid; int ml; Net *sn = N; N = (Net *)n;
+  int r = nl > 0 && marker_app(q, &mb, &ml, &mid);
+  N = sn; return r;
+}
+
 /* Could this argument be a numeral already -- `\c.\n.` over a cell or a terminal -- WITHOUT forcing anything?
    Reading a number forces its layers, and a FUNCTION argument forced so would have its body reduced (an `_op`
    head under its binder taken apart) before the compiler reads it. */
@@ -1852,9 +2756,11 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
       if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
       continue;
     }
-    Compiled *c = lin_precompile_depth ? NULL : compile_fn(n, F);
-    long args[8]; int call = appy, ok = c != NULL;
-    int car = c ? c->arity : (lin_precompile_depth ? 0 : (N = n, fun_arity(F)));   /* (a function that needs its arguments: see below) */
+    /* (the call WITH its arguments first, when some are not numbers yet: that unit is the one that runs, and a
+       function of data or of functions compiles no other way -- the function alone is the fallback) */
+    Compiled *c = NULL;
+    long args[8]; int call = appy, ok;
+    int car = lin_precompile_depth ? 0 : (N = n, fun_arity(F));
     /* ARGUMENTS THAT ARE NOT VALUES YET -- `(check (make 7))` -- are compiled into the unit as expressions, rather
        than built by the net first (which is the slow part); a number already there is passed as one.  A function
        taking a FUNCTION compiles only with its arguments (it is specialised to them). */
@@ -1865,18 +2771,59 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         if (!is(n, nx, APP, 0)) { shape = 0; break; }
         cl = nx.node; ap[k] = W(n, (Port){cl, 2});
         long dummy; an[k] = numeral_shape(n, ap[k]) && net_read_i64(n, ap[k], &dummy);
-        nexpr += !an[k];
+        if (!an[k] && data_value(n, ap[k]) && !list_end(n, ap[k])) an[k] = 2;   /* data already in the net: passed in at call time */
+        if (dbg > 1) { long x = 0; int ns = numeral_shape(n, ap[k]); int ok = ns && net_read_i64(n, ap[k], &x); DBG("[arg %d: shape %d read %d (%ld) -> %d]\n", k, ns, ok, x, an[k]); }
+        nexpr += an[k] != 1;
       }
       if (shape && nexpr) {
-        Compiled *c2 = compile_fn_ex(n, F, ap, an);
+        /* the context first (see cx_push): the widest that compiles, else the call alone */
+        int top = cl; cx_n = 0;
+        for (int k = 0; k < n->nn; k++) {
+          Port o = W(n, (Port){top, 1});
+          if (is(n, o, APP, 0)) { cx_push(0, W(n, (Port){o.node, 2})); top = o.node; }
+          else if (is(n, o, APP, 2)) { cx_push(1, W(n, (Port){o.node, 0})); top = o.node; }
+          else break;
+        }
+        double t_c0 = now_ms();
+        Compiled *c2 = NULL;
+        int *tops = malloc(sizeof *tops * (size_t)(cx_n + 1)), all = cx_n;   /* each context's node, to cut back to */
+        { int t = cl; tops[0] = cl;
+          for (int i = 0; i < all; i++) { Port o = W(n, (Port){t, 1}); t = o.node; tops[i + 1] = t; } }
+        for (; cx_n > 0 && !c2; cx_n--) {             /* the widest context that compiles */
+          c2 = compile_fn_ex(n, F, ap, an);
+          if (c2) cl = tops[cx_n];
+        }
+        if (all && !c2) DBG("(no context of the call compiles: the call alone)\n");
+        free(tops); cx_n = 0;
+        if (!c2) c2 = compile_fn_ex(n, F, ap, an);
+        double t_c1 = now_ms();
         if (c2) {
-          int nn = 0;
-          for (int k = 0; k < car; k++) if (an[k]) net_read_i64(n, ap[k], &args[nn++]);
+          int nn = 0, pi = 0;
+          long *xa = malloc(sizeof *xa * (size_t)(car + n_inp + c2->npsh + 1));   /* (the arguments, inputs included) */
+          Marsh M; memset(&M, 0, sizeof M); M.n = n; M.c = c2; M.steps0 = n->steps;
+          for (int k = 0; k < car && !M.bad; k++) {
+            if (an[k] == 1) { net_read_i64(n, ap[k], &xa[nn++]); pi++; }
+            else if (an[k] == 2) {
+              if (pi >= c2->npsh) { M.bad = 1; break; }
+              xa[nn++] = marshal(&M, ap[k], c2->psh[pi]); pi++;
+              if (dbg > 1) DBG("[argument %d passed in as %d %s: %lx]\n", k, c2->psh[pi - 1].k, c2->psh[pi - 1].dt ? c2->psh[pi - 1].dt : "", (unsigned long)xa[nn - 1]);
+            }
+          }
+          for (int i = 0; i < n_inp && !M.bad; i++, pi++) {   /* the inputs met inside the arguments */
+            if (pi >= c2->npsh) { M.bad = 1; break; }
+            xa[nn++] = marshal(&M, inp_port[i], c2->psh[pi]);
+          }
+          if (M.bad) { DBG("an argument could not be read in: the net computes the call\n"); ms_free(&M); free(xa); goto decline_ex; }
           extern int lin_threads;
-          long r = c2->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
-          if (c2->aborted && *c2->aborted) { DBG("the data unit's guard fired: the net computes it\n"); }
+          double t_m = now_ms();
+          long r = c2->fn(xa, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
+          double t_r = now_ms();
+          if (dbg) DBG("[time: compile %.2f ms, read in %.2f ms, run %.2f ms]\n", t_c1 - t_c0, t_m - t_c1, t_r - t_m);
+          free(xa);
+          if (c2->aborted && *c2->aborted) { DBG("the data unit's guard fired: the net computes it\n"); ms_free(&M); }
           else {
             Port val = result_port(n, c2, r);
+            ms_free(&M);                                 /* (after the result is read: it may hold blocks passed in) */
             if (val.node < 0) goto decline_ex;
             Port out = W(n, (Port){cl, 1});
             net_link(n, val, out, 1);
@@ -1889,6 +2836,8 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         }
       }
     }
+    c = lin_precompile_depth ? NULL : compile_fn(n, F);
+    ok = c != NULL;
     for (int k = 0; ok && k < c->arity; k++) {         /* the call chain: (Y F) a1 .. ak */
       Port nx = W(n, (Port){call, 1});
       if (!is(n, nx, APP, 0)) { ok = 0; break; }
@@ -1939,6 +2888,7 @@ static void __attribute__((constructor)) fn_load(void) {
   if (registered) return;
   registered = 1;
   lin_driver_add(&lin_fn_driver);
+  cells_init();                                      /* (the cell datatype, registered once) */
 }
 LinDriver lin_fn_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),

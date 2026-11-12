@@ -40,7 +40,7 @@ run_test() {
 printf "Running Lin Confluence & Stability Test Suite against %s\n" "$LIN_BIN"
 
 printf "[Tier 1: Core Interaction Calculus & Primitives]\n"
-for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/mutual.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/seq.lin test/adt_types.lin test/loop.lin; do
+for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/mutual.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/seq.lin test/array.lin test/string_ops.lin test/omap.lin test/adt_types.lin test/loop.lin; do
   run_test "$f"
 done
 
@@ -261,7 +261,7 @@ fi
 # ----------------------------------------------------------------------------
 FN_LOG=$(mktemp)
 if bash test/fn_compile.sh "$LIN_BIN" "$STD_DIR" >"$FN_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 22)); echo "PASS test/fn_compile.sh ($(tail -1 "$FN_LOG"))"
+  pass=$((pass+1)); total_checks=$((total_checks + 33)); echo "PASS test/fn_compile.sh ($(tail -1 "$FN_LOG"))"
   rm -f "$FN_LOG"
 else
   fail=$((fail+1)); echo "FAIL test/fn_compile.sh"; cat "$FN_LOG"; rm -f "$FN_LOG"

@@ -423,12 +423,13 @@ static int eff_shape(Net *n, Port p) {
 }
 
 /* The string encoding, built here because readback is who needs one (an input line, a command's
-   output): cells of character-code numerals, with the nil terminal. */
+   output): cells of character-code numerals, ended as a source literal is (src/parse.c): `\c.\n.true`. */
 static Port net_alloc_string(Net *n, const char *s) {
   Scope sc = scope_nil();
   Port c_nil = net_alloc(n, LAM, sc), n_nil = net_alloc(n, LAM, sc);
   net_link(n, (Port){c_nil.node, 2}, (Port){n_nil.node, 0}, 0);
-  net_link(n, (Port){n_nil.node, 2}, (Port){n_nil.node, 1}, 0);      /* select-second: the nil cell */
+  net_link(n, (Port){n_nil.node, 2}, net_alloc_bool(n, 1), 0);      /* the end answers true */
+  net_link(n, (Port){n_nil.node, 1}, net_alloc(n, ERA, sc), 0);
   net_link(n, (Port){c_nil.node, 1}, net_alloc(n, ERA, sc), 0);
   Port cur = (Port){c_nil.node, 0};
   for (long i = (long)strlen(s) - 1; i >= 0; i--) {
@@ -446,14 +447,24 @@ static Port net_alloc_string(Net *n, const char *s) {
 }
 
 static void chomp(char *s) { size_t l = strlen(s); if (l > 0 && s[l - 1] == '\n') s[l - 1] = 0; }
-static void read_stream(FILE *f, char *buf, size_t sz, int is_pipe) {
-  if (!f) return;
-  size_t nr = fread(buf, 1, sz - 1, f);
-  buf[nr] = 0;
-  chomp(buf);
-  if (is_pipe) pclose(f); else fclose(f);
+/* What a source answers, read whole into a buffer that grows with it: input has no size the program must fit. */
+typedef struct { char *s; size_t len, cap; } InBuf;
+static void ib_add(InBuf *b, const char *p, size_t k) {
+  if (b->len + k + 1 > b->cap) { while (b->len + k + 1 > b->cap) b->cap = b->cap ? b->cap * 2 : 256; b->s = realloc(b->s, b->cap); }
+  memcpy(b->s + b->len, p, k); b->len += k; b->s[b->len] = 0;
 }
-static void read_stdin(char *buf, size_t sz) { if (!fgets(buf, (int)sz, stdin)) buf[0] = 0; else chomp(buf); }
+static void read_stream(FILE *f, InBuf *b, int is_pipe) {
+  if (!f) return;
+  char chunk[BUFSIZ]; size_t nr;   /* (the stdio buffer's own size: a chunk, not a limit) */
+  while ((nr = fread(chunk, 1, sizeof chunk, f)) > 0) ib_add(b, chunk, nr);
+  if (b->s) chomp(b->s);
+  if (is_pipe == 1) pclose(f); else if (!is_pipe) fclose(f);
+}
+static void read_stdin(InBuf *b) {                  /* one line */
+  char *line = NULL; size_t cap = 0; ssize_t k = getline(&line, &cap, stdin);
+  if (k > 0) { ib_add(b, line, (size_t)k); chomp(b->s); }
+  free(line);
+}
 
 /* apply effect continuation `fn` to value `arg`, relink ROOT, and re-reduce: the single monadic step shared by every effect (print/read/wait/ffi) */
 static void eff_apply(Net *n, Port fn, Port arg) {
@@ -504,32 +515,39 @@ static long run_io_body(Net *n, long step_limit) {
        whichever the source produced. */
     {
       Port src_p = pay[0], cb = pay[1];
-      char in_buf[4096] = {0};
+      InBuf ib = { NULL, 0, 0 }; ib_add(&ib, "", 0);
       long res_int = -1; int is_int = 0;
       /* the runner OBSERVES the source, so it forces it: under needed order nothing else had a reason to */
       if (src_p.node >= 0) src_p = net_force_val(n, src_p);
       Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0};
       if (fv.kind == 1) { res_int = fv.iv; is_int = 1; }
       else if (fv.kind == 3) is_int = 2;                      /* bool result */
-      else if (fv.kind == 2) snprintf(in_buf, sizeof(in_buf), "%s", fv.sv);
-      else if (src_p.node < 0) read_stdin(in_buf, sizeof(in_buf));
+      else if (fv.kind == 2) ib_add(&ib, fv.sv, strlen(fv.sv));
+      else if (src_p.node < 0) read_stdin(&ib);
       else {
         long fd = net_read_int(n, src_p, LIN_ENC_NUM);
-        if (fd == 0) read_stdin(in_buf, sizeof(in_buf));
-        else if (fd > 0) { ssize_t nr = read((int)fd, in_buf, sizeof(in_buf) - 1); if (nr > 0) { in_buf[nr] = 0; chomp(in_buf); } }
+        if (fd == 0) read_stdin(&ib);
+        else if (fd > 0) {                           /* what the descriptor has now (a short read ends it) */
+          char chunk[BUFSIZ]; ssize_t nr;   /* (the stdio buffer's own size: a chunk, not a limit) */
+          while ((nr = read((int)fd, chunk, sizeof chunk)) > 0) { ib_add(&ib, chunk, (size_t)nr); if ((size_t)nr < sizeof chunk) break; }
+          chomp(ib.s);
+        }
         else {
           const char *src;
           if (net_read_string_arena(n, src_p, LIN_ENC_NUM, &src) >= 0) {
-            if (!strcmp(src, "stdin") || !strcmp(src, "0")) read_stdin(in_buf, sizeof(in_buf));
-            else if (src[0] == '!' || !strncmp(src, "cmd:", 4)) read_stream(popen(src[0] == '!' ? src + 1 : src + 4, "r"), in_buf, sizeof(in_buf), 1);
+            if (!strcmp(src, "stdin") || !strcmp(src, "0")) read_stdin(&ib);
+            else if (!strcmp(src, "stdin:all")) read_stream(stdin, &ib, 2);   /* (all of it; stdin stays open) */
+            else if (src[0] == '!' || !strncmp(src, "cmd:", 4)) read_stream(popen(src[0] == '!' ? src + 1 : src + 4, "r"), &ib, 1);
             else if (!strncmp(src, "sleep:", 6)) { res_int = strtol(src + 6, NULL, 10); if (res_int > 0) usleep((useconds_t)(res_int * 1000)); is_int = 1; }
-            else read_stream(fopen(!strncmp(src, "file:", 5) ? src + 5 : src, "r"), in_buf, sizeof(in_buf), 0);
+            else read_stream(fopen(!strncmp(src, "file:", 5) ? src + 5 : src, "r"), &ib, 0);
           }
         }
       }
+      char *in_buf = ib.s;
       char *endptr = NULL;
       long val = (!is_int && in_buf[0]) ? strtol(in_buf, &endptr, 10) : -1;
       Port arg = (is_int == 2) ? net_alloc_bool(n, (int)fv.iv) : is_int ? net_alloc_scott(n, res_int) : (in_buf[0] && endptr && !*endptr && val >= 0) ? net_alloc_scott(n, val) : net_alloc_string(n, in_buf);
+      free(ib.s);
       eff_apply(n, cb, arg);
       net_reduce(n, step_limit); did_io = 1; continue;
     }

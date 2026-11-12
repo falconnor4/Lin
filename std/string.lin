@@ -16,6 +16,7 @@
 (load "bool.lin")
 (load "num.lin")
 (load "list.lin")
+(load "seq.lin")
 
 (namespace str)
 
@@ -68,7 +69,42 @@
           (\_ (str_parse_int_help s 0))
           (\_ 0))))))
 
-; --- Re-export the safe str_* / streq names into root scope ---
+; --- Re-export the safe str_* / streq names into root scope ---; lexicographic order: negative, zero or positive
+(define str_compare (\a (\b (if (str_is_empty a) (if (str_is_empty b) 0 -1)
+  (if (str_is_empty b) 1 (if (lt (list.head a) (list.head b)) -1 (if (gt (list.head a) (list.head b)) 1
+    (str_compare (list.tail a) (list.tail b)))))))))
+;; ---- building and taking apart (all pure Lin; the function compiler reads them as C) ----
+; the decimal digits of n (with a leading '-' when negative)
+(define _digits (\n (\acc (if (lt n 10) (list.cons (add n 48) acc) (_digits (div n 10) (list.cons (add (mod n 10) 48) acc))))))
+(define str_of_num (\n (if (lt n 0) (list.cons 45 (_digits (sub 0 n) list.nil)) (_digits n list.nil))))
+(define _rev (\s (\acc (if (str_is_empty s) acc (_rev (list.tail s) (list.cons (list.head s) acc))))))
+(define str_reverse (\s (_rev s list.nil)))
+(define str_take (\k (\s (if (or (eq k 0) (str_is_empty s)) list.nil (list.cons (list.head s) (str_take (sub k 1) (list.tail s)))))))
+(define str_drop (\k (\s (if (or (eq k 0) (str_is_empty s)) s (str_drop (sub k 1) (list.tail s))))))
+(define str_equal (\a (\b (if (str_is_empty a) (str_is_empty b)
+  (if (str_is_empty b) false (if (eq (list.head a) (list.head b)) (str_equal (list.tail a) (list.tail b)) false))))))
+(define _prefix (\p (\s (if (str_is_empty p) true (if (str_is_empty s) false
+  (if (eq (list.head p) (list.head s)) (_prefix (list.tail p) (list.tail s)) false))))))
+(define str_starts_with (\p (\s (_prefix p s))))
+; the position of the first occurrence of p in s, or -1
+(define _index (\p (\s (\i (if (_prefix p s) i (if (str_is_empty s) -1 (_index p (list.tail s) (add i 1))))))))
+(define str_index_of (\p (\s (_index p s 0))))
+; the pieces of s between occurrences of the character c (as a Seq of strings)
+(define _split (\c (\s (\cur (if (str_is_empty s) (seq.scons (str_reverse cur) seq.snil)
+  (if (eq (list.head s) c) (seq.scons (str_reverse cur) (_split c (list.tail s) list.nil))
+    (_split c (list.tail s) (list.cons (list.head s) cur))))))))
+(define str_split (\c (\s (_split c s list.nil))))
+(define str_lines (\s (str_split 10 s)))
+; the words of s: maximal runs of characters that are not space, tab or newline (as a Seq)
+(define _ws (\c (or (eq c 32) (or (eq c 10) (or (eq c 9) (eq c 13))))))
+(define _words (\s (\cur (if (str_is_empty s) (if (str_is_empty cur) seq.snil (seq.scons (str_reverse cur) seq.snil))
+  (if (_ws (list.head s))
+    (if (str_is_empty cur) (_words (list.tail s) list.nil) (seq.scons (str_reverse cur) (_words (list.tail s) list.nil)))
+    (_words (list.tail s) (list.cons (list.head s) cur)))))))
+(define str_words (\s (_words s list.nil)))
+; the strings of a Seq, with sep between them
+(define str_join (\sep (\ss (seq.sfoldl (\acc (\x (if (str_is_empty acc) x (str_concat acc (str_concat sep x))))) list.nil ss))))
+
 (namespace _)
 (export str)
 

@@ -1,0 +1,4 @@
+; an array: a million random writes (i*7919 mod n), then a sum of every element by index
+(define fill (\a (\i (\n (if (eq i n) a (fill (aset a (mod (mul i 7919) n) i) (add i 1) n))))))
+(define sum (\a (\i (\n (\s (if (eq i n) s (sum a (add i 1) n (add s (aget a i)))))))))
+(sum (fill (array 1000000 0) 0 1000000) 0 1000000 0)

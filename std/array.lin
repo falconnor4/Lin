@@ -1,0 +1,79 @@
+; ==============================================================================
+; Lin Standard Library: Array -- indexed storage with in-place update
+; ==============================================================================
+; An array of n elements is a 32-way radix trie whose bottom nodes hold 32 elements
+; each: `get` and `set` walk one node per five bits of the index (4 for a million
+; elements).  It is ordinary
+; Lin -- a datatype and `match` -- so it is persistent by default: `aset` returns a
+; new array and the old one is unchanged.  And because it is a datatype, the
+; function compiler reads it as C blocks and proves ownership from the net: an
+; array nothing else holds is updated IN PLACE, path node by path node, which is
+; what a mutable vector costs.  No mutation, no borrow checker, no GC.
+;
+;   (array n x)        n copies of x
+;   (alen a)           its length
+;   (aget a i)         element i
+;   (aset a i x)       a with element i replaced
+;   (apush a x)        a with x appended (grows a level when full)
+;   (afold f z a)      f over the elements in order, from z
+;   (aof_seq s)        the elements of a Seq, as an array
+;   (ato_seq a)        the array's elements, as a Seq
+; ==============================================================================
+
+(load "bool.lin")
+(load "num.lin")
+(load "seq.lin")
+
+(namespace array)
+
+; the trie: an empty subtree; a bottom node of 32 elements; an inner node of 32 subtrees
+(datatype (Trie a) (tempty)
+  (tvals (v0 a) (v1 a) (v2 a) (v3 a) (v4 a) (v5 a) (v6 a) (v7 a) (v8 a) (v9 a) (v10 a) (v11 a) (v12 a) (v13 a) (v14 a) (v15 a) (v16 a) (v17 a) (v18 a) (v19 a) (v20 a) (v21 a) (v22 a) (v23 a) (v24 a) (v25 a) (v26 a) (v27 a) (v28 a) (v29 a) (v30 a) (v31 a))
+  (tnode (c0 Trie a) (c1 Trie a) (c2 Trie a) (c3 Trie a) (c4 Trie a) (c5 Trie a) (c6 Trie a) (c7 Trie a) (c8 Trie a) (c9 Trie a) (c10 Trie a) (c11 Trie a) (c12 Trie a) (c13 Trie a) (c14 Trie a) (c15 Trie a) (c16 Trie a) (c17 Trie a) (c18 Trie a) (c19 Trie a) (c20 Trie a) (c21 Trie a) (c22 Trie a) (c23 Trie a) (c24 Trie a) (c25 Trie a) (c26 Trie a) (c27 Trie a) (c28 Trie a) (c29 Trie a) (c30 Trie a) (c31 Trie a)))
+; an array: its length, the trie's depth in inner levels, the trie
+(datatype (Arr a) (arr (len num) (depth num) (root Trie a)))
+
+(define _digit (\i (\d (band (shr i (mul 5 d)) 31))))
+(define _pick (\k (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\c9 (\c10 (\c11 (\c12 (\c13 (\c14 (\c15 (\c16 (\c17 (\c18 (\c19 (\c20 (\c21 (\c22 (\c23 (\c24 (\c25 (\c26 (\c27 (\c28 (\c29 (\c30 (\c31 (if (lt k 16) (if (lt k 8) (if (lt k 4) (if (lt k 2) (if (eq k 0) c0 c1) (if (eq k 2) c2 c3)) (if (lt k 6) (if (eq k 4) c4 c5) (if (eq k 6) c6 c7))) (if (lt k 12) (if (lt k 10) (if (eq k 8) c8 c9) (if (eq k 10) c10 c11)) (if (lt k 14) (if (eq k 12) c12 c13) (if (eq k 14) c14 c15)))) (if (lt k 24) (if (lt k 20) (if (lt k 18) (if (eq k 16) c16 c17) (if (eq k 18) c18 c19)) (if (lt k 22) (if (eq k 20) c20 c21) (if (eq k 22) c22 c23))) (if (lt k 28) (if (lt k 26) (if (eq k 24) c24 c25) (if (eq k 26) c26 c27)) (if (lt k 30) (if (eq k 28) c28 c29) (if (eq k 30) c30 c31)))))))))))))))))))))))))))))))))))))))
+
+(define _tget (\t (\i (\d (match t
+  (tempty 0)
+  ((tvals v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31) (_pick (band i 31) v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31))
+  ((tnode c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31) (_tget (_pick (_digit i d) c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31) i (sub d 1))))))))
+
+; A trie of depth d holding x in its slots lo .. n-1 (subtrees wholly past n left empty, so `array` costs n, not
+; the capacity).  The subtrees are DISTINCT blocks -- their offsets make them so: a node that stored one subtree
+; 32 times could never be updated in place.
+(define _tfill (\d (\x (\lo (\n (if (geq lo n) tempty (if (eq d 0) (tvals x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x)
+  (let ((e (sub d 1)) (w (shl 1 (mul 5 d))))
+    (tnode (_tfill e x (add lo (mul 0 w)) n) (_tfill e x (add lo (mul 1 w)) n) (_tfill e x (add lo (mul 2 w)) n) (_tfill e x (add lo (mul 3 w)) n) (_tfill e x (add lo (mul 4 w)) n) (_tfill e x (add lo (mul 5 w)) n) (_tfill e x (add lo (mul 6 w)) n) (_tfill e x (add lo (mul 7 w)) n) (_tfill e x (add lo (mul 8 w)) n) (_tfill e x (add lo (mul 9 w)) n) (_tfill e x (add lo (mul 10 w)) n) (_tfill e x (add lo (mul 11 w)) n) (_tfill e x (add lo (mul 12 w)) n) (_tfill e x (add lo (mul 13 w)) n) (_tfill e x (add lo (mul 14 w)) n) (_tfill e x (add lo (mul 15 w)) n) (_tfill e x (add lo (mul 16 w)) n) (_tfill e x (add lo (mul 17 w)) n) (_tfill e x (add lo (mul 18 w)) n) (_tfill e x (add lo (mul 19 w)) n) (_tfill e x (add lo (mul 20 w)) n) (_tfill e x (add lo (mul 21 w)) n) (_tfill e x (add lo (mul 22 w)) n) (_tfill e x (add lo (mul 23 w)) n) (_tfill e x (add lo (mul 24 w)) n) (_tfill e x (add lo (mul 25 w)) n) (_tfill e x (add lo (mul 26 w)) n) (_tfill e x (add lo (mul 27 w)) n) (_tfill e x (add lo (mul 28 w)) n) (_tfill e x (add lo (mul 29 w)) n) (_tfill e x (add lo (mul 30 w)) n) (_tfill e x (add lo (mul 31 w)) n))))))))))
+
+; (a slot not yet set holds the value first stored in its node: reading past the length is not meaningful)
+(define _tset (\t (\i (\d (\x (match t
+  (tempty (if (eq d 0) (tvals x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x) (_tset (tnode tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty) i d x)))
+  ((tvals v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31) (let ((k (band i 31))) (tvals (if (eq k 0) x v0) (if (eq k 1) x v1) (if (eq k 2) x v2) (if (eq k 3) x v3) (if (eq k 4) x v4) (if (eq k 5) x v5) (if (eq k 6) x v6) (if (eq k 7) x v7) (if (eq k 8) x v8) (if (eq k 9) x v9) (if (eq k 10) x v10) (if (eq k 11) x v11) (if (eq k 12) x v12) (if (eq k 13) x v13) (if (eq k 14) x v14) (if (eq k 15) x v15) (if (eq k 16) x v16) (if (eq k 17) x v17) (if (eq k 18) x v18) (if (eq k 19) x v19) (if (eq k 20) x v20) (if (eq k 21) x v21) (if (eq k 22) x v22) (if (eq k 23) x v23) (if (eq k 24) x v24) (if (eq k 25) x v25) (if (eq k 26) x v26) (if (eq k 27) x v27) (if (eq k 28) x v28) (if (eq k 29) x v29) (if (eq k 30) x v30) (if (eq k 31) x v31))))
+  ((tnode c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31)
+    (let ((k (_digit i d)))
+      (tnode (if (eq k 0) (_tset c0 i (sub d 1) x) c0) (if (eq k 1) (_tset c1 i (sub d 1) x) c1) (if (eq k 2) (_tset c2 i (sub d 1) x) c2) (if (eq k 3) (_tset c3 i (sub d 1) x) c3) (if (eq k 4) (_tset c4 i (sub d 1) x) c4) (if (eq k 5) (_tset c5 i (sub d 1) x) c5) (if (eq k 6) (_tset c6 i (sub d 1) x) c6) (if (eq k 7) (_tset c7 i (sub d 1) x) c7) (if (eq k 8) (_tset c8 i (sub d 1) x) c8) (if (eq k 9) (_tset c9 i (sub d 1) x) c9) (if (eq k 10) (_tset c10 i (sub d 1) x) c10) (if (eq k 11) (_tset c11 i (sub d 1) x) c11) (if (eq k 12) (_tset c12 i (sub d 1) x) c12) (if (eq k 13) (_tset c13 i (sub d 1) x) c13) (if (eq k 14) (_tset c14 i (sub d 1) x) c14) (if (eq k 15) (_tset c15 i (sub d 1) x) c15) (if (eq k 16) (_tset c16 i (sub d 1) x) c16) (if (eq k 17) (_tset c17 i (sub d 1) x) c17) (if (eq k 18) (_tset c18 i (sub d 1) x) c18) (if (eq k 19) (_tset c19 i (sub d 1) x) c19) (if (eq k 20) (_tset c20 i (sub d 1) x) c20) (if (eq k 21) (_tset c21 i (sub d 1) x) c21) (if (eq k 22) (_tset c22 i (sub d 1) x) c22) (if (eq k 23) (_tset c23 i (sub d 1) x) c23) (if (eq k 24) (_tset c24 i (sub d 1) x) c24) (if (eq k 25) (_tset c25 i (sub d 1) x) c25) (if (eq k 26) (_tset c26 i (sub d 1) x) c26) (if (eq k 27) (_tset c27 i (sub d 1) x) c27) (if (eq k 28) (_tset c28 i (sub d 1) x) c28) (if (eq k 29) (_tset c29 i (sub d 1) x) c29) (if (eq k 30) (_tset c30 i (sub d 1) x) c30) (if (eq k 31) (_tset c31 i (sub d 1) x) c31))))))))))
+
+; how many inner levels n elements need
+(define _depth_for (\n (\d (if (leq n (shl 32 (mul 5 d))) d (_depth_for n (add d 1))))))
+
+(define array (\n (\x (let ((d (_depth_for n 0))) (arr n d (_tfill d x 0 n))))))
+(define alen (\a (match a ((arr n d t) n))))
+(define aget (\a (\i (match a ((arr n d t) (_tget t i d))))))
+(define aset (\a (\i (\x (match a ((arr n d t) (arr n d (_tset t i d x))))))))
+(define apush (\a (\x (match a ((arr n d t)
+  (if (lt n (shl 32 (mul 5 d)))
+    (arr (add n 1) d (_tset t n d x))
+    (arr (add n 1) (add d 1) (_tset (tnode t tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty) n (add d 1) x))))))))
+; in index order, the first (alen a) elements
+(define _afold (\f (\z (\a (\i (\n (if (lt i n) (_afold f (f z (aget a i)) a (add i 1) n) z)))))))
+(define afold (\f (\z (\a (_afold f z a 0 (alen a))))))
+(define aempty (arr 0 0 tempty))
+(define _aof (\s (\a (match s (snil a) ((scons h t) (_aof t (apush a h)))))))
+(define aof_seq (\s (_aof s aempty)))
+(define ato_seq (\a (sreverse (afold (\acc (\x (scons x acc))) snil a))))
+
+(namespace _)
+(export array)

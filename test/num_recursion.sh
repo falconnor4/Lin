@@ -2,7 +2,7 @@
 # ================================================================================
 # A recursion whose argument is built by a recursion: the numerals' one open defect.
 # --------------------------------------------------------------------------------
-# This is the executable form of the goals.md defect: `_padd` over a chain whose cells
+# This is the executable form of a defect found while building examples/linden: `_padd` over a chain whose cells
 # were produced by `pred`'s BORROW branch (a chain whose tail is itself a recursive
 # call) never reaches WHNF -- the fan-fan copy rule unrolls instead of converging.
 # Everything here is a one-line program whose expected value is a LITERAL, so the
@@ -12,8 +12,8 @@
 #   so a value that is a shared/unprintable net still has to answer TRUE or FALSE.
 #   (Printing the projection itself does NOT work as a test: the readback reports `?`
 #   for shared normal forms by design, and a decoded-looking closure tree can be either
-#   a correct value it declined to decode or a wrong one -- measured both ways, see
-#   goals.md.  A test that cannot tell those two apart is not a test.)
+#   a correct value it declined to decode or a wrong one -- measured both ways.
+#   A test that cannot tell those two apart is not a test.)
 #
 # A failing case can fail THREE ways, and all three count as the defect: a stall (no value in
 # 20s), a WRONG value (`(num.is_zero (num.pred (num.pred 2)))` answers with a chain, not a bool,

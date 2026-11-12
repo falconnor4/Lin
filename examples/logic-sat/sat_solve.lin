@@ -24,11 +24,13 @@
 
 ; sat.probe2 self-reduces the formula and returns a pair (sat?, witness):
 (define sol (sat.probe2 phi))
-(pair.fst sol)              ; satisfiable?
+; (the solver's truth values are its own Church booleans; `as_bool` reads one as a `bool` so it prints as one)
+(define as_bool (\c (if c bool.true bool.false)))
+(as_bool (pair.fst sol))              ; satisfiable?
 ; expect => true
-(pair.fst (pair.snd sol))   ; witness.x
+(as_bool (pair.fst (pair.snd sol)))   ; witness.x
 ; expect => true
-(pair.snd (pair.snd sol))   ; witness.y
+(as_bool (pair.snd (pair.snd sol)))   ; witness.y
 ; expect => true
 
 ; The extracted witness is itself a valid model, confirmed by verify2:

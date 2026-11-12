@@ -41,6 +41,8 @@
 ;   - "sleep:ms": timer delay
 (define io_wait (\src (\cb (\_eff (((_eff 3) src) cb)))))
 (define io_read (\cb (io.io_wait 0 cb)))
+; all of standard input, as one string
+(define io_read_all (\cb (io.io_wait "stdin:all" cb)))
 (define io_file (\path (\cb (io.io_wait path cb))))
 
 ; --- Destination-Directed Output ---
@@ -75,6 +77,7 @@
 ;     leaks into root) ---
 (define io.wait     io_wait)
 (define io.read     io_read)
+(define io.read_all io_read_all)
 (define io.file     io_file)
 (define io.write_to io_write_to)
 (define io.print    io_print)

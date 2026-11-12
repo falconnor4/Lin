@@ -1,0 +1,4 @@
+; an ordered map (red-black tree): 200,000 inserts of keys i*7919 mod 1000003, then a lookup of each
+(define build (\i (\m (if (eq i 0) m (build (sub i 1) (imap_insert (mod (mul i 7919) 1000003) i m))))))
+(define look (\i (\m (\s (if (eq i 0) s (look (sub i 1) m (add s (imap_get (mod (mul i 7919) 1000003) 0 m))))))))
+(look 200000 (build 200000 omap_empty) 0)

@@ -18,6 +18,7 @@ typedef struct Term {
   const char *name;
   struct Term *l, *r;
   Type *annot;
+  unsigned char nl;   /* (shrinking: this lambda's binder is known to occur more than once) */
 } Term;
 /* A type scheme, declared here because the driver ABI hands a pass the inferred types and that hook
    is defined long before the type interface below. */
@@ -319,6 +320,7 @@ void parse_forms(const char *src, FormFn fn, void *ud);
 Term *term_new(int type, const char *name, Term *l, Term *r); Term *term_copy(Term *t);
 const char *lin_intern(const char *s, size_t n); const char *lin_internf(const char *fmt, ...);
 void term_free(Term *t); int term_refs(Term *t, const char *name);
+void term_release(Term *t);   /* one node back to the pool (not its children) */
 Term *term_fix(const char *name, Term *body);
 
 /* ---------------- types ---------------- */

@@ -72,6 +72,25 @@ prog lifted '(datatype L (ln) (lc h t))
 (define lsum (\s (\a (match s (ln a) ((lc h t) (lsum t (add a h)))))))
 (define go (\k (\acc (if (eq k 0) acc (go (sub k 1) (add acc (lsum (lmap (\x (mul x k)) (upto 10)) 0)))))))
 (go 5 0)' 825
+# STRINGS and other cell-encoded lists: the cell encoding is a datatype to the compiler (a block per cell)
+prog strlen '(str_length "hello, world")' 12
+prog strbuild '(define rep (\n (\acc (if (eq n 0) acc (rep (sub n 1) (cons 97 acc))))))
+(str_length (str_concat (rep 30 nil) (rep 20 nil)))' 50
+prog strmap '(define up (\s (if (str_is_empty s) s (cons (if (and (geq (head s) 97) (leq (head s) 122)) (sub (head s) 32) (head s)) (up (tail s))))))
+(up "hello world")' '"HELLO WORLD"'
+prog strint '(str_parse_int "90210")' 90210
+# MEMORY: a block a match consumes and nothing else holds goes back to the allocator, so a loop that builds and
+# consumes a list each round runs in the memory of one list (measured: 200M cells in 12 MB)
+prog freed '(datatype L (ln) (lc h t))
+(define upto (\n (if (eq n 0) ln (lc n (upto (sub n 1))))))
+(define lsum (\s (\a (match s (ln a) ((lc h t) (lsum t (add a h)))))))
+(define go (\k (\acc (if (eq k 0) acc (go (sub k 1) (add acc (lsum (upto 100) 0)))))))
+(go 20 0)' 101000
+# ...but a block stored twice (node t t) is shared, and is neither freed nor rebuilt in place
+prog sharedfree '(datatype T (lf) (nd l r))
+(define full (\n (if (eq n 0) lf (let ((t (full (sub n 1)))) (nd t t)))))
+(define cnt (\t (match t (lf 1) ((nd l r) (add (cnt l) (cnt r))))))
+(cnt (full 10))' 1024
 # a function that may not look at its data argument (lazy in Lin, strict in C): still the net's answer
 prog lazydata '(datatype S (snil) (scons h t))
 (define upto (\n (if (eq n 0) snil (scons n (upto (sub n 1))))))
@@ -121,5 +140,17 @@ done
 [ "$(timeout 120 "$LIN_BIN" "$TMP/max.lin" 2>/dev/null)" = "=> 278" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL max-reduction value"; }
 sites=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/par.lin" 2>&1 >/dev/null | grep -c "1 parallel site")
 [ "$sites" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL the tree recursion was not compiled with a parallel site"; }
+# ONE block given to several calls that each take it apart is not theirs to free: with the term left unshrunk
+# the three selectors below share one list, and each must leave it whole for the next.
+printf '%s\n' '(v3y (v3scale 2.0 (vec3 1.0 2.0 3.0)))' > "$TMP/shared.lin"
+[ "$(LIN_NO_SHRINK=1 timeout 120 "$LIN_BIN" "$TMP/shared.lin" 2>/dev/null)" = "=> 4" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a shared block was consumed"; }
+# DESTINATION PASSING: a recursion that builds a cell around its own call is a loop, so a list far deeper than
+# any stack is mapped, filtered and appended -- and the answers are what the short lists give.
+printf '%s\n' '(ssum (sfilter (\x (eq (mod x 3) 0)) (smap (\x (add x 1)) (sappend (srange 0 3000000) (srange 0 3000000)))))' \
+  '(slength (stake 2500000 (srange 0 3000000)))' '(ssum (smap (\x (mul x 2)) (srange 0 10)))' > "$TMP/dp.lin"
+dp=$(timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>/dev/null | tr '\n' ' ')
+[ "$dp" = "=> 3000003000000 => 2500000 => 90 " ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL destination passing: '$dp'"; }
+dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep -c "_d(long \*dst")
+[ "$dn" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no destination-passing form was written"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

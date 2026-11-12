@@ -1,0 +1,20 @@
+; std/omap.lin: an ordered map as a red-black tree (a datatype and match: typed, compiled, persistent)
+(load "std/std.lin")
+(imap_get 3 0 (imap_insert 3 30 (imap_insert 1 10 (imap_insert 2 20 omap_empty))))
+; expect => 30
+(imap_get 7 -1 (imap_insert 3 30 omap_empty))
+; expect => -1
+(omap_keys (imap_insert 5 0 (imap_insert 1 0 (imap_insert 9 0 (imap_insert 3 0 omap_empty)))))
+; expect => (scons 1 (scons 3 (scons 5 (scons 9 snil))))
+(smap_get "b" 0 (smap_insert "a" 1 (smap_insert "b" 2 omap_empty)))
+; expect => 2
+(smap_has "c" (smap_insert "a" 1 omap_empty))
+; expect => false
+(omap_size (imap_insert 1 1 (imap_insert 1 2 omap_empty)))
+; expect => 1
+(omap_values (smap_insert "pear" 3 (smap_insert "apple" 1 (smap_insert "fig" 2 omap_empty))))
+; expect => (scons 1 (scons 2 (scons 3 snil)))
+(define build (\i (\m (if (eq i 0) m (build (sub i 1) (imap_insert (mod (mul i 7919) 1000003) i m))))))
+(define look (\i (\m (\s (if (eq i 0) s (look (sub i 1) m (add s (imap_get (mod (mul i 7919) 1000003) 0 m))))))))
+(look 200000 (build 200000 omap_empty) 0)
+; expect => 20000100000

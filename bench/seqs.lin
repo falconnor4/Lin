@@ -1,0 +1,2 @@
+; lists: the squares of 0..999,999, the even ones kept, summed (a datatype list: map, filter, fold)
+(sfoldl (\a (\x (add a x))) 0 (sfilter (\x (eq (mod x 2) 0)) (smap (\x (mul x x)) (srange 0 1000000))))
