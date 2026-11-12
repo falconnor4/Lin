@@ -1,6 +1,8 @@
-# Lin
+<p align="center">
+  <img src="docs/Lin.svg" alt="Lin" width="240">
+</p>
 
-Lin is a pure functional programming language whose programs are interaction nets.
+**Lin** is a pure functional programming language whose programs are interaction nets.
 A program is compiled to a graph of four kinds of node, and evaluation is graph
 rewriting: there is no garbage collector, shared work is done once, and independent
 work runs in parallel without the program asking for it.
