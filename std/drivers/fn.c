@@ -1176,7 +1176,7 @@ static int call_fv(Buf *b, long k) {                 /* the callee's lifted para
     const FV *v = &fvs[k][i];
     if (v->h == emitting) put(b, ", p%ld", v->k);
     else if (emitting >= 0 && emitting < lifted && fv_has(emitting, v->h, v->k)) put(b, ", l%d_%ld", v->h + 1, v->k);
-    else { DBG("declined: a lifted parameter with no source\n"); return 0; }
+    else { DBG("declined: a lifted parameter with no source (f%d calls f%ld, which reads f%d's parameter %ld)\n", emitting, k, v->h, v->k); return 0; }
   }
   return 1;
 }
@@ -1437,7 +1437,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
    list can be done at once: each thread builds its stretch through a destination of its own and reports the
    hole it stopped at, and the stretches are joined end to end.  Worth it when a cell's value takes a call to
    compute.  `pm_k`: the list parameter; `pm_tf`: the field holding the rest. */
-static int ho_f; static unsigned ho_info(const Expr *e);
+static int ho_f; static unsigned ho_info(const Expr *e); static unsigned char *fr_memo;
 static int pm_k, pm_tf, pm_heavy, pm_holes;
 static int pm_self(const Expr *c, int f) {           /* is this call of f the next step of the walk? */
   int K = -1;
@@ -1477,6 +1477,7 @@ static int pm_cand(int f) {
   const Expr *sc = funs[f].body->a;
   if (sc->op != E_PARAM || sc->nargs != f) return 0;
   pm_k = pm_tf = -1; pm_heavy = pm_holes = 0; ho_f = f; mm_new(MM_SSTR);
+  free(fr_memo); fr_memo = calloc((size_t)nfun + 1, 1);
   return pm_tail(funs[f].body, f) && pm_holes > 0 && pm_heavy && pm_k == (int)sc->k && pm_tf >= 0;
 }
 static int dp_scan(const Expr *e, int f, unsigned char *hd) {
@@ -2463,13 +2464,35 @@ static const char *DATA_RT =
    made a PARAMETER of the function: whoever calls it computes the value and hands it over, and the function's own
    recursive calls pass it on. */
 static int ho_f;
+/* does function h read a parameter of ho_f -- itself, or through what it calls?  (An inner function reads its
+   enclosing function's parameters without being handed them: a call of it is not free of them.) */
+static int fr_body(const Expr *e, unsigned char *seen);
+static int fun_reads(int h) {
+  if (h < 0 || h >= nfun || h == ho_f) return 0;
+  if (fr_memo[h]) return fr_memo[h] == 2;
+  fr_memo[h] = 1;                                    /* (in progress: a cycle adds nothing) */
+  unsigned char *seen = calloc((size_t)eid + 1, 1);
+  int r = funs[h].body ? fr_body(funs[h].body, seen) : 0;
+  free(seen);
+  fr_memo[h] = r ? 2 : 1; return r;
+}
+static int fr_body(const Expr *e, unsigned char *seen) {
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_PARAM) return e->nargs == ho_f;
+  if (e->op == E_CONST) return 0;
+  if (e->op == E_CALL && fun_reads((int)e->k)) return 1;
+  if (fr_body(e->a, seen) || fr_body(e->b, seen) || (e->op != E_CTOR && fr_body(e->c, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (fr_body(e->args[i], seen)) return 1;
+  return 0;
+}
 static unsigned ho_info(const Expr *e) {             /* 1: reads ho_f's own parameter (or an input); 2: has a call; 4: calls ho_f */
   if (!e) return 0;
   if (mm_has(MM_SSTR, e)) return mm_val[MM_SSTR][e->id];
   unsigned r = 0;
   if (e->op == E_PARAM) r = (e->nargs == ho_f || e->nargs < 0) ? 1u : 0u;
   else {
-    if (e->op == E_CALL) r |= e->k == ho_f ? 6u : 2u;
+    if (e->op == E_CALL) r |= e->k == ho_f ? 6u : fun_reads((int)e->k) ? 3u : 2u;
     r |= ho_info(e->a) | ho_info(e->b); if (e->op != E_CTOR) r |= ho_info(e->c);
     for (int i = 0; i < e->nargs && e->args; i++) r |= ho_info(e->args[i]);
   }
@@ -2515,6 +2538,7 @@ static Expr *hoist_captured(Expr *entry) {
     for (int i = 0; i < nfun && !x; i++) {
       if (funs[i].arity + 1 >= (int)(sizeof(unsigned) * 8) || !funs[i].body) continue;
       ho_f = i; mm_new(MM_SSTR); mm_new(MM_NUM);
+      free(fr_memo); fr_memo = calloc((size_t)nfun + 1, 1);
       if ((x = ho_find(funs[i].body))) f = i;
     }
     if (!x) break;
@@ -3257,6 +3281,9 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
           for (int k = 0; k < car && !M.bad; k++) {
             if (an[k] == 1) { net_read_i64(n, ap[k], &xa[nn++]); pi++; }
             else if (an[k] == 2) {
+              /* (as the whole expression, the unit met this value where the program names it -- a constant of
+                 the unit -- and does not read the call's own argument: nothing is passed) */
+              if (!c2->npsh || (root_mode && pi < c2->npsh && c2->psh[pi].k == 0)) { xa[nn++] = 0; pi++; continue; }
               if (pi >= c2->npsh) { M.bad = 1; break; }
               xa[nn++] = marshal(&M, ap[k], c2->psh[pi]); pi++;
               if (dbg > 1) DBG("[argument %d passed in as %d %s: %lx]\n", k, c2->psh[pi - 1].k, c2->psh[pi - 1].dt ? c2->psh[pi - 1].dt : "", (unsigned long)xa[nn - 1]);
