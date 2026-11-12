@@ -1997,12 +1997,23 @@ static void mark_reuse(Expr *e, int f) {
   if (e->c && e->op != E_CTOR) mark_reuse(e->c, f);
   for (int i = 0; i < e->nargs && e->args; i++) mark_reuse(e->args[i], f);
 }
+static void captured(const Expr *e, int f) {
+  if (!e || mm_has(MM_NUM, e)) return;
+  mm_put(MM_NUM, e, 1);
+  if (e->op == E_PARAM) { if (e->nargs >= 0 && e->nargs < nfun && e->nargs != f && e->k >= 0 && e->k < funs[e->nargs].arity) uparam[e->nargs][e->k] = 0; return; }
+  captured(e->a, f); captured(e->b, f); if (e->op != E_CTOR) captured(e->c, f);
+  for (int i = 0; i < e->nargs && e->args; i++) captured(e->args[i], f);
+}
 static void ownership(Expr *entry) {
   uparam = A(sizeof *uparam * (size_t)nfun); ufresh = A((size_t)nfun);
   for (int i = 0; i < nfun; i++) { int a = funs[i].arity ? funs[i].arity : 1; uparam[i] = A((size_t)a); memset(uparam[i], 1, (size_t)a); ufresh[i] = 1; }
   fown_n = 0; while (lin_ctor_info(fown_n + 1)) fown_n++;
   fown = A(sizeof *fown * (size_t)(fown_n + 1));
   for (long k = 1; k <= fown_n; k++) { int nk = lin_ctor_info(k)->k + 1; fown[k] = A((size_t)nk); memset(fown[k], 1, (size_t)nk); }
+  /* a parameter an INNER function reads (a captured variable) is held by that function for as long as it runs --
+     through every step of its loop -- so neither the function it belongs to nor the one reading it may take it
+     apart or rebuild in it */
+  for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); captured(funs[i].body, i); }
   if (nrefs_cap) memset(nrefs, 0, sizeof *nrefs * (size_t)nrefs_cap);
   mm_new(MM_NUM); for (int i = 0; i < nfun; i++) count_refs(funs[i].body);
   count_refs(entry);

@@ -1,0 +1,8 @@
+; binary-trees (Computer Language Benchmarks Game), max depth 16: a stretch tree, a long-lived tree, and for each
+; depth 4, 6, .. 16 many short-lived trees built and checked.  The answer is the sum of every check.
+(datatype Tree (leaf) (node l r))
+(define make (\d (if (eq d 0) (node leaf leaf) (node (make (sub d 1)) (make (sub d 1))))))
+(define check (\t (match t (leaf 0) ((node l r) (add 1 (add (check l) (check r)))))))
+(define iter (\i (\d (\acc (if (eq i 0) acc (iter (sub i 1) d (add acc (check (make d)))))))))
+(define depths (\d (\mx (\acc (if (gt d mx) acc (depths (add d 2) mx (add acc (iter (shl 1 (add (sub mx d) 4)) d 0))))))))
+(add (check (make 17)) (add (depths 4 16 0) (check (make 16))))

@@ -46,17 +46,21 @@ method and the full table):
 
 | Benchmark | C | Lin | Lin vs C |
 |-----------|---|-----|----------|
-| Binary tree, 2M nodes built and counted | 33 ms | 8 ms | 4.1× faster |
-| Map, filter and fold over a 1M-element list | 73 ms | 18 ms | 4.1× faster |
-| Collatz, longest chain below one million | 165 ms | 46 ms | 3.6× faster |
-| `fib 40`, tree recursion | 156 ms | 47 ms | 3.3× faster |
-| Search tree, 200,000 inserts | 38 ms | 30 ms | 1.3× faster |
-| Red-black map, 200,000 inserts and lookups | 123 ms | 117 ms | about equal |
-| Words in a 1M-character string | 5 ms | 15 ms | 3× slower |
-| Array, 1M strided writes and reads | 6 ms | 51 ms | 8× slower |
+| Benchmarks Game binary-trees, depth 16 | 173 ms | 25 ms | 6.9× faster |
+| Map, filter and fold over a 1M-element list | 81 ms | 14 ms | 5.8× faster |
+| Collatz, longest chain below one million | 165 ms | 44 ms | 3.8× faster |
+| Mandelbrot, 1000 × 800, in floats | 86 ms | 29 ms | 3.0× faster |
+| `fib 40`, tree recursion | 125 ms | 48 ms | 2.6× faster |
+| Red-black map, 200,000 inserts and lookups | 116 ms | 94 ms | 1.2× faster |
+| Search tree, 200,000 inserts | 30 ms | 30 ms | about equal |
+| Words in a 1M-character string | 4 ms | 11 ms | 3× slower |
+| Array, 1M strided writes and reads | 7 ms | 30 ms | 4× slower |
+| Benchmarks Game n-body, 200,000 steps | 14 ms | 482 ms | 33× slower |
 
-Lin is ahead where it parallelises work the C runs on one core, and behind where a
-persistent structure is compared with flat mutable memory.
+Lin is ahead where it runs work in parallel that the C runs on one core, where it
+shares a computation the C repeats, and where it updates data in place. It is
+behind where a persistent structure is compared with flat mutable memory, and on
+`nbody`, where compiled code cannot yet free data that dies mid-computation.
 
 ## Quick start
 

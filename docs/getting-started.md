@@ -127,6 +127,8 @@ it can be made executable and run as a command.
 
 | Variable | Meaning |
 |----------|---------|
+| `LIN_NO_CACHE=1` | Do not run an unchanged program from the [program cache](drivers.md#the-program-cache) |
+| `LIN_CACHE_DEBUG=1` | Report whether a run came from the program cache |
 | `LIN_FN_OFF=1` | Disable the function compiler; everything is reduced as a net |
 | `LIN_FN_DEBUG=1` | Report each function-compiler decision and timing; `2` also prints the generated C |
 | `LIN_NO_SHRINK=1` | Skip compile-time simplification of terms |

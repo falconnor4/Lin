@@ -10,6 +10,7 @@ produced.
 - [Loading drivers](#loading-drivers)
 - [The drivers](#the-drivers)
 - [The function compiler](#the-function-compiler)
+  - [The program cache](#the-program-cache)
 
 ## The driver contract
 
@@ -139,6 +140,22 @@ Generated C is compiled once and cached by content hash under
 `~/.cache/lin/native` (`LIN_NATIVE_CACHE` overrides the location). The first run
 of a program pays for the C compiler; later runs load the cached library.
 
+### The program cache
+
+Compiling is not the only work that can be saved. When every top-level
+expression of a program was answered by a single compiled call on constants, the
+function compiler records which compiled unit answered each one and with which
+arguments. The next run of the same program runs those units directly, without
+parsing, type checking or analysing it again.
+
+The cache never stores an answer: a cached run performs the whole computation.
+An entry is keyed on the program's text, the library and drivers on disk, the
+`lin` binary and the environment's `LIN_` settings, so changing any of them is a
+different program. A program is not cached if it performs an effect or a foreign
+call, loads another source file, or has an expression the compiler did not
+answer with a single number or boolean. A run with a diagnostic setting
+(`LIN_FN_DEBUG`, `LIN_TRACE`, and so on) is always made in full.
+
 ### Controls
 
 | Variable | Effect |
@@ -147,6 +164,8 @@ of a program pays for the C compiler; later runs load the cached library.
 | `LIN_FN_DEBUG=1` | Print decisions and timings; `2` also prints the generated C |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
+| `LIN_NO_CACHE=1` | Do not use the program cache |
+| `LIN_CACHE_DEBUG=1` | Report whether a run came from the program cache |
 
 ## Writing a driver
 
