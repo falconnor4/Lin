@@ -800,7 +800,7 @@ static int emitting;   /* the unit function being written: a parameter of anothe
    ...)`, that writes its result through `dst` instead of returning it: the cell is built FIRST, with a hole where
    the call's result goes, and the call becomes a tail call given the hole's address.  cc turns that into a loop.
    `hasd[f]`: f has the form; `tailpos`: the expression about to be written is in tail position of one. */
-static unsigned char *hasd; static int tailpos;
+static unsigned char *hasd; static int tailpos; static const struct Expr *dp_hole;
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 
 /* SHARING, KEPT IN THE C.  The evaluator builds a DAG -- a `let`-bound or shared value is ONE node -- and C
@@ -1152,7 +1152,7 @@ static int call_fv(Buf *b, long k) {                 /* the callee's lifted para
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
-  if (bound(e)) { put(b, tp ? "(*dst = v%d, 0L)" : "v%d", e->var); return 1; }
+  if (bound(e)) { put(b, tp ? "LIN_SET(dst, v%d)" : "v%d", e->var); return 1; }
   if (e->fre && !par) {                              /* a tail that frees the block its match consumed */
     Expr t = *e; t.fre = NULL;
     /* the fields of the block this tail still reads go into locals first; then the block is released, so what
@@ -1182,6 +1182,24 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       if (!call_fv(b, e->k)) return 0;
       put(b, ")"); return 1;
     }
+    { const Expr *K2, *f0, *x0; long off2;          /* slot K of a block rebuilt in place, given to a call: the loop of a trie update */
+      if (e->op == E_CTOR && e->nargs && e->c && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K2, &off2, &f0, &x0) &&
+          x0->op == E_CALL && hasd[x0->k] && !bound(x0)) {
+        int kv = nvar++, pv = nvar++, ov = nvar++, a0 = nvar; nvar += x0->nargs;
+        put(b, "({ long v%d = ", kv); if (!emitx(b, pre, K2, par, budget - 1)) return 0;
+        put(b, "; long *v%d = (long *)(", pv); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
+        put(b, "); long v%d = v%d[v%d + %ld]; ", ov, pv, kv, off2);
+        Expr *fx = (Expr *)f0; int sv = fx->var, ss = fx->vscope; fx->var = ov; fx->vscope = fscope;
+        Expr *kx = (Expr *)K2; int skv = kx->var, sks = kx->vscope; kx->var = kv; kx->vscope = fscope;
+        int ok = 1;
+        for (int i = 0; ok && i < x0->nargs; i++) { put(b, "long v%d = ", a0 + i); ok = emitx(b, pre, x0->args[i], par, budget - 1); put(b, "; "); }
+        fx->var = sv; fx->vscope = ss; kx->var = skv; kx->vscope = sks;
+        if (!ok) return 0;
+        put(b, "LIN_PUT(dst, (long)v%d); f%ld_d(&v%d[v%d + %ld]", pv, x0->k, pv, kv, off2);
+        for (int i = 0; i < x0->nargs; i++) put(b, ", v%d", a0 + i);
+        if (!call_fv(b, x0->k)) return 0;
+        put(b, "); })"); return 1;
+      } }
     int hole = -1;
     if (e->op == E_CTOR && e->nargs)
       for (int i = 0; i < e->nargs && hole < 0; i++)
@@ -1193,16 +1211,19 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       put(b, "({ long v%d = 0; ", hv);
       for (int i = 0; i < c->nargs; i++) { put(b, "long v%d = ", a0 + i); if (!emitx(b, pre, c->args[i], par, budget - 1)) return 0; put(b, "; "); }
       int sv = c->var, ss = c->vscope; c->var = hv; c->vscope = fscope;
+      const Expr *sh = dp_hole; dp_hole = c;
       put(b, "long *v%d = (long *)(", ov); int ok = emitx(b, pre, e, par, budget - 1);
+      dp_hole = sh;
       c->var = sv; c->vscope = ss;
       if (!ok) return 0;
-      put(b, "); *dst = (long)v%d; f%ld_d(&v%d[%d]", ov, c->k, ov, hole + !e->untag);
+      put(b, "); LIN_SET(dst, (long)v%d); f%ld_d(&v%d[%d]", ov, c->k, ov, hole + !e->untag);
       for (int i = 0; i < c->nargs; i++) put(b, ", v%d", a0 + i);
       if (!call_fv(b, c->k)) return 0;
       put(b, "); })"); return 1;
     }
     if (!(e->op == E_MATCH || (e->op == E_IF && !indexed_pick(e, &K, &S, &off)))) {   /* a leaf: the result itself */
-      put(b, "(*dst = "); if (!emitx(b, pre, e, par, budget - 1)) return 0; put(b, ", 0L)"); return 1;
+      /* (a block rebuilt in place is usually where it was: LIN_PUT; anything else is new: LIN_SET) */
+      put(b, e->op == E_CTOR && e->c ? "LIN_PUT(dst, " : "LIN_SET(dst, "); if (!emitx(b, pre, e, par, budget - 1)) return 0; put(b, ")"); return 1;
     }
   }
   switch (e->op) {
@@ -1256,7 +1277,9 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         int ok = emit_region(b, pre, x0, par, budget - 1);
         fx->var = sv; fx->vscope = ss; kx->var = skv; kx->vscope = sks;
         if (!ok) return 0;
-        put(b, "; if (_n != v%d) _o[v%d + %ld] = _n; (long)_o; })", ov, kv, off); return 1;
+        if (x0->op == E_CALL || x0->op == E_MATCH || x0->op == E_IF) put(b, "; if (_n != v%d) _o[v%d + %ld] = _n; (long)_o; })", ov, kv, off);
+        else put(b, "; _o[v%d + %ld] = _n; (long)_o; })", kv, off);   /* (a plain value: stored without reading the old one) */
+        return 1;
       } }
     if (e->c && !(par && e->c->op != E_PARAM)) {      /* REUSE: the block the enclosing match took apart (ownership) */
       /* only what changed is written: the same constructor keeps its tag, a field that IS the old one stays */
@@ -1264,7 +1287,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
 #define SAMEF(x) (((x)->op == E_FIELD && (x)->a == e->c && (x)->k == i) || (e->ci && !field_live(e->ci, i)))
       for (int i = 0; i < e->nargs; i++) {
         const Expr *a = e->args[i];
-        if (SAMEF(a)) continue;
+        if (SAMEF(a) || a == dp_hole) continue;   /* (the hole of a destination-passing cell: its call writes it) */
         /* `cond ? new : old` (or `cond ? old : new`): the field is written only when it changes */
         if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) {
           int keep_else = SAMEF(a->c);
@@ -1279,7 +1302,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       if (!e->untag && e->rtag - 1 != e->k) put(b, "_o[0] = %ldL; ", e->k);
       for (int i = 0; i < e->nargs; i++) {
         const Expr *a = e->args[i];
-        if (SAMEF(a)) continue;
+        if (SAMEF(a) || a == dp_hole) continue;   /* (the hole of a destination-passing cell: its call writes it) */
         if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) { put(b, "if (%s_c%d) _o[%d] = _a%d; ", SAMEF(a->c) ? "" : "!", i, i + !e->untag, i); continue; }
         /* (a field a call computed is often the very block it was given, rebuilt in place: see above) */
         if ((e->untag || e->rtag - 1 == e->k) && !bound(a) && (a->op == E_CALL || a->op == E_MATCH || a->op == E_IF))
@@ -1367,6 +1390,8 @@ static int dp_scan(const Expr *e, int f, unsigned char *hd) {
   case E_IF: if (indexed_pick(e, &K, &S, &off)) return 0; return dp_scan(e->b, f, hd) | dp_scan(e->c, f, hd);
   case E_MATCH: { int r = 0; for (int i = 0; i < e->nargs; i++) r |= dp_scan(e->args[i], f, hd); return r; }
   case E_CTOR:
+    { const Expr *K2, *f0, *x0; long off2;
+      if (e->nargs && e->c && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K2, &off2, &f0, &x0) && x0->op == E_CALL && x0->k == f && !hd[f]) { hd[f] = 1; return 1; } }
     for (int i = 0; i < e->nargs; i++)
       if (e->args[i]->op == E_CALL && e->args[i]->k == f && (!e->ci || field_live(e->ci, i)) && !hd[f]) { hd[f] = 1; return 1; }
     return 0;
@@ -2177,7 +2202,11 @@ static const char *DATA_RT =
      abandons the joiner too, so a half-computed value is never used. */
   "#define LIN_ENTER\n#define LIN_LEAVE\n"
   "#define LIN_TASK_START(ss) if (setjmp(lin_jb)) { lin_fn_aborted = 1; return 0; } lin_stack_lo = (char *)__builtin_frame_address(0) - (ss) + ((size_t)1 << 24)\n"
-  "#define LIN_JOINED (lin_fn_aborted ? (longjmp(lin_jb, 1), 0) : 0)\n";
+  "#define LIN_JOINED (lin_fn_aborted ? (longjmp(lin_jb, 1), 0) : 0)\n"
+  /* a result through its destination: LIN_PUT stores it only if it is not there already (a block rebuilt in place
+     is, and storing it again would hold up the next load of that slot); LIN_SET is for a value that is new */
+  "#define LIN_PUT(d, x) ({ long x_ = (x); if (*(d) != x_) *(d) = x_; 0L; })\n"
+  "#define LIN_SET(d, x) (*(d) = (x), 0L)\n";
 
 /* Compile F and everything it calls, or return NULL.  `aports`, when given, are the call's arguments: a NUMBER
    one (anum[k]) is passed to the entry, any other is compiled into it as an expression -- `(check (make 7))`
@@ -2346,7 +2375,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0);
         emitting = i; fscope++;
         if (hd[i]) {                                   /* the plain form: the other, given a local to write */
-          put(&fb, ") { long r; f%d_d(&r", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", p%d", j); fv_params(&fb, i, 0, 1); put(&fb, "); return r; }\n");
+          put(&fb, ") { long r = 0; f%d_d(&r", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", p%d", j); fv_params(&fb, i, 0, 1); put(&fb, "); return r; }\n");
           put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ") { LIN_ENTER; return ");
           tailpos = 1; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
         } else { put(&fb, ") { LIN_ENTER; return "); ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n"); }
