@@ -152,5 +152,60 @@ dp=$(timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>/dev/null | tr '\n' ' ')
 [ "$dp" = "=> 3000003000000 => 2500000 => 90 " ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL destination passing: '$dp'"; }
 dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep -c "_d(long \*dst")
 [ "$dn" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no destination-passing form was written"; }
+# A CAPTURED VARIABLE is held by the inner function for every step of its loop: in the n-body benchmark the list
+# of bodies is read by each body's update while the map over that same list runs, so the map must not rebuild
+# in it and the fold must not free it.  (It did both: bodies saw their neighbours' new positions, and the unit
+# crashed.)  The answer after 1,000 steps is the one the C program gives.
+sed 's/(run 200000 /(run 1000 /' "$ROOT/bench/nbody.lin" > "$TMP/cap.lin"
+cap=$(timeout 120 "$LIN_BIN" "$TMP/cap.lin" 2>/dev/null)
+[ "$cap" = "=> -169301064" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a captured list was taken apart: n-body after 1,000 steps is '$cap'"; }
+# The same program states three more things the compiler must do, each named in its report: the fold over the
+# bodies starts from a COPY of a body and rebuilds in it; the list a step was computed from is DROPPED once the
+# step is built (the eraser, in compiled code); and the simulation the energy is read from is computed ONCE,
+# though the energy's inner loop names it at every body.
+LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/cap.lin" >/dev/null 2>"$TMP/cap.err"
+for what in "is given a copy" "is dropped after its call" "is computed once"; do
+  grep -q "$what" "$TMP/cap.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL n-body: no parameter '$what'"; }
+done
+# ...and dropping keeps a long run in a few blocks: thirty million steps of a two-body state allocate what one
+# step does (kept, they would be gigabytes; the unit's memory guard must not fire).
+printf '%s\n' '(datatype P (p (x num) (v num)))' \
+  '(define nudge (\\b (\\o (match b ((p x v) (match o ((p ox ov) (p x (add v (sub ox x))))))))))' \
+  '(define step (\\bs (smap (\\b (match (sfoldl nudge b bs) ((p x v) (p (add x v) v)))) bs)))' \
+  '(define run (\\n (\\bs (if (eq n 0) bs (run (sub n 1) (step bs))))))' \
+  '(define total (\\bs (sfoldl (\\a (\\b (match b ((p x v) (add a (band (add x v) 255)))))) 0 bs)))' \
+  '(total (run 30000000 (scons (p 0 0) (scons (p 7 1) snil))))' > "$TMP/long.lin"
+lg=$(LIN_FN_DEBUG=1 timeout 300 "$LIN_BIN" "$TMP/long.lin" 2>"$TMP/long.err")
+[ -n "$lg" ] && ! grep -q "guard fired" "$TMP/long.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a long stepping loop did not stay in bounded memory: '$lg'"; }
+# A FUNCTION WHOSE BODY IS A LITERAL is a function: `(\i 7)` is three lambdas deep, as a numeral's last cell is,
+# and read as data it was passed in as a list and then applied.
+printf '%s\n' '(ssum (smap (\i 7) (srange 0 5)))' > "$TMP/lit.lin"
+lit=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/lit.lin" 2>"$TMP/lit.err")
+[ "$lit" = "=> 35" ] && ! grep -q declined "$TMP/lit.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a literal-bodied function: '$lit'"; }
+# TWO CLOSURES OF ONE LAMBDA with different captured values are two functions.  (After a speculative read failed,
+# a function's number was given to another, and a remembered value still named the first: the four nested maps
+# below became two, each defined by the other.)  And a captured value is COMPUTED ONCE, as the net shares it:
+# the captured list is a parameter of the loop, not an expression evaluated at every step.
+printf '%s\n' '(define row (\i (\u (\acc (match u (snil acc) ((scons h t) (row i t (add acc (mul i h)))))))))' \
+  '(define av (\n (\u (smap (\i (row i u 0)) (srange 0 n)))))' '(define atav (\n (\u (av n (av n u)))))' \
+  '(ssum (atav 3 (atav 3 (srange 0 3))))' > "$TMP/nest.lin"
+nest=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/nest.lin" 2>"$TMP/nest.err")
+[ "$nest" = "=> 243" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL nested closures of one lambda: '$nest'"; }
+grep -q "computed once" "$TMP/nest.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a captured value was not made a parameter"; }
+# A MAP IN PARALLEL: a loop that builds a list from a list, each cell by a call, does stretches of the list at
+# once and joins them.  The list it builds must be the one a single thread builds -- same cells, same order --
+# at every width, uneven splits included (a list of 1,003 over 3, 7 and 8 threads), and through a filter, which
+# drops cells at the joins too.
+printf '%s\n' '(define tri (\n (\a (if (eq n 0) a (tri (sub n 1) (add a n))))))' \
+  '(define weigh (\s (\i (\a (match s (snil a) ((scons h t) (weigh t (add i 1) (add a (mul h i)))))))))' \
+  '(weigh (smap (\x (tri (mod x 50) x)) (srange 0 1003)) 1 0)' \
+  '(weigh (sfilter (\x (eq (mod (tri (mod x 7) 0) 2) 0)) (srange 0 1003)) 1 0)' > "$TMP/pm.lin"
+pm1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pm.lin" 2>/dev/null)
+pmok=1; for t in 2 3 7 8; do [ "$(timeout 120 "$LIN_BIN" -t $t "$TMP/pm.lin" 2>/dev/null)" = "$pm1" ] || pmok=0; done
+sed 's/(srange 0 1003)/(srange 0 40)/' "$TMP/pm.lin" > "$TMP/pms.lin"   # (the net's own answer, on a list it can walk in time)
+pmn=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pms.lin" 2>/dev/null); pmc=$(timeout 120 "$LIN_BIN" -t 8 "$TMP/pms.lin" 2>/dev/null)
+[ -n "$pm1" ] && [ "$pmok" = 1 ] && [ -n "$pmn" ] && [ "$pmc" = "$pmn" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL parallel map: -t 1 '$pm1' widths agree $pmok; short list compiled '$pmc' net '$pmn'"; }
+pmd=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" -t 4 "$TMP/pm.lin" 2>&1 >/dev/null | grep -c "maps its list in parallel")
+[ "$pmd" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no map was run in parallel"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

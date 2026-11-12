@@ -298,6 +298,16 @@ int wave_snapshot(Net *n, Port **out, int *cap);  /* this wave's DEMANDED pairs;
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
 void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
+/* ---- the program cache ----
+   A program whose every top-level expression was answered by ONE compiled call on constants need not be parsed,
+   checked and compiled again while nothing it depends on has changed: the core derives a KEY from the source
+   text, the library and the binaries, and a driver that folds such a call records which compiled unit, on which
+   arguments, answered expression `lin_form_idx`.  The next run asks the driver to RUN those units (never to
+   remember their answers).  The core knows nothing of what a unit is: two hooks, registered by the driver. */
+extern uint64_t lin_form_key; extern int lin_form_idx, lin_form_domain; extern void *lin_form_net;
+typedef int (*LinFormRecall)(uint64_t key, int idx, int threads, long *word, int *kind, int *domain);   /* 1 ran, 0 no more, -1 cannot */
+typedef void (*LinFormCommit)(uint64_t key, int count);   /* the file's `count` expressions are all evaluated */
+void lin_form_register(LinFormRecall recall, LinFormCommit commit);
 typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
 /* A provider of callables DECLARES, where it registers, whether calling it observes the world: `pure`
    means every call it supplies is a function of its operands alone.  That is a CAPABILITY, never a naming
@@ -432,6 +442,7 @@ int  net_spine_slots(Net *n, Port argp); /* operand count of a cell-spine (-1: n
 /* !=0 while def_precompile reduces an open body: a driver must not fold there, since the operands are free vars
    that never become concrete and a baked closure would capture a stale value */
 extern int lin_precompile_depth;
+int lin_reduce_nested(void);   /* inside a force made from within a reduction: someone above holds ports of this net */
 /* !=0 while the AOT build is partially evaluating: a driver must not bake anything the
    program would observe at RUN time (e.g. a (lin_folds) probe) into the artifact */
 extern int lin_build_depth;

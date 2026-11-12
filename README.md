@@ -46,17 +46,23 @@ method and the full table):
 
 | Benchmark | C | Lin | Lin vs C |
 |-----------|---|-----|----------|
-| Binary tree, 2M nodes built and counted | 33 ms | 8 ms | 4.1× faster |
-| Map, filter and fold over a 1M-element list | 73 ms | 18 ms | 4.1× faster |
-| Collatz, longest chain below one million | 165 ms | 46 ms | 3.6× faster |
-| `fib 40`, tree recursion | 156 ms | 47 ms | 3.3× faster |
-| Search tree, 200,000 inserts | 38 ms | 30 ms | 1.3× faster |
-| Red-black map, 200,000 inserts and lookups | 123 ms | 117 ms | about equal |
-| Words in a 1M-character string | 5 ms | 15 ms | 3× slower |
-| Array, 1M strided writes and reads | 6 ms | 51 ms | 8× slower |
+| Benchmarks Game binary-trees, depth 16 | 205 ms | 29 ms | 7.1× faster |
+| Map, filter and fold over a 1M-element list | 89 ms | 15 ms | 5.9× faster |
+| Collatz, longest chain below one million | 248 ms | 62 ms | 4.0× faster |
+| Mandelbrot, 1000 × 800, in floats | 134 ms | 39 ms | 3.4× faster |
+| `fib 40`, tree recursion | 170 ms | 54 ms | 3.1× faster |
+| Search tree, 200,000 inserts | 50 ms | 30 ms | 1.7× faster |
+| Red-black map, 200,000 inserts and lookups | 128 ms | 79 ms | 1.6× faster |
+| Benchmarks Game spectral-norm, n = 1000 | 61 ms | 43 ms | 1.4× faster |
+| Benchmarks Game n-body, 200,000 steps | 18 ms | 50 ms | 2.8× slower |
+| Words in a 1M-character string | 6 ms | 13 ms | 2.2× slower |
+| Array, 1M strided writes and reads | 8 ms | 24 ms | 3.0× slower |
 
-Lin is ahead where it parallelises work the C runs on one core, and behind where a
-persistent structure is compared with flat mutable memory.
+Lin is ahead on 12 of the 15 benchmarks: where it runs work in parallel that the
+C runs on one core, where it shares a computation the C repeats, and where it
+updates data in place. It is behind where a persistent structure is compared with
+flat mutable memory (`array`, `words`) and in the inner floating-point loop of
+`nbody`.
 
 ## Quick start
 
@@ -110,7 +116,7 @@ docs/           documentation
 ## Status
 
 Lin is under active development and its interfaces may change. The test suite
-(80 suites, about 1,400 assertions) passes on Linux x86-64. Known gaps are listed
+(81 suites, about 1,450 assertions) passes on Linux x86-64. Known gaps are listed
 in the [language reference](docs/language.md#limitations) and the
 [benchmarks](bench/README.md#where-lin-is-behind).
 

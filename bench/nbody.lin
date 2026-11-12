@@ -1,0 +1,27 @@
+; n-body (Computer Language Benchmarks Game): the Sun and the four giant planets, 200,000 steps of 0.01 days.
+; Each body is pulled by every other; the answer is the system's energy afterwards, in billionths.
+(datatype Body (body (x float) (y float) (z float) (vx float) (vy float) (vz float) (m float)))
+(define pull (\dt (\b (\o (match b ((body x y z vx vy vz m) (match o ((body ox oy oz ovx ovy ovz om)
+  (let ((dx (fsub x ox)) (dy (fsub y oy)) (dz (fsub z oz)) (d2 (fadd (fadd (fmul dx dx) (fmul dy dy)) (fmul dz dz))))
+    (if (feq d2 0.0) b
+      (let ((mag (fdiv dt (fmul d2 (fsqrt d2)))) (k (fmul om mag)))
+        (body x y z (fsub vx (fmul dx k)) (fsub vy (fmul dy k)) (fsub vz (fmul dz k)) m))))))))))))
+(define kick (\dt (\all (\b (sfoldl (pull dt) b all)))))
+(define drift (\dt (\b (match b ((body x y z vx vy vz m) (body (fadd x (fmul dt vx)) (fadd y (fmul dt vy)) (fadd z (fmul dt vz)) vx vy vz m))))))
+(define step (\dt (\bs (smap (\b (drift dt (kick dt bs b))) bs))))
+(define run (\n (\dt (\bs (if (eq n 0) bs (run (sub n 1) dt (step dt bs)))))))
+(define kinetic (\b (match b ((body x y z vx vy vz m) (fmul (fmul 0.5 m) (fadd (fadd (fmul vx vx) (fmul vy vy)) (fmul vz vz)))))))
+(define pot (\b (\o (match b ((body x y z vx vy vz m) (match o ((body ox oy oz ovx ovy ovz om)
+  (let ((dx (fsub x ox)) (dy (fsub y oy)) (dz (fsub z oz)) (d2 (fadd (fadd (fmul dx dx) (fmul dy dy)) (fmul dz dz))))
+    (if (feq d2 0.0) 0.0 (fdiv (fmul m om) (fsqrt d2)))))))))))
+(define energy (\bs (sfoldl (\e (\b (fsub (fadd e (kinetic b)) (fmul 0.5 (sfoldl (\p (\o (fadd p (pot b o)))) 0.0 bs))))) 0.0 bs)))
+(define sm 39.47841760435743)
+(define dp 365.24)
+(define bodies
+  (scons (body 0.0 0.0 0.0 0.0 0.0 0.0 sm)
+  (scons (body 4.84143144246472090 -1.16032004402742839 -0.103622044471123109 (fmul 0.00166007664274403694 dp) (fmul 0.00769901118419740425 dp) (fmul -0.0000690460016972063023 dp) (fmul 0.000954791938424326609 sm))
+  (scons (body 8.34336671824457987 4.12479856412430479 -0.403523417114321381 (fmul -0.00276742510726862411 dp) (fmul 0.00499852801234917238 dp) (fmul 0.0000230417297573763929 dp) (fmul 0.000285885980666130812 sm))
+  (scons (body 12.8943695621391310 -15.1111514016986312 -0.223307578892655734 (fmul 0.00296460137564761618 dp) (fmul 0.00237847173959480950 dp) (fmul -0.0000296589568540237556 dp) (fmul 0.0000436624404335156298 sm))
+  (scons (body 15.3796971148509165 -25.9193146099879641 0.179258772950371181 (fmul 0.00268067772490389322 dp) (fmul 0.00162824170038242295 dp) (fmul -0.0000951592254519715870 dp) (fmul 0.0000515138902046611451 sm))
+  snil))))))
+(f2i (fmul 1000000000.0 (energy (run 200000 0.01 bodies))))

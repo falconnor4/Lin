@@ -25,15 +25,15 @@ best() {   # best wall-clock ms of three runs of "$@"
   done
   echo $b
 }
-printf '| %-9s | %10s | %10s | %10s | %8s | %s\n' benchmark "C -O3" "Lin" "Lin -t 1" "C / Lin" result
-printf '|%s|%s|%s|%s|%s|%s\n' ----------- ------------ ------------ ------------ ---------- --------
+printf '| %-11s | %10s | %10s | %10s | %8s | %s\n' benchmark "C -O3" "Lin" "Lin -t 1" "C / Lin" result
+printf '|%s|%s|%s|%s|%s|%s\n' ------------- ------------ ------------ ------------ ---------- --------
 for f in "$DIR"/*.lin; do
   name=$(basename "$f" .lin)
-  "$CC" -O3 -march=native -ffp-contract=off -o "$TMP/$name" "$DIR/$name.c" 2>/dev/null || { echo "| $name | (C build failed)"; continue; }
+  "$CC" -O3 -march=native -ffp-contract=off -o "$TMP/$name" "$DIR/$name.c" -lm 2>/dev/null || { echo "| $name | (C build failed)"; continue; }
   want=$("$TMP/$name")
   got=$("$LIN" "$f" 2>/dev/null | sed 's/^=> //')         # also warms the compile cache
-  if [ "$got" != "$want" ]; then printf '| %-9s | MISMATCH: C %s, Lin %s\n' "$name" "$want" "$got"; continue; fi
+  if [ "$got" != "$want" ]; then printf '| %-11s | MISMATCH: C %s, Lin %s\n' "$name" "$want" "$got"; continue; fi
   c=$(best "$TMP/$name"); l=$(best "$LIN" "$f"); l1=$(best "$LIN" -t 1 "$f")
   ratio=$(awk -v c="$c" -v l="$l" 'BEGIN { printf "%.2fx", (l > 0 ? c / l : 0) }')
-  printf '| %-9s | %7d ms | %7d ms | %7d ms | %8s | %s\n' "$name" "$c" "$l" "$l1" "$ratio" "$want"
+  printf '| %-11s | %7d ms | %7d ms | %7d ms | %8s | %s\n' "$name" "$c" "$l" "$l1" "$ratio" "$want"
 done

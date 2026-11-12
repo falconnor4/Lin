@@ -1,0 +1,13 @@
+; spectral-norm (Computer Language Benchmarks Game), n = 1000: ten power-method steps with the matrix
+; A(i,j) = 1 / ((i+j)(i+j+1)/2 + i + 1), never stored.  The answer is the norm, in billionths.
+(define a (\i (\j (fdiv 1.0 (i2f (add (div (mul (add i j) (add (add i j) 1)) 2) (add i 1)))))))
+(define row (\i (\j (\u (\acc (match u (snil acc) ((scons h t) (row i (add j 1) t (fadd acc (fmul (a i j) h))))))))))
+(define col (\i (\j (\u (\acc (match u (snil acc) ((scons h t) (col i (add j 1) t (fadd acc (fmul (a j i) h))))))))))
+(define av (\n (\u (smap (\i (row i 0 u 0.0)) (srange 0 n)))))
+(define atv (\n (\u (smap (\i (col i 0 u 0.0)) (srange 0 n)))))
+(define atav (\n (\u (atv n (av n u)))))
+(define power (\k (\n (\u (if (eq k 0) u (power (sub k 1) n (atav n (atav n u))))))))
+(define dot (\x (\y (\acc (match x (snil acc) ((scons h t) (match y (snil acc) ((scons g s) (dot t s (fadd acc (fmul h g)))))))))))
+(define norm (\n (\u (let ((v (atav n u))) (fsqrt (fdiv (dot u v 0.0) (dot v v 0.0)))))))
+(define ones (\n (if (eq n 0) snil (scons 1.0 (ones (sub n 1))))))
+(f2i (fmul 1000000000.0 (norm 1000 (power 10 1000 (ones 1000)))))
