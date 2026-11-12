@@ -11,7 +11,7 @@ a character until these hold.
 Exit 0 when every case passes.  This is NOT in run_tests.sh: it is the gate to WATCH until
 it is green, not a suite that should fail the tree.
 
-Why each family exists (all measured, see docs/NEXT-AGENT-BOOTSTRAP.md):
+Why each family exists (all measured):
 
   fold/nonrec      control: an `_op` fold fires when the body is not recursive
   fold/rec         the `_op` fold DECLINES in a recursive body; the answer still comes out

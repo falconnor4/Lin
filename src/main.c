@@ -1091,6 +1091,7 @@ static void cap_cb(Term *t, const char *perr, void *ud) {
 
 static void do_type(const char *expr) {
   first_form = NULL; parse_forms(expr, cap_cb, NULL); if (!first_form) return;
+  lazy_demand_term(first_form);                    /* (a library name it uses: its module is read now) */
   Scheme sch; char err[512];
   if (type_check(first_form, &sch, err, sizeof err)) { scheme_print(&sch); putchar('\n'); }
   else printf("error: %s\n", err);
