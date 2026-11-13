@@ -1364,6 +1364,7 @@ static int pl_ment(const Expr *e, int f, int k, unsigned char *seen) {   /* does
   if (!e || seen[e->id]) return 0;
   seen[e->id] = 1;
   if (e->op == E_PARAM) return e->nargs == f && e->k == k;
+  if (e->op == E_CALL && e->k >= 0 && e->k < lifted && fv_has((int)e->k, f, k)) return 1;   /* (read by the callee, lifted) */
   if (pl_ment(e->a, f, k, seen) || pl_ment(e->b, f, k, seen) || (e->op != E_CTOR && pl_ment(e->c, f, k, seen))) return 1;
   for (int i = 0; i < e->nargs && e->args; i++) if (pl_ment(e->args[i], f, k, seen)) return 1;
   return 0;
@@ -1373,6 +1374,7 @@ static int pl_params(const Expr *e, int f, unsigned char *seen) {   /* does e re
   if (!e || seen[e->id]) return 0;
   seen[e->id] = 1;
   if (e->op == E_PARAM) return e->nargs == f;
+  if (e->op == E_CALL && e->k >= 0 && e->k < lifted) for (int i = 0; i < nfv[e->k]; i++) if (fvs[e->k][i].h == f) return 1;
   if (pl_params(e->a, f, seen) || pl_params(e->b, f, seen) || (e->op != E_CTOR && pl_params(e->c, f, seen))) return 1;
   for (int i = 0; i < e->nargs && e->args; i++) if (pl_params(e->args[i], f, seen)) return 1;
   return 0;

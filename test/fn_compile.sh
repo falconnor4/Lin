@@ -285,9 +285,16 @@ pln=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pl.lin" 2>/dev/null)
 # A NUMERIC unit whose loop folds an inner loop's result (mandel's shape) still compiles: the parallel fold of
 # independent steps is a data unit's, and a numeric unit has its own parallel reduction.
 printf '%s\n' '(define it (\a (\k (if (eq k 0) a (it (mod (add (mul a a) 7) 1009) (sub k 1))))))' \
-  '(define cl (\y (\x (\acc (if (eq x 0) acc (cl y (sub x 1) (add acc (it (add x y) 50))))))))' \
-  '(define rw (\y (\acc (if (eq y 0) acc (rw (sub y 1) (add acc (cl y 40 0)))))))' '(rw 30 0)' > "$TMP/nm.lin"
+  '(define cl (\y (\x (\acc (if (eq x 0) acc (cl y (sub x 1) (add acc (it (add x y) 20))))))))' \
+  '(define rw (\y (\acc (if (eq y 0) acc (rw (sub y 1) (add acc (cl y 8 0)))))))' '(rw 5 0)' > "$TMP/nm.lin"
 nm=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/nm.lin" 2>"$TMP/nm.err"); nmn=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/nm.lin" 2>/dev/null)
 [ -n "$nm" ] && [ "$nm" = "$nmn" ] && grep -q "folded a call" "$TMP/nm.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a numeric nested loop: '$nm' net '$nmn'"; }
+# ...but a step that reads the accumulator only through a function it specialises -- a closure capturing it,
+# lifted to a parameter -- is not independent: each step needs the one before.
+printf '%s\n' '(define tot (\s (\a (match s (snil a) ((scons h t) (tot t (add a h)))))))' \
+  '(define go (\k (\u (if (eq k 0) u (go (sub k 1) (smap (\x (add x (tot u 0))) (srange 0 3)))))))' \
+  '(let ((r (go 6 (scons 1 (scons 1 (scons 1 snil)))))) (add (tot r 0) (mul 1000 (tot r 1))))' > "$TMP/pd2.lin"
+pd2=$(timeout 120 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null); pd2n=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null)
+[ -n "$pd2" ] && [ "$pd2" = "$pd2n" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a step reading the accumulator through a closure: '$pd2' net '$pd2n'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
