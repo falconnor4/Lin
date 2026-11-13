@@ -2976,6 +2976,14 @@ static int fu_mentions_list(const Expr *e, const Fuse *u, unsigned char *seen) {
   for (int i = 0; i < e->nargs && e->args; i++) if (fu_mentions_list(e->args[i], u, seen)) return 1;
   return 0;
 }
+static int fu_otherloop(const Expr *e, int c, unsigned char *seen) {
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_CALL && e->k != c) return 1;
+  if (fu_otherloop(e->a, c, seen) || fu_otherloop(e->b, c, seen) || (e->op != E_CTOR && fu_otherloop(e->c, c, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (fu_otherloop(e->args[i], c, seen)) return 1;
+  return 0;
+}
 static int fu_consumer(Fuse *u) {
   const Expr *B = funs[u->c].body;
   if (!B || B->op != E_MATCH || !fu_pj(B->a, u->c, u->j) || B->nargs != 2 || !B->ci) return 0;
@@ -2991,6 +2999,9 @@ static int fu_consumer(Fuse *u) {
   if (ok) { memset(seen, 0, (size_t)eid + 1); ok = fu_cuses(B->args[u->consb], u, &tf, seen, 0) && tf >= 0; }   /* (it must walk the list) */
   u->tf = tf;
   if (ok) { memset(seen, 0, (size_t)eid + 1); ok = !fu_tailreads(B->args[u->consb], u, seen); }
+  /* (a step that runs a loop of its own -- a matrix row per cell -- is worth a list: its cells are mapped in
+     parallel stretches, and the list costs little beside the work) */
+  if (ok) { memset(seen, 0, (size_t)eid + 1); ok = !fu_otherloop(B->args[u->consb], u->c, seen); }
   free(seen);
   return ok;
 }
