@@ -303,6 +303,11 @@ static int field_is_bool(const LinCtor *ci, int j) {
   for (int i = 0; d && *d && i < j; i++) d = fd_skip(d);
   return d && *d == 'B';
 }
+static int field_is_param(const LinCtor *ci, int j) {
+  const char *d = ci ? ci->fdesc : NULL;
+  for (int i = 0; d && *d && i < j; i++) d = fd_skip(d);
+  return d && *d == 'P';
+}
 static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci) {
   Expr *e = mke(E_FIELD, field_is_bool(ci, j) ? 3 : 1); e->a = scrut; e->k = j; e->untag = untag; e->ci = ci; return hc(e);
 }
@@ -1856,7 +1861,10 @@ static V *fix_call(int G, Env *genv, int target, Lz **args, int ar) {
   }
   int fid = target >= 0 && known_eq(funs[target].known, known, ar) ? target : compile_body_spec(G, genv, known);
   if (fid < 0) return NULL;
-  V *s = mkv(V_SYM); s->e = mke(E_CALL, 1); s->e->k = fid; s->e->nargs = ar; s->e->args = A(sizeof(Expr *) * (size_t)ar);
+  /* (the call's kind is its function's: a recursive predicate's result is a condition, and `if` on it picks a
+     branch rather than taking data apart -- known once the body is, which it is unless this is a call of
+     itself from inside) */
+  V *s = mkv(V_SYM); s->e = mke(E_CALL, funs[fid].body && funs[fid].body->kind == 3 ? 3 : 1); s->e->k = fid; s->e->nargs = ar; s->e->args = A(sizeof(Expr *) * (size_t)ar);
   for (int i = 0; i < ar; i++) {
     if (known && known[i]) { Expr *z = mke(E_CONST, 1); z->k = 0; s->e->args[i] = hc(z); continue; }   /* (unused: bound in the copy) */
     s->e->args[i] = to_expr(force(args[i])); if (!s->e->args[i]) return NULL;
@@ -2214,7 +2222,7 @@ static int drop_fn(const char *dt) {
   drop_dt[ndrop] = dt; return ndrop++;
 }
 static int deep_owned(const char *dt, int depth) {   /* every data field of dt's values, all the way down, is owned */
-  if (depth > 8) return 0;
+  if (depth > 8 || !dt) return 0;
   const LinCtor *c;
   for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == dt)
     for (int j = 0; j < c->k; j++) {
@@ -2423,6 +2431,10 @@ static Shape sh_join(Shape a, Shape b) {
   if (!a.k) return b;
   if (!b.k) return a;
   if (a.k == b.k && (a.k != 5 || a.dt == b.dt)) return a;
+  /* two datatypes in one field: a polymorphic constructor (a Seq of pieces and a Seq of ranges) used at two
+     types.  Still a block of SOME datatype, which is all a match needs -- it reads the layout its own
+     constructors state; only reading such a value in or out needs to know which */
+  if (a.k == 5 && b.k == 5) return (Shape){ 5, NULL };
   return (Shape){ 9, NULL };
 }
 static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt; }
@@ -2461,7 +2473,14 @@ static Shape shape_of(const Expr *e) {
       else if (e->a->nargs >= 0 && e->a->nargs < nfun) sh_upd(&sh_par[e->a->nargs][e->a->k], (Shape){ 5, e->ci->dt });
     }
     Shape sc = shape_of(e->a);                       /* what is taken apart must be that datatype's */
-    if (sc.k && !(sc.k == 5 && e->ci && sc.dt == e->ci->dt)) sh_bad = 1;
+    /* a field whose declared type is the datatype's PARAMETER holds whatever this use of the datatype holds:
+       taken apart as another datatype than the unit built in it elsewhere (a Seq of pieces, a Seq of ranges),
+       it is a block of SOME datatype -- the field's shape says so from now on */
+    if (sc.k == 5 && e->ci && sc.dt && sc.dt != e->ci->dt && e->a->op == E_FIELD && field_is_param(e->a->ci, (int)e->a->k)) {
+      long fid = ctor_id(e->a->ci);
+      if (fid > 0 && fid <= sh_nctor) sh_upd(&sh_fld[fid][e->a->k], (Shape){ 5, e->ci->dt });
+    } else
+    if (sc.k && !(sc.k == 5 && e->ci && (!sc.dt || sc.dt == e->ci->dt))) { if (dbg > 2) DBG("[shape: match on op %d (f%d.%ld k%ld) shape %d %s, wanted %s]\n", e->a->op, e->a->nargs, e->a->k, e->a->k, sc.k, sc.dt ? sc.dt : "-", e->ci ? e->ci->dt : "?"); sh_bad = 1; }
     for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i]));
     break;
   }
@@ -2489,9 +2508,10 @@ static Shape shape_of(const Expr *e) {
     r.k = 5; r.dt = e->ci->dt; break;
   }
   case E_FIELD: {
-    { Shape sc = shape_of(e->a); if (sc.k && !(sc.k == 5 && e->ci && sc.dt == e->ci->dt)) sh_bad = 1; }
+    { Shape sc = shape_of(e->a); if (sc.k && !(sc.k == 5 && e->ci && (!sc.dt || sc.dt == e->ci->dt))) sh_bad = 1; }
     long id = ctor_id(e->ci);
-    r = id > 0 && id <= sh_nctor && e->k < e->ci->k ? sh_fld[id][e->k] : (Shape){ 9, NULL }; break;
+    r = id > 0 && id <= sh_nctor && e->k < e->ci->k ? sh_fld[id][e->k] : (Shape){ 9, NULL };
+    break;
   }
   default: r.k = 9; break;
   }
@@ -2534,7 +2554,7 @@ static Shape unit_shapes(const Expr *entry) {
    must have fields of a known shape. */
 static int shape_closed(Shape s, int depth) {   /* depth: datatypes on the walk (each one checked once) */
   if (s.k == 1 || s.k == 3) return 1;
-  if (s.k != 5 || depth > sh_nctor) return 0;
+  if (s.k != 5 || !s.dt || depth > sh_nctor) return 0;
   for (long k = 1; k <= sh_nctor; k++) {
     const LinCtor *c = lin_ctor_info(k);
     if (c->dt != s.dt || !sh_built[k]) continue;
@@ -3236,6 +3256,44 @@ static long *ms_alloc(Marsh *M, long words) {
 }
 static void ms_free(Marsh *M) { for (int i = 0; i < M->nch; i++) free(M->ch[i]); free(M->ch); free(M->mk); free(M->mp); }
 static long ms_value(Marsh *M, Port p, Shape s, int depth);
+/* THE VALUE'S DECLARED TYPE, carried down while reading it in: a field whose type is the datatype's parameter
+   (a Seq's element) is told what it is by the type it was declared at -- `(alts Seq (Seq Piece))` says the
+   elements of the inner Seqs are Pieces, which no shape of `scons` can say for every use of it.
+   Descriptors are src/type.c's: N B F ?, L<elem>, P<i>;, D<name>(<args>). */
+static const char *td_dt(const char *d) {            /* the datatype a D-descriptor names (the registry's own string) */
+  if (!d || *d != 'D') return NULL;
+  const char *e = strchr(d, '('); if (!e) return NULL;
+  size_t nl = (size_t)(e - d - 1); const LinCtor *c;
+  for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt && strlen(c->dt) == nl && !strncmp(c->dt, d + 1, nl)) return c->dt;
+  return NULL;
+}
+static int td_args(const char *d, const char **out, int max) {   /* a D-descriptor's type arguments, each a pointer into it */
+  const char *p = d ? strchr(d, '(') : NULL; int n = 0;
+  if (!p) return 0;
+  for (p++; *p && *p != ')'; p = fd_skip(p)) { if (out && n < max) out[n] = p; n++; }   /* (out NULL: just count them) */
+  return n;
+}
+static char *td_subst(const char *f, const char **args, int na) {   /* a field's descriptor, the parent's arguments put in */
+  size_t cap = 64, len = 0; char *o = malloc(cap);
+  for (const char *p = f; p && *p; ) {
+    const char *piece = p, *end; char tmp[2] = { 0, 0 };
+    if (*p == 'P') { int i = atoi(p + 1); const char *q = strchr(p, ';'); end = q ? q + 1 : p + strlen(p);
+      if (i < na && args[i]) { piece = args[i]; size_t l = (size_t)(fd_skip(args[i]) - args[i]);
+        while (len + l + 1 > cap) o = realloc(o, cap *= 2); memcpy(o + len, piece, l); len += l; p = end; continue; } }
+    else end = p + 1;
+    (void)tmp; size_t l = (size_t)(end - p);
+    while (len + l + 1 > cap) o = realloc(o, cap *= 2); memcpy(o + len, p, l); len += l; p = end;
+  }
+  o[len] = 0; return o;
+}
+static Shape td_shape(const char *d, Shape dflt) {   /* what a descriptor says the value is, or the analysis's shape */
+  if (!d || !*d) return dflt;
+  if (*d == 'N' || *d == 'F') return (Shape){ 1, NULL };
+  if (*d == 'B') return (Shape){ 3, NULL };
+  if (*d == 'D') { const char *dt = td_dt(d); if (dt) return (Shape){ 5, dt }; }
+  return dflt;
+}
+static const char *ms_desc;                          /* the declared type of the value ms_value is about to read */
 static long *ms_seen(Marsh *M, int node, int make) {   /* a value reached twice is one block (the net's sharing kept) */
   if (make && (M->mcnt + 1) * 2 > M->mcap) {
     long *ok = M->mk; Port *op = M->mp; long oc = M->mcap; M->mcap = M->mcap ? M->mcap * 2 : 1024;
@@ -3251,6 +3309,8 @@ static long *ms_seen(Marsh *M, int node, int make) {   /* a value reached twice 
 }
 static long ms_value(Marsh *M, Port p, Shape s, int depth) {
   Net *n = M->n;
+  const char *desc = ms_desc; ms_desc = NULL;
+  s = td_shape(desc, s);
   if (M->bad || depth > n->nn) { M->bad = 1; return 0; }
   if (n->steps - M->steps0 > (long)n->nn) { M->bad = 1; return 0; }   /* (a value in hand needs no reduction to read) */
   if (s.k == 0) {                                    /* a field the analysis saw no use of: what the value IS decides */
@@ -3260,7 +3320,7 @@ static long ms_value(Marsh *M, Port p, Shape s, int depth) {
   }
   if (s.k == 1) { long x; if (!net_read_i64(n, p, &x)) M->bad = 1; return x; }
   if (s.k == 3) { long b = net_read_int(n, p, LIN_ENC_BOOL); if (b < 0) M->bad = 1; return b; }
-  if (s.k != 5) { M->bad = 1; return 0; }
+  if (s.k != 5 || !s.dt) { M->bad = 1; return 0; }   /* (a block of some datatype, not known which: not read in) */
   int box = 0, untag = dt_boxed(s.dt, &box) == 1;
   if (cells_dt && s.dt == cells_dt) {               /* a list: its spine read in a loop */
     long first = 0, *link = &first;
@@ -3273,6 +3333,7 @@ static long ms_value(Marsh *M, Port p, Shape s, int depth) {
         *link = ((long)cell_nil->i << 1) | 1; break;
       }
       long *blk = ms_alloc(M, 2); if (!blk) break;
+      ms_desc = desc && *desc == 'L' ? desc + 1 : NULL;
       blk[0] = ms_value(M, h, hs, depth + 1); *link = (long)blk; link = &blk[1]; p = t;
     }
     return first;
@@ -3293,7 +3354,14 @@ static long ms_value(Marsh *M, Port p, Shape s, int depth) {
     if (blk) {
       if (!untag) blk[0] = ci->i;
       long id = ctor_id(ci);
-      for (int j = 0; j < k && !M->bad; j++) blk[j + !untag] = ms_value(M, fp[j], M->c->fld[id][j], depth + 1);
+      int na = desc ? td_args(desc, NULL, 0) : 0; const char **ta = malloc(sizeof *ta * (size_t)(na + 1)); if (desc) td_args(desc, ta, na); const char *fd = ci->fdesc;
+      for (int j = 0; j < k && !M->bad; j++, fd = fd_skip(fd)) {
+        char *f = desc && fd && *fd ? td_subst(fd, ta, na) : NULL;
+        ms_desc = f;
+        blk[j + !untag] = ms_value(M, fp[j], M->c->fld[id][j], depth + 1);
+        ms_desc = NULL; free(f);
+      }
+      free(ta);
       w = (long)blk;
     }
   }
@@ -3302,7 +3370,12 @@ static long ms_value(Marsh *M, Port p, Shape s, int depth) {
   return w;
 }
 typedef struct { Marsh *M; Port p; Shape s; long w; } MsArg;
-static void *ms_thread(void *u) { MsArg *a = u; a->w = ms_value(a->M, a->p, a->s, 0); return NULL; }
+static void *ms_thread(void *u) {
+  MsArg *a = u;
+  /* (a datatype with no parameters is its own declared type: its fields' descriptors say the rest) */
+  char *top = a->s.k == 5 && a->s.dt ? malloc(strlen(a->s.dt) + 4) : NULL; if (top) { sprintf(top, "D%s()", a->s.dt); ms_desc = top; }
+  a->w = ms_value(a->M, a->p, a->s, 0); ms_desc = NULL; free(top); return NULL;
+}
 static long marshal(Marsh *M, Port p, Shape s) {   /* (on a large stack: data is deep) */
   MsArg a = { M, p, s, 0 };
   pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);

@@ -227,5 +227,12 @@ bm=$(timeout 120 "$LIN_BIN" "$TMP/bm.lin" 2>/dev/null)
 sed 's/(digits 0 2000 1/(digits 0 600 1/' "$ROOT/bench/pidigits.lin" > "$TMP/pd.lin"
 pd=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>"$TMP/pd.err")
 [ "$pd" = "=> 127083" ] && grep -q "dropped where its paths end" "$TMP/pd.err" && ! grep -q "guard fired" "$TMP/pd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600: '$pd'"; }
+# REGULAR EXPRESSIONS compiled: a pattern built in the net is read in -- its Seqs of pieces and of ranges by
+# the types it was declared at, as no single shape of `scons` can say -- and the matching loop runs as C.
+# (A recursive predicate's result is a condition; a parameter-typed field may be taken apart as any datatype.)
+printf '%s\n' '(define f (\r (\s (\n (if (eq n 0) 0 (add (re_count r s) (f r s (sub n 1))))))))' \
+  '(f (regex "a[bc]+d|x[^a-c]y") "xxabcdyyabdaxbdxzy" 400)' > "$TMP/re.lin"
+re=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/re.lin" 2>"$TMP/re.err")
+[ "$re" = "=> 1200" ] && grep -q "folded a call" "$TMP/re.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a compiled regex loop: '$re'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
