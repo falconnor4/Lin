@@ -1359,7 +1359,7 @@ static int emit_arg(Buf *b, Buf *pre, const Expr *call, int i, int par, int budg
    IN ORDER -- the same fold the loop makes, so the answer is the loop's whatever A is.  It is used where the
    caller is itself running in parallel (the entry, a parallel copy), with the depth `d` bounding the nesting. */
 typedef struct { int acc, base_then; const Expr *cond, *step, *G; } PL;
-static PL *plinfo; static unsigned char *pl_done; static int plpar;
+static PL *plinfo; static unsigned char *pl_done; static int plpar, pl_unit;   /* pl_unit: writing a data unit (its runtime has the threads) */
 static int pl_ment(const Expr *e, int f, int k, unsigned char *seen) {   /* does e read parameter k of f? */
   if (!e || seen[e->id]) return 0;
   seen[e->id] = 1;
@@ -1714,7 +1714,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         for (int i = 0; i < e->nargs; i++) free(nm[i].s);
         free(nm); return ok;
       } }
-    if (plpar && pl_ok((int)e->k) && !e->dropx && !e->drops) {   /* (see A LOOP WHOSE STEPS ARE INDEPENDENT) */
+    if (plpar && pl_unit && pl_ok((int)e->k) && !e->dropx && !e->drops) {   /* (see A LOOP WHOSE STEPS ARE INDEPENDENT) */
       int se = emitting; if (!pl_emit(pre, (int)e->k, budget)) return 0; emitting = se;
       put(b, "f%ld_pl(", e->k);
       for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emit_arg(b, pre, e, i, 0, budget - 1)) return 0; }
@@ -3459,10 +3459,11 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       put(&b, "%s", fb.s);
       if (ok && data) {                                /* data: on its own large stack, the tree recursions forked */
         Buf ebp = nbuf(1024);
-        nsite = 0; emitting = 0; fscope++;
+        nsite = 0; emitting = 0; fscope++; pl_unit = 1;
         int pok = !nfv[0] && emit_region(&pb, &pre, funs[0].body, 1, 4096);   /* (the parallel copy is of f0's own parameters) */
         emitting = -1; fscope++; entry_np = nnum;
         pok = pok && emit_region(&ebp, &pre, entry, 1, 4096);
+        pl_unit = 0;
         put(&b, "static int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
         put(&b, "%sint d);\n%s", arity ? ", " : "", pre.s);
         if (pok) { put(&b, "static long fp("); plist(&b, 1); put(&b, "%sint d) { if (d >= dmax) return f0(", arity ? ", " : ""); plist(&b, 0); put(&b, "); return %s; }\n", pb.s); }

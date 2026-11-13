@@ -282,5 +282,12 @@ printf '%s\n' '(datatype P (pr (a num) (b num)))' \
 pl=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pl.lin" 2>"$TMP/pl.err"); pl1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pl.lin" 2>/dev/null)
 pln=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pl.lin" 2>/dev/null)
 [ -n "$pl" ] && [ "$pl1" = "$pl" ] && [ "$pln" = "$pl" ] && grep -q "folds independent steps" "$TMP/pl.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL independent steps folded in order: '$pl' -t 1 '$pl1' net '$pln'"; }
+# A NUMERIC unit whose loop folds an inner loop's result (mandel's shape) still compiles: the parallel fold of
+# independent steps is a data unit's, and a numeric unit has its own parallel reduction.
+printf '%s\n' '(define it (\a (\k (if (eq k 0) a (it (mod (add (mul a a) 7) 1009) (sub k 1))))))' \
+  '(define cl (\y (\x (\acc (if (eq x 0) acc (cl y (sub x 1) (add acc (it (add x y) 50))))))))' \
+  '(define rw (\y (\acc (if (eq y 0) acc (rw (sub y 1) (add acc (cl y 40 0)))))))' '(rw 30 0)' > "$TMP/nm.lin"
+nm=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/nm.lin" 2>"$TMP/nm.err"); nmn=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/nm.lin" 2>/dev/null)
+[ -n "$nm" ] && [ "$nm" = "$nmn" ] && grep -q "folded a call" "$TMP/nm.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a numeric nested loop: '$nm' net '$nmn'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
