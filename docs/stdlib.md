@@ -235,7 +235,7 @@ limbs, and signed integers built on them.
 
 ```scheme
 (big_to_string (big_mul (big_of 123456789012) (big_of 987654321098)))
-; => "121932631137021795224746380"
+; => "121932631136585886175176"
 ```
 
 | Name | Meaning |
