@@ -10,7 +10,7 @@ characters of `s`.
 
 - [Core types](#core-types): [bool](#bool), [num](#num), [float](#float), [math](#math), [pair](#pair), [maybe](#maybe), [either](#either)
 - [Collections](#collections): [list](#list), [sequences](#sequences), [array](#array), [omap](#omap), [hmap](#hmap), [big](#big), [map and set](#map-and-set), [queue](#queue), [stream](#stream), [tree](#tree)
-- [Text](#text): [string](#string), [text](#text-driver)
+- [Text](#text): [string](#string), [regex](#regex), [text](#text-driver)
 - [System](#system): [io](#io), [ffi](#ffi)
 - [Other modules](#other-modules)
 
@@ -317,6 +317,35 @@ A program that declares its own `datatype` with constructors named `leaf` and
 `std/text.lin` (load it explicitly: `(load "std/text.lin")`). Constant-time
 access to a source string through a driver, for programs such as parsers that
 index text heavily: `tlen`, `tget`, `tfind`, `tfindany`, `trun`, `tmatch`, `tsub`.
+
+### regex
+
+`std/regex.lin`. Regular expressions, compiled from their text into a datatype
+and matched by backtracking, leftmost alternative first.
+
+```scheme
+(re_replace (regex "c.t") "dog" "the cat sat on the cot")
+; => "the dog sat on the dog"
+```
+
+| Syntax | Matches |
+|--------|---------|
+| `c`, `\c` | The character `c` |
+| `.` | Any character except a newline |
+| `[abc]`, `[a-z]`, `[^abc]` | A class, a range, a complement |
+| `x*`, `x+`, `x?` | Repetition of the preceding atom, greedy |
+| `p\|q` | Alternatives, at the top level (there are no groups) |
+
+| Name | Meaning |
+|------|---------|
+| `(regex p)` | Compile the pattern text `p` |
+| `(re_find r s)` | Where the first match starts, or -1 |
+| `(re_test r s)` | Whether there is a match |
+| `(re_count r s)` | The number of matches, left to right, not overlapping |
+| `(re_replace r t s)` | Every match replaced by the text `t` |
+
+A match is never empty. The function compiler does not yet compile the
+matcher, so matching long texts is slow.
 
 ## System
 

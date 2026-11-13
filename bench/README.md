@@ -25,27 +25,32 @@ bench/run.sh ./lin       # or: nix run .#bench
 
 ## Results
 
-4-core x86-64, gcc 15. `C / Lin` above 1 means Lin is faster. `binarytrees`, `nbody` and `spectralnorm`
-follow the [Computer Language Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/)
-definitions at reduced sizes.
+4-core x86-64, gcc 15. `C / Lin` above 1 means Lin is faster. Eight of the programs follow the
+[Computer Language Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/)
+definitions, at reduced sizes, and generate their own input so each is a single file.
 
 | Benchmark | C -O3 | Lin | Lin -t 1 | C / Lin | What it exercises |
 |-----------|-------|-----|----------|---------|-------------------|
-| binarytrees | 205 ms | 29 ms | 29 ms | 7.07× | Benchmarks Game *binary-trees*, depth 16: many trees built and checked |
-| bintree | 48 ms | 7 ms | 6 ms | 6.86× | Constructors and `match`: a depth-20 tree (2M nodes) built and counted |
-| seqs | 89 ms | 15 ms | 15 ms | 5.93× | `std/seq.lin`: map, filter and fold over a million-element list |
-| collatz | 248 ms | 62 ms | 221 ms | 4.00× | A loop calling a helper loop; a max-reduction |
-| mandel | 134 ms | 39 ms | 141 ms | 3.44× | Floats; three nested loops over a 1000 × 800 grid |
-| fib | 170 ms | 54 ms | 183 ms | 3.15× | Tree recursion: `fib 40` |
-| loop | 102 ms | 35 ms | 111 ms | 2.91× | A tail-recursive sum over 100 million iterations |
-| tak | 107 ms | 45 ms | 100 ms | 2.38× | Calls whose arguments are calls |
-| bst | 50 ms | 30 ms | 31 ms | 1.67× | A search tree: 200,000 inserts, then a weighted walk |
-| omap | 128 ms | 79 ms | 113 ms | 1.62× | `std/omap.lin`, a red-black tree: 200,000 inserts and lookups |
-| spectralnorm | 61 ms | 43 ms | 117 ms | 1.42× | Benchmarks Game *spectral-norm*, n = 1000: ten power-method steps |
-| nqueens | 218 ms | 177 ms | 234 ms | 1.23× | Bitmask backtracking for n = 14; an unbalanced search tree |
-| words | 6 ms | 13 ms | 13 ms | 0.46× | Text: a 1M-character string built and its words counted |
-| nbody | 18 ms | 50 ms | 55 ms | 0.36× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
-| array | 8 ms | 24 ms | 29 ms | 0.33× | `std/array.lin`: 1M strided writes, then 1M reads |
+| binarytrees | 190 ms | 29 ms | 29 ms | 6.55× | Benchmarks Game *binary-trees*, depth 16 |
+| bintree | 41 ms | 7 ms | 7 ms | 5.86× | Constructors and `match`: a depth-20 tree (2M nodes) built and counted |
+| collatz | 243 ms | 61 ms | 219 ms | 3.98× | A loop calling a helper loop; a max-reduction |
+| seqs | 81 ms | 21 ms | 16 ms | 3.86× | `std/seq.lin`: map, filter and fold over a million-element list |
+| mandel | 129 ms | 36 ms | 136 ms | 3.58× | Floats; three nested loops over a 1000 × 800 grid |
+| loop | 98 ms | 29 ms | 111 ms | 3.38× | A tail-recursive sum over 100 million iterations |
+| fib | 194 ms | 70 ms | 182 ms | 2.77× | Tree recursion: `fib 40` |
+| tak | 103 ms | 48 ms | 114 ms | 2.15× | Calls whose arguments are calls |
+| bst | 59 ms | 29 ms | 29 ms | 2.03× | A search tree: 200,000 inserts, then a weighted walk |
+| omap | 144 ms | 87 ms | 118 ms | 1.66× | `std/omap.lin`, a red-black tree: 200,000 inserts and lookups |
+| nqueens | 209 ms | 165 ms | 235 ms | 1.27× | Bitmask backtracking for n = 14; an unbalanced search tree |
+| spectralnorm | 57 ms | 45 ms | 92 ms | 1.27× | Benchmarks Game *spectral-norm*, n = 1000 |
+| revcomp | 22 ms | 29 ms | 27 ms | 0.76× | Benchmarks Game *reverse-complement*: 1,000,000 letters reversed and complemented |
+| knucleotide | 39 ms | 75 ms | 74 ms | 0.52× | Benchmarks Game *k-nucleotide*: fragment counts in 250,000 letters, with `std/hmap.lin` |
+| fasta | 21 ms | 46 ms | 44 ms | 0.46× | Benchmarks Game *fasta*, n = 100,000: a repeated and two random sequences, checksummed |
+| words | 5 ms | 14 ms | 15 ms | 0.36× | Text: a 1M-character string built and its words counted |
+| nbody | 19 ms | 54 ms | 52 ms | 0.35× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
+| pidigits | 619 ms | 1942 ms | 2111 ms | 0.32× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
+| array | 7 ms | 32 ms | 25 ms | 0.22× | `std/array.lin`: 1M strided writes, then 1M reads |
+| fannkuch | 22 ms | 117 ms | 131 ms | 0.19× | Benchmarks Game *fannkuch-redux*, n = 9: every permutation, by prefix reversals |
 
 The machine these were measured on is shared and noisy; expect variation of
 about 15% between runs. Re-run before quoting a number.
@@ -74,31 +79,29 @@ different values would measure allocation instead, as `bst` and `omap` do.
 
 ## Where Lin is behind
 
-- **`nbody` (about 3× slower).** The program is a map over the list of bodies
-  in which each body folds over that same list, building a new list every step.
-  Compiled code now starts each fold from a copy of the body and updates it in
-  place, and drops the previous step's list once the new one is built, so the
-  run uses a few blocks however long it is. What remains is the inner
-  arithmetic: per interaction the C is still about three times faster, and why
-  has not been measured (the likely cause is that Lin's loop writes each body's
-  velocity back to memory at every interaction where the C keeps it in
-  registers).
-- **`array` (about 3× slower).** A Lin array is a 32-way trie, so an element is
-  four dependent loads away where C does one indexed store. Updates are in place
-  and run as a loop.
-- **`words` (about 3× slower).** A Lin string is a linked list with a 16-byte
-  cell per character; the C scans a byte buffer. Most of what remains is
-  start-up: the C process takes about 2 ms to start here and Lin about 5 ms.
+- **`fannkuch` (about 5×).** Permutations are lists rebuilt at every step; the
+  C flips an array of nine bytes in place.
+- **`array` (about 4×), `words` and `fasta` (about 2–3×).** A persistent trie
+  or linked list against flat C memory, and process start-up: the C starts in
+  about 2 ms, Lin in about 5 ms.
+- **`pidigits` (about 3×).** Arbitrary-precision numbers are persistent lists of
+  limbs in `std/big.lin`; the C updates arrays in place.
+- **`nbody` (about 3×).** Each step folds every body over the whole list; the
+  inner arithmetic is about three times slower per interaction than the C's,
+  and the cause has not been measured.
+- **`knucleotide` and `revcomp` (about 1.3–2×).** List-based text against byte
+  buffers and an open-addressing hash table.
 
-Flat memory is not something a pure net can express directly, so closing the
-`array` gap fully would take a representation change in the function compiler
-rather than a change to the library.
+Flat memory is not something a pure net can express directly, so closing these
+gaps fully would take a representation change in the function compiler rather
+than a change to the library.
 
 ## Programs not yet in the suite
 
-**fannkuch-redux**, **fasta**, **k-nucleotide** and the other Benchmarks Game
-programs have not been written. Each of the three that were added found faults
-in the compiler (see the commit history), so more are worth adding.
+**regex-redux** is written (`bench/pending/`), with `std/regex.lin`, but the
+function compiler declines the regular-expression matcher, so it runs by net
+reduction and is far too slow to time. **mandelbrot** in its Benchmarks Game
+form (bitmap output) is covered by `mandel`.
 
 ## Without the function compiler
 

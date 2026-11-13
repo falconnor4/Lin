@@ -48,23 +48,27 @@ method and the full table):
 
 | Benchmark | C | Lin | Lin vs C |
 |-----------|---|-----|----------|
-| Benchmarks Game binary-trees, depth 16 | 205 ms | 29 ms | 7.1× faster |
-| Map, filter and fold over a 1M-element list | 89 ms | 15 ms | 5.9× faster |
-| Collatz, longest chain below one million | 248 ms | 62 ms | 4.0× faster |
-| Mandelbrot, 1000 × 800, in floats | 134 ms | 39 ms | 3.4× faster |
-| `fib 40`, tree recursion | 170 ms | 54 ms | 3.1× faster |
-| Search tree, 200,000 inserts | 50 ms | 30 ms | 1.7× faster |
-| Red-black map, 200,000 inserts and lookups | 128 ms | 79 ms | 1.6× faster |
-| Benchmarks Game spectral-norm, n = 1000 | 61 ms | 43 ms | 1.4× faster |
-| Benchmarks Game n-body, 200,000 steps | 18 ms | 50 ms | 2.8× slower |
-| Words in a 1M-character string | 6 ms | 13 ms | 2.2× slower |
-| Array, 1M strided writes and reads | 8 ms | 24 ms | 3.0× slower |
+| Benchmarks Game binary-trees, depth 16 | 190 ms | 29 ms | 6.5× faster |
+| Map, filter and fold over a 1M-element list | 81 ms | 21 ms | 3.9× faster |
+| Collatz, longest chain below one million | 243 ms | 61 ms | 4.0× faster |
+| Mandelbrot, 1000 × 800, in floats | 129 ms | 36 ms | 3.6× faster |
+| `fib 40`, tree recursion | 194 ms | 70 ms | 2.8× faster |
+| Search tree, 200,000 inserts | 59 ms | 29 ms | 2.0× faster |
+| Red-black map, 200,000 inserts and lookups | 144 ms | 87 ms | 1.7× faster |
+| Benchmarks Game spectral-norm, n = 1000 | 57 ms | 45 ms | 1.3× faster |
+| Benchmarks Game reverse-complement | 22 ms | 29 ms | 1.3× slower |
+| Benchmarks Game k-nucleotide | 39 ms | 75 ms | 1.9× slower |
+| Benchmarks Game fasta | 21 ms | 46 ms | 2.2× slower |
+| Benchmarks Game n-body | 19 ms | 54 ms | 2.9× slower |
+| Benchmarks Game pidigits, 2,000 digits | 619 ms | 1942 ms | 3.1× slower |
+| Array, 1M strided writes and reads | 7 ms | 32 ms | 4.5× slower |
+| Benchmarks Game fannkuch-redux, n = 9 | 22 ms | 117 ms | 5.3× slower |
 
-Lin is ahead on 12 of the 15 benchmarks: where it runs work in parallel that the
+Lin is ahead on 12 of the 20 benchmarks: where it runs work in parallel that the
 C runs on one core, where it shares a computation the C repeats, and where it
-updates data in place. It is behind where a persistent structure is compared with
-flat mutable memory (`array`, `words`) and in the inner floating-point loop of
-`nbody`.
+updates data in place. It is behind where a persistent structure (a list, a trie,
+limbs of a big number) is compared with flat mutable memory. The full table is in
+[`bench/`](bench/README.md).
 
 ## Quick start
 
@@ -118,7 +122,7 @@ docs/           documentation
 ## Status
 
 Lin is under active development and its interfaces may change. The test suite
-(81 suites, about 1,450 assertions) passes on Linux x86-64. Known gaps are listed
+(84 suites, about 1,500 assertions) passes on Linux x86-64. Known gaps are listed
 in the [language reference](docs/language.md#limitations) and the
 [benchmarks](bench/README.md#where-lin-is-behind).
 
