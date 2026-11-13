@@ -1351,6 +1351,119 @@ static int emit_arg(Buf *b, Buf *pre, const Expr *call, int i, int par, int budg
   }
   return emitx(b, pre, a, par, budget);
 }
+/* A LOOP WHOSE STEPS ARE INDEPENDENT.  f(.., acc) = if c then acc else f(next.., A(acc, G)), where neither the
+   condition nor the next state reads acc, and G -- a call of another loop -- reads only the state: every step's
+   G can be computed before any is folded in.  fannkuch's `each` is one (G: the permutations under one
+   rotation, A: joining their counts), and its G's are most of the program.  The parallel form, fN_pl, walks
+   the states first (the loop's own cheap part), computes every G on worker threads, and folds them into acc
+   IN ORDER -- the same fold the loop makes, so the answer is the loop's whatever A is.  It is used where the
+   caller is itself running in parallel (the entry, a parallel copy), with the depth `d` bounding the nesting. */
+typedef struct { int acc, base_then; const Expr *cond, *step, *G; } PL;
+static PL *plinfo; static unsigned char *pl_done; static int plpar;
+static int pl_ment(const Expr *e, int f, int k, unsigned char *seen) {   /* does e read parameter k of f? */
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_PARAM) return e->nargs == f && e->k == k;
+  if (pl_ment(e->a, f, k, seen) || pl_ment(e->b, f, k, seen) || (e->op != E_CTOR && pl_ment(e->c, f, k, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (pl_ment(e->args[i], f, k, seen)) return 1;
+  return 0;
+}
+static int pl_m(const Expr *e, int f, int k) { unsigned char *seen = calloc((size_t)eid + 1, 1); int r = pl_ment(e, f, k, seen); free(seen); return r; }
+static int pl_params(const Expr *e, int f, unsigned char *seen) {   /* does e read any parameter of f? */
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_PARAM) return e->nargs == f;
+  if (pl_params(e->a, f, seen) || pl_params(e->b, f, seen) || (e->op != E_CTOR && pl_params(e->c, f, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (pl_params(e->args[i], f, seen)) return 1;
+  return 0;
+}
+/* A's parts that do not read acc: one call G, or values that read no parameter at all */
+static int pl_split(const Expr *e, int f, int acc, const Expr **G, unsigned char *seen) {
+  if (!e || seen[e->id]) return 1;
+  seen[e->id] = 1;
+  if (!pl_m(e, f, acc)) {
+    if (e->op == E_CALL && e->k != f) { if (*G && *G != e) return 0; *G = e; return 1; }
+    unsigned char *s2 = calloc((size_t)eid + 1, 1); int r = !pl_params(e, f, s2); free(s2);
+    if (r) return 1;                                 /* (a constant) */
+    if (e->op == E_PARAM || e->op == E_CALL) return 0;   /* (the state, read outside G) */
+  }
+  if (!pl_split(e->a, f, acc, G, seen) || !pl_split(e->b, f, acc, G, seen) || (e->op != E_CTOR && !pl_split(e->c, f, acc, G, seen))) return 0;
+  for (int i = 0; i < e->nargs && e->args; i++) if (!pl_split(e->args[i], f, acc, G, seen)) return 0;
+  return 1;
+}
+static int pl_ok(int f) {
+  if (!plinfo || f < 0 || f >= nfun || (hasd && hasd[f]) || nfv[f] || !funs[f].body) return 0;
+  if (plinfo[f].acc >= 0) return plinfo[f].acc > 0 || plinfo[f].G;   /* (decided: acc 0 with G set is acc 0) */
+  plinfo[f].acc = 0; plinfo[f].G = NULL;
+  const Expr *B = funs[f].body;
+  if (B->op != E_IF) return 0;
+  int then_base = B->b->op == E_PARAM && B->b->nargs == f && B->c->op == E_CALL && B->c->k == f;
+  int else_base = B->c->op == E_PARAM && B->c->nargs == f && B->b->op == E_CALL && B->b->k == f;
+  if (!then_base && !else_base) return 0;
+  const Expr *base = then_base ? B->b : B->c, *step = then_base ? B->c : B->b;
+  int acc = (int)base->k;
+  if (step->nargs != funs[f].arity || pl_m(B->a, f, acc)) return 0;
+  for (int k = 0; k < step->nargs; k++) if (k != acc && pl_m(step->args[k], f, acc)) return 0;
+  const Expr *G = NULL; unsigned char *seen = calloc((size_t)eid + 1, 1);
+  int ok = pl_split(step->args[acc], f, acc, &G, seen); free(seen);
+  if (!ok || !G) return 0;
+  plinfo[f].acc = acc; plinfo[f].base_then = then_base; plinfo[f].cond = B->a; plinfo[f].step = step; plinfo[f].G = G;
+  if (dbg) DBG("f%d folds independent steps: its calls of f%ld run in parallel\n", f, G->k);
+  return 1;
+}
+static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per unit into `pre` */
+  if (pl_done[f]) return 1;
+  pl_done[f] = 1;
+  const PL *L = &plinfo[f]; int ar = funs[f].arity, ok = 1, se = emitting; emitting = f;
+  Buf g = nbuf(1024), w = nbuf(2048);
+  /* G, as a function of the state */
+  put(&g, "static long f%d_g(", f); plistn(&g, 1, ar); put(&g, ", int d) { return ", f);
+  fscope++; ok = emit_region(&g, pre, L->G, 1, budget - 1); put(&g, "; }\n");
+  put(&g, "typedef struct { const long *st; long *g; long n, next; int d; } PL%d;\n", f);
+  put(&g, "static void *plrun%d(void *v) { PL%d *s = v; LIN_TASK_START((size_t)256 << 20);\n", f, f);
+  put(&g, "  for (long i; (i = __sync_fetch_and_add(&s->next, 1)) < s->n; ) s->g[i] = f%d_g(", f);
+  for (int k = 0; k < ar; k++) put(&g, "%ss->st[i * %d + %d]", k ? ", " : "", ar, k);
+  put(&g, ", s->d + 1);\n  return 0; }\n");
+  put(pre, "%s", g.s); free(g.s);
+  put(&w, "static int lin_threads_; static int lin_live;\n");
+  put(&w, "static long f%d_pl(", f); plistn(&w, 1, ar); put(&w, ", int d) {\n");
+  put(&w, "  if (d >= dmax) return f%d(", f); plistn(&w, 0, ar); put(&w, ");\n");
+  put(&w, "  long cap = 16, n = 0; long *st = malloc(sizeof(long) * (size_t)cap * %d);\n", ar);
+  put(&w, "  { long "); for (int k = 0; k < ar; k++) put(&w, "%sq%d = p%d", k ? ", " : "", k, k); put(&w, ";\n    for (;;) {\n      long ");
+  for (int k = 0; k < ar; k++) put(&w, "%sp%d = q%d", k ? ", " : "", k, k); put(&w, ";\n      if (%s(", L->base_then ? "" : "!");
+  fscope++; ok = ok && emit_region(&w, pre, L->cond, 0, budget - 1); put(&w, ")) break;\n");
+  put(&w, "      if (n == cap) st = realloc(st, sizeof(long) * (size_t)(cap *= 2) * %d);\n      ", ar);
+  for (int k = 0; k < ar; k++) put(&w, "st[n * %d + %d] = p%d; ", ar, k, k);
+  put(&w, "n++;\n");
+  for (int k = 0; k < ar && ok; k++) {
+    if (k == L->acc) continue;
+    put(&w, "      long n%d = ", k); fscope++; ok = emit_region(&w, pre, L->step->args[k], 0, budget - 1); put(&w, ";\n");
+  }
+  put(&w, "      "); for (int k = 0; k < ar; k++) if (k != L->acc) put(&w, "q%d = n%d; ", k, k);
+  put(&w, "\n    } }\n");
+  /* every G at once: the threads and this one take states in turn */
+  put(&w, "  long *g = malloc(sizeof(long) * (size_t)(n + 1));\n");
+  put(&w, "  PL%d s = { st, g, n, 0, d }; int T = lin_threads_ > 0 ? lin_threads_ : 1; pthread_t t[T]; int nt = 0;\n", f);
+  put(&w, "  for (int k = 1; k < T && k < n; k++) { if (__sync_add_and_fetch(&lin_live, 1) > 2 * T) { __sync_sub_and_fetch(&lin_live, 1); break; }\n");
+  put(&w, "    if (pthread_create(&t[nt], &attr, plrun%d, &s)) { __sync_sub_and_fetch(&lin_live, 1); break; } nt++; }\n", f);
+  put(&w, "  for (long i; (i = __sync_fetch_and_add(&s.next, 1)) < n; ) g[i] = f%d_g(", f);
+  for (int k = 0; k < ar; k++) put(&w, "%sst[i * %d + %d]", k ? ", " : "", ar, k);
+  put(&w, ", d + 1);\n  for (int k = 0; k < nt; k++) { pthread_join(t[k], 0); __sync_sub_and_fetch(&lin_live, 1); }\n  (void)LIN_JOINED;\n");
+  /* the fold, in order */
+  int gv = nvar++;
+  put(&w, "  long acc = p%d;\n  for (long i = 0; i < n; i++) {\n    long ", L->acc);
+  for (int k = 0; k < ar; k++) { if (k == L->acc) put(&w, "%sp%d = acc", k ? ", " : "", k); else put(&w, "%sp%d = st[i * %d + %d]", k ? ", " : "", k, ar, k); }
+  put(&w, ";\n    ");
+  put(&w, "long v%d = g[i];\n    acc = ", gv);
+  fscope++; Expr *G = (Expr *)L->G; int sv = G->var, ss = G->vscope; G->var = gv; G->vscope = fscope;
+  ok = ok && emit_region(&w, pre, L->step->args[L->acc], 0, budget - 1);
+  G->var = sv; G->vscope = ss;
+  put(&w, ";\n  }\n  free(st); free(g);\n  return acc;\n}\n");
+  put(pre, "%s", w.s); free(w.s);
+  emitting = se;
+  return ok;
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
@@ -1589,6 +1702,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     put(b, ")"); return 1;
   case E_CALL:
     { int calls = 0, entry = par && emitting == -1 && e->k != 0;   /* (the entry: any call's independent loops) */
+      plpar = par && (e->k != 0 || emitting == -1);   /* (f0 has its own parallel copy, but the entry may fold it) */
       par = par && e->k == 0;                      /* only the entry function has a parallel version */
       for (int i = 0; i < e->nargs; i++) calls += heavy(e->args[i]);
       if ((par || entry) && calls >= 2 && !e->clone && !e->dropx && !par_shares((const Expr **)e->args, e->nargs)) {   /* independent calls among the arguments: at once */
@@ -1600,6 +1714,12 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         for (int i = 0; i < e->nargs; i++) free(nm[i].s);
         free(nm); return ok;
       } }
+    if (plpar && pl_ok((int)e->k) && !e->dropx && !e->drops) {   /* (see A LOOP WHOSE STEPS ARE INDEPENDENT) */
+      int se = emitting; if (!pl_emit(pre, (int)e->k, budget)) return 0; emitting = se;
+      put(b, "f%ld_pl(", e->k);
+      for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emit_arg(b, pre, e, i, 0, budget - 1)) return 0; }
+      put(b, ", %s)", emitting == -1 ? "d" : "d + 1"); nsite++; return 1;
+    }
     { int dr = !par && e->dropx && e->dropx->nargs == emitting;   /* (see `drops`) */
       if (dr) put(b, "({ long r_ = ");
       if (par) put(b, "fp("); else put(b, "f%ld(", e->k);
@@ -3263,6 +3383,8 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       for (int ch = 1; ch; ) { ch = 0; for (int i = 0; i < nfun; i++) if (hd[i]) ch |= dp_scan(funs[i].body, i, hd); }
       for (int i = 0; i < nfun; i++) if (hd[i]) { put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ");\n"); }
       hasd = hd;
+      plinfo = A(sizeof *plinfo * (size_t)(nfun + 1)); pl_done = A((size_t)nfun + 1);
+      for (int i = 0; i < nfun; i++) plinfo[i].acc = -1;
       for (int i = 0; ok && i < nfun; i++) {
         put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0);
         emitting = i; fscope++;

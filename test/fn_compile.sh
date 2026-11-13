@@ -273,5 +273,14 @@ printf '%s\n' '(define up (\i (\n (\rest (if (eq i n) rest (scons i (up (add i 1
   '(sm (up 0 1000 (scons 5000 (scons 7 snil))) 0)' > "$TMP/fa.lin"
 fa=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/fa.lin" 2>"$TMP/fa.err"); fan=$(LIN_FN_OFF=1 timeout 120 "$LIN_BIN" "$TMP/fa.lin" 2>/dev/null)
 [ "$fa" = "=> 504507" ] && [ "$fan" = "$fa" ] && grep -q "fused" "$TMP/fa.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL fusion onto a list's own end: '$fa' net '$fan'"; }
+# A LOOP WHOSE STEPS ARE INDEPENDENT: each step's inner loop reads only the step, so all of them run at once
+# and are folded in order -- here with a fold that is not associative (a*3 + x), so order matters.
+printf '%s\n' '(datatype P (pr (a num) (b num)))' \
+  '(define work (\i (\n (\s (if (eq n 0) (pr s i) (work i (sub n 1) (add s (mod (mul i n) 7))))))))' \
+  '(define go (\i (\n (\acc (if (eq i n) acc (go (add i 1) n (match acc ((pr a b) (match (work i 300 0) ((pr x y) (pr (add (mul a 3) x) (add b y))))))))))))' \
+  '(match (go 0 12 (pr 0 0)) ((pr a b) (add (mod a 1000000007) b)))' > "$TMP/pl.lin"
+pl=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pl.lin" 2>"$TMP/pl.err"); pl1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pl.lin" 2>/dev/null)
+pln=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pl.lin" 2>/dev/null)
+[ -n "$pl" ] && [ "$pl1" = "$pl" ] && [ "$pln" = "$pl" ] && grep -q "folds independent steps" "$TMP/pl.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL independent steps folded in order: '$pl' -t 1 '$pl1' net '$pln'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
