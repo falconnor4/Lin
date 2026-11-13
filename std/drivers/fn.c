@@ -957,6 +957,44 @@ static void certain(const Expr *e, ISet c, const Expr ***out, int *n, int *cap) 
   if (*n >= *cap) *out = realloc(*out, (size_t)(*cap = *cap ? *cap * 2 : 16) * sizeof **out);
   (*out)[(*n)++] = e;
 }
+static int has_call(const Expr *e);
+static int fork_open(Buf *b, Buf *pre, const Expr *x, int budget, Buf *call, int *ok);
+static int rf_dep(const Expr *x, const int *ci, unsigned char *seen) {   /* the last binding x reads (-1: none) */
+  if (!x || x->op == E_PARAM || x->op == E_CONST || seen[x->id]) return -1;
+  seen[x->id] = 1;
+  if (ci[x->id] >= 0) return ci[x->id];
+  if (bound(x)) return -1;
+  int m = rf_dep(x->a, ci, seen), t;
+  if ((t = rf_dep(x->b, ci, seen)) > m) m = t;
+  if (x->op != E_CTOR && (t = rf_dep(x->c, ci, seen)) > m) m = t;
+  for (int i = 0; i < x->nargs && x->args; i++) if ((t = rf_dep(x->args[i], ci, seen)) > m) m = t;
+  return m;
+}
+static void rf_pick(const Expr *y, ISet c, const int *ci, unsigned char *seen, const Expr ***fx, int *nf) {
+  if (!y || y->op == E_PARAM || y->op == E_CONST || seen[y->id] || ci[y->id] >= 0 || bound(y) || !in_set(c, y->id)) return;
+  seen[y->id] = 1;
+  if (y->op == E_CALL && st_uses[y->id] == 1 && !y->drops && !y->dropx) { *fx = realloc(*fx, sizeof **fx * (size_t)(*nf + 1)); (*fx)[(*nf)++] = y; return; }
+  rf_pick(y->a, c, ci, seen, fx, nf);
+  if (y->op == E_IF || y->op == E_MATCH) return;     /* (only what is certainly evaluated) */
+  rf_pick(y->b, c, ci, seen, fx, nf); if (y->op != E_CTOR) rf_pick(y->c, c, ci, seen, fx, nf);
+  for (int i = 0; i < y->nargs && y->args; i++) rf_pick(y->args[i], c, ci, seen, fx, nf);
+}
+static void region_forks(const Expr *e, const Expr **cand, int nc, const Expr ***fx, int **fpos, int *nf) {
+  int *ci = malloc(sizeof *ci * (size_t)(eid + 1)); for (int i = 0; i <= eid; i++) ci[i] = -1;
+  for (int i = 0; i < nc; i++) ci[cand[i]->id] = i;
+  int lastheavy = -1; for (int i = 0; i < nc; i++) if (has_call(cand[i])) lastheavy = i;
+  unsigned char *seen = calloc((size_t)eid + 1, 1);
+  const Expr **all = NULL; int na = 0;
+  rf_pick(e, cert(e), ci, seen, &all, &na);
+  *fpos = malloc(sizeof **fpos * (size_t)(na + 1));
+  for (int i = 0; i < na; i++) {
+    memset(seen, 0, (size_t)eid + 1);
+    int at = rf_dep(all[i], ci, seen) + 1;           /* started right after the last binding it reads */
+    if (at <= lastheavy)                             /* (worth it only with a loop still to come beside it) */ { all[*nf] = all[i]; (*fpos)[(*nf)++] = at; }
+  }
+  *fx = all;
+  free(ci); free(seen);
+}
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   st_grow(); stamp += 2;
@@ -969,7 +1007,18 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD) cand[nk++] = x;   /* (a field read is one load: not worth a local) */
   }
   nc = nk;
-  for (int i = 0; i < nc && ok; i++) {
+  /* THE ENTRY'S LOOPS, STARTED EARLY: a loop the expression certainly runs is started on a thread as soon as
+     the bindings it reads exist -- so it runs alongside the loops bound after it (fasta's repeated sequence beside its two random ones, which follow each
+     other) -- and joined where the expression begins. */
+  const Expr **fx = NULL; int *fpos = NULL, nf = 0;
+  if (par && emitting == -1 && nc) region_forks(e, cand, nc, &fx, &fpos, &nf);
+  int *fsite = nf ? calloc((size_t)nf, sizeof *fsite) : NULL; Buf *fcall = nf ? calloc((size_t)nf, sizeof *fcall) : NULL;
+  for (int i = 0; i <= nc && ok; i++) {
+    for (int f = 0; f < nf && ok; f++) if (fpos[f] == i) {
+      if (!nb++) put(b, "({ ");
+      fcall[f] = nbuf(64); fsite[f] = fork_open(b, pre, fx[f], budget, &fcall[f], &ok);
+    }
+    if (i == nc) break;
     Expr *x = (Expr *)cand[i];
     if (!nb++) put(b, "({ ");
     int k = nvar++;                                /* reserved BEFORE the value is written: a binding nested in it takes later numbers */
@@ -979,11 +1028,18 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     x->var = k; x->vscope = fscope;
     cand[i] = x;                                   /* still listed, so it is unbound below */
   }
+  for (int f = 0; f < nf && ok; f++) {             /* (joined before the expression: it is where they are used) */
+    int k = fsite[f], v = nvar++;
+    put(b, "long v%d = sp%d_ ? (pthread_join(t%d_, 0), LIN_JOINED, s%d_.r) : %s; ", v, k, k, k, fcall[f].s);
+    ((Expr *)fx[f])->var = v; ((Expr *)fx[f])->vscope = fscope;
+  }
   tailpos = tp;
   ok = ok && emitx(b, pre, e, par, budget - 1);
   tailpos = 0;
   if (nb) put(b, "; })");
   for (int i = 0; i < nc; i++) if (cand[i]->var >= 0 && cand[i]->vscope == fscope) ((Expr *)cand[i])->var = -1;
+  for (int f = 0; f < nf; f++) { if (fx[f]->var >= 0 && fx[f]->vscope == fscope) ((Expr *)fx[f])->var = -1; free(fcall[f].s); }
+  free(fx); free(fpos); free(fsite); free(fcall);
   free(cand);
   return ok;
 }
@@ -1058,36 +1114,43 @@ static void captures(const Expr *e, unsigned char *seen, const Expr ***out, int 
   captures(e->a, seen, out, n); captures(e->b, seen, out, n); if (e->op != E_CTOR) captures(e->c, seen, out, n);
   for (int i = 0; i < e->nargs && e->args; i++) captures(e->args[i], seen, out, n);
 }
+/* A TASK: x on a new thread (while `d < dmax`), as a function of the parameters and the locals it reads.
+   Writes the start to b; `call` gets the same computation made here, for when no thread was started.
+   Returns the site's number: the join is `sp<k>_ ? (pthread_join(t<k>_, 0), LIN_JOINED, s<k>_.r) : <call>`. */
+static int fork_open(Buf *b, Buf *pre, const Expr *x, int budget, Buf *call, int *ok) {
+  int np = site_np(), k = nsite++;
+  const Expr **cap = NULL; int nc = 0;
+  { unsigned char *seen = calloc((size_t)eid + 1, 1); captures(x, seen, &cap, &nc); free(seen); }
+  Buf sb = nbuf(512);
+  put(&sb, "static long site%d(", k); plistn(&sb, 1, np);
+  for (int c = 0; c < nc; c++) put(&sb, "%slong v%d", np || c ? ", " : "", cap[c]->var);
+  put(&sb, "%sint d) { return ", np || nc ? ", " : "");
+  *ok = emit_region(&sb, pre, x, 1, budget - 1);   /* (the same scope: the locals it reads are its parameters) */
+  put(&sb, "; }\ntypedef struct { long p[%d]; long v[%d]; int d; long r; } S%d;\n", np + 1, nc + 1, k);
+  put(&sb, "static void *run%d(void *v) { S%d *s = v; LIN_TASK_START((size_t)256 << 20); s->r = site%d(", k, k, k);
+  for (int j = 0; j < np; j++) put(&sb, "s->p[%d], ", j);
+  for (int c = 0; c < nc; c++) put(&sb, "s->v[%d], ", c);
+  put(&sb, "s->d); return 0; }\n");
+  put(pre, "%s", sb.s); free(sb.s);
+  put(b, "S%d s%d_ = { {", k, k); plistn(b, 0, np); put(b, "%s}, {", np ? "" : "0");
+  for (int c = 0; c < nc; c++) put(b, "%sv%d", c ? ", " : "", cap[c]->var);
+  put(b, "%s}, d, 0 }; pthread_t t%d_; ", nc ? "" : "0", k);
+  put(b, "int sp%d_ = d < dmax && !pthread_create(&t%d_, &attr, run%d, &s%d_); ", k, k, k, k);
+  put(call, "site%d(", k); plistn(call, 0, np);
+  for (int c = 0; c < nc; c++) put(call, "%sv%d", np || c ? ", " : "", cap[c]->var);
+  put(call, "%sd)", np || nc ? ", " : "");
+  free(cap);
+  return k;
+}
 static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int budget) {
-  int last = -1, ok = 1, np = site_np();
+  int last = -1, ok = 1;
   for (int i = 0; i < n; i++) if (heavy(xs[i])) last = i;
   put(b, "({ ");
   int *site = calloc((size_t)n, sizeof *site);
   for (int i = 0; ok && i < n; i++) {
     site[i] = -1;
     if (!heavy(xs[i]) || i == last) continue;
-    int k = site[i] = nsite++;
-    const Expr **cap = NULL; int nc = 0;
-    { unsigned char *seen = calloc((size_t)eid + 1, 1); captures(xs[i], seen, &cap, &nc); free(seen); }
-    Buf sb = nbuf(512);            /* the site: this operand as a function of the parameters and the locals it reads */
-    put(&sb, "static long site%d(", k); plistn(&sb, 1, np);
-    for (int c = 0; c < nc; c++) put(&sb, "%slong v%d", np || c ? ", " : "", cap[c]->var);
-    put(&sb, "%sint d) { return ", np || nc ? ", " : "");
-    ok = emit_region(&sb, pre, xs[i], 1, budget - 1);   /* (the same scope: the locals it reads are its parameters) */
-    put(&sb, "; }\ntypedef struct { long p[%d]; long v[%d]; int d; long r; } S%d;\n", np + 1, nc + 1, k);
-    put(&sb, "static void *run%d(void *v) { S%d *s = v; LIN_TASK_START((size_t)256 << 20); s->r = site%d(", k, k, k);
-    for (int j = 0; j < np; j++) put(&sb, "s->p[%d], ", j);
-    for (int c = 0; c < nc; c++) put(&sb, "s->v[%d], ", c);
-    put(&sb, "s->d); return 0; }\n");
-    put(pre, "%s", sb.s); free(sb.s);
-    put(b, "S%d s%d_ = { {", k, k); plistn(b, 0, np); put(b, "%s}, {", np ? "" : "0");
-    for (int c = 0; c < nc; c++) put(b, "%sv%d", c ? ", " : "", cap[c]->var);
-    put(b, "%s}, d, 0 }; pthread_t t%d_; ", nc ? "" : "0", k);
-    put(b, "int sp%d_ = d < dmax && !pthread_create(&t%d_, &attr, run%d, &s%d_); ", k, k, k, k);
-    Buf call = nbuf(128); put(&call, "site%d(", k); plistn(&call, 0, np);
-    for (int c = 0; c < nc; c++) put(&call, "%sv%d", np || c ? ", " : "", cap[c]->var);
-    put(&call, "%sd)", np || nc ? ", " : "");
-    put(&names[i], "%s", call.s); free(call.s); free(cap);   /* (kept until the join below is written) */
+    site[i] = fork_open(b, pre, xs[i], budget, &names[i], &ok);   /* (names[i]: the call, until the join is written) */
   }
   int self = nvar++;
   for (int i = 0; ok && i < n; i++) {             /* the last call-containing operand, on this thread */

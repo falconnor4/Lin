@@ -254,5 +254,13 @@ printf '%s\n' '(define mk (\n (\a (if (eq n 0) a (mk (sub n 1) (scons n a))))))'
   '(let ((l (mk 1000 snil))) (add (sq l 0) (cu l 0)))' > "$TMP/pe.lin"
 pe=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pe.lin" 2>"$TMP/pe.err"); pe1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pe.lin" 2>/dev/null)
 [ "$pe" = "=> 250834083500" ] && [ "$pe1" = "$pe" ] && grep -q "[1-9][0-9]* parallel site" "$TMP/pe.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL independent loops in parallel: '$pe' '$pe1'"; }
+# A LOOP STARTED EARLY: `cu` needs only the list, so it runs while `sq`'s result -- bound, being used twice -- is
+# computed.
+printf '%s\n' '(define mk (\n (\a (if (eq n 0) a (mk (sub n 1) (scons n a))))))' \
+  '(define sq (\s (\t (match s (snil t) ((scons h r) (sq r (add t (mul h h))))))))' \
+  '(define cu (\s (\t (match s (snil t) ((scons h r) (cu r (add t (mul h (mul h h)))))))))' \
+  '(let ((l (mk 1000 snil))) (let ((a (sq l 0))) (add (add a a) (cu l 0))))' > "$TMP/pf.lin"
+pf=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pf.lin" 2>"$TMP/pf.err"); pf1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pf.lin" 2>/dev/null)
+[ "$pf" = "=> 251167917000" ] && [ "$pf1" = "$pf" ] && grep -q "[1-9][0-9]* parallel site" "$TMP/pf.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a loop started early: '$pf' '$pf1'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
