@@ -627,6 +627,8 @@ static Expr *to_expr(V *v) {                       /* one answer per value: a sh
   if (!v->x) v->x = to_expr_v(v);
   return v->x;
 }
+#define SMALL_CONST_NODES 65536
+static int small_data(const Net *n, Port p, int limit); static int const_tree(const Expr *e, int depth); static Expr *const_cells(V *v);
 static Expr *to_expr_v(V *v) {
   if (v->k == V_COND) {
     Expr *e = mke(E_IF, 1); e->a = v->e; e->b = to_expr(force(v->a)); e->c = to_expr(force(v->b));
@@ -648,6 +650,12 @@ static Expr *to_expr_v(V *v) {
     if (!ok) { failed = sf; fuel = sfu; fun_rollback(snf); }
     if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
     if (inp_on && !v->env && numeral_shape(N, (Port){v->lam, 0}) && !list_end(N, (Port){v->lam, 0})) {   /* a list already built: read in at call time */
+      if (small_data(N, (Port){v->lam, 0}, SMALL_CONST_NODES)) {   /* (a short one of pure data is a constant of the unit) */
+        int sf = failed, snf = nfun; long sfu = fuel;
+        fail_quiet++; Expr *cl = const_cells(v); if (failed) cl = NULL; fail_quiet--;
+        if (cl && const_tree(cl, 0)) return cl;
+        failed = sf; fuel = sfu; fun_rollback(snf);
+      }
       Expr *pe = mke(E_PARAM, 1); pe->k = input_of((Port){v->lam, 0}); pe->nargs = -1; return hc(pe);
     }
     Expr *cl = const_cells(v);                       /* a list (a string): its cells, as constructors */
@@ -1446,7 +1454,8 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     uses_data = 1;
     /* the scrutinee once, in a local the branches read it by (a reused block is named by it, never recomputed) */
     int sv = nvar++;
-    put(b, "({ long v%d = ", sv); if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
+    put(b, "({ long v%d = ", sv);
+    if (!emitx(b, pre, e->a, par, budget - 1)) return 0;
     put(b, "; long _s = v%d", sv);
     Expr *sx = (Expr *)e->a; int sx_var = sx->var, sx_scope = sx->vscope;
     if (sx->op != E_PARAM && sx->op != E_CONST) { sx->var = sv; sx->vscope = fscope; }
@@ -3453,6 +3462,64 @@ static int numeral_shape(const Net *n, Port p) {
   Port hd = dhop(n, W(n, (Port){ia.node, 0}));
   return hd.node == c.node && hd.port == 1;          /* a cell applies its own first binder */
 }
+/* A SMALL CONSTANT already in the net -- n-body's five bodies, fasta's alphabets -- is compiled into the unit
+   rather than read in at call time: the unit then has no inputs, and the program cache can answer for the
+   whole program on the next run (a unit that reads data in is computed afresh every time).  How small: the
+   value's own structure (below its root, through sharing) within a bound, so a long list built at run time is
+   still read in. */
+static int small_data(const Net *n, Port p, int limit) {
+  int *stk = malloc(sizeof *stk * (size_t)(limit + 8)), sp = 0, cnt = 0;
+  unsigned char *seen = calloc((size_t)n->nn, 1);
+  Port q = dhop(n, p); stk[sp++] = q.node; seen[q.node] = 1;
+  while (sp > 0 && cnt <= limit) {
+    int a = stk[--sp]; cnt++;
+    int t = n->tag[a], ks[2], nk = 0;
+    if (t == LAM) ks[nk++] = 2;
+    else if (t == APP) { ks[nk++] = 0; ks[nk++] = 2; }
+    else if (t == DUP) ks[nk++] = 0;
+    for (int i = 0; i < nk; i++) {
+      Port w = W(n, (Port){a, ks[i]});
+      if (!live(n, w) || seen[w.node]) continue;
+      int tw = n->tag[w.node];
+      if (tw == ROOT) { cnt = limit + 1; break; }
+      seen[w.node] = 1; if (sp < limit + 4) stk[sp++] = w.node;
+    }
+  }
+  free(stk); free(seen);
+  return cnt <= limit;
+}
+static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum);
+/* (A list cell whose head is a non-empty list is also the SHAPE of a foreign call -- `\_ffi.\_ret.((_ffi name)
+   args)`, its head the symbol's name -- and a call is no constant: such a value is never taken for one.) */
+static int const_tree(const Expr *e, int depth) {   /* constructors and numbers only: data, not a computation */
+  if (!e) return 0;
+  if (e->op == E_CONST) return 1;
+  if (e->op != E_CTOR) return 0;
+  if (cell_cons && e->ci == cell_cons && e->nargs > 0 && e->args[0]->op == E_CTOR && e->args[0]->ci == cell_cons) return 0;
+  for (int i = 0; i < e->nargs; i++) if (!const_tree(e->args[i], depth + 1)) return 0;
+  return 1;
+}
+static int const_data(Net *n, Port p) {             /* does this value read as pure data? (a speculative read) */
+  N = n; failed = 0; fuel = 1000000; nfun = 0; eid = 0; hc_reset(); inp_on = 0;
+  fail_quiet++; V *v = eval(p, NULL); Expr *x = v && !failed ? to_expr(v) : NULL; fail_quiet--;
+  int ok = x && !failed && const_tree(x, 0);
+  failed = 0; nfun = 0; arena_free(); hc_reset();
+  return ok;
+}
+/* The unit with its small constants compiled in (small_data), else as it was asked for.  `an` is updated to
+   the arguments the unit that compiled takes. */
+static Compiled *compile_pref(Net *n, int F, const Port *ap, int *an, int car) {
+  int an2[8], diff = 0;
+  for (int k = 0; k < car; k++) { an2[k] = an[k]; if (an[k] == 2 && small_data(n, ap[k], SMALL_CONST_NODES) && const_data(n, ap[k])) { an2[k] = 0; diff = 1; } }
+  if (diff) {
+    int sc = cx_n; Port *sp = NULL; int *sk = NULL;
+    if (sc) { sp = malloc(sizeof *sp * (size_t)sc); sk = malloc(sizeof *sk * (size_t)sc); memcpy(sp, cx_port, sizeof *sp * (size_t)sc); memcpy(sk, cx_kind, sizeof *sk * (size_t)sc); }
+    Compiled *c = compile_fn_ex(n, F, ap, an2);
+    if (c) { for (int k = 0; k < car; k++) an[k] = an2[k]; free(sp); free(sk); DBG("(small constants compiled in)\n"); return c; }
+    if (sc) { memcpy(cx_port, sp, sizeof *sp * (size_t)sc); memcpy(cx_kind, sk, sizeof *sk * (size_t)sc); } cx_n = sc; free(sp); free(sk);
+  }
+  return compile_fn_ex(n, F, ap, an);
+}
 static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
   (void)limit;
   int folded = 0;
@@ -3500,18 +3567,18 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
         if (root_mode) {                              /* (see fn_match) */
           Port rp = W(n, (Port){0, 0});
           cx_n = 0; cx_push(2, rp);
-          c2 = compile_fn_ex(n, F, ap, an);
+          c2 = compile_pref(n, F, ap, an, car);
           cx_n = 0; all = 0;
           if (!c2) { free(tops); return folded; }
           cl = rp.node; DBG("(the whole expression is the unit)\n");
         }
         for (; cx_n > 0 && !c2; cx_n--) {             /* the widest context that compiles */
-          c2 = compile_fn_ex(n, F, ap, an);
+          c2 = compile_pref(n, F, ap, an, car);
           if (c2) cl = tops[cx_n];
         }
         if (all && !c2) DBG("(no context of the call compiles: the call alone)\n");
         free(tops); cx_n = 0;
-        if (!c2 && !root_mode) c2 = compile_fn_ex(n, F, ap, an);
+        if (!c2 && !root_mode) c2 = compile_pref(n, F, ap, an, car);
         double t_c1 = now_ms();
         if (c2) {
           int nn = 0, pi = 0;
