@@ -1,0 +1,66 @@
+; ==============================================================================
+; Lin Standard Library: HMap -- a hash map (a 32-way hash trie)
+; ==============================================================================
+; A map from integer keys to values with insert and lookup in a handful of steps
+; whatever its size: the key is hashed, and five bits of the hash at a time choose
+; one of a node's 32 subtrees.  It is a datatype and `match`, so it is typed,
+; persistent, and compiled -- and a map nothing else holds is updated in place.
+; Keys are not kept in order; for that, see std/omap.lin.
+;
+;   hmap_empty
+;   (hmap_insert k v m)      k now maps to v
+;   (hmap_get k d m)         the value at k, or d
+;   (hmap_has k m)
+;   (hmap_alter f d k m)     the value at k becomes (f old), old being d when k is absent
+;   (hmap_add k n m)         n added to the count at k (absent counts as 0)
+;   (hmap_size m)
+;   (hmap_fold f z m)        f acc key value, in no particular order
+; ==============================================================================
+
+(load "bool.lin")
+(load "num.lin")
+
+(namespace hmap)
+
+; nothing; one entry (and, only at the last level, the entries its hash collides with); 32 subtrees
+(datatype (HMap v) (hempty) (hleaf (key num) (val v) (more HMap v))
+  (hnode (c0 HMap v) (c1 HMap v) (c2 HMap v) (c3 HMap v) (c4 HMap v) (c5 HMap v) (c6 HMap v) (c7 HMap v) (c8 HMap v) (c9 HMap v) (c10 HMap v) (c11 HMap v) (c12 HMap v) (c13 HMap v) (c14 HMap v) (c15 HMap v) (c16 HMap v) (c17 HMap v) (c18 HMap v) (c19 HMap v) (c20 HMap v) (c21 HMap v) (c22 HMap v) (c23 HMap v) (c24 HMap v) (c25 HMap v) (c26 HMap v) (c27 HMap v) (c28 HMap v) (c29 HMap v) (c30 HMap v) (c31 HMap v)))
+
+(define hmap_empty hempty)
+
+; the hash, and the five bits of it that level d reads (twelve levels: sixty bits)
+(define _hash (\k (let ((x (mul k -7046029254386353131))) (bxor x (shr x 29)))))
+(define _digit (\h (\d (band (shr h (mul 5 d)) 31))))
+(define _pick (\k (\c0 (\c1 (\c2 (\c3 (\c4 (\c5 (\c6 (\c7 (\c8 (\c9 (\c10 (\c11 (\c12 (\c13 (\c14 (\c15 (\c16 (\c17 (\c18 (\c19 (\c20 (\c21 (\c22 (\c23 (\c24 (\c25 (\c26 (\c27 (\c28 (\c29 (\c30 (\c31 (if (lt k 16) (if (lt k 8) (if (lt k 4) (if (lt k 2) (if (lt k 1) c0 c1) (if (lt k 3) c2 c3)) (if (lt k 6) (if (lt k 5) c4 c5) (if (lt k 7) c6 c7))) (if (lt k 12) (if (lt k 10) (if (lt k 9) c8 c9) (if (lt k 11) c10 c11)) (if (lt k 14) (if (lt k 13) c12 c13) (if (lt k 15) c14 c15)))) (if (lt k 24) (if (lt k 20) (if (lt k 18) (if (lt k 17) c16 c17) (if (lt k 19) c18 c19)) (if (lt k 22) (if (lt k 21) c20 c21) (if (lt k 23) c22 c23))) (if (lt k 28) (if (lt k 26) (if (lt k 25) c24 c25) (if (lt k 27) c26 c27)) (if (lt k 30) (if (lt k 29) c28 c29) (if (lt k 31) c30 c31)))))))))))))))))))))))))))))))))))))))
+; a node holding one entry, at slot i
+(define _single (\i (\leaf (hnode (if (eq i 0) leaf hempty) (if (eq i 1) leaf hempty) (if (eq i 2) leaf hempty) (if (eq i 3) leaf hempty) (if (eq i 4) leaf hempty) (if (eq i 5) leaf hempty) (if (eq i 6) leaf hempty) (if (eq i 7) leaf hempty) (if (eq i 8) leaf hempty) (if (eq i 9) leaf hempty) (if (eq i 10) leaf hempty) (if (eq i 11) leaf hempty) (if (eq i 12) leaf hempty) (if (eq i 13) leaf hempty) (if (eq i 14) leaf hempty) (if (eq i 15) leaf hempty) (if (eq i 16) leaf hempty) (if (eq i 17) leaf hempty) (if (eq i 18) leaf hempty) (if (eq i 19) leaf hempty) (if (eq i 20) leaf hempty) (if (eq i 21) leaf hempty) (if (eq i 22) leaf hempty) (if (eq i 23) leaf hempty) (if (eq i 24) leaf hempty) (if (eq i 25) leaf hempty) (if (eq i 26) leaf hempty) (if (eq i 27) leaf hempty) (if (eq i 28) leaf hempty) (if (eq i 29) leaf hempty) (if (eq i 30) leaf hempty) (if (eq i 31) leaf hempty)))))
+
+(define _get (\k (\h (\dflt (\d (\t (match t
+  (hempty dflt)
+  ((hleaf lk lv more) (if (eq lk k) lv (_get k h dflt d more)))
+  ((hnode c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31) (_get k h dflt (add d 1) (_pick (_digit h d) c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31))))))))))
+; an entry met where a node belongs moves one level down, into a node of its own, and the insert goes on there
+(define _alter (\f (\dflt (\k (\h (\d (\t (match t
+  (hempty (hleaf k (f dflt) hempty))
+  ((hleaf lk lv more) (if (eq lk k) (hleaf lk (f lv) more)
+    (if (geq d 12) (hleaf lk lv (_alter f dflt k h d more))
+      (_alter f dflt k h d (_single (_digit (_hash lk) d) (hleaf lk lv hempty))))))
+  ((hnode c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31) (let ((i (_digit h d))) (hnode (if (eq i 0) (_alter f dflt k h (add d 1) c0) c0) (if (eq i 1) (_alter f dflt k h (add d 1) c1) c1) (if (eq i 2) (_alter f dflt k h (add d 1) c2) c2) (if (eq i 3) (_alter f dflt k h (add d 1) c3) c3) (if (eq i 4) (_alter f dflt k h (add d 1) c4) c4) (if (eq i 5) (_alter f dflt k h (add d 1) c5) c5) (if (eq i 6) (_alter f dflt k h (add d 1) c6) c6) (if (eq i 7) (_alter f dflt k h (add d 1) c7) c7) (if (eq i 8) (_alter f dflt k h (add d 1) c8) c8) (if (eq i 9) (_alter f dflt k h (add d 1) c9) c9) (if (eq i 10) (_alter f dflt k h (add d 1) c10) c10) (if (eq i 11) (_alter f dflt k h (add d 1) c11) c11) (if (eq i 12) (_alter f dflt k h (add d 1) c12) c12) (if (eq i 13) (_alter f dflt k h (add d 1) c13) c13) (if (eq i 14) (_alter f dflt k h (add d 1) c14) c14) (if (eq i 15) (_alter f dflt k h (add d 1) c15) c15) (if (eq i 16) (_alter f dflt k h (add d 1) c16) c16) (if (eq i 17) (_alter f dflt k h (add d 1) c17) c17) (if (eq i 18) (_alter f dflt k h (add d 1) c18) c18) (if (eq i 19) (_alter f dflt k h (add d 1) c19) c19) (if (eq i 20) (_alter f dflt k h (add d 1) c20) c20) (if (eq i 21) (_alter f dflt k h (add d 1) c21) c21) (if (eq i 22) (_alter f dflt k h (add d 1) c22) c22) (if (eq i 23) (_alter f dflt k h (add d 1) c23) c23) (if (eq i 24) (_alter f dflt k h (add d 1) c24) c24) (if (eq i 25) (_alter f dflt k h (add d 1) c25) c25) (if (eq i 26) (_alter f dflt k h (add d 1) c26) c26) (if (eq i 27) (_alter f dflt k h (add d 1) c27) c27) (if (eq i 28) (_alter f dflt k h (add d 1) c28) c28) (if (eq i 29) (_alter f dflt k h (add d 1) c29) c29) (if (eq i 30) (_alter f dflt k h (add d 1) c30) c30) (if (eq i 31) (_alter f dflt k h (add d 1) c31) c31))))))))))))
+
+(define hmap_alter (\f (\dflt (\k (\m (_alter f dflt k (_hash k) 0 m))))))
+(define hmap_insert (\k (\v (\m (_alter (\old v) v k (_hash k) 0 m)))))
+(define hmap_add (\k (\n (\m (_alter (\old (add old n)) 0 k (_hash k) 0 m)))))
+(define hmap_get (\k (\dflt (\m (_get k (_hash k) dflt 0 m)))))
+(define _absent (\k (\h (\d (\t (match t
+  (hempty true)
+  ((hleaf lk lv more) (if (eq lk k) false (_absent k h d more)))
+  ((hnode c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31) (_absent k h (add d 1) (_pick (_digit h d) c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31)))))))))
+(define hmap_has (\k (\m (not (_absent k (_hash k) 0 m)))))
+(define hmap_fold (\f (\z (\m (match m
+  (hempty z)
+  ((hleaf k v more) (hmap_fold f (f z k v) more))
+  ((hnode c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29 c30 c31) (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f (hmap_fold f z c0) c1) c2) c3) c4) c5) c6) c7) c8) c9) c10) c11) c12) c13) c14) c15) c16) c17) c18) c19) c20) c21) c22) c23) c24) c25) c26) c27) c28) c29) c30) c31)))))))
+(define hmap_size (\m (hmap_fold (\n (\k (\v (add n 1)))) 0 m)))
+
+(namespace _)
+(export hmap)

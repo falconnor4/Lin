@@ -9,7 +9,7 @@ Arguments are listed in application order: `(str_take k s)` takes the first `k`
 characters of `s`.
 
 - [Core types](#core-types): [bool](#bool), [num](#num), [float](#float), [math](#math), [pair](#pair), [maybe](#maybe), [either](#either)
-- [Collections](#collections): [list](#list), [sequences](#sequences), [array](#array), [omap](#omap), [map and set](#map-and-set), [queue](#queue), [stream](#stream), [tree](#tree)
+- [Collections](#collections): [list](#list), [sequences](#sequences), [array](#array), [omap](#omap), [hmap](#hmap), [map and set](#map-and-set), [queue](#queue), [stream](#stream), [tree](#tree)
 - [Text](#text): [string](#string), [text](#text-driver)
 - [System](#system): [io](#io), [ffi](#ffi)
 - [Other modules](#other-modules)
@@ -204,6 +204,29 @@ lookup, keys kept in order.
 | `(omap_size m)` | Number of entries |
 | `(omap_fold f z m)` | Fold in key order, `(f acc key value)` |
 | `(omap_keys m)`, `(omap_values m)` | Keys or values, as sequences in key order |
+
+### hmap
+
+`std/hmap.lin`. A hash map from integer keys: a 32-way hash trie, so insert and
+lookup take a handful of steps whatever the size. Persistent, and updated in
+place when nothing else holds it. Keys are not kept in order.
+
+```scheme
+(hmap_get 7 0 (hmap_add 7 1 (hmap_add 7 1 hmap_empty)))
+; => 2
+```
+
+| Name | Meaning |
+|------|---------|
+| `hmap_empty` | The empty map |
+| `(hmap_insert k v m)` | `k` now maps to `v` |
+| `(hmap_get k d m)`, `(hmap_has k m)` | The value at `k`, or `d`; membership |
+| `(hmap_alter f d k m)` | The value at `k` becomes `(f old)`, where `old` is `d` when `k` is absent |
+| `(hmap_add k n m)` | Add `n` to the count at `k` (absent counts as 0) |
+| `(hmap_size m)` | Number of entries |
+| `(hmap_fold f z m)` | Fold over the entries, `(f acc key value)`, in no particular order |
+
+Use `omap` when keys must come out in order, `hmap` otherwise.
 
 ### map and set
 
