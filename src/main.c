@@ -583,11 +583,15 @@ void eval_form(Term *t) {
   net_free(&net); term_free(ex);
 }
 
+static const char *qualify_self;   /* the definition being read: its own name is bound by its fixpoint */
 static void qualify_free(Term *t, Guard *b) {
   if (!t) return;
   if (t->type == TVAR && !strchr(t->name, '.') && !guard_has(b, t->name) && curr_ns[0]) {
     Def *qd = lookup_raw(dotted(curr_ns, t->name));
     if (qd) t->name = qd->name;
+    /* a name defined nowhere yet is one this namespace defines further down: two of its definitions that call
+       each other (the first names the second before it exists) */
+    else if (!def_find(t->name) && !(qualify_self && !strcmp(t->name, qualify_self))) t->name = lin_internf("%s.%s", curr_ns, t->name);   /* (its own name: the fixpoint binds it) */
   }
   int bound = (t->type == TLAM || t->type == TLET);   /* a let's name is bound in its value and body */
   if (bound) guard_push(b, t->name);
@@ -662,7 +666,7 @@ static void process_def(Term *t) {
   Scheme sch; sch.nq = 0; sch.t = NULL;   /* TDEF's scheme is inferred on first reference; TDEFX's IS the annotation */
   int rec = term_refs(t->l, t->name);
   if (t->type == TDEFX) sch = scheme_all((Type *)t->annot);
-  Guard b = {0}; qualify_free(t->l, &b); free(b.names);
+  Guard b = {0}; qualify_self = t->name; qualify_free(t->l, &b); qualify_self = NULL; free(b.names);
   Def *d = &defs[ndefs++];
   if (curr_ns[0] && !strchr(t->name, '.')) {
     const char *qn = lin_internf("%s.%s", curr_ns, t->name);

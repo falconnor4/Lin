@@ -1,0 +1,32 @@
+; std/regex.lin: regular expressions (checked against Python's re)
+
+(re_count (regex "agggtaaa|tttaccct") "xxagggtaaayytttaccctagggtaaa")
+; expect => 3
+
+(re_count (regex "[cgt]gggtaaa|tttaccc[acg]") "cgggtaaa tttaccca agggtaaa")
+; expect => 2
+
+(re_find (regex "b+") "aaabbbc")
+; expect => 3
+
+(re_test (regex "x") "abc")
+; expect => false
+
+(re_replace (regex "a[NSt]|BY") "<2>" "aNxBYat")
+; expect => "<2>x<2><2>"
+
+(re_replace (regex "<[^>]*>") "|" "x<2>y<3>z")
+; expect => "x|y|z"
+
+(re_replace (regex "\\|[^|][^|]*\\|") "-" "a|b|c|d")
+; expect => "a-c|d"
+
+; a match is never empty
+(re_count (regex "a*") "baaab")
+; expect => 1
+
+(re_replace (regex "c.t") "dog" "the cat sat on the cot")
+; expect => "the dog sat on the dog"
+
+(re_count (regex "[a-c]") "abcdefcba")
+; expect => 6
