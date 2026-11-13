@@ -1,0 +1,27 @@
+; k-nucleotide (Computer Language Benchmarks Game): in a DNA sequence of 250,000 letters drawn by the
+; benchmark's generator, count every fragment of length 1 and 2 and five given fragments, with a map from
+; fragment to count.  The answer combines the number of distinct fragments of each length and the counts.
+(define next (\seed (mod (add (mul seed 3877) 29573) 139968)))
+(define base (\s (if (lt s 42403) 0 (if (lt s 70117) 1 (if (lt s 97768) 2 3)))))
+(define draw (\k (\seed (if (eq k 0) snil (let ((s (next seed))) (scons (base s) (draw (sub k 1) s)))))))
+; every fragment of length k, as a number in base 4: `have` letters are in `code` so far
+(define count (\k (\mask (\s (\have (\code (\m (match s (snil m) ((scons h t)
+  (let ((c (band (add (mul code 4) h) mask)))
+    (if (lt (add have 1) k) (count k mask t (add have 1) c m)
+      (count k mask t have c (imap_insert c (add 1 (imap_get c 0 m)) m)))))))))))))
+(define frags (\k (\s (count k (sub (shl 1 (mul 2 k)) 1) s 0 0 omap_empty))))
+(define code (\s (\acc (match s (snil acc) ((scons h t) (code t (add (mul acc 4) h)))))))
+(define seq (draw 250000 42))
+(define of (\l (code (seq_of_list l) 0)))
+(define m1 (frags 1 seq))
+(define m2 (frags 2 seq))
+; G G T A T T T T A A T T T A T A G T, as bases a=0 c=1 g=2 t=3
+(define g3 (scons 2 (scons 2 (scons 3 snil))))
+(define g4 (sappend g3 (scons 0 snil)))
+(define g6 (sappend g4 (scons 3 (scons 3 snil))))
+(define g12 (sappend g6 (scons 3 (scons 3 (scons 0 (scons 0 (scons 3 (scons 3 snil))))))))
+(define g18 (sappend g12 (scons 3 (scons 0 (scons 3 (scons 0 (scons 2 (scons 3 snil))))))))
+(define hits (\k (\g (imap_get (code g 0) 0 (frags k seq)))))
+(add (mul 1000000 (add (omap_size m1) (omap_size m2)))
+  (add (imap_get 0 0 m1) (add (imap_get 15 0 m2)
+    (add (hits 3 g3) (add (hits 4 g4) (add (hits 6 g6) (add (hits 12 g12) (hits 18 g18))))))))

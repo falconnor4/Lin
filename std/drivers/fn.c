@@ -2357,6 +2357,9 @@ static Shape shape_of(const Expr *e) {
       sh_upd(&sh_par[e->k][i], a);
       const Expr *x = e->args[i];                    /* an argument passed in takes the parameter's shape */
       if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], sh_par[e->k][i]);
+      /* (and a function's own parameter handed to one that is taken apart is that datatype too: `src` in
+         `(repeat src src ...)` is only ever passed along, to the parameter that walks it) */
+      else if (x->op == E_PARAM && x->nargs >= 0 && x->nargs < nfun && sh_par[e->k][i].k == 5) sh_upd(&sh_par[x->nargs][x->k], sh_par[e->k][i]);
     }
     r = sh_fun[e->k]; break;
   case E_CTOR: {
@@ -3281,9 +3284,9 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
           for (int k = 0; k < car && !M.bad; k++) {
             if (an[k] == 1) { net_read_i64(n, ap[k], &xa[nn++]); pi++; }
             else if (an[k] == 2) {
-              /* (as the whole expression, the unit met this value where the program names it -- a constant of
-                 the unit -- and does not read the call's own argument: nothing is passed) */
-              if (!c2->npsh || (root_mode && pi < c2->npsh && c2->psh[pi].k == 0)) { xa[nn++] = 0; pi++; continue; }
+/* (a data argument the unit has NO shape for is one it never looks at -- passed along from call to
+                 call, or met by a whole-expression unit where the program names it: nothing is read in for it) */
+              if (!c2->npsh || (pi < c2->npsh && c2->psh[pi].k == 0)) { xa[nn++] = 0; pi++; continue; }
               if (pi >= c2->npsh) { M.bad = 1; break; }
               xa[nn++] = marshal(&M, ap[k], c2->psh[pi]); pi++;
               if (dbg > 1) DBG("[argument %d passed in as %d %s: %lx]\n", k, c2->psh[pi - 1].k, c2->psh[pi - 1].dt ? c2->psh[pi - 1].dt : "", (unsigned long)xa[nn - 1]);
