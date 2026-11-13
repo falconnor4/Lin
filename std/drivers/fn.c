@@ -110,7 +110,7 @@ enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
 typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; int cells; } V;   /* cells: a match on the cell encoding */   /* x: to_expr's answer */
-typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int busy; } Lz;   /* 0 port, 1 application, 2 value */
+typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int busy; int port; } Lz;   /* 0 port, 1 application, 2 value */   /* port: it was a port (p, env), forced or not */
 
 /* One compile attempt's memory: everything is freed together. */
 static void **arena; static int narena, arcap;
@@ -147,7 +147,7 @@ static void fail(const char *why) { if (!failed && !fail_quiet) DBG("declined: %
 
 static V *mkv(int k) { V *v = A(sizeof *v); v->k = k; return v; }
 static Lz *ready(V *v) { Lz *l = A(sizeof *l); l->state = 2; l->v = v; return l; }
-static Lz *lzp(Port p, Env *e) { Lz *l = A(sizeof *l); l->state = 0; l->p = p; l->env = e; return l; }
+static Lz *lzp(Port p, Env *e) { Lz *l = A(sizeof *l); l->state = 0; l->p = p; l->env = e; l->port = 1; return l; }
 static Lz *lzapp(Lz *f, Lz *x) { Lz *l = A(sizeof *l); l->state = 1; l->f = f; l->x = x; return l; }
 static int eid;
 static Expr *mke(int op, int kind) { Expr *e = A(sizeof *e); e->op = op; e->kind = kind; e->id = eid++; e->var = -1; return e; }
@@ -346,9 +346,11 @@ static V *cells_add(V *m, Lz *x) {
   V *res = mkv(V_SYM); res->e = hc(r); return res;
 }
 static V *match_add(V *m, Lz *x) {
-  if (m->cells || (m->nargs == 0 && !(x->state == 0 && ({ Port b_, i_; int l_; marker_app(x->p, &b_, &l_, &i_); }))))
+  /* (a branch is net structure: a port, perhaps forced already -- one arm of a conditional applies it to its
+     constructor's fields before the other arm takes it apart) */
+  if (m->cells || (m->nargs == 0 && !(x->port && ({ Port b_, i_; int l_; marker_app(x->p, &b_, &l_, &i_); }))))
     return cells_add(m, x);
-  if (x->state != 0) { fail("a match branch that is not net structure"); return NULL; }
+  if (!x->port) { fail("a match branch that is not net structure"); return NULL; }
   Port body, idp; int lam; long id;
   if (!marker_app(x->p, &body, &lam, &idp)) { fail("a parameter applied to something that is not a match branch (a function parameter?)"); return NULL; }
   const LinCtor *ci = marker_ctor(idp, x->env, &id);
@@ -1829,7 +1831,9 @@ static int compile_body_spec(int G, Env *outer, V **known) {
   int params[sizeof(unsigned) * 8]; Port body;
   int ar = fun_params(G, params, N_OF(params), &body);
   for (int i = 0; i < nfun; i++) if (funs[i].lam == G && known_eq(funs[i].known, known, ar)) return i;
-  if (nfun >= 1 + LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }   /* mutual recursion re-copies: bound it */
+  /* (the net holds one copy of a definition per use, so a program applying a library function in five places
+     reaches five copies of everything under it; the bound is against mutual recursion re-copying for ever) */
+  if (nfun >= 4 * LIN_INT_BITS) { fail("too many functions in one unit"); return -1; }
   if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
   int fid = nfun++; funs[fid].lam = G; funs[fid].body = NULL; funs[fid].strict = ~0u; funs[fid].pnode = NULL;
   funs[fid].outer = outer; funs[fid].known = NULL;

@@ -5,8 +5,8 @@
 ; the IUB alphabet, by cumulative weight out of 139968: a c g t B D H K M N R S V W Y
 (define iub (\r (if (lt r 37791) 97 (if (lt r 54587) 99 (if (lt r 71383) 103 (if (lt r 109174) 116 (if (lt r 111973) 66 (if (lt r 114772) 68 (if (lt r 117571) 72 (if (lt r 120370) 75 (if (lt r 123170) 77 (if (lt r 125969) 78 (if (lt r 128768) 82 (if (lt r 131567) 83 (if (lt r 134366) 86 (if (lt r 137165) 87 89))))))))))))))))
 (define draw (\k (\seed (if (eq k 0) nil (let ((s (next seed))) (cons (iub s) (draw (sub k 1) s)))))))
-(define variants (cons "agggtaaa|tttaccct" (cons "[cgt]gggtaaa|tttaccc[acg]" (cons "a[act]ggtaaa|tttacc[agt]t" (cons "ag[act]gtaaa|tttac[agt]ct" (cons "agg[act]taaa|ttta[agt]cct" (cons "aggg[acg]aaa|ttt[cgt]ccct" (cons "agggt[cgt]aa|tt[acg]accct" (cons "agggta[cgt]a|t[acg]taccct" (cons "agggtaa[cgt]|[acg]ttaccct" nil))))))))))
-(define counts (\s (\ps (\i (\acc (if (is_empty ps) acc (counts s (tail ps) (add i 1) (add acc (mul i (re_count (regex (head ps)) s))))))))))
+(define variants (scons "agggtaaa|tttaccct" (scons "[cgt]gggtaaa|tttaccc[acg]" (scons "a[act]ggtaaa|tttacc[agt]t" (scons "ag[act]gtaaa|tttac[agt]ct" (scons "agg[act]taaa|ttta[agt]cct" (scons "aggg[acg]aaa|ttt[cgt]ccct" (scons "agggt[cgt]aa|tt[acg]accct" (scons "agggta[cgt]a|t[acg]taccct" (scons "agggtaa[cgt]|[acg]ttaccct" snil))))))))))
+(define counts (\s (\ps (\i (\acc (match ps (snil acc) ((scons p ps2) (counts s ps2 (add i 1) (add acc (mul i (re_count (regex p) s)))))))))))
 ; the substitutions, applied in turn
 (define subst (\s (re_replace (regex "\\|[^|][^|]*\\|") "-" (re_replace (regex "<[^>]*>") "|" (re_replace (regex "a[NSt]|BY") "<2>" (re_replace (regex "aND|caN|Ha[DS]|WaS") "<3>" (re_replace (regex "tHa[Nt]") "<4>" s)))))))
 (define run (\s (add (counts s variants 1 0) (mul 1000000 (str_length (subst s))))))

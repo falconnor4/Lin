@@ -234,5 +234,17 @@ printf '%s\n' '(define f (\r (\s (\n (if (eq n 0) 0 (add (re_count r s) (f r s (
   '(f (regex "a[bc]+d|x[^a-c]y") "xxabcdyyabdaxbdxzy" 400)' > "$TMP/re.lin"
 re=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/re.lin" 2>"$TMP/re.err")
 [ "$re" = "=> 1200" ] && grep -q "folded a call" "$TMP/re.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a compiled regex loop: '$re'"; }
+# A MATCH ON A CONDITIONAL with three or more arms, one of them a call of another recursive function: the branch
+# is applied by one arm (a constructor takes it) before another takes the call apart -- still a branch.
+printf '%s\n' '(datatype P (pp (a num) (r list num)))' \
+  '(define sk (\s (\k (if (is_empty s) (pp k s) (if (eq (head s) 93) (pp k (tail s)) (sk (tail s) (add k 1)))))))' \
+  '(define at (\s (if (eq (head s) 46) (pp 0 (tail s)) (if (eq (head s) 91) (sk (tail s) 0) (pp 1 (tail s))))))' \
+  '(define cl (\s (\n (if (is_empty s) n (match (at s) ((pp a r) (cl r (add n a))))))))' '(cl "ab[d]x.[yy]z" 0)' > "$TMP/m3.lin"
+m3=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/m3.lin" 2>"$TMP/m3.err")
+[ "$m3" = "=> 7" ] && ! grep -q declined "$TMP/m3.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a match on a three-armed conditional: '$m3'"; }
+# SUBSTITUTIONS chained: a pattern parsed, then a text rewritten around it, five times over -- one unit.
+printf '%s\n' '(str_length (re_replace (regex "\\|[^|][^|]*\\|") "-" (re_replace (regex "<[^>]*>") "|" (re_replace (regex "a[NSt]|BY") "<2>" (re_replace (regex "aND|caN|Ha[DS]|WaS") "<3>" (re_replace (regex "tHa[Nt]") "<4>" "xtHaNtyaNDzHaDSaByBYk"))))))' > "$TMP/rs.lin"
+rs=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/rs.lin" 2>"$TMP/rs.err")
+[ "$rs" = "=> 5" ] && grep -q "folded a call" "$TMP/rs.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL chained substitutions: '$rs'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

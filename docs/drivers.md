@@ -90,6 +90,10 @@ The compiled code is strict; Lin is lazy. The driver compiles only where the
 difference cannot be observed, and otherwise leaves the call to the net:
 
 - A value used in a way its inferred shape does not allow
+- One constructor holding different kinds of value in one unit, such as a
+  built-in list of strings, whose cells hold both lists and numbers: shapes are
+  tracked per constructor, not per type. A `Seq` of strings is compiled, since
+  its cells and the strings' cells are different constructors
 - A structure that is infinite or outgrows memory or the stack while being built:
   the compiled call is abandoned and the net computes the call lazily
 - Any shape of net it does not recognise

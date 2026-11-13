@@ -344,8 +344,9 @@ and matched by backtracking, leftmost alternative first.
 | `(re_count r s)` | The number of matches, left to right, not overlapping |
 | `(re_replace r t s)` | Every match replaced by the text `t` |
 
-A match is never empty. The function compiler does not yet compile the
-matcher, so matching long texts is slow.
+A match is never empty. The parser, the matcher and a loop over the text all
+compile together, so a pattern applied to a long text runs as native code (see
+the `regexredux` benchmark).
 
 ## System
 

@@ -25,7 +25,7 @@ bench/run.sh ./lin       # or: nix run .#bench
 
 ## Results
 
-4-core x86-64, gcc 15. `C / Lin` above 1 means Lin is faster. Eight of the programs follow the
+4-core x86-64, gcc 15. `C / Lin` above 1 means Lin is faster. Nine of the programs follow the
 [Computer Language Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/)
 definitions, at reduced sizes, and generate their own input so each is a single file.
 
@@ -96,12 +96,10 @@ Flat memory is not something a pure net can express directly, so closing these
 gaps fully would take a representation change in the function compiler rather
 than a change to the library.
 
-## Programs not yet in the suite
+## Programs not in the suite
 
-**regex-redux** is written (`bench/pending/`), with `std/regex.lin`, but the
-function compiler declines the regular-expression matcher, so it runs by net
-reduction and is far too slow to time. **mandelbrot** in its Benchmarks Game
-form (bitmap output) is covered by `mandel`.
+**mandelbrot** in its Benchmarks Game form (bitmap output) is covered by `mandel`.
+Every other Benchmarks Game program has a row above.
 
 ## Without the function compiler
 
