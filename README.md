@@ -48,23 +48,24 @@ method and the full table):
 
 | Benchmark | C | Lin | Lin vs C |
 |-----------|---|-----|----------|
-| Benchmarks Game binary-trees, depth 16 | 190 ms | 29 ms | 6.5× faster |
-| Map, filter and fold over a 1M-element list | 81 ms | 21 ms | 3.9× faster |
-| Collatz, longest chain below one million | 243 ms | 61 ms | 4.0× faster |
-| Mandelbrot, 1000 × 800, in floats | 129 ms | 36 ms | 3.6× faster |
-| `fib 40`, tree recursion | 194 ms | 70 ms | 2.8× faster |
-| Search tree, 200,000 inserts | 59 ms | 29 ms | 2.0× faster |
-| Red-black map, 200,000 inserts and lookups | 144 ms | 87 ms | 1.7× faster |
-| Benchmarks Game spectral-norm, n = 1000 | 57 ms | 45 ms | 1.3× faster |
-| Benchmarks Game reverse-complement | 22 ms | 29 ms | 1.3× slower |
-| Benchmarks Game k-nucleotide | 39 ms | 75 ms | 1.9× slower |
-| Benchmarks Game fasta | 21 ms | 46 ms | 2.2× slower |
-| Benchmarks Game n-body | 19 ms | 54 ms | 2.9× slower |
-| Benchmarks Game pidigits, 2,000 digits | 619 ms | 1942 ms | 3.1× slower |
-| Array, 1M strided writes and reads | 7 ms | 32 ms | 4.5× slower |
-| Benchmarks Game fannkuch-redux, n = 9 | 22 ms | 117 ms | 5.3× slower |
+| Benchmarks Game binary-trees, depth 16 | 200 ms | 35 ms | 5.7× faster |
+| Map, filter and fold over a 1M-element list | 69 ms | 13 ms | 5.3× faster |
+| Collatz, longest chain below one million | 221 ms | 52 ms | 4.3× faster |
+| Mandelbrot, 1000 × 800, in floats | 123 ms | 38 ms | 3.2× faster |
+| `fib 40`, tree recursion | 161 ms | 52 ms | 3.1× faster |
+| Search tree, 200,000 inserts | 59 ms | 30 ms | 2.0× faster |
+| Benchmarks Game spectral-norm, n = 1000 | 54 ms | 34 ms | 1.6× faster |
+| Red-black map, 200,000 inserts and lookups | 112 ms | 73 ms | 1.5× faster |
+| Benchmarks Game regex-redux, against POSIX `regex.h` | 87 ms | 62 ms | 1.4× faster |
+| Benchmarks Game reverse-complement | 19 ms | 25 ms | 1.3× slower |
+| Benchmarks Game k-nucleotide | 36 ms | 72 ms | 2.0× slower |
+| Benchmarks Game fasta | 17 ms | 36 ms | 2.1× slower |
+| Array, 1M strided writes and reads | 8 ms | 20 ms | 2.5× slower |
+| Benchmarks Game n-body | 18 ms | 51 ms | 2.8× slower |
+| Benchmarks Game pidigits, 2,000 digits | 577 ms | 1812 ms | 3.1× slower |
+| Benchmarks Game fannkuch-redux, n = 9 | 20 ms | 115 ms | 5.8× slower |
 
-Lin is ahead on 12 of the 20 benchmarks: where it runs work in parallel that the
+Lin is ahead on 13 of the 21 benchmarks: where it runs work in parallel that the
 C runs on one core, where it shares a computation the C repeats, and where it
 updates data in place. It is behind where a persistent structure (a list, a trie,
 limbs of a big number) is compared with flat mutable memory. The full table is in

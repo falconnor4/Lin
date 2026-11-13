@@ -31,26 +31,27 @@ definitions, at reduced sizes, and generate their own input so each is a single 
 
 | Benchmark | C -O3 | Lin | Lin -t 1 | C / Lin | What it exercises |
 |-----------|-------|-----|----------|---------|-------------------|
-| binarytrees | 190 ms | 29 ms | 29 ms | 6.55× | Benchmarks Game *binary-trees*, depth 16 |
-| bintree | 41 ms | 7 ms | 7 ms | 5.86× | Constructors and `match`: a depth-20 tree (2M nodes) built and counted |
-| collatz | 243 ms | 61 ms | 219 ms | 3.98× | A loop calling a helper loop; a max-reduction |
-| seqs | 81 ms | 21 ms | 16 ms | 3.86× | `std/seq.lin`: map, filter and fold over a million-element list |
-| mandel | 129 ms | 36 ms | 136 ms | 3.58× | Floats; three nested loops over a 1000 × 800 grid |
-| loop | 98 ms | 29 ms | 111 ms | 3.38× | A tail-recursive sum over 100 million iterations |
-| fib | 194 ms | 70 ms | 182 ms | 2.77× | Tree recursion: `fib 40` |
-| tak | 103 ms | 48 ms | 114 ms | 2.15× | Calls whose arguments are calls |
-| bst | 59 ms | 29 ms | 29 ms | 2.03× | A search tree: 200,000 inserts, then a weighted walk |
-| omap | 144 ms | 87 ms | 118 ms | 1.66× | `std/omap.lin`, a red-black tree: 200,000 inserts and lookups |
-| nqueens | 209 ms | 165 ms | 235 ms | 1.27× | Bitmask backtracking for n = 14; an unbalanced search tree |
-| spectralnorm | 57 ms | 45 ms | 92 ms | 1.27× | Benchmarks Game *spectral-norm*, n = 1000 |
-| revcomp | 22 ms | 29 ms | 27 ms | 0.76× | Benchmarks Game *reverse-complement*: 1,000,000 letters reversed and complemented |
-| knucleotide | 39 ms | 75 ms | 74 ms | 0.52× | Benchmarks Game *k-nucleotide*: fragment counts in 250,000 letters, with `std/hmap.lin` |
-| fasta | 21 ms | 46 ms | 44 ms | 0.46× | Benchmarks Game *fasta*, n = 100,000: a repeated and two random sequences, checksummed |
-| words | 5 ms | 14 ms | 15 ms | 0.36× | Text: a 1M-character string built and its words counted |
-| nbody | 19 ms | 54 ms | 52 ms | 0.35× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
-| pidigits | 619 ms | 1942 ms | 2111 ms | 0.32× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
-| array | 7 ms | 32 ms | 25 ms | 0.22× | `std/array.lin`: 1M strided writes, then 1M reads |
-| fannkuch | 22 ms | 117 ms | 131 ms | 0.19× | Benchmarks Game *fannkuch-redux*, n = 9: every permutation, by prefix reversals |
+| binarytrees | 200 ms | 35 ms | 27 ms | 5.71× | Benchmarks Game *binary-trees*, depth 16 |
+| bintree | 34 ms | 6 ms | 7 ms | 5.67× | Constructors and `match`: a depth-20 tree (2M nodes) built and counted |
+| seqs | 69 ms | 13 ms | 12 ms | 5.31× | `std/seq.lin`: map, filter and fold over a million-element list |
+| collatz | 221 ms | 52 ms | 198 ms | 4.25× | A loop calling a helper loop; a max-reduction |
+| loop | 91 ms | 26 ms | 102 ms | 3.50× | A tail-recursive sum over 100 million iterations |
+| mandel | 123 ms | 38 ms | 125 ms | 3.24× | Floats; three nested loops over a 1000 × 800 grid |
+| fib | 161 ms | 52 ms | 183 ms | 3.10× | Tree recursion: `fib 40` |
+| tak | 89 ms | 34 ms | 91 ms | 2.62× | Calls whose arguments are calls |
+| bst | 59 ms | 30 ms | 27 ms | 1.97× | A search tree: 200,000 inserts, then a weighted walk |
+| spectralnorm | 54 ms | 34 ms | 72 ms | 1.59× | Benchmarks Game *spectral-norm*, n = 1000 |
+| omap | 112 ms | 73 ms | 105 ms | 1.53× | `std/omap.lin`, a red-black tree: 200,000 inserts and lookups |
+| regexredux | 87 ms | 62 ms | 62 ms | 1.40× | Benchmarks Game *regex-redux*: nine patterns counted and five substitutions over 200,000 letters, with `std/regex.lin` |
+| nqueens | 206 ms | 152 ms | 211 ms | 1.36× | Bitmask backtracking for n = 14; an unbalanced search tree |
+| revcomp | 19 ms | 25 ms | 27 ms | 0.76× | Benchmarks Game *reverse-complement*: 1,000,000 letters reversed and complemented |
+| knucleotide | 36 ms | 72 ms | 72 ms | 0.50× | Benchmarks Game *k-nucleotide*: fragment counts in 250,000 letters, with `std/hmap.lin` |
+| fasta | 17 ms | 36 ms | 38 ms | 0.47× | Benchmarks Game *fasta*, n = 100,000: a repeated and two random sequences, checksummed |
+| array | 8 ms | 20 ms | 25 ms | 0.40× | `std/array.lin`: 1M strided writes, then 1M reads |
+| nbody | 18 ms | 51 ms | 53 ms | 0.35× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
+| words | 4 ms | 12 ms | 11 ms | 0.33× | Text: a 1M-character string built and its words counted |
+| pidigits | 577 ms | 1812 ms | 1661 ms | 0.32× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
+| fannkuch | 20 ms | 115 ms | 119 ms | 0.17× | Benchmarks Game *fannkuch-redux*, n = 9: every permutation, by prefix reversals |
 
 The machine these were measured on is shared and noisy; expect variation of
 about 15% between runs. Re-run before quoting a number.
@@ -79,9 +80,9 @@ different values would measure allocation instead, as `bst` and `omap` do.
 
 ## Where Lin is behind
 
-- **`fannkuch` (about 5×).** Permutations are lists rebuilt at every step; the
+- **`fannkuch` (about 6×).** Permutations are lists rebuilt at every step; the
   C flips an array of nine bytes in place.
-- **`array` (about 4×), `words` and `fasta` (about 2–3×).** A persistent trie
+- **`array`, `words` and `fasta` (about 2–3×).** A persistent trie
   or linked list against flat C memory, and process start-up: the C starts in
   about 2 ms, Lin in about 5 ms.
 - **`pidigits` (about 3×).** Arbitrary-precision numbers are persistent lists of
