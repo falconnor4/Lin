@@ -995,6 +995,20 @@ static void region_forks(const Expr *e, const Expr **cand, int nc, const Expr **
   *fx = all;
   free(ci); free(seen);
 }
+static void tail_uses(const Expr *e, unsigned *n) {   /* how often each node is reached where a region ends */
+  if (!e) return;
+  if (e->op == E_IF) { tail_uses(e->b, n); tail_uses(e->c, n); return; }
+  if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) tail_uses(e->args[i], n); return; }
+  if (e->op == E_CTOR) {                             /* (a call in two fields of one cell is two uses on one path) */
+    for (int i = 0; i < e->nargs; i++) {
+      if (e->args[i]->op != E_CALL) continue;
+      int same = 0; for (int j = 0; j < e->nargs; j++) same += e->args[j] == e->args[i];
+      if (same == 1) n[e->args[i]->id]++;
+    }
+    return;
+  }
+  if (e->op == E_CALL) n[e->id]++;
+}
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   st_grow(); stamp += 2;
@@ -1002,10 +1016,17 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   const Expr **cand = NULL; int nc = 0, cc = 0;
   certain(e, cert(e), &cand, &nc, &cc);
   int nb = 0, ok = 1, nk = 0;
+  /* (a call used only where the region ENDS -- each arm's tail, or the rest of a cell an arm builds -- is used
+     once on any path: the arms are exclusive.  Bound first, it would no longer be a tail call: a filter whose
+     two arms both step to the same next call became a recursion a million frames deep.) */
+  unsigned *tails = NULL;
+  if (tp || emitting >= 0) { tails = calloc((size_t)eid + 1, sizeof *tails); tail_uses(e, tails); }
   for (int i = 0; i < nc; i++) {                   /* choose first: emitting a binding runs nested regions' passes */
     const Expr *x = cand[i];
+    if (tails && x->op == E_CALL && tails[x->id] >= st_uses[x->id]) continue;
     if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD) cand[nk++] = x;   /* (a field read is one load: not worth a local) */
   }
+  free(tails);
   nc = nk;
   /* THE ENTRY'S LOOPS, STARTED EARLY: a loop the expression certainly runs is started on a thread as soon as
      the bindings it reads exist -- so it runs alongside the loops bound after it (fasta's repeated sequence beside its two random ones, which follow each
@@ -2900,6 +2921,245 @@ static void cx_push(int kind, Port p) {
   if (cx_n >= cx_cap) { cx_cap = cx_cap ? cx_cap * 2 : 8; cx_port = realloc(cx_port, sizeof *cx_port * (size_t)cx_cap); cx_kind = realloc(cx_kind, sizeof *cx_kind * (size_t)cx_cap); }
   cx_port[cx_n] = p; cx_kind[cx_n] = kind; cx_n++;
 }
+/* FUSION.  `(check (revcomp (draw n seed) snil) 0 0)`: draw builds a million-cell list, revcomp takes it apart
+   cell by cell and nothing else ever sees it.  When a call's argument is the only use of another call's result,
+   the consumer takes that argument apart one cell per step (a match at the top of its body, the rest of the
+   list handed to itself and to nothing else) and the producer builds it one cell per step (each cell's rest
+   is its own next call), the two are one loop: the producer's body, where each cell it would build is the
+   consumer's step on that cell -- and the list is never built.  What the consumer does not read of a cell is
+   not computed at all.  The fused function is a new function of the unit, so everything after (strictness,
+   ownership, destination passing, the parallel forms) sees an ordinary loop. */
+typedef struct { int c, j, p, tf, nilb, consb, F, ap, ac; const LinCtor *ncons, *nnil; const Expr *ctail; Expr *tailcall; Expr **hs; } Fuse;
+static Expr **fu_mp, **fu_mr, **fu_mc; static int fu_n;   /* copies: of the producer's nodes, its result positions, the consumer's */
+static int *fu_occ;
+static void fu_count(const Expr *e, unsigned char *seen) {
+  if (!e) return;
+  fu_occ[e->id]++;
+  if (seen[e->id]) return;
+  seen[e->id] = 1;
+  fu_count(e->a, seen); fu_count(e->b, seen); if (e->op != E_CTOR) fu_count(e->c, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) fu_count(e->args[i], seen);
+}
+static int fu_pj(const Expr *e, int f, int j) { return e && e->op == E_PARAM && e->nargs == f && e->k == j; }
+/* the consumer: c's body is a match on parameter j; its rest field reaches only c's own calls, as argument j */
+static int fu_cuses(const Expr *e, const Fuse *u, int *tf, unsigned char *seen, int top) {
+  if (!e || seen[e->id]) return 1;
+  seen[e->id] = 1;
+  if (fu_pj(e, u->c, u->j)) return top;             /* (only as the top match's scrutinee) */
+  if (e->op == E_FIELD && fu_pj(e->a, u->c, u->j)) return 1;   /* (a head read: checked at the calls) */
+  if (e->op == E_CALL && e->k == u->c) {
+    const Expr *a = e->args[u->j];
+    if (!(a->op == E_FIELD && fu_pj(a->a, u->c, u->j))) return 0;
+    if (*tf >= 0 && *tf != a->k) return 0;
+    *tf = (int)a->k;
+    for (int i = 0; i < e->nargs; i++) if (i != u->j && !fu_cuses(e->args[i], u, tf, seen, 0)) return 0;
+    return 1;
+  }
+  if (!fu_cuses(e->a, u, tf, seen, 0) || !fu_cuses(e->b, u, tf, seen, 0) || (e->op != E_CTOR && !fu_cuses(e->c, u, tf, seen, 0))) return 0;
+  for (int i = 0; i < e->nargs && e->args; i++) if (!fu_cuses(e->args[i], u, tf, seen, 0)) return 0;
+  return 1;
+}
+static int fu_tailreads(const Expr *e, const Fuse *u, unsigned char *seen) {   /* the rest field outside a call of c? */
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_CALL && e->k == u->c) { for (int i = 0; i < e->nargs; i++) if (i != u->j && fu_tailreads(e->args[i], u, seen)) return 1; return 0; }
+  if (e->op == E_FIELD && fu_pj(e->a, u->c, u->j) && e->k == u->tf) return 1;
+  if (fu_tailreads(e->a, u, seen) || fu_tailreads(e->b, u, seen) || (e->op != E_CTOR && fu_tailreads(e->c, u, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (fu_tailreads(e->args[i], u, seen)) return 1;
+  return 0;
+}
+static int fu_mentions_list(const Expr *e, const Fuse *u, unsigned char *seen) {
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (fu_pj(e, u->c, u->j)) return 1;
+  if (fu_mentions_list(e->a, u, seen) || fu_mentions_list(e->b, u, seen) || (e->op != E_CTOR && fu_mentions_list(e->c, u, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (fu_mentions_list(e->args[i], u, seen)) return 1;
+  return 0;
+}
+static int fu_consumer(Fuse *u) {
+  const Expr *B = funs[u->c].body;
+  if (!B || B->op != E_MATCH || !fu_pj(B->a, u->c, u->j) || B->nargs != 2 || !B->ci) return 0;
+  const LinCtor *k0 = NULL, *k1 = NULL;
+  for (long k = 1; lin_ctor_info(k); k++) { const LinCtor *ci = lin_ctor_info(k); if (ci->dt == B->ci->dt) { if (ci->i == 0) k0 = ci; else if (ci->i == 1) k1 = ci; } }
+  if (!k0 || !k1) return 0;
+  if (k0->k == 0 && k1->k == 2) { u->nilb = 0; u->consb = 1; u->nnil = k0; u->ncons = k1; }
+  else if (k1->k == 0 && k0->k == 2) { u->nilb = 1; u->consb = 0; u->nnil = k1; u->ncons = k0; }
+  else return 0;
+  unsigned char *seen = calloc((size_t)eid + 1, 1);
+  int ok = !fu_mentions_list(B->args[u->nilb], u, seen);   /* (the end branch cannot read the list: it is the end) */
+  int tf = -1;
+  if (ok) { memset(seen, 0, (size_t)eid + 1); ok = fu_cuses(B->args[u->consb], u, &tf, seen, 0) && tf >= 0; }   /* (it must walk the list) */
+  u->tf = tf;
+  if (ok) { memset(seen, 0, (size_t)eid + 1); ok = !fu_tailreads(B->args[u->consb], u, seen); }
+  free(seen);
+  return ok;
+}
+/* the producer: every result is the end, a cell whose rest is a call of itself (at least one is), a call of
+   itself, or any other value; it calls itself nowhere else */
+static int fu_res(const Expr *e, const Fuse *u, int *guarded, unsigned char *ok) {
+  if (!e) return 0;
+  if (e->op == E_IF) return fu_res(e->b, u, guarded, ok) && fu_res(e->c, u, guarded, ok);
+  if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) if (!fu_res(e->args[i], u, guarded, ok)) return 0; return 1; }
+  if (e->op == E_CTOR && e->ci == u->ncons && e->nargs == 2) {
+    const Expr *t = e->args[u->tf];
+    if (t->op == E_CALL && t->k == u->p) { (*guarded)++; ok[t->id] = 1; }
+    return 1;
+  }
+  if (e->op == E_CALL && e->k == u->p) ok[e->id] = 1;
+  return 1;
+}
+static int fu_stray(const Expr *e, int p, const unsigned char *ok, unsigned char *seen) {   /* a call of itself elsewhere? */
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_CALL && e->k == p && !ok[e->id]) return 1;
+  if (fu_stray(e->a, p, ok, seen) || fu_stray(e->b, p, ok, seen) || (e->op != E_CTOR && fu_stray(e->c, p, ok, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (fu_stray(e->args[i], p, ok, seen)) return 1;
+  return 0;
+}
+static int fu_producer(Fuse *u) {
+  const Expr *B = funs[u->p].body; int g = 0;
+  unsigned char *okc = calloc((size_t)eid + 1, 1), *seen = calloc((size_t)eid + 1, 1);
+  int r = B && fu_res(B, u, &g, okc) && g > 0 && !fu_stray(B, u->p, okc, seen);
+  free(okc); free(seen);
+  return r;
+}
+/* copies, with the parameters renumbered into F's */
+static Expr *fu_param(const Fuse *u, int k) { return funs[u->F].pnode[k]; }
+static Expr *fu_clone(const Expr *e) { Expr *x = mke(e->op, e->kind); int id = x->id; *x = *e; x->id = id; x->var = -1; x->vscope = 0; return x; }
+static Expr *fu_copyP(const Fuse *u, const Expr *e) {   /* a node of the producer's body (not a result position) */
+  if (!e) return NULL;
+  if (e->op == E_PARAM && e->nargs == u->p) return fu_param(u, (int)e->k);
+  if (e->id < fu_n && fu_mp[e->id]) return fu_mp[e->id];
+  Expr *x = fu_clone(e);
+  x->a = fu_copyP(u, e->a); x->b = fu_copyP(u, e->b); x->c = e->op == E_CTOR ? e->c : fu_copyP(u, e->c);
+  if (e->nargs && e->args) { x->args = A(sizeof(Expr *) * (size_t)e->nargs); for (int i = 0; i < e->nargs; i++) x->args[i] = fu_copyP(u, e->args[i]); }
+  x = hc(x);
+  if (e->id < fu_n) fu_mp[e->id] = x;
+  return x;
+}
+static int fu_cparam(const Fuse *u, int k) { return u->ap + (k < u->j ? k : k - 1); }
+static Expr *fu_copyC(const Fuse *u, const Expr *e) {   /* a node of the consumer's branch, on the cell (hs, tailcall) */
+  if (!e) return NULL;
+  if (e->op == E_PARAM && e->nargs == u->c) return fu_param(u, fu_cparam(u, (int)e->k));
+  if (e->op == E_FIELD && fu_pj(e->a, u->c, u->j)) return u->hs[e->k];   /* (a field of the cell: its value) */
+  if (e->id < fu_n && fu_mc[e->id]) return fu_mc[e->id];
+  Expr *x;
+  if (e->op == E_CALL && e->k == u->c && e->args[u->j]->op == E_FIELD && fu_pj(e->args[u->j]->a, u->c, u->j)) {
+    /* the step to the rest of the list: the producer's next step, or the consumer on a rest that is not one */
+    const Expr *t = u->ctail;
+    if (t->op == E_CALL && t->k == u->p) {
+      x = mke(E_CALL, e->kind); x->k = u->F; x->nargs = u->ap + u->ac - 1; x->args = A(sizeof(Expr *) * (size_t)x->nargs);
+      for (int i = 0; i < u->ap; i++) x->args[i] = fu_copyP(u, t->args[i]);
+      for (int i = 0; i < u->ac; i++) if (i != u->j) x->args[fu_cparam(u, i)] = fu_copyC(u, e->args[i]);
+    } else {
+      x = fu_clone(e); x->args = A(sizeof(Expr *) * (size_t)e->nargs);
+      for (int i = 0; i < e->nargs; i++) x->args[i] = i == u->j ? fu_copyP(u, t) : fu_copyC(u, e->args[i]);
+    }
+  } else {
+    x = fu_clone(e);
+    x->a = fu_copyC(u, e->a); x->b = fu_copyC(u, e->b); x->c = e->op == E_CTOR ? e->c : fu_copyC(u, e->c);
+    if (e->nargs && e->args) { x->args = A(sizeof(Expr *) * (size_t)e->nargs); for (int i = 0; i < e->nargs; i++) x->args[i] = fu_copyC(u, e->args[i]); }
+  }
+  x = hc(x);
+  if (e->id < fu_n) fu_mc[e->id] = x;
+  return x;
+}
+static Expr *fu_consumer_on(Fuse *u, const Expr *list) {   /* c applied to a list that is not a cell of the producer's */
+  Expr *x = mke(E_CALL, funs[u->c].body->kind); x->k = u->c; x->nargs = u->ac; x->args = A(sizeof(Expr *) * (size_t)u->ac);
+  for (int i = 0; i < u->ac; i++) x->args[i] = i == u->j ? (Expr *)list : fu_param(u, fu_cparam(u, i));
+  return hc(x);
+}
+static Expr *fu_res_copy(Fuse *u, const Expr *e) {   /* a result position of the producer */
+  if (e->id < fu_n && fu_mr[e->id]) return fu_mr[e->id];
+  const Expr *B = funs[u->c].body; Expr *x;
+  if (e->op == E_IF) { x = fu_clone(e); x->a = fu_copyP(u, e->a); x->b = fu_res_copy(u, e->b); x->c = fu_res_copy(u, e->c); }
+  else if (e->op == E_MATCH) {
+    x = fu_clone(e); x->a = fu_copyP(u, e->a); x->args = A(sizeof(Expr *) * (size_t)e->nargs);
+    for (int i = 0; i < e->nargs; i++) x->args[i] = fu_res_copy(u, e->args[i]);
+  } else if (e->op == E_CTOR && e->ci == u->nnil) {
+    memset(fu_mc, 0, sizeof *fu_mc * (size_t)fu_n);
+    x = fu_copyC(u, B->args[u->nilb]);
+  } else if (e->op == E_CTOR && e->ci == u->ncons && e->nargs == 2) {
+    Expr *hs[2]; for (int i = 0; i < 2; i++) hs[i] = i == u->tf ? NULL : fu_copyP(u, e->args[i]);
+    u->hs = hs; u->ctail = e->args[u->tf];
+    memset(fu_mc, 0, sizeof *fu_mc * (size_t)fu_n);   /* (each cell is its own instance of the step) */
+    x = fu_copyC(u, B->args[u->consb]);
+  } else if (e->op == E_CALL && e->k == u->p) {
+    x = mke(E_CALL, funs[u->c].body->kind); x->k = u->F; x->nargs = u->ap + u->ac - 1; x->args = A(sizeof(Expr *) * (size_t)x->nargs);
+    for (int i = 0; i < u->ap; i++) x->args[i] = fu_copyP(u, e->args[i]);
+    for (int i = u->ap; i < x->nargs; i++) x->args[i] = fu_param(u, i);
+  } else x = fu_consumer_on(u, fu_copyP(u, e));
+  x = hc(x);
+  if (e->id < fu_n) fu_mr[e->id] = x;
+  return x;
+}
+/* the call site: replaced through every body and the entry */
+static Expr *fu_from, *fu_to; static Expr **fu_mrep;
+static Expr *fu_replace(Expr *e) {
+  if (!e) return NULL;
+  if (e == fu_from) return fu_to;
+  if (e->id < fu_n && fu_mrep[e->id]) return fu_mrep[e->id];
+  Expr *a = fu_replace(e->a), *b = fu_replace(e->b), *c = e->op == E_CTOR ? e->c : fu_replace(e->c);
+  int ch = a != e->a || b != e->b || c != e->c; Expr **na = NULL;
+  if (e->nargs && e->args) {
+    na = A(sizeof(Expr *) * (size_t)e->nargs);
+    for (int i = 0; i < e->nargs; i++) { na[i] = fu_replace(e->args[i]); ch |= na[i] != e->args[i]; }
+  }
+  Expr *x = e;
+  if (ch) { x = fu_clone(e); x->a = a; x->b = b; x->c = c; if (na) x->args = na; x = hc(x); }
+  if (e->id < fu_n) fu_mrep[e->id] = x;
+  return x;
+}
+static int fu_find(const Expr *e, unsigned char *seen, Fuse *u) {
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_CALL && e->k >= 0 && e->k < nfun && funs[e->k].body && !e->clone && !e->drops)
+    for (int j = 0; j < e->nargs; j++) {
+      const Expr *P = e->args[j];
+      if (P->op != E_CALL || P->k == e->k || P->k < 0 || P->k >= nfun || !funs[P->k].body || fu_occ[P->id] != 1) continue;
+      memset(u, 0, sizeof *u); u->c = (int)e->k; u->j = j; u->p = (int)P->k; u->ap = funs[u->p].arity; u->ac = funs[u->c].arity;
+      if (u->ap + u->ac - 1 > (int)(sizeof(unsigned) * 8)) continue;   /* (a function's parameters are a bit set: see strict) */
+      int okc = fu_consumer(u), okp = okc && fu_producer(u);
+      if (dbg > 1) DBG("[fuse? f%d arg %d <- f%d: consumer %d producer %d]\n", u->c, j, u->p, okc, okp);
+      if (okp) { fu_from = (Expr *)e; return 1; }
+    }
+  if (fu_find(e->a, seen, u) || fu_find(e->b, seen, u) || (e->op != E_CTOR && fu_find(e->c, seen, u))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (fu_find(e->args[i], seen, u)) return 1;
+  return 0;
+}
+static void fuse_lists(Expr **entry) {
+  for (int round = 0; round < nfun + 1; round++) {
+    fu_n = eid;
+    fu_occ = calloc((size_t)fu_n + 1, sizeof *fu_occ);
+    unsigned char *seen = calloc((size_t)fu_n + 1, 1);
+    fu_count(*entry, seen); for (int i = 0; i < nfun; i++) fu_count(funs[i].body, seen);
+    memset(seen, 0, (size_t)fu_n + 1);
+    Fuse u; int found = fu_find(*entry, seen, &u);
+    for (int i = 0; !found && i < nfun; i++) found = fu_find(funs[i].body, seen, &u);
+    free(seen); free(fu_occ); fu_occ = NULL;
+    if (!found) return;
+    /* the fused function */
+    if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
+    int F = u.F = nfun++, ar = u.ap + u.ac - 1;
+    funs[F].lam = -1; funs[F].arity = ar; funs[F].strict = ~0u; funs[F].known = NULL; funs[F].outer = NULL; funs[F].body = NULL;
+    funs[F].pnode = A(sizeof(Expr *) * (size_t)(ar ? ar : 1));
+    for (int i = 0; i < ar; i++) { Expr *q = mke(E_PARAM, 1); q->k = i; q->nargs = F; funs[F].pnode[i] = q; }
+    fu_mp = calloc((size_t)fu_n + 1, sizeof *fu_mp); fu_mr = calloc((size_t)fu_n + 1, sizeof *fu_mr); fu_mc = calloc((size_t)fu_n + 1, sizeof *fu_mc);
+    funs[F].body = fu_res_copy(&u, funs[u.p].body);
+    free(fu_mp); free(fu_mr); free(fu_mc);
+    /* the call site: F on the producer's arguments and the consumer's others */
+    const Expr *P = fu_from->args[u.j];
+    Expr *call = mke(E_CALL, fu_from->kind); call->k = F; call->nargs = ar; call->args = A(sizeof(Expr *) * (size_t)(ar ? ar : 1));
+    for (int i = 0; i < u.ap; i++) call->args[i] = P->args[i];
+    for (int i = 0; i < u.ac; i++) if (i != u.j) call->args[fu_cparam(&u, i)] = fu_from->args[i];
+    fu_to = hc(call);
+    fu_mrep = calloc((size_t)fu_n + 1, sizeof *fu_mrep);
+    *entry = fu_replace(*entry);
+    for (int i = 0; i < nfun; i++) if (i != F) funs[i].body = fu_replace(funs[i].body);
+    free(fu_mrep);
+    if (dbg) DBG("fused f%d's list into f%d: f%d\n", u.p, u.c, F);
+  }
+}
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum) {
   N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
@@ -2951,6 +3211,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     r0_g++;
     for (int i = 0; i < nfun; i++) funs[i].body = one_match(funs[i].body);
     entry = one_match(entry);
+    if (!getenv("LIN_FN_NOFUSE")) fuse_lists(&entry);
     mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
       changed = 0;

@@ -262,5 +262,16 @@ printf '%s\n' '(define mk (\n (\a (if (eq n 0) a (mk (sub n 1) (scons n a))))))'
   '(let ((l (mk 1000 snil))) (let ((a (sq l 0))) (add (add a a) (cu l 0))))' > "$TMP/pf.lin"
 pf=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pf.lin" 2>"$TMP/pf.err"); pf1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pf.lin" 2>/dev/null)
 [ "$pf" = "=> 251167917000" ] && [ "$pf1" = "$pf" ] && grep -q "[1-9][0-9]* parallel site" "$TMP/pf.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a loop started early: '$pf' '$pf1'"; }
+# FUSION: a pipeline over a list two million long is one loop -- no list is built, and the filter's two arms,
+# which step to the same next call, stay tail calls (bound first, they were a recursion two million deep).
+printf '%s\n' '(sfoldl (\a (\x (add a x))) 0 (sfilter (\x (eq (mod x 2) 0)) (smap (\x (mul x x)) (srange 0 2000000))))' > "$TMP/fu.lin"
+fu=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/fu.lin" 2>"$TMP/fu.err"); fu1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/fu.lin" 2>/dev/null)
+[ "$fu" = "=> 1333331333334000000" ] && [ "$fu1" = "$fu" ] && [ "$(grep -c "fused" "$TMP/fu.err")" -ge 3 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a fused pipeline: '$fu' '$fu1'"; }
+# A producer whose list ends in another list (sappend): the consumer goes on with that list.
+printf '%s\n' '(define up (\i (\n (\rest (if (eq i n) rest (scons i (up (add i 1) n rest)))))))' \
+  '(define sm (\s (\a (match s (snil a) ((scons h t) (sm t (add a h)))))))' \
+  '(sm (up 0 1000 (scons 5000 (scons 7 snil))) 0)' > "$TMP/fa.lin"
+fa=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/fa.lin" 2>"$TMP/fa.err"); fan=$(LIN_FN_OFF=1 timeout 120 "$LIN_BIN" "$TMP/fa.lin" 2>/dev/null)
+[ "$fa" = "=> 504507" ] && [ "$fan" = "$fa" ] && grep -q "fused" "$TMP/fa.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL fusion onto a list's own end: '$fa' net '$fan'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
