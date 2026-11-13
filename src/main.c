@@ -1236,19 +1236,61 @@ static uint64_t program_key(const char *src) {
   for (char **e = environ; e && *e; e++) if (!strncmp(*e, "LIN_", 4) && strncmp(*e, "LIN_THREADS=", 12) && strncmp(*e, "LIN_CACHE_DEBUG=", 16)) h = key_mix(h, *e, strlen(*e));
   return h ? h : 1;
 }
-static int load_main_file(const char *path) {
+/* THE CACHE FIRST.  A run the program cache can answer needs none of the library: its compiled units are the
+   whole program.  So before the std is read (most of a short run's start-up: every module's file is opened
+   to register its names), the record is looked for where the function compiler keeps it, and if it is there
+   the two drivers a recall needs -- the compiler's, which runs the units, and readback, which prints -- are
+   loaded and asked.  Returns 1 when every expression was answered; otherwise *nprinted say how many were. */
+static int full_run_env(void);
+static uint64_t program_key(const char *src);
+static int cache_first(const char *path, int *nprinted) {
+  *nprinted = 0;
+  if (full_run_env()) return 0;
   char full[PATH_MAX]; char *src;
-  int dbgc = getenv("LIN_CACHE_DEBUG") != NULL;
+  if (!resolve_path(path, full, sizeof full) || !(src = read_file(full))) return 0;
+  if (!strncmp(src, "#!", 2) && strstr(path, ".line")) { free(src); return 0; }
+  uint64_t key = program_key(src); free(src);
+  const char *env = getenv("LIN_NATIVE_CACHE"), *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+  const char *dir = env && env[0] ? env : xdg && xdg[0] ? lin_internf("%s/lin/native", xdg)
+                  : home && home[0] ? lin_internf("%s/.cache/lin/native", home) : lin_internf("/tmp/lin-native-%u", (unsigned)getuid());
+  struct stat st;
+  if (stat(lin_internf("%s/form-%016llx.txt", dir, (unsigned long long)key), &st)) return 0;
+  if (!lin_driver_load("readback") || !lin_driver_load("fn") || !form_recall) return 0;
+  int idx = 0;
+  for (;; idx++) {
+    long w; int kind, dom;
+    int r = form_recall(key, idx, lin_threads, &w, &kind, &dom);
+    if (r == 0 && idx > 0) { if (getenv("LIN_CACHE_DEBUG")) fprintf(stderr, "[cache] %d expression%s run from compiled units\n", idx, idx == 1 ? "" : "s"); return 1; }
+    if (r <= 0) break;
+    Net net; net_init(&net, 16);
+    Port v = kind == 3 ? net_alloc_bool(&net, w != 0) : net_alloc_scott(&net, w);
+    net_link(&net, (Port){0, 0}, v, 0);
+    lin_result_desc = NULL;
+    run_and_report(&net, dom);
+    net_free(&net);
+  }
+  *nprinted = idx;
+  return 0;
+}
+static int full_run_env(void) {
   /* (a diagnostic setting, or one that changes how a program is run, asks for the run in full) */
   static const char *const full_run[] = { "LIN_FN_", "LIN_NO_", "LIN_DUMP_", "LIN_GPU_", "LIN_AOT_", "LIN_NATIVE_DEBUG=", "LIN_TRACE=", "LIN_STEPS=",
     "LIN_LEAKCHECK=", "LIN_WAVE_STATS=", "LIN_PASSES=", "LIN_EGRULES=", "LIN_PRECOMPILE=", "LIN_READBACK=", "LIN_EAGER_STD=" };
   for (char **e = environ; e && *e; e++) if (!strncmp(*e, "LIN_", 4))
-    for (int k = 0; k < N_OF(full_run); k++) if (!strncmp(*e, full_run[k], strlen(full_run[k]))) return load_file(path);
+    for (int k = 0; k < N_OF(full_run); k++) if (!strncmp(*e, full_run[k], strlen(full_run[k]))) return 1;
+  return 0;
+}
+static int cache_printed;   /* expressions cache_first already answered (and printed) */
+static int load_main_file(const char *path) {
+  char full[PATH_MAX]; char *src;
+  int dbgc = getenv("LIN_CACHE_DEBUG") != NULL;
+  /* (a diagnostic setting, or one that changes how a program is run, asks for the run in full) */
+  if (full_run_env()) return load_file(path);
   if (!form_recall || !resolve_path(path, full, sizeof full) || !(src = read_file(full))) return load_file(path);
   if (!strncmp(src, "#!", 2) && strstr(path, ".line")) { free(src); return load_file(path); }   /* (an artifact) */
   uint64_t key = program_key(src); free(src);
-  int idx = 0;
-  for (;; idx++) {
+  int idx = cache_printed;
+  for (; !cache_printed; idx++) {                    /* (cache_first answered some and stopped: the rest is evaluated) */
     long w; int kind, dom;
     int r = form_recall(key, idx, lin_threads, &w, &kind, &dom);
     if (r == 0 && idx > 0) { if (dbgc) fprintf(stderr, "[cache] %d expression%s run from compiled units\n", idx, idx == 1 ? "" : "s"); return 1; }   /* every expression ran from its compiled unit */
@@ -1299,6 +1341,7 @@ int main(int argc, char **argv) {
   }
 
   if (argc == 2 && run_line_file(argv[1])) return 0;
+  if (argc == 2 && argv[1][0] != '-' && cache_first(argv[1], &cache_printed)) return 0;
   load_std();
   int ran_eval = 0;
   for (int i = 1; i < argc; i++) {

@@ -1036,7 +1036,19 @@ static int par_shares(const Expr **xs, int n) {
    a loop, a call of one of the unit's recursive functions.  Independent loops in one expression (seven maps
    built from one sequence, or two sums) run side by side. */
 static int entry_np;   /* the entry's parameters: its numeric arguments */
-static int heavy(const Expr *e) { return emitting == -1 ? has_call(e) : has_self(e); }
+static int runs_loop(const Expr *e, unsigned char *seen) {   /* a call not yet made: one a local already holds is done */
+  if (!e || e->op == E_PARAM || e->op == E_CONST || bound(e) || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_CALL) return 1;
+  if (runs_loop(e->a, seen) || runs_loop(e->b, seen) || (e->op != E_CTOR && runs_loop(e->c, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (runs_loop(e->args[i], seen)) return 1;
+  return 0;
+}
+static int heavy(const Expr *e) {
+  if (emitting != -1) return has_self(e);
+  if (!has_call(e)) return 0;
+  unsigned char *seen = calloc((size_t)eid + 1, 1); int r = runs_loop(e, seen); free(seen); return r;
+}
 static int site_np(void) { return emitting == -1 ? entry_np : arity; }
 /* The locals an operand reads: what the enclosing code holds that the operand's task is handed. */
 static void captures(const Expr *e, unsigned char *seen, const Expr ***out, int *n) {
