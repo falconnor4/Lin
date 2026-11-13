@@ -1006,10 +1006,12 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
    both reach, or one the enclosing code already holds in a local -- would be computed again inside each.  That
    is the opposite of what sharing is for (`(fdiv (dot u v) (dot v v))` built `v` on both threads), so such
    operands are evaluated in turn, the shared value once. */
+/* (A value the enclosing code already holds in a local is no conflict: it is computed, and each operand's task
+   is handed it -- see par_group.) */
 static int ps_walk(const Expr *e, unsigned char *mark, int who) {
   if (!e || e->op == E_PARAM || e->op == E_CONST) return 0;
   if (mark[e->id] == who) return 0;
-  if ((mark[e->id] || bound(e)) && has_call(e)) return 1;
+  if (mark[e->id] && !bound(e) && has_call(e)) return 1;
   mark[e->id] = (unsigned char)who;
   if (bound(e)) return 0;
   if (ps_walk(e->a, mark, who) || ps_walk(e->b, mark, who) || (e->op != E_CTOR && ps_walk(e->c, mark, who))) return 1;
@@ -1021,27 +1023,51 @@ static int par_shares(const Expr **xs, int n) {
   for (int i = 0; i < n && !r; i++) r = ps_walk(xs[i], mark, i + 1);
   free(mark); return r;
 }
+/* WORTH A THREAD: inside a function's parallel copy, an operand that calls the function again (the tree of
+   calls is what spreads); in the ENTRY -- the expression the program observes, run once -- any operand that runs
+   a loop, a call of one of the unit's recursive functions.  Independent loops in one expression (seven maps
+   built from one sequence, or two sums) run side by side. */
+static int entry_np;   /* the entry's parameters: its numeric arguments */
+static int heavy(const Expr *e) { return emitting == -1 ? has_call(e) : has_self(e); }
+static int site_np(void) { return emitting == -1 ? entry_np : arity; }
+/* The locals an operand reads: what the enclosing code holds that the operand's task is handed. */
+static void captures(const Expr *e, unsigned char *seen, const Expr ***out, int *n) {
+  if (!e || e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return;
+  seen[e->id] = 1;
+  if (bound(e)) { *out = realloc(*out, sizeof **out * (size_t)(*n + 1)); (*out)[(*n)++] = e; return; }
+  captures(e->a, seen, out, n); captures(e->b, seen, out, n); if (e->op != E_CTOR) captures(e->c, seen, out, n);
+  for (int i = 0; i < e->nargs && e->args; i++) captures(e->args[i], seen, out, n);
+}
 static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int budget) {
-  int last = -1, ok = 1;
-  for (int i = 0; i < n; i++) if (has_self(xs[i])) last = i;
+  int last = -1, ok = 1, np = site_np();
+  for (int i = 0; i < n; i++) if (heavy(xs[i])) last = i;
   put(b, "({ ");
   int *site = calloc((size_t)n, sizeof *site);
   for (int i = 0; ok && i < n; i++) {
     site[i] = -1;
-    if (!has_self(xs[i]) || i == last) continue;
+    if (!heavy(xs[i]) || i == last) continue;
     int k = site[i] = nsite++;
-    Buf sb = nbuf(512);            /* the site: this operand as a function of the parameters */
-    put(&sb, "static long site%d(", k); plist(&sb, 1); put(&sb, "%sint d) { return ", arity ? ", " : "");
-    int save = fscope; fscope = ++nvar + (1 << 20);   /* a new C function: no enclosing local is in scope */
-    ok = emit_region(&sb, pre, xs[i], 1, budget - 1);
-    fscope = save;
-    put(&sb, "; }\ntypedef struct { long p[%d]; int d; long r; } S%d;\n", arity, k);
+    const Expr **cap = NULL; int nc = 0;
+    { unsigned char *seen = calloc((size_t)eid + 1, 1); captures(xs[i], seen, &cap, &nc); free(seen); }
+    Buf sb = nbuf(512);            /* the site: this operand as a function of the parameters and the locals it reads */
+    put(&sb, "static long site%d(", k); plistn(&sb, 1, np);
+    for (int c = 0; c < nc; c++) put(&sb, "%slong v%d", np || c ? ", " : "", cap[c]->var);
+    put(&sb, "%sint d) { return ", np || nc ? ", " : "");
+    ok = emit_region(&sb, pre, xs[i], 1, budget - 1);   /* (the same scope: the locals it reads are its parameters) */
+    put(&sb, "; }\ntypedef struct { long p[%d]; long v[%d]; int d; long r; } S%d;\n", np + 1, nc + 1, k);
     put(&sb, "static void *run%d(void *v) { S%d *s = v; LIN_TASK_START((size_t)256 << 20); s->r = site%d(", k, k, k);
-    for (int j = 0; j < arity; j++) put(&sb, "s->p[%d], ", j);
+    for (int j = 0; j < np; j++) put(&sb, "s->p[%d], ", j);
+    for (int c = 0; c < nc; c++) put(&sb, "s->v[%d], ", c);
     put(&sb, "s->d); return 0; }\n");
     put(pre, "%s", sb.s); free(sb.s);
-    put(b, "S%d s%d_ = { {", k, k); plist(b, 0); put(b, "}, d, 0 }; pthread_t t%d_; ", k);
+    put(b, "S%d s%d_ = { {", k, k); plistn(b, 0, np); put(b, "%s}, {", np ? "" : "0");
+    for (int c = 0; c < nc; c++) put(b, "%sv%d", c ? ", " : "", cap[c]->var);
+    put(b, "%s}, d, 0 }; pthread_t t%d_; ", nc ? "" : "0", k);
     put(b, "int sp%d_ = d < dmax && !pthread_create(&t%d_, &attr, run%d, &s%d_); ", k, k, k, k);
+    Buf call = nbuf(128); put(&call, "site%d(", k); plistn(&call, 0, np);
+    for (int c = 0; c < nc; c++) put(&call, "%sv%d", np || c ? ", " : "", cap[c]->var);
+    put(&call, "%sd)", np || nc ? ", " : "");
+    put(&names[i], "%s", call.s); free(call.s); free(cap);   /* (kept until the join below is written) */
   }
   int self = nvar++;
   for (int i = 0; ok && i < n; i++) {             /* the last call-containing operand, on this thread */
@@ -1049,14 +1075,16 @@ static int par_group(Buf *b, Buf *pre, const Expr **xs, int n, Buf *names, int b
     put(b, "long y%d_ = ", self); ok = emitx(b, pre, xs[i], 1, budget - 1); put(b, "; ");
   }
   for (int i = 0; ok && i < n; i++) {
-    names[i].len = 0; names[i].s[0] = 0;
     if (site[i] >= 0) {
       int k = site[i];
-      put(b, "long x%d_ = sp%d_ ? (pthread_join(t%d_, 0), LIN_JOINED, s%d_.r) : site%d(", k, k, k, k, k); plist(b, 0);
-      put(b, "%sd); ", arity ? ", " : "");
+      put(b, "long x%d_ = sp%d_ ? (pthread_join(t%d_, 0), LIN_JOINED, s%d_.r) : %s; ", k, k, k, k, names[i].s);
+      names[i].len = 0; names[i].s[0] = 0;
       put(&names[i], "x%d_", k);
-    } else if (i == last) put(&names[i], "y%d_", self);
-    else ok = emitx(&names[i], pre, xs[i], 1, budget - 1);
+    } else {
+      names[i].len = 0; names[i].s[0] = 0;
+      if (i == last) put(&names[i], "y%d_", self);
+      else ok = emitx(&names[i], pre, xs[i], 1, budget - 1);
+    }
   }
   free(site);
   return ok;
@@ -1327,7 +1355,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     Buf x = nbuf(256), y = nbuf(256);
     int ok = 1;
     const Expr *xs2[2] = { e->a, e->b };
-    if (par && has_self(e->a) && has_self(e->b) && !par_shares(xs2, 2)) {
+    if (par && heavy(e->a) && heavy(e->b) && !par_shares(xs2, 2)) {
       const Expr *xs[2] = { e->a, e->b }; Buf nm[2] = { nbuf(32), nbuf(32) };
       ok = par_group(b, pre, xs, 2, nm, budget);
       if (ok) { emit_op(b, e->k, nm[0].s, nm[1].s); put(b, "; })"); }
@@ -1455,13 +1483,15 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; }
     put(b, ")"); return 1;
   case E_CALL:
-    par = par && e->k == 0;                        /* only the entry function has a parallel version */
-    { int calls = 0; for (int i = 0; i < e->nargs; i++) calls += has_self(e->args[i]);
-      if (par && calls >= 2 && !e->clone && !par_shares((const Expr **)e->args, e->nargs)) {   /* independent calls among the arguments: at once */
+    { int calls = 0, entry = par && emitting == -1 && e->k != 0;   /* (the entry: any call's independent loops) */
+      par = par && e->k == 0;                      /* only the entry function has a parallel version */
+      for (int i = 0; i < e->nargs; i++) calls += heavy(e->args[i]);
+      if ((par || entry) && calls >= 2 && !e->clone && !e->dropx && !par_shares((const Expr **)e->args, e->nargs)) {   /* independent calls among the arguments: at once */
         Buf *nm = calloc((size_t)e->nargs, sizeof *nm);
         for (int i = 0; i < e->nargs; i++) nm[i] = nbuf(32);
         int ok = par_group(b, pre, (const Expr **)e->args, e->nargs, nm, budget);
-        if (ok) { put(b, "fp("); for (int i = 0; i < e->nargs; i++) put(b, "%s, ", nm[i].s); put(b, "d + 1); })"); }
+        if (ok && par) { put(b, "fp("); for (int i = 0; i < e->nargs; i++) put(b, "%s, ", nm[i].s); put(b, "d + 1); })"); }
+        else if (ok) { put(b, "f%ld(", e->k); for (int i = 0; i < e->nargs; i++) put(b, "%s%s", i ? ", " : "", nm[i].s); ok = call_fv(b, e->k); put(b, "); })"); }
         for (int i = 0; i < e->nargs; i++) free(nm[i].s);
         free(nm); return ok;
       } }
@@ -2953,7 +2983,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         Buf ebp = nbuf(1024);
         nsite = 0; emitting = 0; fscope++;
         int pok = !nfv[0] && emit_region(&pb, &pre, funs[0].body, 1, 4096);   /* (the parallel copy is of f0's own parameters) */
-        emitting = -1; fscope++;
+        emitting = -1; fscope++; entry_np = nnum;
         pok = pok && emit_region(&ebp, &pre, entry, 1, 4096);
         put(&b, "static int dmax; static pthread_attr_t attr;\nstatic long fp("); plist(&b, 1);
         put(&b, "%sint d);\n%s", arity ? ", " : "", pre.s);

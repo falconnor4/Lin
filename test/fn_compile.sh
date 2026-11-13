@@ -246,5 +246,13 @@ m3=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/m3.lin" 2>"$TMP/m3.err")
 printf '%s\n' '(str_length (re_replace (regex "\\|[^|][^|]*\\|") "-" (re_replace (regex "<[^>]*>") "|" (re_replace (regex "a[NSt]|BY") "<2>" (re_replace (regex "aND|caN|Ha[DS]|WaS") "<3>" (re_replace (regex "tHa[Nt]") "<4>" "xtHaNtyaNDzHaDSaByBYk"))))))' > "$TMP/rs.lin"
 rs=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/rs.lin" 2>"$TMP/rs.err")
 [ "$rs" = "=> 5" ] && grep -q "folded a call" "$TMP/rs.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL chained substitutions: '$rs'"; }
+# INDEPENDENT LOOPS IN ONE EXPRESSION run side by side: two sums over one list, the list built once and handed
+# to both tasks.
+printf '%s\n' '(define mk (\n (\a (if (eq n 0) a (mk (sub n 1) (scons n a))))))' \
+  '(define sq (\s (\t (match s (snil t) ((scons h r) (sq r (add t (mul h h))))))))' \
+  '(define cu (\s (\t (match s (snil t) ((scons h r) (cu r (add t (mul h (mul h h)))))))))' \
+  '(let ((l (mk 1000 snil))) (add (sq l 0) (cu l 0)))' > "$TMP/pe.lin"
+pe=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pe.lin" 2>"$TMP/pe.err"); pe1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pe.lin" 2>/dev/null)
+[ "$pe" = "=> 250834083500" ] && [ "$pe1" = "$pe" ] && grep -q "[1-9][0-9]* parallel site" "$TMP/pe.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL independent loops in parallel: '$pe' '$pe1'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
