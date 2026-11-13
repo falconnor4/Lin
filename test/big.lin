@@ -1,0 +1,62 @@
+; std/big.lin: arbitrary-precision natural numbers, and signed integers over them
+
+(big_to_string (big_of 1234567890123))
+; expect => "1234567890123"
+
+(big_to_string big_zero)
+; expect => "0"
+
+(big_to_string (big_add (big_of 999999999) (big_of 1)))
+; expect => "1000000000"
+
+(big_to_string (big_sub (big_of 1000000000) (big_of 1)))
+; expect => "999999999"
+
+(big_to_string (big_sub (big_of 5000000000) (big_of 5000000000)))
+; expect => "0"
+
+(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))
+(big_to_string (fact 30 (big_of 1)))
+; expect => "265252859812191058636308480000000"
+
+(big_to_string (big_mul (fact 20 (big_of 1)) (fact 25 (big_of 1))))
+; expect => "37737254063669622951147441236213760000000000"
+
+(big_mod_small (fact 30 (big_of 1)) 1000003)
+; expect => 90317
+
+(big_to_string (big_div_small (fact 30 (big_of 1)) 7))
+; expect => "37893265687455865519472640000000"
+
+(big_cmp (fact 20 (big_of 1)) (fact 21 (big_of 1)))
+; expect => -1
+
+(big_cmp (fact 21 (big_of 1)) (fact 21 (big_of 1)))
+; expect => 0
+
+(big_to_num (big_of 12345678901))
+; expect => 12345678901
+
+(big_is_zero (big_sub (big_of 7) (big_of 7)))
+; expect => true
+
+(bigint_to_string (bigint_add (bigint_of -5) (bigint_of 3)))
+; expect => "-2"
+
+(bigint_to_string (bigint_sub (bigint_of 3) (bigint_of 1000000000000)))
+; expect => "-999999999997"
+
+(bigint_to_string (bigint_mul (bigint_of -123456789012) (bigint_of 98765432109)))
+; expect => "-12193263113559823186308"
+
+(bigint_to_string (bigint_mul_small (bigint_of 7) -3))
+; expect => "-21"
+
+(bigint_cmp (bigint_of -7) (bigint_of -3))
+; expect => -1
+
+(bigint_cmp (bigint_of 2) (bigint_of -3))
+; expect => 1
+
+(bigint_is_neg (bigint_sub (bigint_of 3) (bigint_of 3)))
+; expect => false

@@ -9,7 +9,7 @@ Arguments are listed in application order: `(str_take k s)` takes the first `k`
 characters of `s`.
 
 - [Core types](#core-types): [bool](#bool), [num](#num), [float](#float), [math](#math), [pair](#pair), [maybe](#maybe), [either](#either)
-- [Collections](#collections): [list](#list), [sequences](#sequences), [array](#array), [omap](#omap), [hmap](#hmap), [map and set](#map-and-set), [queue](#queue), [stream](#stream), [tree](#tree)
+- [Collections](#collections): [list](#list), [sequences](#sequences), [array](#array), [omap](#omap), [hmap](#hmap), [big](#big), [map and set](#map-and-set), [queue](#queue), [stream](#stream), [tree](#tree)
 - [Text](#text): [string](#string), [text](#text-driver)
 - [System](#system): [io](#io), [ffi](#ffi)
 - [Other modules](#other-modules)
@@ -227,6 +227,28 @@ place when nothing else holds it. Keys are not kept in order.
 | `(hmap_fold f z m)` | Fold over the entries, `(f acc key value)`, in no particular order |
 
 Use `omap` when keys must come out in order, `hmap` otherwise.
+
+### big
+
+`std/big.lin`. Arbitrary-precision natural numbers, as sequences of base-10⁹
+limbs, and signed integers built on them.
+
+```scheme
+(big_to_string (big_mul (big_of 123456789012) (big_of 987654321098)))
+; => "121932631137021795224746380"
+```
+
+| Name | Meaning |
+|------|---------|
+| `big_zero`, `(big_of n)` | Zero; from a non-negative machine integer |
+| `(big_add a b)`, `(big_sub a b)` | Sum; difference, for `a >= b` |
+| `(big_mul a b)`, `(big_mul_small a k)` | Product; product with `0 <= k < 10^9` |
+| `(big_divmod_small a k)`, `(big_div_small a k)`, `(big_mod_small a k)` | Division by a machine integer |
+| `(big_cmp a b)`, `(big_is_zero a)` | Comparison (negative, zero or positive); zero test |
+| `(big_to_num a)`, `(big_to_string a)` | To a machine integer (when it fits); to decimal text |
+| `(bigint_of n)`, `(bigint_of_big a)` | Signed integers: from a machine integer; from a natural |
+| `bigint_add`, `bigint_sub`, `bigint_mul`, `bigint_mul_small`, `bigint_neg` | Arithmetic (`bigint_mul_small` takes a negative `k` too) |
+| `bigint_cmp`, `bigint_is_neg`, `bigint_mag`, `bigint_to_string` | Comparison, sign, magnitude, decimal text |
 
 ### map and set
 

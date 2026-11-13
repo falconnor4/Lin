@@ -207,5 +207,25 @@ pmn=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pms.lin" 2>/dev/null); pmc=$(tim
 [ -n "$pm1" ] && [ "$pmok" = 1 ] && [ -n "$pmn" ] && [ "$pmc" = "$pmn" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL parallel map: -t 1 '$pm1' widths agree $pmok; short list compiled '$pmc' net '$pmn'"; }
 pmd=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" -t 4 "$TMP/pm.lin" 2>&1 >/dev/null | grep -c "maps its list in parallel")
 [ "$pmd" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no map was run in parallel"; }
+# A FIELD DECLARED bool is a condition: taken out of a block and used by `if`, it is compiled, not left to the net.
+printf '%s\n' '(datatype B (bb (n bool) (m num)))' \
+  '(define h (\k (\a (if (eq k 0) a (h (sub k 1) (match a ((bb n m) (bb (not n) (add m 1)))))))))' \
+  '(match (h 5 (bb true 0)) ((bb n m) (if n m 7)))' > "$TMP/bf.lin"
+bf=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/bf.lin" 2>"$TMP/bf.err")
+[ "$bf" = "=> 7" ] && ! grep -q declined "$TMP/bf.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a bool field: '$bf'"; }
+# A FIELD ONLY PASSED ALONG has the shape its declared type says, so the value it holds can be read in.
+printf '%s\n' '(datatype W (w (ac BigInt)))' \
+  '(define t1 (\i (\st (if (eq i 0) 0 (t1 (sub i 1) (match st ((w ac) (w ac))))))))' '(t1 5 (w (bigint_of 3)))' > "$TMP/pa.lin"
+pa=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pa.lin" 2>"$TMP/pa.err")
+[ "$pa" = "=> 0" ] && ! grep -q declined "$TMP/pa.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field passed along: '$pa'"; }
+# A PARAMETER ONLY LENT is dropped where its path ends -- and one handed to a function that owns it is not (it is
+# that function's to free: big_mul hands its `a` to itself, and dropping it too freed it twice).
+printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
+  '(big_to_string (big_mul (fact 20 (big_of 1)) (fact 25 (big_of 1))))' > "$TMP/bm.lin"
+bm=$(timeout 120 "$LIN_BIN" "$TMP/bm.lin" 2>/dev/null)
+[ "$bm" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL big_mul: '$bm'"; }
+sed 's/(digits 0 2000 1/(digits 0 600 1/' "$ROOT/bench/pidigits.lin" > "$TMP/pd.lin"
+pd=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>"$TMP/pd.err")
+[ "$pd" = "=> 127083" ] && grep -q "dropped where its paths end" "$TMP/pd.err" && ! grep -q "guard fired" "$TMP/pd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600: '$pd'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

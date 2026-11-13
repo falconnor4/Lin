@@ -1,0 +1,107 @@
+; ==============================================================================
+; Lin Standard Library: Big -- arbitrary-precision natural numbers
+; ==============================================================================
+; A natural number of any size, as a sequence of limbs in base 10^9, least
+; significant first, with no zero limbs at the top (zero is the empty sequence).
+; Everything is a Seq and `match`, so it is typed and compiled; arithmetic on a
+; number nothing else holds is done in place.
+;
+;   (big_of n)            from a (non-negative) machine integer
+;   (big_add a b)  (big_sub a b)  -- a - b requires a >= b
+;   (big_mul a b)  (big_mul_small a k)  -- 0 <= k < 10^9
+;   (big_divmod_small a k)  -> (qr q r): quotient (a Big) and remainder (a number)
+;   (big_div_small a k)  (big_mod_small a k)
+;   (big_cmp a b)          negative, zero or positive
+;   (big_is_zero a)
+;   (big_to_num a)         the value, when it fits in a machine integer
+;   (big_to_string a)      decimal digits
+;
+; Signed integers, a sign and a Big magnitude (bigint_*): bigint_of, bigint_of_big, bigint_neg, bigint_add,
+; bigint_sub, bigint_mul, bigint_mul_small (k may be negative), bigint_cmp, bigint_is_neg, bigint_mag,
+; bigint_to_string.
+; ==============================================================================
+
+(load "bool.lin")
+(load "num.lin")
+(load "seq.lin")
+(load "string.lin")
+
+(namespace big)
+
+(define _base 1000000000)
+
+(datatype (QR s) (qr (q s) (r num)))
+
+(define big_zero snil)
+(define big_is_zero (\a (match a (snil true) ((scons h t) false))))
+(define big_of (\n (if (eq n 0) snil (scons (mod n _base) (big_of (div n _base))))))
+
+; a limb with its carry, and the rest
+(define _addc (\a (\b (\c (match a
+  (snil (if (eq c 0) b (_addc b (scons c snil) 0)))
+  ((scons x xs) (match b
+    (snil (if (eq c 0) a (let ((s (add x c))) (if (lt s _base) (scons s xs) (scons (sub s _base) (_addc xs snil 1))))))
+    ((scons y ys) (let ((s (add (add x y) c)))
+      (if (lt s _base) (scons s (_addc xs ys 0)) (scons (sub s _base) (_addc xs ys 1))))))))))))
+(define big_add (\a (\b (_addc a b 0))))
+
+; (a limb that became zero at the top is dropped: no number has zero limbs there)
+(define _cons0 (\h (\t (if (eq h 0) (match t (snil snil) ((scons x xs) (scons h t))) (scons h t)))))
+(define _subb (\a (\b (\c (match a
+  (snil snil)
+  ((scons x xs) (let ((y (match b (snil 0) ((scons y ys) y))) (rest (match b (snil snil) ((scons y ys) ys))))
+    (let ((d (sub (sub x y) c)))
+      (if (lt d 0) (_cons0 (add d _base) (_subb xs rest 1)) (_cons0 d (_subb xs rest 0)))))))))))
+(define big_sub (\a (\b (_subb a b 0))))
+
+(define _mulc (\a (\k (\c (match a
+  (snil (if (eq c 0) snil (scons (mod c _base) (_mulc snil k (div c _base)))))
+  ((scons x xs) (let ((p (add (mul x k) c))) (scons (mod p _base) (_mulc xs k (div p _base))))))))))
+(define big_mul_small (\a (\k (if (eq k 0) snil (_mulc a k 0)))))
+(define _shift (\a (match a (snil snil) ((scons h t) (scons 0 a)))))
+(define big_mul (\a (\b (match b
+  (snil snil)
+  ((scons h t) (big_add (big_mul_small a h) (_shift (big_mul a t))))))))
+
+; most significant limb first: a quotient built up, and the remainder carried down
+(define _divs (\hi (\k (\q (\r (match hi
+  (snil (qr q r))
+  ((scons x xs) (let ((v (add (mul r _base) x))) (_divs xs k (_cons0 (div v k) q) (mod v k))))))))))
+(define big_divmod_small (\a (\k (_divs (sreverse a) k snil 0))))
+(define big_div_small (\a (\k (match (big_divmod_small a k) ((qr q r) q)))))
+(define big_mod_small (\a (\k (match (big_divmod_small a k) ((qr q r) r)))))
+
+(define big_cmp (\a (\b (match a
+  (snil (match b (snil 0) ((scons y ys) -1)))
+  ((scons x xs) (match b
+    (snil 1)
+    ((scons y ys) (let ((c (big_cmp xs ys))) (if (eq c 0) (if (lt x y) -1 (if (gt x y) 1 0)) c)))))))))
+
+(define big_to_num (\a (match a (snil 0) ((scons h t) (add h (mul _base (big_to_num t)))))))
+
+; nine digits, zeros in front
+(define _pad (\s (\k (if (geq (str_length s) k) s (_pad (str_concat "0" s) k)))))
+(define _digits (\hi (\acc (match hi (snil acc) ((scons x xs) (_digits xs (str_concat acc (_pad (str_of_num x) 9))))))))
+(define big_to_string (\a (match (sreverse a) (snil "0") ((scons x xs) (_digits xs (str_of_num x))))))
+
+; ---- signed: a sign and a magnitude (zero is never negative) ----
+(datatype BigInt (bigint (neg num) (mag Seq num)))   ; neg: 1 below zero, else 0
+(define _mk (\neg (\mag (if (big_is_zero mag) (bigint 0 snil) (bigint neg mag)))))
+(define bigint_of (\n (if (lt n 0) (bigint 1 (big_of (sub 0 n))) (bigint 0 (big_of n)))))
+(define bigint_of_big (\a (bigint 0 a)))
+(define bigint_neg (\a (match a ((bigint n m) (_mk (sub 1 n) m)))))
+(define bigint_add (\a (\b (match a ((bigint an am) (match b ((bigint bn bm)
+  (if (eq an bn) (bigint an (big_add am bm))
+    (let ((c (big_cmp am bm)))
+      (if (gt c 0) (_mk an (big_sub am bm)) (_mk bn (big_sub bm am))))))))))))
+(define bigint_sub (\a (\b (bigint_add a (bigint_neg b)))))
+(define bigint_mul_small (\a (\k (match a ((bigint n m) (if (lt k 0) (_mk (sub 1 n) (big_mul_small m (sub 0 k))) (_mk n (big_mul_small m k))))))))
+(define bigint_mul (\a (\b (match a ((bigint an am) (match b ((bigint bn bm) (_mk (bxor an bn) (big_mul am bm)))))))))
+(define bigint_cmp (\a (\b (match a ((bigint an am) (match b ((bigint bn bm)
+  (if (eq an bn) (if (eq an 1) (big_cmp bm am) (big_cmp am bm)) (if (eq an 1) -1 1)))))))))
+(define bigint_is_neg (\a (match a ((bigint n m) (eq n 1)))))
+(define bigint_mag (\a (match a ((bigint n m) m))))
+(define bigint_to_string (\a (match a ((bigint n m) (if (eq n 1) (str_concat "-" (big_to_string m)) (big_to_string m))))))
+
+(namespace _)
+(export big)

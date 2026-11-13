@@ -103,8 +103,9 @@ static int y_call(const Net *n, Port p1, Port p2, int *h, int *appy, int *F) {
 enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FROW[k]) over args */
        E_CTOR, E_MATCH, E_FIELD };   /* data: constructor k (its index) of args; match on a over args (one result per
                                         constructor, in order); field k of a */
+struct Drop { const struct Expr *p; int fn; struct Drop *next; };   /* a parameter dropped at a path's end (drop_paths) */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; const struct Expr *dropx; int dropfn; } Expr;   /* dropx: a parameter this call only borrowed and nothing needs after it -- freed (by drop function dropfn) once the call returns */   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; const struct Expr *dropx; int dropfn; struct Drop *drops; } Expr;   /* dropx: a parameter this call only borrowed and nothing needs after it -- freed (by drop function dropfn) once the call returns */   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
@@ -284,8 +285,26 @@ static int dt_boxed(const char *dt, int *box) {      /* how many constructors of
   for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == dt && c->k > 0) { n++; *box = c->i; }
   return n;
 }
+/* A field's declared type, from the constructor's descriptor (src/type.c desc_rec: N B F ? a letter each,
+   L<elem>, P<i>;, D<name>(<args>)): a field declared `bool` is read as a condition, not as data. */
+static const char *fd_skip(const char *d) {
+  if (!d || !*d) return d;
+  switch (*d) {
+  case 'L': return fd_skip(d + 1);
+  case 'P': { const char *e = strchr(d, ';'); return e ? e + 1 : d + strlen(d); }
+  case 'D': { const char *p = strchr(d, '('); if (!p) return d + strlen(d); p++;
+              while (*p && *p != ')') { const char *q = fd_skip(p); if (q == p) break; p = q; }
+              return *p == ')' ? p + 1 : p; }
+  default: return d + 1;
+  }
+}
+static int field_is_bool(const LinCtor *ci, int j) {
+  const char *d = ci ? ci->fdesc : NULL;
+  for (int i = 0; d && *d && i < j; i++) d = fd_skip(d);
+  return d && *d == 'B';
+}
 static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci) {
-  Expr *e = mke(E_FIELD, 1); e->a = scrut; e->k = j; e->untag = untag; e->ci = ci; return hc(e);
+  Expr *e = mke(E_FIELD, field_is_bool(ci, j) ? 3 : 1); e->a = scrut; e->k = j; e->untag = untag; e->ci = ci; return hc(e);
 }
 /* THE CELL ENCODING AS A DATATYPE.  Lists, strings and the std's sequences are cells `\c.\n.((c h) t)` ended by
    `\c.\n.true` -- no constructor marker, but two constructors all the same, and the compiler gives them the
@@ -1197,6 +1216,27 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
   if (bound(e)) { put(b, tp ? "LIN_SET(dst, v%d)" : "v%d", e->var); return 1; }
+  if (e->drops && !par) {                            /* (see drop_paths) */
+    struct Drop *mine = NULL; for (struct Drop *d = e->drops; d; d = d->next) if (d->p->nargs == emitting) mine = d;
+    if (mine) {
+      Expr t = *e; t.drops = NULL; uses_data = 1;
+      if (e->op == E_CALL) {                         /* the arguments, then the drops, then the call (a tail call stays one) */
+        int a0 = nvar; nvar += e->nargs;
+        int *sv = A(sizeof(int) * (size_t)(e->nargs + 1)), *ss = A(sizeof(int) * (size_t)(e->nargs + 1));
+        put(b, "({ ");
+        for (int i = 0; i < e->nargs; i++) { put(b, "long v%d = ", a0 + i); if (!emit_arg(b, pre, e, i, par, budget - 1)) return 0; put(b, "; "); }
+        for (struct Drop *d = e->drops; d; d = d->next) if (d->p->nargs == emitting) put(b, "lin_drop%d(p%ld); ", d->fn, d->p->k);
+        Expr **na = A(sizeof(Expr *) * (size_t)(e->nargs + 1)); t.args = na; t.clone = 0;
+        for (int i = 0; i < e->nargs; i++) { Expr *v = mke(E_PARAM, e->args[i]->kind); v->var = a0 + i; v->vscope = fscope; na[i] = v; }
+        (void)sv; (void)ss;
+        tailpos = tp; int ok = emitx(b, pre, &t, par, budget - 1); put(b, "; })"); return ok;
+      }
+      put(b, "({ long r_ = "); int ok = emitx(b, pre, &t, par, budget - 1);   /* the value, then the drops */
+      put(b, "; ");
+      for (struct Drop *d = e->drops; d; d = d->next) if (d->p->nargs == emitting) put(b, "lin_drop%d(p%ld); ", d->fn, d->p->k);
+      put(b, tp ? "LIN_SET(dst, r_); })" : "r_; })"); return ok;
+    }
+  }
   if (e->fre && !par) {                              /* a tail that frees the block its match consumed */
     Expr t = *e; t.fre = NULL;
     /* the fields of the block this tail still reads go into locals first; then the block is released, so what
@@ -2194,7 +2234,10 @@ static void own_sites(const Expr *e) {               /* a parameter is OWNED if 
   if (e->op == E_CALL && e->k >= 0 && e->k < nfun)
     for (int i = 0; i < e->nargs && i < funs[e->k].arity; i++) {
       const Expr *a = e->args[i];
-      if (!((a->op == E_CTOR || a->op == E_CALL) && uniq(a))) uown[e->k][i] = 0;
+      /* fresh: something built, or computed by what builds (a conditional of such); or the function's own
+         parameter handed back to itself, in its place -- what it owned, it still owns */
+      int self = a->op == E_PARAM && a->nargs == (int)e->k && a->k == i;
+      if (!self && !(a->op != E_PARAM && a->op != E_FIELD && a->op != E_CONST && uniq(a))) uown[e->k][i] = 0;
     }
   own_sites(e->a); own_sites(e->b); if (e->op != E_CTOR) own_sites(e->c);
   for (int i = 0; i < e->nargs && e->args; i++) own_sites(e->args[i]);
@@ -2215,6 +2258,13 @@ static int drop_only(const Expr *e, const Expr *p, const Expr **call) {
   for (int i = 0; i < e->nargs && e->args; i++) if (!drop_only(e->args[i], p, call)) return 0;
   return 1;
 }
+static int contains_dropx(const Expr *e, const Expr *p) {
+  if (!e || e->op == E_PARAM || e->op == E_CONST) return 0;
+  if (e->dropx == p) return 1;
+  if (contains_dropx(e->a, p) || contains_dropx(e->b, p) || (e->op != E_CTOR && contains_dropx(e->c, p))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (contains_dropx(e->args[i], p)) return 1;
+  return 0;
+}
 static void drop_tails(Expr *e, int g, int k) {      /* each path of g's body: p handed on whole, unnamed, or lent to one call */
   const Expr *p = funs[g].pnode[k];
   if (e == p || !contains(e, p, 0)) return;
@@ -2230,6 +2280,59 @@ static void drop_tails(Expr *e, int g, int k) {      /* each path of g's body: p
   ((Expr *)call)->dropx = p; ((Expr *)call)->dropfn = drop_fn(ps.dt);
   if (dbg > 1) DBG("[f%d's parameter %d is dropped after its call of f%d]\n", g, k, h);
 }
+/* ...and a parameter only LENT on the way to a path's end -- to calls that read it and hand back nothing of it
+   (`(digits ... (big_mul_small nu k) ...)` lends `nu` twice, and keeps neither) -- is dropped at that end: before
+   the tail call, its arguments evaluated, or after the value a path ends with. */
+static int fun_reads(int h);
+static int borrows(const Expr *call, int i) {        /* does this call only read its argument i, and keep none of it? */
+  int h = (int)call->k;
+  if (h < 0 || h >= nfun || (i < funs[h].arity && uparam[h][i]) || !ufresh[h]) return 0;
+  if (i < funs[h].arity && uown[h][i]) return 0;     /* (a callee that owns the parameter may free it: handed over, not lent) */
+  if (fun_reads(h)) return 0;                        /* (it reads the parameters of the function the drop is in) */
+  Shape rs = shape_of(call);
+  return rs.k == 1 || rs.k == 3 || (rs.k == 5 && rs.dt && deep_owned(rs.dt, 0));
+}
+static int lent_only(const Expr *e, const Expr *p, unsigned char *seen) {   /* p in e only as a lent argument */
+  if (!e || e == p) return e != p;
+  if (e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return 1;
+  seen[e->id] = 1;
+  if (!contains(e, p, 0)) return 1;
+  if (e->op == E_CALL) {
+    if (fun_reads((int)e->k)) return 0;
+    for (int i = 0; i < e->nargs; i++) {
+      if (e->args[i] == p) { if (!borrows(e, i)) return 0; }
+      else if (!lent_only(e->args[i], p, seen)) return 0;
+    }
+    return 1;
+  }
+  if (!lent_only(e->a, p, seen) || !lent_only(e->b, p, seen) || (e->op != E_CTOR && !lent_only(e->c, p, seen))) return 0;
+  for (int i = 0; i < e->nargs && e->args; i++) if (!lent_only(e->args[i], p, seen)) return 0;
+  return 1;
+}
+static int lent(const Expr *e, const Expr *p) { unsigned char *seen = calloc((size_t)eid + 1, 1); int r = lent_only(e, p, seen); free(seen); return r; }
+static void drop_at(Expr **slot, const Expr *p, int fn) {   /* this path's end, as a node of its own, drops p */
+  Expr *c = A(sizeof *c); *c = **slot; c->id = eid++; c->var = -1;
+  struct Drop *d = A(sizeof *d); d->p = p; d->fn = fn; d->next = c->drops; c->drops = d;
+  *slot = c;
+}
+static void drop_paths(Expr **slot, const Expr *p, int fn, int seen) {
+  Expr *e = *slot;
+  if (e == p) return;                                /* (handed on whole) */
+  if ((e->op == E_IF && !indexed_pick(e, &(const Expr *){0}, &(const Expr *){0}, &(long){0})) || (e->op == E_MATCH && e->a != p)) {
+    const Expr *c = e->a;
+    if (!lent(c, p)) return;
+    Expr *c2 = A(sizeof *c2); *c2 = *e; c2->id = eid++; c2->var = -1; *slot = c2;
+    int s2 = seen || contains(c, p, 0);
+    if (e->op == E_IF) { drop_paths(&c2->b, p, fn, s2); drop_paths(&c2->c, p, fn, s2); return; }
+    c2->args = A(sizeof(Expr *) * (size_t)(e->nargs ? e->nargs : 1)); memcpy(c2->args, e->args, sizeof(Expr *) * (size_t)e->nargs);
+    for (int i = 0; i < e->nargs; i++) drop_paths(&c2->args[i], p, fn, s2);
+    return;
+  }
+  if (e->op == E_MATCH) return;                      /* (p taken apart: what becomes of it is the match's business) */
+  if (e->op == E_CALL) { if (fun_reads((int)e->k)) return; for (int i = 0; i < e->nargs; i++) if (e->args[i] == p) return; }
+  if (!lent(e, p)) return;
+  if (seen || contains(e, p, 0)) drop_at(slot, p, fn);
+}
 static void drops(Expr *entry) {
   ndrop = 0;
   uown = A(sizeof *uown * (size_t)(nfun ? nfun : 1));
@@ -2239,6 +2342,18 @@ static void drops(Expr *entry) {
   own_sites(entry);
   for (int g = 0; g < nfun; g++) for (int k = 0; k < funs[g].arity; k++)
     if (uown[g][k] && funs[g].pnode && funs[g].pnode[k] && funs[g].body) drop_tails(funs[g].body, g, k);
+  for (int g = 0; g < nfun; g++) {
+    ho_f = g; free(fr_memo); fr_memo = calloc((size_t)nfun + 1, 1);   /* (fun_reads: of g's parameters) */
+    for (int k = 0; k < funs[g].arity; k++) {
+      const Expr *p = funs[g].pnode ? funs[g].pnode[k] : NULL;
+      if (dbg > 2 && p) DBG("[drop? f%d.%d own %d shape %d]\n", g, k, uown[g][k], shape_of(p).k);
+      if (!p || !uown[g][k] || !funs[g].body) continue;
+      Shape ps = shape_of(p); if (ps.k != 5 || !ps.dt) continue;
+      if (contains_dropx(funs[g].body, p)) continue;   /* (the single-call drop above already has it) */
+      drop_paths(&funs[g].body, p, drop_fn(ps.dt), 0);
+      if (dbg > 1) DBG("[f%d's parameter %d is dropped where its paths end]\n", g, k);
+    }
+  }
 }
 static void ownership(Expr *entry) {
   uparam = A(sizeof *uparam * (size_t)nfun); ufresh = A((size_t)nfun);
@@ -2390,6 +2505,20 @@ static Shape unit_shapes(const Expr *entry) {
   for (int i = 0; i < nfun; i++) sh_par[i] = A(sizeof **sh_par * (size_t)(funs[i].arity ? funs[i].arity : 1));
   sh_fld = A(sizeof *sh_fld * (size_t)(sh_nctor + 1)); sh_built = A((size_t)(sh_nctor + 1)); sh_fneed = A((size_t)(nfun ? nfun : 1));
   for (long k = 1; k <= sh_nctor; k++) sh_fld[k] = A(sizeof **sh_fld * (size_t)(lin_ctor_info(k)->k + 1));
+  /* a field's DECLARED type is its shape to start from: a field the unit only passes along is never taken
+     apart, so nothing else would say what it holds -- and data read in needs its shape */
+  for (long k = 1; k <= sh_nctor; k++) {
+    const LinCtor *c = lin_ctor_info(k); const char *d = c->fdesc;
+    for (int j = 0; d && *d && j < c->k; j++, d = fd_skip(d)) {
+      if (*d == 'N' || *d == 'F') sh_fld[k][j] = (Shape){ 1, NULL };
+      else if (*d == 'B') sh_fld[k][j] = (Shape){ 3, NULL };
+      else if (*d == 'D') {
+        const char *p = strchr(d, '('); size_t nl = p ? (size_t)(p - d - 1) : 0; const LinCtor *c2;
+        for (long k2 = 1; nl && (c2 = lin_ctor_info(k2)); k2++)
+          if (c2->dt && strlen(c2->dt) == nl && !strncmp(c2->dt, d + 1, nl)) { sh_fld[k][j] = (Shape){ 5, c2->dt }; break; }
+      }
+    }
+  }
   if (sh_cap < eid) { sh_cap = eid * 2 + 64; sh_memo = realloc(sh_memo, sizeof *sh_memo * (size_t)sh_cap); sh_gen = realloc(sh_gen, sizeof *sh_gen * (size_t)sh_cap); memset(sh_gen, 0, sizeof *sh_gen * (size_t)sh_cap); }
   Shape res = { 0, NULL };
   for (int round = 0; round < 1000; round++) {

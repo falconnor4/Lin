@@ -59,6 +59,7 @@
 (load "array.lin")
 (load "omap.lin")
 (load "hmap.lin")
+(load "big.lin")
 (load "io.lin")
 
 ; --- Open All Standard Namespaces into Current Scope ---
@@ -84,5 +85,6 @@
 (open array)
 (open omap)
 (open hmap)
+(open big)
 (open io)
 

@@ -819,7 +819,9 @@ static int lazy_register(const char *full, const char *src) {
     } else if (!strcmp(tok, "datatype") || !strcmp(tok, "data")) {
       /* its constructors are definitions (and a match names them while it is being READ: see lin_ctor_demand) */
       lz_ws(src, &i);
-      if (src[i] == '(') lz_skip_form(src, &i); else lz_tok(src, &i, arg, (int)sl);   /* the type's name */
+      /* the type's name -- itself a name a program may use first, as a field's type (see parse_type_atom) */
+      if (src[i] == '(') { int j = i + 1; if (lz_tok(src, &j, arg, (int)sl)) LZ_ADD(lin_intern(arg, strlen(arg))); lz_skip_form(src, &i); }
+      else if (lz_tok(src, &i, arg, (int)sl)) LZ_ADD(lin_intern(arg, strlen(arg)));
       for (;;) {
         lz_ws(src, &i);
         if (!src[i] || src[i] == ')') break;

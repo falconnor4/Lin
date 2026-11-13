@@ -142,6 +142,9 @@ static Type *parse_type_atom(void) {
   }
   const char *nm = sym();
   if (!nm) pfail("type: expected name");
+  /* a datatype a library module declares, named before anything of that module is used: the module is read now
+     (a type is capitalised; a lower-case name is a type variable) */
+  if (!nominal_lookup(nm) && nm[0] >= 'A' && nm[0] <= 'Z' && lin_ctor_demand) lin_ctor_demand(nm);
   if (nominal_lookup(nm)) {
     /* generic nominal: consume `arity` type-argument atoms, chained as TARGs. */
     Type *t = type_nominal(nm); Type **cur = &t->a;
