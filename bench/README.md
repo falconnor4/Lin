@@ -31,27 +31,27 @@ definitions, at reduced sizes, and generate their own input so each is a single 
 
 | Benchmark | C -O3 | Lin | Lin -t 1 | C / Lin | What it exercises |
 |-----------|-------|-----|----------|---------|-------------------|
-| binarytrees | 200 ms | 35 ms | 27 ms | 5.71× | Benchmarks Game *binary-trees*, depth 16 |
-| bintree | 34 ms | 6 ms | 7 ms | 5.67× | Constructors and `match`: a depth-20 tree (2M nodes) built and counted |
-| seqs | 69 ms | 13 ms | 12 ms | 5.31× | `std/seq.lin`: map, filter and fold over a million-element list |
-| collatz | 221 ms | 52 ms | 198 ms | 4.25× | A loop calling a helper loop; a max-reduction |
-| loop | 91 ms | 26 ms | 102 ms | 3.50× | A tail-recursive sum over 100 million iterations |
-| mandel | 123 ms | 38 ms | 125 ms | 3.24× | Floats; three nested loops over a 1000 × 800 grid |
-| fib | 161 ms | 52 ms | 183 ms | 3.10× | Tree recursion: `fib 40` |
-| tak | 89 ms | 34 ms | 91 ms | 2.62× | Calls whose arguments are calls |
-| bst | 59 ms | 30 ms | 27 ms | 1.97× | A search tree: 200,000 inserts, then a weighted walk |
-| spectralnorm | 54 ms | 34 ms | 72 ms | 1.59× | Benchmarks Game *spectral-norm*, n = 1000 |
-| omap | 112 ms | 73 ms | 105 ms | 1.53× | `std/omap.lin`, a red-black tree: 200,000 inserts and lookups |
-| regexredux | 87 ms | 62 ms | 62 ms | 1.40× | Benchmarks Game *regex-redux*: nine patterns counted and five substitutions over 200,000 letters, with `std/regex.lin` |
-| nqueens | 206 ms | 152 ms | 211 ms | 1.36× | Bitmask backtracking for n = 14; an unbalanced search tree |
-| revcomp | 19 ms | 25 ms | 27 ms | 0.76× | Benchmarks Game *reverse-complement*: 1,000,000 letters reversed and complemented |
-| knucleotide | 36 ms | 72 ms | 72 ms | 0.50× | Benchmarks Game *k-nucleotide*: fragment counts in 250,000 letters, with `std/hmap.lin` |
-| fasta | 17 ms | 36 ms | 38 ms | 0.47× | Benchmarks Game *fasta*, n = 100,000: a repeated and two random sequences, checksummed |
-| array | 8 ms | 20 ms | 25 ms | 0.40× | `std/array.lin`: 1M strided writes, then 1M reads |
-| nbody | 18 ms | 51 ms | 53 ms | 0.35× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
-| words | 4 ms | 12 ms | 11 ms | 0.33× | Text: a 1M-character string built and its words counted |
-| pidigits | 577 ms | 1812 ms | 1661 ms | 0.32× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
-| fannkuch | 20 ms | 115 ms | 119 ms | 0.17× | Benchmarks Game *fannkuch-redux*, n = 9: every permutation, by prefix reversals |
+| seqs | 87 ms | 4 ms | 6 ms | 21.75× | `std/seq.lin`: map, filter and fold over a million-element list |
+| binarytrees | 178 ms | 14 ms | 23 ms | 12.71× | Benchmarks Game *binary-trees*, depth 16 |
+| bintree | 35 ms | 4 ms | 5 ms | 8.75× | Constructors and `match`: a depth-20 tree (2M nodes) built and counted |
+| collatz | 218 ms | 49 ms | 193 ms | 4.45× | A loop calling a helper loop; a max-reduction |
+| mandel | 120 ms | 30 ms | 119 ms | 4.00× | Floats; three nested loops over a 1000 × 800 grid |
+| fib | 149 ms | 46 ms | 156 ms | 3.24× | Tree recursion: `fib 40` |
+| loop | 90 ms | 29 ms | 94 ms | 3.10× | A tail-recursive sum over 100 million iterations |
+| tak | 87 ms | 30 ms | 90 ms | 2.90× | Calls whose arguments are calls |
+| spectralnorm | 54 ms | 27 ms | 70 ms | 2.00× | Benchmarks Game *spectral-norm*, n = 1000 |
+| bst | 45 ms | 23 ms | 25 ms | 1.96× | A search tree: 200,000 inserts, then a weighted walk |
+| regexredux | 78 ms | 42 ms | 59 ms | 1.86× | Benchmarks Game *regex-redux*: nine patterns counted and five substitutions over 200,000 letters, with `std/regex.lin` |
+| omap | 106 ms | 69 ms | 99 ms | 1.54× | `std/omap.lin`, a red-black tree: 200,000 inserts and lookups |
+| nqueens | 193 ms | 147 ms | 202 ms | 1.31× | Bitmask backtracking for n = 14; an unbalanced search tree |
+| revcomp | 21 ms | 16 ms | 17 ms | 1.31× | Benchmarks Game *reverse-complement*: 1,000,000 letters reversed and complemented |
+| knucleotide | 32 ms | 31 ms | 40 ms | 1.03× | Benchmarks Game *k-nucleotide*: fragment counts in 250,000 letters, with `std/hmap.lin` |
+| fasta | 16 ms | 16 ms | 19 ms | 1.00× | Benchmarks Game *fasta*, n = 100,000: a repeated and two random sequences, checksummed |
+| nbody | 16 ms | 23 ms | 25 ms | 0.70× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
+| words | 5 ms | 9 ms | 12 ms | 0.56× | Text: a 1M-character string built and its words counted |
+| fannkuch | 18 ms | 36 ms | 106 ms | 0.50× | Benchmarks Game *fannkuch-redux*, n = 9: every permutation, by prefix reversals |
+| pidigits | 557 ms | 1407 ms | 1342 ms | 0.40× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
+| array | 7 ms | 19 ms | 25 ms | 0.37× | `std/array.lin`: 1M strided writes, then 1M reads |
 
 The machine these were measured on is shared and noisy; expect variation of
 about 15% between runs. Re-run before quoting a number.
@@ -60,15 +60,18 @@ about 15% between runs. Re-run before quoting a number.
 
 **Parallelism.** The function compiler runs independent recursive calls on
 separate threads (`fib`, `tak`, `bintree`, `nqueens`), splits loops that fold an
-associative operation (`loop`, `collatz`, `mandel`), and maps a list in
-stretches when each element takes a call to compute (`spectralnorm`, whose rows
-are independent). With one thread (`Lin -t 1`) these run at about the speed of
-the C.
+associative operation (`loop`, `collatz`, `mandel`), maps a list in stretches
+when each element takes a call to compute (`spectralnorm`), runs the independent
+loops of one expression side by side (`knucleotide`'s seven maps, `regexredux`'s
+nine counts), and computes the steps of a loop whose steps do not depend on one
+another together (`fannkuch`'s permutations). With one thread (`Lin -t 1`) these
+run at about the speed of the C or slower.
 
 **Memory.** `seqs`, `bst` and `omap` are ahead on one thread too: compiled code
 allocates from an arena, rebuilds structures in place when nothing else holds
 them, and frees everything at once, where the C calls `malloc` and `free` per
-node.
+node. In `seqs` and `revcomp` the intermediate lists are never built at all: a
+loop that builds a list and the loop that takes it apart are fused into one.
 
 **Sharing.** In `binarytrees` and `bintree` the two subtrees of a node are the
 same expression, `(make (sub d 1))` written twice. Lin evaluates a shared
@@ -80,18 +83,21 @@ different values would measure allocation instead, as `bst` and `omap` do.
 
 ## Where Lin is behind
 
-- **`fannkuch` (about 6×).** Permutations are lists rebuilt at every step; the
-  C flips an array of nine bytes in place.
-- **`array`, `words` and `fasta` (about 2–3×).** A persistent trie
-  or linked list against flat C memory, and process start-up: the C starts in
-  about 2 ms, Lin in about 5 ms.
-- **`pidigits` (about 3×).** Arbitrary-precision numbers are persistent lists of
-  limbs in `std/big.lin`; the C updates arrays in place.
-- **`nbody` (about 3×).** Each step folds every body over the whole list; the
-  inner arithmetic is about three times slower per interaction than the C's,
-  and the cause has not been measured.
-- **`knucleotide` and `revcomp` (about 1.3–2×).** List-based text against byte
-  buffers and an open-addressing hash table.
+- **`pidigits` (about 2.5×).** Arbitrary-precision numbers are persistent lists of
+  limbs in `std/big.lin`; the C updates arrays in place, and the step is
+  sequential.
+- **`array`, `words` (about 2–2.5×).** A persistent trie or a list of characters
+  against flat C memory. `words` is also short enough (5 ms) that process start
+  matters: Lin's is now within 1 ms of an empty C program's.
+- **`fannkuch` (about 2×).** Permutations are lists, and each prefix reversal
+  builds a new one; the C flips nine bytes in place. Its permutations run in
+  parallel, which is most of what closes the gap from 6×. Reversing in place
+  needs the ownership analysis to see that a list it reads and then hands on is
+  still owned.
+- **`nbody` (about 1.4×).** Five bodies are a list of records; the C's loop over
+  an array of five structs is unrolled and vectorised. The steps are sequential,
+  so there is no parallelism to use.
+- **`fasta` is level** with the C.
 
 Flat memory is not something a pure net can express directly, so closing these
 gaps fully would take a representation change in the function compiler rather
