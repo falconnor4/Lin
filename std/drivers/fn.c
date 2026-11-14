@@ -1474,25 +1474,40 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   if (budget <= 0) return 0;
   if (bound(e)) { put(b, tp ? "LIN_SET(dst, v%d)" : "v%d", e->var); return 1; }
   if (e->drops && !par) {                            /* (see drop_paths) */
-    struct Drop *mine = NULL; for (struct Drop *d = e->drops; d; d = d->next) if (d->p->nargs == emitting) mine = d;
+#define MINE(d) ((d)->p->op != E_PARAM || (d)->p->nargs == emitting)
+#define LOCAL(d) ((d)->p->op != E_PARAM)
+    struct Drop *mine = NULL; int nfd = 0;
+    for (struct Drop *d = e->drops; d; d = d->next) if (MINE(d)) { mine = d; nfd += LOCAL(d); }
     if (mine) {
       Expr t = *e; t.drops = NULL; uses_data = 1;
+      /* a FIELD or a LOCAL to drop is read first -- by the path's end a field's block may be freed, or rebuilt
+         in -- and is that local while the path is written, so it is computed once */
+      int f0 = nvar; nvar += nfd;
+      put(b, "({ ");
+      Expr **held = nfd ? A(sizeof(Expr *) * (size_t)nfd) : NULL; int *hv = nfd ? A(sizeof(int) * (size_t)nfd * 2) : NULL;
+      { int q = 0; for (struct Drop *d = e->drops; d; d = d->next) if (MINE(d) && LOCAL(d)) {
+          put(b, "long v%d = ", f0 + q); if (!emitx(b, pre, d->p, par, budget - 1)) return 0; put(b, "; ");
+          Expr *x = (Expr *)d->p; held[q] = x; hv[2 * q] = x->var; hv[2 * q + 1] = x->vscope; x->var = f0 + q; x->vscope = fscope; q++; } }
+#define DROPS() do { int q_ = 0; for (struct Drop *d = e->drops; d; d = d->next) if (MINE(d)) { \
+        if (LOCAL(d)) put(b, "lin_drop%d(v%d); ", d->fn, f0 + q_++); else put(b, "lin_drop%d(p%ld); ", d->fn, d->p->k); } } while (0)
+#define UNHOLD() do { for (int q_ = 0; q_ < nfd; q_++) { held[q_]->var = hv[2 * q_]; held[q_]->vscope = hv[2 * q_ + 1]; } } while (0)
       if (e->op == E_CALL) {                         /* the arguments, then the drops, then the call (a tail call stays one) */
         int a0 = nvar; nvar += e->nargs;
-        int *sv = A(sizeof(int) * (size_t)(e->nargs + 1)), *ss = A(sizeof(int) * (size_t)(e->nargs + 1));
-        put(b, "({ ");
         for (int i = 0; i < e->nargs; i++) { put(b, "long v%d = ", a0 + i); if (!emit_arg(b, pre, e, i, par, budget - 1)) return 0; put(b, "; "); }
-        for (struct Drop *d = e->drops; d; d = d->next) if (d->p->nargs == emitting) put(b, "lin_drop%d(p%ld); ", d->fn, d->p->k);
+        DROPS();
         Expr **na = A(sizeof(Expr *) * (size_t)(e->nargs + 1)); t.args = na; t.clone = 0;
         for (int i = 0; i < e->nargs; i++) { Expr *v = mke(E_PARAM, e->args[i]->kind); v->var = a0 + i; v->vscope = fscope; na[i] = v; }
-        (void)sv; (void)ss;
-        tailpos = tp; int ok = emitx(b, pre, &t, par, budget - 1); put(b, "; })"); return ok;
+        tailpos = tp; int ok = emitx(b, pre, &t, par, budget - 1); put(b, "; })"); UNHOLD(); return ok;
       }
-      put(b, "({ long r_ = "); int ok = emitx(b, pre, &t, par, budget - 1);   /* the value, then the drops */
+      put(b, "long r_ = "); int ok = emitx(b, pre, &t, par, budget - 1);   /* the value, then the drops */
       put(b, "; ");
-      for (struct Drop *d = e->drops; d; d = d->next) if (d->p->nargs == emitting) put(b, "lin_drop%d(p%ld); ", d->fn, d->p->k);
+      DROPS(); UNHOLD();
       put(b, tp ? "LIN_SET(dst, r_); })" : "r_; })"); return ok;
+#undef DROPS
+#undef UNHOLD
     }
+#undef MINE
+#undef LOCAL
   }
   if (e->fre && !par) {                              /* a tail that frees the block its match consumed */
     Expr t = *e; t.fre = NULL;
@@ -2687,15 +2702,39 @@ static void drop_paths(Expr **slot, const Expr *p, int fn, int seen) {
    does not own the parameter and hands back none of it).  Nothing frees it -- the callee does not own it, and
    nobody else holds it -- so it is dropped when the call returns.  `(big_add (big_mul_small nu 3) ac)` built
    a number every step and kept them all. */
+/* where a value is used in a body: as call arguments (*nc) or otherwise (*other) */
+typedef struct { const Expr *call; int i; } TSite;
+static void temp_uses(const Expr *e, const Expr *a, TSite **v, int *nc, int *other, unsigned char *seen) {
+  if (!e || e == a || e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return;
+  seen[e->id] = 1;
+  const Expr *kids[3] = { e->a, e->b, e->op != E_CTOR ? e->c : NULL };
+  for (int q = 0; q < 3; q++) if (kids[q] == a) (*other)++;
+  for (int i = 0; i < e->nargs && e->args; i++) if (e->args[i] == a) {
+    if (e->op == E_CALL) { *v = realloc(*v, sizeof **v * (size_t)(*nc + 1)); (*v)[(*nc)++] = (TSite){ e, i }; } else (*other)++;
+  }
+  for (int q = 0; q < 3; q++) temp_uses(kids[q], a, v, nc, other, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) temp_uses(e->args[i], a, v, nc, other, seen);
+}
+static int exclusive(const Expr *e, const Expr *c1, const Expr *c2);
+static const Expr *td_body;
+static int temp_alone(const Expr *a) {   /* used only as call arguments, never two of them on one path */
+  TSite *v = NULL; int nc = 0, other = 0; unsigned char *seen = calloc((size_t)eid + 1, 1);
+  temp_uses(td_body, a, &v, &nc, &other, seen); free(seen);
+  int ok = !other && nc >= 1;
+  for (int x = 0; ok && x < nc; x++) for (int y = x + 1; ok && y < nc; y++)
+    if (v[x].call == v[y].call || !exclusive(td_body, v[x].call, v[y].call)) ok = 0;
+  free(v); return ok;
+}
 static void temp_drops(Expr *e, unsigned char *seen) {
   if (!e || e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return;
   seen[e->id] = 1;
   if (e->op == E_CALL && e->k >= 0 && e->k < nfun && !e->drops)
     for (int i = 0; i < e->nargs && i < CLONE_BITS && i < funs[e->k].arity; i++) {
       const Expr *a = e->args[i];
-      if (!(a->op == E_CALL || (a->op == E_CTOR && a->nargs)) || !uniq(a)) continue;   /* (fresh: built here) */
-      if (a->id >= nrefs_cap || nrefs[a->id] != 1 || bound(a)) continue;               /* (named once: this call's) */
-      if (uown[e->k][i] || ((e->clone >> i) & 1u) || ((e->dcopy >> i) & 1u) || !borrows(e, i)) continue;
+      if (!(a->op == E_CALL || (a->op == E_CTOR && a->nargs) || a->op == E_IF || a->op == E_MATCH) || !uniq(a)) continue;   /* (fresh: built here, or a choice of such) */
+      if (bound(a) || !((a->id < nrefs_cap && nrefs[a->id] == 1) || temp_alone(a))) continue;   /* (this call's alone, on its path) */
+      if (uown[e->k][i] || ((e->clone >> i) & 1u) || ((e->dcopy >> i) & 1u) || !borrows(e, i)) {
+        continue; }
       Shape sa = shape_of(a); if (sa.k != 5 || !sa.dt || !deep_owned(sa.dt, 0)) continue;
       if (!e->tdropfn) e->tdropfn = A(sizeof(int) * (size_t)(e->nargs ? e->nargs : 1));
       e->tdrop |= 1u << i; e->tdropfn[i] = drop_fn(sa.dt);
@@ -2703,6 +2742,68 @@ static void temp_drops(Expr *e, unsigned char *seen) {
     }
   temp_drops(e->a, seen); temp_drops(e->b, seen); if (e->op != E_CTOR) temp_drops(e->c, seen);
   for (int i = 0; i < e->nargs && e->args; i++) temp_drops(e->args[i], seen);
+}
+/* A FIELD OF A CONSUMED VALUE is the program's as much as a parameter is: a match takes apart a block nothing else
+   holds (its fields bound, the block itself rebuilt in or freed on every path), and a field only read on the way
+   to a path's end -- `(sm s m)`'s magnitude, lent to one multiplication -- is dead there.  Nothing else frees it;
+   so it is dropped, as an owned parameter is.  (A field handed on whole, stored, or given to a callee that owns
+   it, has moved, and is not.) */
+static int fd_cap;   /* (the nodes field_drops' walk knows: those drop_paths makes are copies of ones it has seen) */
+static void field_drops(Expr *e, unsigned char *seen) {
+  if (!e || e->op == E_PARAM || e->op == E_CONST || e->id >= fd_cap || seen[e->id]) return;
+  seen[e->id] = 1;
+  if (e->op == E_MATCH && e->freeb && e->ci)
+    for (int i = 0; i < e->nargs; i++) {
+      if (!e->freeb[i]) continue;
+      Expr **fl = NULL; int nfl = 0, cfl = 0;
+      mm_new(MM_SITE); fre_fields(e->args[i], e->a, &fl, &nfl, &cfl);
+      for (int j = 0; j < nfl; j++) {
+        const Expr *f = fl[j];
+        if (!field_owned(f)) continue;
+        Shape fs = shape_of(f); if (fs.k != 5 || !fs.dt || !deep_owned(fs.dt, 0)) continue;
+        if (contains_dropx(e->args[i], f)) continue;
+        drop_paths(&e->args[i], f, drop_fn(fs.dt), 0);
+        if (dbg > 1) DBG("[field %ld of a consumed %s is dropped where its paths end]\n", f->k, f->ci ? f->ci->name : "?");
+      }
+      free(fl);
+    }
+  field_drops(e->a, seen); field_drops(e->b, seen); if (e->op != E_CTOR) field_drops(e->c, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) field_drops(e->args[i], seen);
+}
+/* A LOCAL, likewise: a value a body builds (a call, or a choice of calls), reads -- lends to calls that keep
+   none of it -- and then no longer needs, is dropped where each of its paths ends.  `(big_mul_small nu 2)` is
+   compared with one number and added to another, and then is dead. */
+static void local_cands(const Expr *e, const Expr *root, const Expr ***v, int *n, unsigned char *seen) {
+  if (!e || e->op == E_PARAM || e->op == E_CONST || e->op == E_FIELD || seen[e->id]) return;
+  seen[e->id] = 1;
+  if (e != root && (e->op == E_CALL || e->op == E_IF || e->op == E_MATCH) && uniq(e)) {
+    Shape sh = shape_of(e);
+    if (sh.k == 5 && sh.dt && deep_owned(sh.dt, 0)) { *v = realloc(*v, sizeof **v * (size_t)(*n + 1)); (*v)[(*n)++] = e; }
+  }
+  local_cands(e->a, root, v, n, seen); local_cands(e->b, root, v, n, seen); if (e->op != E_CTOR) local_cands(e->c, root, v, n, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) local_cands(e->args[i], root, v, n, seen);
+}
+static int tdropped(const Expr *e, const Expr *a, unsigned char *seen) {   /* already a temporary of some call? */
+  if (!e || e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_CALL && e->tdrop) for (int i = 0; i < e->nargs && i < CLONE_BITS; i++) if (((e->tdrop >> i) & 1u) && e->args[i] == a) return 1;
+  if (tdropped(e->a, a, seen) || tdropped(e->b, a, seen) || (e->op != E_CTOR && tdropped(e->c, a, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (tdropped(e->args[i], a, seen)) return 1;
+  return 0;
+}
+static void local_drops(Expr **body) {
+  const Expr **v = NULL; int n = 0; unsigned char *seen = calloc((size_t)eid + 1, 1);
+  local_cands(*body, *body, &v, &n, seen);
+  for (int i = 0; i < n; i++) {
+    free(seen); seen = calloc((size_t)eid + 1, 1);   /* (drop_paths makes nodes: the ids grow) */
+    if (tdropped(*body, v[i], seen)) continue;
+    if (contains_dropx(*body, v[i])) continue;
+    Shape sh = shape_of(v[i]);
+    Expr *before = *body;
+    drop_paths(body, v[i], drop_fn(sh.dt), 0);
+    if (dbg > 1 && *body != before) DBG("[a local (f%ld's value) is dropped where its paths end]\n", v[i]->op == E_CALL ? v[i]->k : -1L);
+  }
+  free(seen); free(v);
 }
 static void drops(Expr *entry) {
   ndrop = 0;
@@ -2730,7 +2831,9 @@ static void drops(Expr *entry) {
   for (int g = -1; g < nfun; g++) {                  /* (the entry, then each function) */
     if (g >= 0 && !funs[g].body) continue;
     ho_f = g; free(fr_memo); fr_memo = calloc((size_t)nfun + 1, 1);
-    unsigned char *seen = calloc((size_t)eid + 1, 1); temp_drops(g < 0 ? entry : funs[g].body, seen); free(seen);
+    td_body = g < 0 ? entry : funs[g].body;
+    unsigned char *seen = calloc((size_t)eid + 1, 1); temp_drops((Expr *)td_body, seen); free(seen);
+    if (g >= 0) local_drops(&funs[g].body);
   }
 }
 static void ownership(Expr *entry) {
@@ -2762,6 +2865,11 @@ static void ownership(Expr *entry) {
   }
   drops(entry);
   for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); mark_reuse(funs[i].body, i); }
+  for (int g = 0; g < nfun; g++) {                   /* (after mark_reuse: it says which matches consume their block) */
+    if (!funs[g].body) continue;
+    ho_f = g; free(fr_memo); fr_memo = calloc((size_t)nfun + 1, 1);
+    fd_cap = eid; unsigned char *seen = calloc((size_t)eid + 1, 1); field_drops(funs[g].body, seen); free(seen);
+  }
   if (dbg > 1) {
     for (int i = 0; i < nfun; i++) { DBG("[own f%d fresh %d:", i, ufresh[i]); for (int k = 0; k < funs[i].arity; k++) fprintf(stderr, " %d", uparam[i][k]); fprintf(stderr, "]\n"); }
     for (long k = 1; k <= fown_n; k++) { const LinCtor *c = lin_ctor_info(k); if (c->k == 0) continue; DBG("[own %s:", c->name); for (int j = 0; j < c->k; j++) fprintf(stderr, " %d", fown[k][j]); fprintf(stderr, "]\n"); }
@@ -2963,7 +3071,11 @@ static const char *DATA_RT =
   "static inline long *lin_alloc(long n) { long *f = lin_fl[n & 7]; if (n < 8 && f) { lin_fl[n] = (long *)f[0]; return f; }\n"
   "  if (__builtin_expect(lin_hp + n > lin_he, 0)) lin_refill(n); long *r = lin_hp; lin_hp += n; return r; }\n"
   /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
+  "#ifdef LIN_POISON\n"   /* (LIN_FN_POISON: a freed block's words become an address nothing is at -- read after its free, it faults) */
+  "static inline void lin_free(long *p, long n) { if (n < 8) { for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
+  "#else\n"
   "static inline void lin_free(long *p, long n) { if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
+  "#endif\n"
   "static inline long lin_clone(long v, int n) { if (v & 1) return v; long *o = lin_alloc(n); __builtin_memcpy(o, (long *)v, (size_t)n * 8); return (long)o; }\n"
   "static void lin_free_all(void) { for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; for (int i = 0; i < 8; i++) lin_fl[i] = 0; }\n"
   /* The guard lives where an infinite STRUCTURE must go -- the arena's refill, once per chunk -- and checks memory and
@@ -3621,6 +3733,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       emitting = -1; fscope++; ok = ok && emit_region(&eb, &pre, entry, 0, 4096);
       int data = uses_data;
       put(&b, "%s%s\n#include <pthread.h>\n", LIN_I64_SRC, LIN_F64_SRC);
+      if (data && getenv("LIN_FN_POISON")) put(&b, "#define LIN_POISON 1\n");
       if (data) put(&b, "%s", DATA_RT); else put(&b, "#define LIN_ENTER\n#define LIN_LEAVE\n#define LIN_TASK_START(ss)\n#define LIN_JOINED 0\nint lin_fn_aborted;\n");
       { Buf db = nbuf(256);                            /* (written first: a drop function may call for another datatype's) */
       for (int d = 0; d < ndrop; d++) {                /* (drop_fn may add datatypes while these are written) */

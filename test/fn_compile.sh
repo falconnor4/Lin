@@ -307,5 +307,23 @@ printf '%s\n' '(define go (\i (\a (\n (if (eq i 0) n (go (sub i 1) a (if (gt (bi
   '(go 20000 (big_of 123456789123456789) 0)' > "$TMP/td.lin"
 td=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/td.lin" 2>"$TMP/td.err"); td1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/td.lin" 2>/dev/null)
 [ "$td" = "=> 20000" ] && [ "$td1" = "$td" ] && grep -q "temporary given to" "$TMP/td.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a temporary dropped: '$td' '$td1'"; }
+# A FIELD of a consumed record, lent and then dead, is dropped where its paths end -- and a LOCAL likewise.
+printf '%s\n' '(datatype R (r (k num) (l Seq num)))' \
+  '(define up (\n (\a (if (eq n 0) a (up (sub n 1) (scons n a))))))' \
+  '(define tot (\s (\a (match s (snil a) ((scons h t) (tot t (add a h)))))))' \
+  '(define mk (\i (\n (if (eq n 0) (r i (up (add (mod i 7) 3) snil)) (mk i (sub n 1))))))' \
+  '(define go (\i (\acc (if (eq i 0) acc (match (mk i 2) ((r k l) (go (sub i 1) (add acc (add k (tot l 0))))))))))' \
+  '(go 3000 0)' > "$TMP/fd.lin"
+fd=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/fd.lin" 2>"$TMP/fd.err")
+[ "$fd" = "=> 4570482" ] && grep -q "field 1 of a consumed r is dropped" "$TMP/fd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field dropped: '$fd'"; }
+# THE SAME PROGRAMS WITH FREED BLOCKS POISONED (LIN_FN_POISON): a block read after it is freed reads an address
+# nothing is at, so a drop made too early fails here rather than by luck.
+for f in fd sh2 td pa bm; do
+  [ -f "$TMP/$f.lin" ] || continue
+  a=$(timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null); b=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null)
+  [ -n "$a" ] && [ "$a" = "$b" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL $f with freed blocks poisoned: '$b', not '$a'"; }
+done
+pp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>/dev/null)
+[ "$pp" = "=> 127083" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600 with freed blocks poisoned: '$pp'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
