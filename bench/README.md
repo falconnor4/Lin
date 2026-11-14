@@ -83,9 +83,11 @@ different values would measure allocation instead, as `bst` and `omap` do.
 
 ## Where Lin is behind
 
-- **`pidigits` (about 2.5×).** Arbitrary-precision numbers are persistent lists of
-  limbs in `std/big.lin`; the C updates arrays in place, and the step is
-  sequential.
+- **`pidigits` (about 2×).** Arbitrary-precision numbers are lists of limbs in
+  `std/big.lin`; the C updates arrays in place, and the step is sequential. Most
+  of the gap was memory never freed (1.9 GB against the C's 13 MB); now that
+  results share no cells and temporaries are dropped it is 0.77 GB. What remains
+  is the fields of matched values that are read and then dead.
 - **`array`, `words` (about 2–2.5×).** A persistent trie or a list of characters
   against flat C memory. `words` is also short enough (5 ms) that process start
   matters: Lin's is now within 1 ms of an empty C program's.

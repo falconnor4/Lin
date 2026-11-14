@@ -120,7 +120,11 @@ structure, which shows exactly where a value is shared:
   none of it. This is the net's eraser in compiled code: a loop that computes
   each state from the last keeps one state, not all of them.
 - **Copying to own.** A small flat value given to an accumulating loop is given
-  as a copy, so the loop owns it and updates it in place at every step.
+  as a copy, so the loop owns it and updates it in place at every step. One value
+  given to two calls that would each own it is given to the second as a copy, so
+  both can free what they were given.
+- **Temporaries.** A value built only to be the argument of one call that just
+  reads it is freed when that call returns.
 - **Unread fields are not computed.** A constructor field that no part of the
   program reads is never evaluated or stored, matching lazy semantics.
 
