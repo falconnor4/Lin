@@ -217,7 +217,7 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_OFF=1` | Disable the function compiler |
 | `LIN_FN_DEBUG=1` | Print decisions and timings; `2` also prints the generated C |
 | `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
-| `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance |
+| `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance. The whole test suite and every benchmark pass under it |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
 | `LIN_NO_CACHE=1` | Do not use the program cache |

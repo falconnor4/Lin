@@ -323,6 +323,11 @@ for f in fd sh2 td pa bm; do
   a=$(timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null); b=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null)
   [ -n "$a" ] && [ "$a" = "$b" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL $f with freed blocks poisoned: '$b', not '$a'"; }
 done
+# (a trie node consumed while one of its children is PICKED by index: the pick reads the block itself, so it is
+# loaded before the node is freed)
+printf '%s\n' '(aget (apush (array 1024 0) 77) 1024)' > "$TMP/ap.lin"
+ap=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/ap.lin" 2>/dev/null)
+[ "$ap" = "=> 77" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a picked child of a freed trie node: '$ap'"; }
 pp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>/dev/null)
 [ "$pp" = "=> 127083" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600 with freed blocks poisoned: '$pp'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi

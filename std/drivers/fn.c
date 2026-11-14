@@ -1329,6 +1329,19 @@ static void fre_fields(const Expr *e, const Expr *s, Expr ***out, int *n, int *c
   if (e->c && e->op != E_CTOR) fre_fields(e->c, s, out, n, cap);
   for (int i = 0; i < e->nargs && e->args; i++) fre_fields(e->args[i], s, out, n, cap);
 }
+static int indexed_pick(const Expr *e, const Expr **K, const Expr **S, long *off);
+static void fre_picks(const Expr *e, const Expr *s, Expr ***out, int *n, int *cap) {   /* indexed picks from s in e */
+  if (!e) return;
+  if (e->id < mm_cap[MM_SITE]) { if (mm_has(MM_SITE, e)) return; mm_put(MM_SITE, e, 1); }
+  if (e->op == E_IF) {
+    const Expr *K, *S; long off;
+    if (indexed_pick(e, &K, &S, &off) && S == s) { if (*n >= *cap) *out = realloc(*out, sizeof **out * (size_t)(*cap = *cap ? *cap * 2 : 8)); (*out)[(*n)++] = (Expr *)e; return; }
+  }
+  if (e->a) fre_picks(e->a, s, out, n, cap);
+  if (e->b) fre_picks(e->b, s, out, n, cap);
+  if (e->c && e->op != E_CTOR) fre_picks(e->c, s, out, n, cap);
+  for (int i = 0; i < e->nargs && e->args; i++) fre_picks(e->args[i], s, out, n, cap);
+}
 static int call_fv(Buf *b, long k) {                 /* the callee's lifted parameters: ours, or passed on */
   for (int i = 0; k < lifted && i < nfv[k]; i++) {
     const FV *v = &fvs[k][i];
@@ -1521,13 +1534,24 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       int k = nvar++; put(b, "long v%d = ", k); if (!emitx(b, pre, fl[j], par, budget - 1)) { free(fl); return 0; } put(b, "; ");
       fl[j]->var = k; fl[j]->vscope = fscope;
     }
+    /* ...and so does a field the tail PICKS by index (an indexed load reads the block itself, not those locals) */
+    Expr **pk = NULL; int npk = 0, cpk = 0;
+    mm_new(MM_SITE); fre_picks(&t, e->fre, &pk, &npk, &cpk);
+    for (int j = 0; j < npk; j++) {
+      const Expr *K, *S; long off;
+      if (bound(pk[j]) || !indexed_pick(pk[j], &K, &S, &off)) { pk[j] = NULL; continue; }
+      int k = nvar++; put(b, "long v%d = ((long *)(", k); if (!emitx(b, pre, S, par, budget - 1)) { free(fl); free(pk); return 0; }
+      put(b, "))[("); if (!emitx(b, pre, K, par, budget - 1)) { free(fl); free(pk); return 0; } put(b, ") + %ld]; ", off);
+      pk[j]->var = k; pk[j]->vscope = fscope;
+    }
     put(b, "lin_free((long *)("); int ok = emitx(b, pre, e->fre, par, budget - 1);
     put(b, "), %d); ", e->fren);
     tailpos = tp;
     ok = ok && emitx(b, pre, &t, par, budget - 1); put(b, "; })");
     tailpos = 0;
     for (int j = 0; j < nfl; j++) if (fl[j]) fl[j]->var = -1;
-    free(fl);
+    for (int j = 0; j < npk; j++) if (pk[j]) pk[j]->var = -1;
+    free(fl); free(pk);
     return ok;
   }
   if (tp) {
@@ -3072,7 +3096,7 @@ static const char *DATA_RT =
   "  if (__builtin_expect(lin_hp + n > lin_he, 0)) lin_refill(n); long *r = lin_hp; lin_hp += n; return r; }\n"
   /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
   "#ifdef LIN_POISON\n"   /* (LIN_FN_POISON: a freed block's words become an address nothing is at -- read after its free, it faults) */
-  "static inline void lin_free(long *p, long n) { if (n < 8) { for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
+  "static inline void lin_free(long *p, long n) { for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
   "#else\n"
   "static inline void lin_free(long *p, long n) { if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
   "#endif\n"
