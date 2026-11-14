@@ -105,7 +105,7 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
                                         constructor, in order); field k of a */
 struct Drop { const struct Expr *p; int fn; struct Drop *next; };   /* a parameter dropped at a path's end (drop_paths) */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; const struct Expr *dropx; int dropfn; struct Drop *drops; } Expr;   /* dropx: a parameter this call only borrowed and nothing needs after it -- freed (by drop function dropfn) once the call returns */   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; const struct Expr *dropx; int dropfn; struct Drop *drops; unsigned dcopy; int *dcopyfn; unsigned tdrop; int *tdropfn; } Expr;   /* dropx: a parameter this call only borrowed and nothing needs after it -- freed (by drop function dropfn) once the call returns */   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* dcopy: ... as a deep copy (lin_copy<dcopyfn[i]>): one value two calls would each own */   /* tdrop: arguments built for this call alone, which it only reads: dropped (lin_drop<tdropfn[i]>) once it returns */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
@@ -1345,6 +1345,9 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 static int clone_words(const Expr *a);
 static int emit_arg(Buf *b, Buf *pre, const Expr *call, int i, int par, int budget) {
   const Expr *a = call->args[i];
+  if (i < CLONE_BITS && ((call->dcopy >> i) & 1u) && call->dcopyfn) {   /* (see own_alone) */
+    uses_data = 1; put(b, "lin_copy%d(", call->dcopyfn[i]); if (!emitx(b, pre, a, par, budget)) return 0; put(b, ")"); return 1;
+  }
   if (i < CLONE_BITS && ((call->clone >> i) & 1u)) {
     int w = clone_words(a);
     if (w > 0) { uses_data = 1; put(b, "lin_clone("); if (!emitx(b, pre, a, par, budget)) return 0; put(b, ", %d)", w); return 1; }
@@ -1721,6 +1724,21 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       put(b, "f%ld_pl(", e->k);
       for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emit_arg(b, pre, e, i, 0, budget - 1)) return 0; }
       put(b, ", %s)", emitting == -1 ? "d" : "d + 1"); nsite++; return 1;
+    }
+    if (e->tdrop && !par && !e->drops) {              /* (see temp_drops) the temporaries, the call, then the drops */
+      Expr t = *e; t.tdrop = 0; uses_data = 1;
+      int a0 = nvar; nvar += e->nargs;
+      Expr **na = A(sizeof(Expr *) * (size_t)(e->nargs ? e->nargs : 1)); t.args = na;
+      put(b, "({ ");
+      for (int i = 0; i < e->nargs; i++) {
+        if (!(i < CLONE_BITS && ((e->tdrop >> i) & 1u))) { na[i] = e->args[i]; continue; }
+        put(b, "long v%d = ", a0 + i); if (!emit_arg(b, pre, e, i, par, budget - 1)) return 0; put(b, "; ");
+        Expr *v = mke(E_PARAM, e->args[i]->kind); v->var = a0 + i; v->vscope = fscope; na[i] = v;
+      }
+      put(b, "long r_ = "); if (!emitx(b, pre, &t, par, budget - 1)) return 0; put(b, "; ");
+      for (int i = 0; i < e->nargs; i++) if (i < CLONE_BITS && ((e->tdrop >> i) & 1u)) put(b, "lin_drop%d(v%d); ", e->tdropfn[i], a0 + i);
+      put(b, "r_; })");
+      return 1;
     }
     { int dr = !par && e->dropx && e->dropx->nargs == emitting;   /* (see `drops`) */
       if (dr) put(b, "({ long r_ = ");
@@ -2542,7 +2560,7 @@ static void own_list(const Expr *e, OwnSite **v, int *n, unsigned char *seen) {
   seen[e->id] = 1;
   if (e->op == E_CALL && e->k >= 0 && e->k < nfun)
     for (int i = 0; i < e->nargs && i < funs[e->k].arity; i++)
-      if (uown[e->k][i] && e->args[i]->op != E_PARAM && e->args[i]->op != E_CONST) { *v = realloc(*v, sizeof **v * (size_t)(*n + 1)); (*v)[(*n)++] = (OwnSite){ e, i }; }
+      if (uown[e->k][i] && e->args[i]->op != E_PARAM && e->args[i]->op != E_CONST && !(e->args[i]->op == E_CTOR && !e->args[i]->nargs)) {   /* (an immediate is no block) */ *v = realloc(*v, sizeof **v * (size_t)(*n + 1)); (*v)[(*n)++] = (OwnSite){ e, i }; }
   own_list(e->a, v, n, seen); own_list(e->b, v, n, seen); if (e->op != E_CTOR) own_list(e->c, v, n, seen);
   for (int i = 0; i < e->nargs && e->args; i++) own_list(e->args[i], v, n, seen);
 }
@@ -2559,8 +2577,18 @@ static void own_alone(const Expr *body) {
     if (v[x].call != v[y].call && exclusive(body, v[x].call, v[y].call)) continue;
     int tx = tails[v[x].call->id] > 0, ty = tails[v[y].call->id] > 0;
     if (v[x].call != v[y].call && tx != ty) { OwnSite early = tx ? v[y] : v[x]; uown[early.call->k][early.i] = 0; continue; }
+    /* (a structure: the second is given a copy of its own, and both still own what they are given --
+       one copy, where owning neither would keep every step's value alive) */
+    Shape sa = shape_of(a);
+    if (sa.k == 5 && sa.dt && v[y].i < CLONE_BITS && !((v[y].call->clone >> v[y].i) & 1u)) {
+      Expr *c = (Expr *)v[y].call;
+      if (!c->dcopyfn) { c->dcopyfn = A(sizeof(int) * (size_t)(c->nargs ? c->nargs : 1)); }
+      c->dcopy |= 1u << v[y].i; c->dcopyfn[v[y].i] = drop_fn(sa.dt);
+      if (dbg > 1) DBG("[one value given to f%ld and f%ld: the second is given a copy]\n", v[x].call->k, v[y].call->k);
+      continue;
+    }
     uown[v[x].call->k][v[x].i] = 0; uown[v[y].call->k][v[y].i] = 0;
-    if (dbg > 1) DBG("[one value given to f%ld and f%ld: owned by neither]\n", v[x].call->k, v[y].call->k);
+    if (dbg > 1) DBG("[one value given to f%ld and f%ld: owned by neither (arg op %d, positions %d %d, same call %d)]\n", v[x].call->k, v[y].call->k, a->op, v[x].i, v[y].i, v[x].call == v[y].call);
   }
   free(tails); free(v);
 }
@@ -2655,6 +2683,27 @@ static void drop_paths(Expr **slot, const Expr *p, int fn, int seen) {
   if (!lent(e, p)) return;
   if (seen || contains(e, p, 0)) drop_at(slot, p, fn);
 }
+/* A TEMPORARY: a value built to be an argument of one call, named nowhere else, which that call only reads (it
+   does not own the parameter and hands back none of it).  Nothing frees it -- the callee does not own it, and
+   nobody else holds it -- so it is dropped when the call returns.  `(big_add (big_mul_small nu 3) ac)` built
+   a number every step and kept them all. */
+static void temp_drops(Expr *e, unsigned char *seen) {
+  if (!e || e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return;
+  seen[e->id] = 1;
+  if (e->op == E_CALL && e->k >= 0 && e->k < nfun && !e->drops)
+    for (int i = 0; i < e->nargs && i < CLONE_BITS && i < funs[e->k].arity; i++) {
+      const Expr *a = e->args[i];
+      if (!(a->op == E_CALL || (a->op == E_CTOR && a->nargs)) || !uniq(a)) continue;   /* (fresh: built here) */
+      if (a->id >= nrefs_cap || nrefs[a->id] != 1 || bound(a)) continue;               /* (named once: this call's) */
+      if (uown[e->k][i] || ((e->clone >> i) & 1u) || ((e->dcopy >> i) & 1u) || !borrows(e, i)) continue;
+      Shape sa = shape_of(a); if (sa.k != 5 || !sa.dt || !deep_owned(sa.dt, 0)) continue;
+      if (!e->tdropfn) e->tdropfn = A(sizeof(int) * (size_t)(e->nargs ? e->nargs : 1));
+      e->tdrop |= 1u << i; e->tdropfn[i] = drop_fn(sa.dt);
+      if (dbg > 1) DBG("[a temporary given to f%ld is dropped when it returns]\n", e->k);
+    }
+  temp_drops(e->a, seen); temp_drops(e->b, seen); if (e->op != E_CTOR) temp_drops(e->c, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) temp_drops(e->args[i], seen);
+}
 static void drops(Expr *entry) {
   ndrop = 0;
   uown = A(sizeof *uown * (size_t)(nfun ? nfun : 1));
@@ -2677,6 +2726,11 @@ static void drops(Expr *entry) {
       drop_paths(&funs[g].body, p, drop_fn(ps.dt), 0);
       if (dbg > 1) DBG("[f%d's parameter %d is dropped where its paths end]\n", g, k);
     }
+  }
+  for (int g = -1; g < nfun; g++) {                  /* (the entry, then each function) */
+    if (g >= 0 && !funs[g].body) continue;
+    ho_f = g; free(fr_memo); fr_memo = calloc((size_t)nfun + 1, 1);
+    unsigned char *seen = calloc((size_t)eid + 1, 1); temp_drops(g < 0 ? entry : funs[g].body, seen); free(seen);
   }
 }
 static void ownership(Expr *entry) {
@@ -3586,8 +3640,26 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
           if (!untag) put(&db, " break; }");
         }
         put(&db, " } v = nx; } }\n");
+      /* a COPY of what a drop would free -- the owned structure, down the same fields -- sharing the rest */
+      {
+        put(&db, "static long lin_copy%d(long v) { long r = v, *dst = &r; while (!(v & 1)) { long *o = (long *)v, *t = 0; long nx = 1;%s", d, untag ? " {" : " switch (o[0]) {");
+        for (long k = 1; (c = lin_ctor_info(k)); k++) {
+          if (c->dt != dt || c->k == 0) continue;
+          if (!untag) put(&db, " case %d: {", c->i);
+          put(&db, " long *n = lin_alloc(%d); __builtin_memcpy(n, o, %d * 8); *dst = (long)n;", c->k + !untag, c->k + !untag);
+          int last = -1;
+          for (int j = 0; j < c->k; j++) if (field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j]) last = j;
+          for (int j = 0; j < c->k; j++) {
+            if (!(field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j])) continue;
+            if (j == last && sh_fld[k][j].dt == dt) put(&db, " nx = o[%d]; t = &n[%d];", j + !untag, j + !untag);
+            else put(&db, " n[%d] = lin_copy%d(o[%d]);", j + !untag, drop_fn(sh_fld[k][j].dt), j + !untag);
+          }
+          if (!untag) put(&db, " break; }");
+        }
+        put(&db, " } if (!t) return r; dst = t; v = nx; } *dst = v; return r; }\n");
       }
-        for (int d = 0; d < ndrop; d++) put(&b, "static void lin_drop%d(long v);\n", d);
+      }
+        for (int d = 0; d < ndrop; d++) put(&b, "static void lin_drop%d(long v);\nstatic long lin_copy%d(long v);\n", d, d);
         put(&b, "%s", db.s); free(db.s); }
       put(&b, "%s", fb.s);
       if (ok && data) {                                /* data: on its own large stack, the tree recursions forked */

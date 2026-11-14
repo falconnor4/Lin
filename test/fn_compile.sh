@@ -300,7 +300,12 @@ pd2=$(timeout 120 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null); pd2n=$(LIN_FN_OFF=1 ti
 # starting number they share must survive the first (it was freed under the second).
 printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
   '(let ((x (big_of 1))) (big_to_string (big_mul (fact 20 x) (fact 25 x))))' > "$TMP/sh2.lin"
-sh2=$(timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>/dev/null)
-[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
+sh2=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>"$TMP/sh2.err")
+[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && grep -q "the second is given a copy" "$TMP/sh2.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
+# A TEMPORARY -- a number built only to be read by one call -- is dropped when the call returns.
+printf '%s\n' '(define go (\i (\a (\n (if (eq i 0) n (go (sub i 1) a (if (gt (big_cmp (big_mul_small a 3) (big_mul_small a 2)) 0) (add n 1) n)))))))' \
+  '(go 20000 (big_of 123456789123456789) 0)' > "$TMP/td.lin"
+td=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/td.lin" 2>"$TMP/td.err"); td1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/td.lin" 2>/dev/null)
+[ "$td" = "=> 20000" ] && [ "$td1" = "$td" ] && grep -q "temporary given to" "$TMP/td.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a temporary dropped: '$td' '$td1'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

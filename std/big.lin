@@ -36,11 +36,14 @@
 (define big_is_zero (\a (match a (snil true) ((scons h t) false))))
 (define big_of (\n (if (eq n 0) snil (scons (mod n _base) (big_of (div n _base))))))
 
+; a copy of the limbs: every result is a number of its own, sharing no cells with what it was made from -- so
+; compiled code can free each one as soon as nothing reads it
+(define _copy (\a (match a (snil snil) ((scons h t) (scons h (_copy t))))))
 ; a limb with its carry, and the rest
 (define _addc (\a (\b (\c (match a
-  (snil (if (eq c 0) b (_addc b (scons c snil) 0)))
+  (snil (if (eq c 0) (_copy b) (_addc b (scons c snil) 0)))
   ((scons x xs) (match b
-    (snil (if (eq c 0) a (let ((s (add x c))) (if (lt s _base) (scons s xs) (scons (sub s _base) (_addc xs snil 1))))))
+    (snil (let ((s (add x c))) (if (lt s _base) (scons s (_copy xs)) (scons (sub s _base) (_addc xs snil 1)))))
     ((scons y ys) (let ((s (add (add x y) c)))
       (if (lt s _base) (scons s (_addc xs ys 0)) (scons (sub s _base) (_addc xs ys 1))))))))))))
 (define big_add (\a (\b (_addc a b 0))))
@@ -58,7 +61,7 @@
   (snil (if (eq c 0) snil (scons (mod c _base) (_mulc snil k (div c _base)))))
   ((scons x xs) (let ((p (add (mul x k) c))) (scons (mod p _base) (_mulc xs k (div p _base))))))))))
 (define big_mul_small (\a (\k (if (eq k 0) snil (_mulc a k 0)))))
-(define _shift (\a (match a (snil snil) ((scons h t) (scons 0 a)))))
+(define _shift (\a (match a (snil snil) ((scons h t) (scons 0 (scons h t))))))
 (define big_mul (\a (\b (match b
   (snil snil)
   ((scons h t) (big_add (big_mul_small a h) (_shift (big_mul a t))))))))
