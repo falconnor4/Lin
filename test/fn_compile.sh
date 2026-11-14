@@ -296,5 +296,11 @@ printf '%s\n' '(define tot (\s (\a (match s (snil a) ((scons h t) (tot t (add a 
   '(let ((r (go 6 (scons 1 (scons 1 (scons 1 snil)))))) (add (tot r 0) (mul 1000 (tot r 1))))' > "$TMP/pd2.lin"
 pd2=$(timeout 120 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null); pd2n=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null)
 [ -n "$pd2" ] && [ "$pd2" = "$pd2n" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a step reading the accumulator through a closure: '$pd2' net '$pd2n'"; }
+# ONE VALUE GIVEN TO TWO CALLS is owned by neither: each `fact` updates its accumulator in place, and the
+# starting number they share must survive the first (it was freed under the second).
+printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
+  '(let ((x (big_of 1))) (big_to_string (big_mul (fact 20 x) (fact 25 x))))' > "$TMP/sh2.lin"
+sh2=$(timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>/dev/null)
+[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

@@ -2511,6 +2511,59 @@ static void own_sites(const Expr *e) {               /* a parameter is OWNED if 
   own_sites(e->a); own_sites(e->b); if (e->op != E_CTOR) own_sites(e->c);
   for (int i = 0; i < e->nargs && e->args; i++) own_sites(e->args[i]);
 }
+/* ...and to that call ALONE: one value built once and handed to two calls that would each own it is owned by
+   neither -- each would free it under the other.  Two calls in different arms of a conditional are never both
+   made; one that only lends the value (its parameter is not owned) takes nothing. */
+static int exclusive(const Expr *e, const Expr *c1, const Expr *c2) {   /* are c1 and c2 never both made, below e? */
+  if (!e || e == c1 || e == c2) return 0;
+  if (e->op == E_IF || e->op == E_MATCH) {
+    if (contains(e->a, c1, 0) || contains(e->a, c2, 0)) return 0;   /* (one is in the condition: made first) */
+    int nb = e->op == E_IF ? 2 : e->nargs;
+    for (int i = 0; i < nb; i++) {                   /* every arm that reaches both must keep them apart itself */
+      const Expr *br = e->op == E_IF ? (i ? e->c : e->b) : e->args[i];
+      if (contains(br, c1, 0) && contains(br, c2, 0) && !exclusive(br, c1, c2)) return 0;
+    }
+    return 1;
+  }
+  const Expr *next = NULL; int nk = 0;
+  const Expr *kids[3] = { e->a, e->b, e->op != E_CTOR ? e->c : NULL };
+  for (int q = 0; q < 3 + (e->args ? e->nargs : 0); q++) {
+    const Expr *k = q < 3 ? kids[q] : e->args[q - 3];
+    if (!k) continue;
+    int h1 = contains(k, c1, 0), h2 = contains(k, c2, 0);
+    if (h1 != h2 && (h1 || h2)) return 0;           /* (in two operands: both evaluated) */
+    if (h1 && h2) { next = k; nk++; }
+  }
+  return nk == 1 && exclusive(next, c1, c2);
+}
+typedef struct { const Expr *call; int i; } OwnSite;
+static void own_list(const Expr *e, OwnSite **v, int *n, unsigned char *seen) {
+  if (!e || e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return;
+  seen[e->id] = 1;
+  if (e->op == E_CALL && e->k >= 0 && e->k < nfun)
+    for (int i = 0; i < e->nargs && i < funs[e->k].arity; i++)
+      if (uown[e->k][i] && e->args[i]->op != E_PARAM && e->args[i]->op != E_CONST) { *v = realloc(*v, sizeof **v * (size_t)(*n + 1)); (*v)[(*n)++] = (OwnSite){ e, i }; }
+  own_list(e->a, v, n, seen); own_list(e->b, v, n, seen); if (e->op != E_CTOR) own_list(e->c, v, n, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) own_list(e->args[i], v, n, seen);
+}
+static void tail_uses(const Expr *e, unsigned *n);
+static void own_alone(const Expr *body) {
+  OwnSite *v = NULL; int n = 0; unsigned char *seen = calloc((size_t)eid + 1, 1);
+  own_list(body, &v, &n, seen); free(seen);
+  /* (everything else on a path is evaluated before the call it ends with: that call may own what an earlier
+     one only lends -- the earlier one keeps nothing) */
+  unsigned *tails = calloc((size_t)eid + 1, sizeof *tails); tail_uses(body, tails);
+  for (int x = 0; x < n; x++) for (int y = x + 1; y < n; y++) {
+    const Expr *a = v[x].call->args[v[x].i];
+    if (a != v[y].call->args[v[y].i]) continue;
+    if (v[x].call != v[y].call && exclusive(body, v[x].call, v[y].call)) continue;
+    int tx = tails[v[x].call->id] > 0, ty = tails[v[y].call->id] > 0;
+    if (v[x].call != v[y].call && tx != ty) { OwnSite early = tx ? v[y] : v[x]; uown[early.call->k][early.i] = 0; continue; }
+    uown[v[x].call->k][v[x].i] = 0; uown[v[y].call->k][v[y].i] = 0;
+    if (dbg > 1) DBG("[one value given to f%ld and f%ld: owned by neither]\n", v[x].call->k, v[y].call->k);
+  }
+  free(tails); free(v);
+}
 /* in e, is p named only as a direct argument of ONE call (returned in *call)? 1 yes, 0 no; *call stays NULL if p is not named */
 static int drop_only(const Expr *e, const Expr *p, const Expr **call) {
   if (!e || e == p) return 0;
@@ -2609,6 +2662,8 @@ static void drops(Expr *entry) {
   mm_new(MM_UNIQ); mm_new(MM_NUM);
   for (int i = 0; i < nfun; i++) own_sites(funs[i].body);
   own_sites(entry);
+  for (int i = 0; i < nfun; i++) own_alone(funs[i].body);
+  own_alone(entry);
   for (int g = 0; g < nfun; g++) for (int k = 0; k < funs[g].arity; k++)
     if (uown[g][k] && funs[g].pnode && funs[g].pnode[k] && funs[g].body) drop_tails(funs[g].body, g, k);
   for (int g = 0; g < nfun; g++) {
@@ -3260,6 +3315,81 @@ static int fu_find(const Expr *e, unsigned char *seen, Fuse *u) {
   for (int i = 0; i < e->nargs && e->args; i++) if (fu_find(e->args[i], seen, u)) return 1;
   return 0;
 }
+/* ONE FUNCTION, ONE COPY.  The net holds one copy of a definition per use, so a unit that uses `seq` eight times
+   meets eight copies of `draw` -- and eight equal calls of eight functions are eight computations, where the
+   program has one.  Functions of the unit that are the same function (the same body, with their calls of
+   each other the same too: a partition refined to a fixpoint) are merged into one, after which equal calls
+   are one node and the region binder computes them once. */
+typedef struct { char *s; size_t n, cap; } Sig;
+static void sig_put(Sig *g, const char *fmt, ...) {
+  va_list ap; char tmp[96]; va_start(ap, fmt); int k = vsnprintf(tmp, sizeof tmp, fmt, ap); va_end(ap);
+  if (k < 0) return;
+  if (g->n + (size_t)k + 1 > g->cap) { g->cap = (g->n + (size_t)k + 1) * 2; g->s = realloc(g->s, g->cap); }
+  memcpy(g->s + g->n, tmp, (size_t)k + 1); g->n += (size_t)k;
+}
+static int *dd_cls, *dd_num, dd_next;
+static void dd_sig(const Expr *e, int f, Sig *g) {   /* the body as a DAG: each node once, its children by number */
+  if (!e) { sig_put(g, "_"); return; }
+  if (dd_num[e->id]) { sig_put(g, "#%d", dd_num[e->id]); return; }
+  dd_num[e->id] = ++dd_next;
+  if (e->op == E_PARAM) { if (e->nargs == f) sig_put(g, "P%ld", e->k); else sig_put(g, "Q%d.%ld", e->nargs, e->k); return; }
+  sig_put(g, "(%d %ld %d %d %p %d %d", e->op, e->op == E_CALL ? (long)dd_cls[e->k] : e->k, e->kind, e->nargs, (const void *)e->ci, e->untag, e->box);
+  if (e->op == E_CALL && e->k == f) sig_put(g, "S");
+  dd_sig(e->a, f, g); dd_sig(e->b, f, g); if (e->op != E_CTOR) dd_sig(e->c, f, g); else sig_put(g, "c");
+  for (int i = 0; i < e->nargs && e->args; i++) dd_sig(e->args[i], f, g);
+  sig_put(g, ")");
+}
+static Expr **dd_map; static int dd_n; static int *dd_rep;
+static Expr *dd_rewrite(Expr *e, int f) {   /* calls of a merged function become calls of its representative */
+  if (!e) return NULL;
+  if (e->id < dd_n && dd_map[e->id]) return dd_map[e->id];
+  Expr *x = e;
+  if (e->op == E_PARAM) { if (e->nargs >= 0 && e->nargs < nfun && dd_rep[e->nargs] != e->nargs) x = funs[dd_rep[e->nargs]].pnode[e->k]; }
+  else {
+    Expr *a = dd_rewrite(e->a, f), *b = dd_rewrite(e->b, f), *c = e->op == E_CTOR ? e->c : dd_rewrite(e->c, f);
+    int ch = a != e->a || b != e->b || c != e->c || (e->op == E_CALL && dd_rep[e->k] != e->k); Expr **na = NULL;
+    if (e->nargs && e->args) { na = A(sizeof(Expr *) * (size_t)e->nargs); for (int i = 0; i < e->nargs; i++) { na[i] = dd_rewrite(e->args[i], f); ch |= na[i] != e->args[i]; } }
+    if (ch) { x = fu_clone(e); x->a = a; x->b = b; x->c = c; if (na) x->args = na; if (e->op == E_CALL) x->k = dd_rep[e->k]; x = hc(x); }
+  }
+  if (e->id < dd_n) dd_map[e->id] = x;
+  return x;
+}
+static void dedup_funs(Expr **entry) {
+  if (nfun < 2) return;
+  dd_cls = calloc((size_t)nfun, sizeof *dd_cls);
+  for (int i = 0; i < nfun; i++) dd_cls[i] = funs[i].body && funs[i].pnode && !funs[i].known && !funs[i].outer ? funs[i].arity : -1 - i;
+  char **sg = calloc((size_t)nfun, sizeof *sg);
+  for (int round = 0; round < nfun + 1; round++) {   /* refine: same class and same signature under the classes */
+    for (int i = 0; i < nfun; i++) {
+      free(sg[i]); sg[i] = NULL;
+      if (dd_cls[i] < 0) continue;
+      Sig g = { NULL, 0, 0 }; dd_num = calloc((size_t)eid + 1, sizeof *dd_num); dd_next = 0;
+      sig_put(&g, "%d|", dd_cls[i]); dd_sig(funs[i].body, i, &g); free(dd_num); sg[i] = g.s;
+    }
+    int *nc = malloc(sizeof *nc * (size_t)nfun), changed = 0;
+    for (int i = 0; i < nfun; i++) {
+      nc[i] = dd_cls[i] < 0 ? dd_cls[i] : i;
+      if (dd_cls[i] >= 0) for (int j = 0; j < i; j++) if (dd_cls[j] >= 0 && !strcmp(sg[i], sg[j])) { nc[i] = nc[j]; break; }
+    }
+    /* (renumber to the first member, so the classes are comparable across rounds) */
+    for (int i = 0; i < nfun; i++) if (dd_cls[i] >= 0 && nc[i] != dd_cls[i]) changed = 1;
+    for (int i = 0; i < nfun; i++) dd_cls[i] = nc[i];
+    free(nc);
+    if (!changed) break;
+  }
+  for (int i = 0; i < nfun; i++) free(sg[i]);
+  free(sg);
+  dd_rep = malloc(sizeof *dd_rep * (size_t)nfun); int merged = 0;
+  for (int i = 0; i < nfun; i++) { dd_rep[i] = i; if (dd_cls[i] >= 0) for (int j = 0; j < i; j++) if (dd_cls[j] == dd_cls[i]) { dd_rep[i] = j; merged++; if (dbg > 1) DBG("[f%d is f%d]\n", i, j); break; } }
+  if (merged) {
+    dd_n = eid; dd_map = calloc((size_t)dd_n + 1, sizeof *dd_map);
+    *entry = dd_rewrite(*entry, -1);
+    for (int i = 0; i < nfun; i++) if (dd_rep[i] == i) funs[i].body = dd_rewrite(funs[i].body, i);
+    free(dd_map);
+    if (dbg) DBG("merged %d copies of the unit's functions into the ones they copy\n", merged);
+  }
+  free(dd_rep); free(dd_cls); dd_cls = NULL;
+}
 static void fuse_lists(Expr **entry) {
   for (int round = 0; round < nfun + 1; round++) {
     fu_n = eid;
@@ -3344,6 +3474,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     r0_g++;
     for (int i = 0; i < nfun; i++) funs[i].body = one_match(funs[i].body);
     entry = one_match(entry);
+    dedup_funs(&entry);
     if (!getenv("LIN_FN_NOFUSE")) fuse_lists(&entry);
     mm_new(MM_CALL); mm_new(MM_SELF);              /* the DAG is complete: its structure answers stay valid */
     for (int it = 0, changed = 1; changed && it <= LIN_INT_BITS; it++) {   /* strictness: down to the fixpoint */
