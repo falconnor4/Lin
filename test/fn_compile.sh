@@ -330,5 +330,16 @@ ap=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/ap.lin" 2>/dev/null)
 [ "$ap" = "=> 77" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a picked child of a freed trie node: '$ap'"; }
 pp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>/dev/null)
 [ "$pp" = "=> 127083" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600 with freed blocks poisoned: '$pp'"; }
+# READ, THEN MOVE: a branch that reads a number from a list and then hands the list on whole moves it once (the
+# number is loaded at the match), so the list stays the callee's to rebuild in place.
+printf '%s\n' '(define bump (\s (match s (snil snil) ((scons h t) (scons (add h 1) (bump t))))))' \
+  '(define go (\k (\s (\acc (if (eq k 0) acc (match s (snil acc) ((scons h t) (go (sub k 1) (bump s) (add acc h)))))))))' \
+  '(go 2000 (srange 0 50) 0)' > "$TMP/rm.lin"
+rm1=$(timeout 120 "$LIN_BIN" "$TMP/rm.lin" 2>/dev/null); rmp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/rm.lin" 2>/dev/null)
+[ "$rm1" = "=> 1999000" ] && [ "$rmp" = "$rm1" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL read then move: '$rm1' poisoned '$rmp'"; }
+# A unit without data has no allocator: no drop or copy function is written into it.  (In test/array.lin's net
+# one was, and the unit did not compile -- the net computed it instead.)
+LIN_FN_DEBUG=1 timeout 300 "$LIN_BIN" "$ROOT/test/array.lin" >/dev/null 2>"$TMP/af.err"
+! grep -q "error:" "$TMP/af.err" && grep -q "folded a call" "$TMP/af.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL test/array.lin's units: a generated unit did not compile"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
