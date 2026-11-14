@@ -50,7 +50,7 @@ definitions, at reduced sizes, and generate their own input so each is a single 
 | nbody | 16 ms | 23 ms | 25 ms | 0.70× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
 | words | 5 ms | 9 ms | 12 ms | 0.56× | Text: a 1M-character string built and its words counted |
 | fannkuch | 18 ms | 36 ms | 106 ms | 0.50× | Benchmarks Game *fannkuch-redux*, n = 9: every permutation, by prefix reversals |
-| pidigits | 557 ms | 1407 ms | 1342 ms | 0.40× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
+| pidigits | 454 ms | 857 ms | 885 ms | 0.53× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
 | array | 7 ms | 19 ms | 25 ms | 0.37× | `std/array.lin`: 1M strided writes, then 1M reads |
 
 The machine these were measured on is shared and noisy; expect variation of
@@ -84,10 +84,11 @@ different values would measure allocation instead, as `bst` and `omap` do.
 ## Where Lin is behind
 
 - **`pidigits` (about 2×).** Arbitrary-precision numbers are lists of limbs in
-  `std/big.lin`; the C updates arrays in place, and the step is sequential. Most
-  of the gap was memory never freed (1.9 GB against the C's 13 MB); now that
-  results share no cells and temporaries are dropped it is 0.77 GB. What remains
-  is the fields of matched values that are read and then dead.
+  `std/big.lin`; the C updates arrays in place, and the step is sequential. Much
+  of the gap was memory never freed: 1.9 GB against the C's 13 MB. Results now
+  share no cells, and temporaries, locals and fields are freed once dead, which
+  brings it to about 220 MB. What remains is mostly the compute on lists of
+  limbs.
 - **`array`, `words` (about 2–2.5×).** A persistent trie or a list of characters
   against flat C memory. `words` is also short enough (5 ms) that process start
   matters: Lin's is now within 1 ms of an empty C program's.

@@ -123,8 +123,10 @@ structure, which shows exactly where a value is shared:
   as a copy, so the loop owns it and updates it in place at every step. One value
   given to two calls that would each own it is given to the second as a copy, so
   both can free what they were given.
-- **Temporaries.** A value built only to be the argument of one call that just
-  reads it is freed when that call returns.
+- **Temporaries, locals and fields.** A value built only to be the argument of
+  one call that just reads it is freed when that call returns. A value a function
+  builds and only lends, and a field of a value it takes apart, are freed where
+  each of their paths ends.
 - **Unread fields are not computed.** A constructor field that no part of the
   program reads is never evaluated or stored, matching lazy semantics.
 
@@ -215,6 +217,7 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_OFF=1` | Disable the function compiler |
 | `LIN_FN_DEBUG=1` | Print decisions and timings; `2` also prints the generated C |
 | `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
+| `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
 | `LIN_NO_CACHE=1` | Do not use the program cache |
