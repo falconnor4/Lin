@@ -36,6 +36,13 @@ sed -i 's/(fib 25)/(fib 26)/' "$TMP/p.lin"
 d=$(run "$TMP/p.lin"); hit && bad "a changed source was answered from the old entry"
 [ "$(printf '%s\n' "$d" | head -1)" = "=> 121393" ] && ok || bad "changed source: '$d'"
 
+# a small constant structure the program defines is compiled into the unit, so the program is cached too
+printf '%s\n' '(datatype P (pt (x num) (y num)))' '(define ps (scons (pt 1 2) (scons (pt 3 4) snil)))' \
+  '(define go (\n (\s (\acc (if (eq n 0) acc (go (sub n 1) s (add acc (sfoldl (\a (\p (match p ((pt x y) (add a (mul x y)))))) 0 s))))))))' \
+  '(go 1000 ps 0)' > "$TMP/k.lin"
+k1=$(run "$TMP/k.lin"); k2=$(run "$TMP/k.lin")
+hit && [ "$k1" = "=> 14000" ] && [ "$k2" = "$k1" ] && ok || bad "a program with a constant structure: '$k1' '$k2'"
+
 # the outside world: never cached
 printf '%s\n' '(define f (\n (if (eq n 0) 0 (add n (f (sub n 1))))))' '(f (ccall "atoi" (cons (getenv "LIN_T_N") nil)))' > "$TMP/e.lin"
 e1=$(LIN_T_N=10 run "$TMP/e.lin"); e2=$(LIN_T_N=20 run "$TMP/e.lin")

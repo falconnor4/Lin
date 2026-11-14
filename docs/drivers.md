@@ -82,7 +82,9 @@ the call with its result.
 
 A value already present in the net when the call is reached, such as a string
 read from input or a structure built earlier, is passed into the compiled code
-rather than rebuilt.
+rather than rebuilt. A small one that is pure data (constructors and numbers,
+such as a table of constants the program defines) is compiled into the unit as
+a constant instead, so that the program cache can answer for the program.
 
 ### What it declines
 
@@ -90,6 +92,10 @@ The compiled code is strict; Lin is lazy. The driver compiles only where the
 difference cannot be observed, and otherwise leaves the call to the net:
 
 - A value used in a way its inferred shape does not allow
+- One constructor holding different kinds of value in one unit, such as a
+  built-in list of strings, whose cells hold both lists and numbers: shapes are
+  tracked per constructor, not per type. A `Seq` of strings is compiled, since
+  its cells and the strings' cells are different constructors
 - A structure that is infinite or outgrows memory or the stack while being built:
   the compiled call is abandoned and the net computes the call lazily
 - Any shape of net it does not recognise
@@ -127,6 +133,12 @@ structure, which shows exactly where a value is shared:
   a loop, so a list of any length is processed in constant stack.
 - **Indexed fields.** Reading or replacing field `k` of a wide constructor, as the
   array trie does, is one indexed load or store.
+- **Fusion.** When the only use of a list one loop builds is another loop that
+  takes it apart one cell per step, the two become one loop and the list is
+  never built: `(sfoldl add 0 (sfilter even (smap square (srange 0 n))))` runs
+  as a single loop over the integers. A cell field the consumer never reads is
+  never computed. A consumer whose every step runs a loop of its own (a matrix
+  row per cell) keeps its list, so its cells can still be mapped in parallel.
 
 ### Sharing
 
@@ -154,6 +166,16 @@ Compiled code computes a shared value once, as the net does.
 - **Reductions.** A loop that folds an associative operation over a range
   (wrapping `add` or `mul`, the bitwise operations, `max` and `min`) is split
   into chunks that run on separate threads.
+- **Independent loops in one expression.** In the expression the program
+  observes, operands that each run a loop run on separate threads; a value they
+  share is computed once and handed to each. A loop the expression certainly
+  needs starts as soon as the values it reads exist, alongside the loops bound
+  before the expression is evaluated.
+- **Independent steps.** A loop that folds into an accumulator the result of
+  another loop that reads only the step's own state, such as
+  `fannkuch`'s fold over the permutations under each rotation, computes every
+  step's inner loop on worker threads and folds the results in order. The fold
+  is the loop's own, so no associativity is assumed.
 
 All are checked to give the same answer at every thread count
 (`test/fn_compile.sh`).
@@ -170,7 +192,9 @@ Compiling is not the only work that can be saved. When every top-level
 expression of a program was answered by a single compiled call on constants, the
 function compiler records which compiled unit answered each one and with which
 arguments. The next run of the same program runs those units directly, without
-parsing, type checking or analysing it again.
+reading the standard library, parsing, type checking or analysing it again:
+`lin` looks for the record before anything else and loads only the two drivers
+a recall needs.
 
 The cache never stores an answer: a cached run performs the whole computation.
 An entry is keyed on the program's text, the library and drivers on disk, the
@@ -186,6 +210,7 @@ answer with a single number or boolean. A run with a diagnostic setting
 |----------|--------|
 | `LIN_FN_OFF=1` | Disable the function compiler |
 | `LIN_FN_DEBUG=1` | Print decisions and timings; `2` also prints the generated C |
+| `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
 | `LIN_NO_CACHE=1` | Do not use the program cache |

@@ -58,6 +58,9 @@
 (load "seq.lin")
 (load "array.lin")
 (load "omap.lin")
+(load "hmap.lin")
+(load "big.lin")
+(load "regex.lin")
 (load "io.lin")
 
 ; --- Open All Standard Namespaces into Current Scope ---
@@ -82,5 +85,8 @@
 (open seq)
 (open array)
 (open omap)
+(open hmap)
+(open big)
+(open regex)
 (open io)
 

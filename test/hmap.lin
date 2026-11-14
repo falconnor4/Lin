@@ -1,0 +1,53 @@
+; std/hmap.lin: a hash map (a 32-way hash trie)
+
+(hmap_get 5 0 (hmap_insert 5 42 hmap_empty))
+; expect => 42
+
+(hmap_get 6 -1 (hmap_insert 5 42 hmap_empty))
+; expect => -1
+
+(hmap_get 5 0 (hmap_insert 5 7 (hmap_insert 5 42 hmap_empty)))
+; expect => 7
+
+(hmap_has 5 hmap_empty)
+; expect => false
+
+(hmap_size hmap_empty)
+; expect => 0
+
+; a value of any type
+(hmap_get 2 "none" (hmap_insert 2 "two" (hmap_insert 1 "one" hmap_empty)))
+; expect => "two"
+
+; persistence: the map inserted into is still the map it was
+(define m1 (hmap_insert 1 10 hmap_empty))
+(define m2 (hmap_insert 2 20 m1))
+(add (hmap_size m1) (mul 10 (hmap_size m2)))
+; expect => 21
+(hmap_get 2 0 m1)
+; expect => 0
+
+; counting: 100,000 additions over 1,000 keys
+(define fill (\i (\m (if (eq i 0) m (fill (sub i 1) (hmap_add (mod (mul i 7919) 1000) 1 m))))))
+(hmap_size (fill 100000 hmap_empty))
+; expect => 1000
+(hmap_get 0 0 (fill 100000 hmap_empty))
+; expect => 100
+(hmap_has 999 (fill 100000 hmap_empty))
+; expect => true
+(hmap_has 1000 (fill 100000 hmap_empty))
+; expect => false
+(hmap_fold (\a (\k (\v (add a v)))) 0 (fill 100000 hmap_empty))
+; expect => 100000
+
+; many distinct keys, negative and large ones among them: every one is found again
+(define put (\i (\m (if (eq i 0) m (put (sub i 1) (hmap_insert (mul (sub i 30000) 1000003) i m))))))
+(define seen (\i (\m (\n (if (eq i 0) n (seen (sub i 1) m (add n (if (eq (hmap_get (mul (sub i 30000) 1000003) 0 m) i) 1 0))))))))
+(seen 60000 (put 60000 hmap_empty) 0)
+; expect => 60000
+(hmap_size (put 60000 hmap_empty))
+; expect => 60000
+
+; alter: the value becomes a function of the old one
+(hmap_get 3 0 (hmap_alter (\v (mul v 2)) 5 3 (hmap_alter (\v (mul v 2)) 5 3 hmap_empty)))
+; expect => 20

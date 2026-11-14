@@ -9,8 +9,8 @@ Arguments are listed in application order: `(str_take k s)` takes the first `k`
 characters of `s`.
 
 - [Core types](#core-types): [bool](#bool), [num](#num), [float](#float), [math](#math), [pair](#pair), [maybe](#maybe), [either](#either)
-- [Collections](#collections): [list](#list), [sequences](#sequences), [array](#array), [omap](#omap), [map and set](#map-and-set), [queue](#queue), [stream](#stream), [tree](#tree)
-- [Text](#text): [string](#string), [text](#text-driver)
+- [Collections](#collections): [list](#list), [sequences](#sequences), [array](#array), [omap](#omap), [hmap](#hmap), [big](#big), [map and set](#map-and-set), [queue](#queue), [stream](#stream), [tree](#tree)
+- [Text](#text): [string](#string), [regex](#regex), [text](#text-driver)
 - [System](#system): [io](#io), [ffi](#ffi)
 - [Other modules](#other-modules)
 
@@ -205,6 +205,51 @@ lookup, keys kept in order.
 | `(omap_fold f z m)` | Fold in key order, `(f acc key value)` |
 | `(omap_keys m)`, `(omap_values m)` | Keys or values, as sequences in key order |
 
+### hmap
+
+`std/hmap.lin`. A hash map from integer keys: a 32-way hash trie, so insert and
+lookup take a handful of steps whatever the size. Persistent, and updated in
+place when nothing else holds it. Keys are not kept in order.
+
+```scheme
+(hmap_get 7 0 (hmap_add 7 1 (hmap_add 7 1 hmap_empty)))
+; => 2
+```
+
+| Name | Meaning |
+|------|---------|
+| `hmap_empty` | The empty map |
+| `(hmap_insert k v m)` | `k` now maps to `v` |
+| `(hmap_get k d m)`, `(hmap_has k m)` | The value at `k`, or `d`; membership |
+| `(hmap_alter f d k m)` | The value at `k` becomes `(f old)`, where `old` is `d` when `k` is absent |
+| `(hmap_add k n m)` | Add `n` to the count at `k` (absent counts as 0) |
+| `(hmap_size m)` | Number of entries |
+| `(hmap_fold f z m)` | Fold over the entries, `(f acc key value)`, in no particular order |
+
+Use `omap` when keys must come out in order, `hmap` otherwise.
+
+### big
+
+`std/big.lin`. Arbitrary-precision natural numbers, as sequences of base-10⁹
+limbs, and signed integers built on them.
+
+```scheme
+(big_to_string (big_mul (big_of 123456789012) (big_of 987654321098)))
+; => "121932631136585886175176"
+```
+
+| Name | Meaning |
+|------|---------|
+| `big_zero`, `(big_of n)` | Zero; from a non-negative machine integer |
+| `(big_add a b)`, `(big_sub a b)` | Sum; difference, for `a >= b` |
+| `(big_mul a b)`, `(big_mul_small a k)` | Product; product with `0 <= k < 10^9` |
+| `(big_divmod_small a k)`, `(big_div_small a k)`, `(big_mod_small a k)` | Division by a machine integer |
+| `(big_cmp a b)`, `(big_is_zero a)` | Comparison (negative, zero or positive); zero test |
+| `(big_to_num a)`, `(big_to_string a)` | To a machine integer (when it fits); to decimal text |
+| `(bigint_of n)`, `(bigint_of_big a)` | Signed integers: from a machine integer; from a natural |
+| `bigint_add`, `bigint_sub`, `bigint_mul`, `bigint_mul_small`, `bigint_neg` | Arithmetic (`bigint_mul_small` takes a negative `k` too) |
+| `bigint_cmp`, `bigint_is_neg`, `bigint_mag`, `bigint_to_string` | Comparison, sign, magnitude, decimal text |
+
 ### map and set
 
 `std/map.lin`, `std/set.lin`. Unbalanced binary search trees over integer keys.
@@ -272,6 +317,36 @@ A program that declares its own `datatype` with constructors named `leaf` and
 `std/text.lin` (load it explicitly: `(load "std/text.lin")`). Constant-time
 access to a source string through a driver, for programs such as parsers that
 index text heavily: `tlen`, `tget`, `tfind`, `tfindany`, `trun`, `tmatch`, `tsub`.
+
+### regex
+
+`std/regex.lin`. Regular expressions, compiled from their text into a datatype
+and matched by backtracking, leftmost alternative first.
+
+```scheme
+(re_replace (regex "c.t") "dog" "the cat sat on the cot")
+; => "the dog sat on the dog"
+```
+
+| Syntax | Matches |
+|--------|---------|
+| `c`, `\c` | The character `c` |
+| `.` | Any character except a newline |
+| `[abc]`, `[a-z]`, `[^abc]` | A class, a range, a complement |
+| `x*`, `x+`, `x?` | Repetition of the preceding atom, greedy |
+| `p\|q` | Alternatives, at the top level (there are no groups) |
+
+| Name | Meaning |
+|------|---------|
+| `(regex p)` | Compile the pattern text `p` |
+| `(re_find r s)` | Where the first match starts, or -1 |
+| `(re_test r s)` | Whether there is a match |
+| `(re_count r s)` | The number of matches, left to right, not overlapping |
+| `(re_replace r t s)` | Every match replaced by the text `t` |
+
+A match is never empty. The parser, the matcher and a loop over the text all
+compile together, so a pattern applied to a long text runs as native code (see
+the `regexredux` benchmark).
 
 ## System
 

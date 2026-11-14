@@ -1,0 +1,25 @@
+; pidigits (Computer Language Benchmarks Game): the first 2,000 digits of pi by Gibbons' unbounded spigot, on
+; arbitrary-precision numbers (std/big.lin).  The accumulator goes below zero after a digit is taken out, so it is
+; carried as a sign (1: negative) and a magnitude.  The answer is a checksum of every digit with its position.
+
+; the quotient tmp / de, which is a digit: counted up
+(define quot (\tmp (\de (\q (\acc (let ((nx (big_add acc de))) (if (gt (big_cmp nx tmp) 0) q (quot tmp de (add q 1) nx))))))))
+; a signed number: its sign and magnitude
+(datatype SM (sm (s num) (m Seq num)))
+; x - y for naturals, signed
+(define minus (\x (\y (if (lt (big_cmp x y) 0) (sm 1 (big_sub y x)) (sm 0 (big_sub x y))))))
+; (sign s, magnitude a) + t, for a natural t
+(define plus (\s (\a (\t (if (eq s 0) (sm 0 (big_add a t)) (minus t a))))))
+(define digits (\i (\n (\k (\nu (\ac (\s (\de (\sum (if (eq i n) sum
+  (let ((k2 (add (mul k 2) 1)) (de2 (big_mul_small de (add (mul k 2) 1))) (nu2 (big_mul_small nu k)))
+    (match (plus s ac (big_mul_small nu 2)) ((sm s2 m)
+      (let ((ac2 (big_mul_small m k2)))
+        (if (eq s2 1) (digits i n (add k 1) nu2 ac2 s2 de2 sum)
+          (if (gt (big_cmp nu2 ac2) 0) (digits i n (add k 1) nu2 ac2 s2 de2 sum)
+            (let ((d (quot (big_add (big_mul_small nu2 3) ac2) de2 0 big_zero)))
+              (if (eq d (quot (big_add (big_mul_small nu2 4) ac2) de2 0 big_zero))
+                (match (minus ac2 (big_mul_small de2 d)) ((sm s3 m3)
+                  (digits (add i 1) n (add k 1) (big_mul_small nu2 10) (big_mul_small m3 10) s3 de2
+                    (add sum (mul d (add (mod i 97) 1))))))
+                (digits i n (add k 1) nu2 ac2 s2 de2 sum)))))))))))))))))))
+(digits 0 2000 1 (big_of 1) big_zero 0 (big_of 1) 0)

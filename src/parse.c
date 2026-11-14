@@ -142,6 +142,19 @@ static Type *parse_type_atom(void) {
   }
   const char *nm = sym();
   if (!nm) pfail("type: expected name");
+  /* a datatype a library module declares, named before anything of that module is used: the module is read now
+     (a type is capitalised; a lower-case name is a type variable) */
+  if (!nominal_lookup(nm) && nm[0] >= 'A' && nm[0] <= 'Z' && lin_ctor_demand) {
+    /* (reading that module parses its own datatypes: this one's half-read state is kept aside meanwhile) */
+    int snp = dt_np, sin = dt_in, stn = tvnn; const char **sp = malloc(sizeof *sp * (size_t)(snp + 1)); for (int i = 0; i < snp; i++) sp[i] = dt_params[i];
+    const char **sn = malloc(sizeof *sn * (size_t)(stn + 1)); Type **st = malloc(sizeof *st * (size_t)(stn + 1));
+    for (int i = 0; i < stn; i++) { sn[i] = tvn[i]; st[i] = tvt[i]; }
+    lin_ctor_demand(nm);
+    for (int i = 0; i < snp; i++) dt_params[i] = sp[i]; free(sp); dt_np = snp; dt_in = sin;
+    if (tvcap < stn) { tvn = realloc(tvn, sizeof *tvn * (size_t)(tvcap = stn)); tvt = realloc(tvt, sizeof *tvt * (size_t)tvcap); }
+    for (int i = 0; i < stn; i++) { tvn[i] = sn[i]; tvt[i] = st[i]; }
+    tvnn = stn; free(sn); free(st);
+  }
   if (nominal_lookup(nm)) {
     /* generic nominal: consume `arity` type-argument atoms, chained as TARGs. */
     Type *t = type_nominal(nm); Type **cur = &t->a;
@@ -237,6 +250,10 @@ static Term *parse_term(void) {
     if (!strcmp(kw, "define") || !strcmp(kw, "define!")) {
       int typed = !strcmp(kw, "define!");
       skipws(); const char *name = sym(); if (!name) pfail("define: expected name");
+      /* the names the net's own protocols use as binders (primitive operations, constructors, match branches):
+         a definition of one is read as part of that protocol, and silently computes something else */
+      { const char *bare = strrchr(name, '.'); bare = bare ? bare + 1 : name;
+        if (!strcmp(bare, "_op") || !strcmp(bare, "_k") || !strcmp(bare, "_c") || !strcmp(bare, "_m")) pfail("define: '_op', '_k', '_c' and '_m' are reserved names"); }
       Type *ty = typed ? parse_type_top() : NULL;
       Term *v = parse_term(); skipws();
       if (S[P] != ')') pfail("define: expected ')'"); else P++;

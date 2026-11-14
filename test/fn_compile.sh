@@ -207,5 +207,100 @@ pmn=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pms.lin" 2>/dev/null); pmc=$(tim
 [ -n "$pm1" ] && [ "$pmok" = 1 ] && [ -n "$pmn" ] && [ "$pmc" = "$pmn" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL parallel map: -t 1 '$pm1' widths agree $pmok; short list compiled '$pmc' net '$pmn'"; }
 pmd=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" -t 4 "$TMP/pm.lin" 2>&1 >/dev/null | grep -c "maps its list in parallel")
 [ "$pmd" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no map was run in parallel"; }
+# A FIELD DECLARED bool is a condition: taken out of a block and used by `if`, it is compiled, not left to the net.
+printf '%s\n' '(datatype B (bb (n bool) (m num)))' \
+  '(define h (\k (\a (if (eq k 0) a (h (sub k 1) (match a ((bb n m) (bb (not n) (add m 1)))))))))' \
+  '(match (h 5 (bb true 0)) ((bb n m) (if n m 7)))' > "$TMP/bf.lin"
+bf=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/bf.lin" 2>"$TMP/bf.err")
+[ "$bf" = "=> 7" ] && ! grep -q declined "$TMP/bf.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a bool field: '$bf'"; }
+# A FIELD ONLY PASSED ALONG has the shape its declared type says, so the value it holds can be read in.
+printf '%s\n' '(datatype W (w (ac BigInt)))' \
+  '(define t1 (\i (\st (if (eq i 0) 0 (t1 (sub i 1) (match st ((w ac) (w ac))))))))' '(t1 5 (w (bigint_of 3)))' > "$TMP/pa.lin"
+pa=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pa.lin" 2>"$TMP/pa.err")
+[ "$pa" = "=> 0" ] && ! grep -q declined "$TMP/pa.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field passed along: '$pa'"; }
+# A PARAMETER ONLY LENT is dropped where its path ends -- and one handed to a function that owns it is not (it is
+# that function's to free: big_mul hands its `a` to itself, and dropping it too freed it twice).
+printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
+  '(big_to_string (big_mul (fact 20 (big_of 1)) (fact 25 (big_of 1))))' > "$TMP/bm.lin"
+bm=$(timeout 120 "$LIN_BIN" "$TMP/bm.lin" 2>/dev/null)
+[ "$bm" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL big_mul: '$bm'"; }
+sed 's/(digits 0 2000 1/(digits 0 600 1/' "$ROOT/bench/pidigits.lin" > "$TMP/pd.lin"
+pd=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>"$TMP/pd.err")
+[ "$pd" = "=> 127083" ] && grep -q "dropped where its paths end" "$TMP/pd.err" && ! grep -q "guard fired" "$TMP/pd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600: '$pd'"; }
+# REGULAR EXPRESSIONS compiled: a pattern built in the net is read in -- its Seqs of pieces and of ranges by
+# the types it was declared at, as no single shape of `scons` can say -- and the matching loop runs as C.
+# (A recursive predicate's result is a condition; a parameter-typed field may be taken apart as any datatype.)
+printf '%s\n' '(define f (\r (\s (\n (if (eq n 0) 0 (add (re_count r s) (f r s (sub n 1))))))))' \
+  '(f (regex "a[bc]+d|x[^a-c]y") "xxabcdyyabdaxbdxzy" 400)' > "$TMP/re.lin"
+re=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/re.lin" 2>"$TMP/re.err")
+[ "$re" = "=> 1200" ] && grep -q "folded a call" "$TMP/re.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a compiled regex loop: '$re'"; }
+# A MATCH ON A CONDITIONAL with three or more arms, one of them a call of another recursive function: the branch
+# is applied by one arm (a constructor takes it) before another takes the call apart -- still a branch.
+printf '%s\n' '(datatype P (pp (a num) (r list num)))' \
+  '(define sk (\s (\k (if (is_empty s) (pp k s) (if (eq (head s) 93) (pp k (tail s)) (sk (tail s) (add k 1)))))))' \
+  '(define at (\s (if (eq (head s) 46) (pp 0 (tail s)) (if (eq (head s) 91) (sk (tail s) 0) (pp 1 (tail s))))))' \
+  '(define cl (\s (\n (if (is_empty s) n (match (at s) ((pp a r) (cl r (add n a))))))))' '(cl "ab[d]x.[yy]z" 0)' > "$TMP/m3.lin"
+m3=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/m3.lin" 2>"$TMP/m3.err")
+[ "$m3" = "=> 7" ] && ! grep -q declined "$TMP/m3.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a match on a three-armed conditional: '$m3'"; }
+# SUBSTITUTIONS chained: a pattern parsed, then a text rewritten around it, five times over -- one unit.
+printf '%s\n' '(str_length (re_replace (regex "\\|[^|][^|]*\\|") "-" (re_replace (regex "<[^>]*>") "|" (re_replace (regex "a[NSt]|BY") "<2>" (re_replace (regex "aND|caN|Ha[DS]|WaS") "<3>" (re_replace (regex "tHa[Nt]") "<4>" "xtHaNtyaNDzHaDSaByBYk"))))))' > "$TMP/rs.lin"
+rs=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/rs.lin" 2>"$TMP/rs.err")
+[ "$rs" = "=> 5" ] && grep -q "folded a call" "$TMP/rs.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL chained substitutions: '$rs'"; }
+# INDEPENDENT LOOPS IN ONE EXPRESSION run side by side: two sums over one list, the list built once and handed
+# to both tasks.
+printf '%s\n' '(define mk (\n (\a (if (eq n 0) a (mk (sub n 1) (scons n a))))))' \
+  '(define sq (\s (\t (match s (snil t) ((scons h r) (sq r (add t (mul h h))))))))' \
+  '(define cu (\s (\t (match s (snil t) ((scons h r) (cu r (add t (mul h (mul h h)))))))))' \
+  '(let ((l (mk 1000 snil))) (add (sq l 0) (cu l 0)))' > "$TMP/pe.lin"
+pe=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pe.lin" 2>"$TMP/pe.err"); pe1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pe.lin" 2>/dev/null)
+[ "$pe" = "=> 250834083500" ] && [ "$pe1" = "$pe" ] && grep -q "[1-9][0-9]* parallel site" "$TMP/pe.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL independent loops in parallel: '$pe' '$pe1'"; }
+# A LOOP STARTED EARLY: `cu` needs only the list, so it runs while `sq`'s result -- bound, being used twice -- is
+# computed.
+printf '%s\n' '(define mk (\n (\a (if (eq n 0) a (mk (sub n 1) (scons n a))))))' \
+  '(define sq (\s (\t (match s (snil t) ((scons h r) (sq r (add t (mul h h))))))))' \
+  '(define cu (\s (\t (match s (snil t) ((scons h r) (cu r (add t (mul h (mul h h)))))))))' \
+  '(let ((l (mk 1000 snil))) (let ((a (sq l 0))) (add (add a a) (cu l 0))))' > "$TMP/pf.lin"
+pf=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pf.lin" 2>"$TMP/pf.err"); pf1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pf.lin" 2>/dev/null)
+[ "$pf" = "=> 251167917000" ] && [ "$pf1" = "$pf" ] && grep -q "[1-9][0-9]* parallel site" "$TMP/pf.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a loop started early: '$pf' '$pf1'"; }
+# FUSION: a pipeline over a list two million long is one loop -- no list is built, and the filter's two arms,
+# which step to the same next call, stay tail calls (bound first, they were a recursion two million deep).
+printf '%s\n' '(sfoldl (\a (\x (add a x))) 0 (sfilter (\x (eq (mod x 2) 0)) (smap (\x (mul x x)) (srange 0 2000000))))' > "$TMP/fu.lin"
+fu=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/fu.lin" 2>"$TMP/fu.err"); fu1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/fu.lin" 2>/dev/null)
+[ "$fu" = "=> 1333331333334000000" ] && [ "$fu1" = "$fu" ] && [ "$(grep -c "fused" "$TMP/fu.err")" -ge 3 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a fused pipeline: '$fu' '$fu1'"; }
+# A producer whose list ends in another list (sappend): the consumer goes on with that list.
+printf '%s\n' '(define up (\i (\n (\rest (if (eq i n) rest (scons i (up (add i 1) n rest)))))))' \
+  '(define sm (\s (\a (match s (snil a) ((scons h t) (sm t (add a h)))))))' \
+  '(sm (up 0 1000 (scons 5000 (scons 7 snil))) 0)' > "$TMP/fa.lin"
+fa=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/fa.lin" 2>"$TMP/fa.err"); fan=$(LIN_FN_OFF=1 timeout 120 "$LIN_BIN" "$TMP/fa.lin" 2>/dev/null)
+[ "$fa" = "=> 504507" ] && [ "$fan" = "$fa" ] && grep -q "fused" "$TMP/fa.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL fusion onto a list's own end: '$fa' net '$fan'"; }
+# A LOOP WHOSE STEPS ARE INDEPENDENT: each step's inner loop reads only the step, so all of them run at once
+# and are folded in order -- here with a fold that is not associative (a*3 + x), so order matters.
+printf '%s\n' '(datatype P (pr (a num) (b num)))' \
+  '(define work (\i (\n (\s (if (eq n 0) (pr s i) (work i (sub n 1) (add s (mod (mul i n) 7))))))))' \
+  '(define go (\i (\n (\acc (if (eq i n) acc (go (add i 1) n (match acc ((pr a b) (match (work i 300 0) ((pr x y) (pr (add (mul a 3) x) (add b y))))))))))))' \
+  '(match (go 0 12 (pr 0 0)) ((pr a b) (add (mod a 1000000007) b)))' > "$TMP/pl.lin"
+pl=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pl.lin" 2>"$TMP/pl.err"); pl1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/pl.lin" 2>/dev/null)
+pln=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pl.lin" 2>/dev/null)
+[ -n "$pl" ] && [ "$pl1" = "$pl" ] && [ "$pln" = "$pl" ] && grep -q "folds independent steps" "$TMP/pl.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL independent steps folded in order: '$pl' -t 1 '$pl1' net '$pln'"; }
+# A NUMERIC unit whose loop folds an inner loop's result (mandel's shape) still compiles: the parallel fold of
+# independent steps is a data unit's, and a numeric unit has its own parallel reduction.
+printf '%s\n' '(define it (\a (\k (if (eq k 0) a (it (mod (add (mul a a) 7) 1009) (sub k 1))))))' \
+  '(define cl (\y (\x (\acc (if (eq x 0) acc (cl y (sub x 1) (add acc (it (add x y) 20))))))))' \
+  '(define rw (\y (\acc (if (eq y 0) acc (rw (sub y 1) (add acc (cl y 8 0)))))))' '(rw 5 0)' > "$TMP/nm.lin"
+nm=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/nm.lin" 2>"$TMP/nm.err"); nmn=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/nm.lin" 2>/dev/null)
+[ -n "$nm" ] && [ "$nm" = "$nmn" ] && grep -q "folded a call" "$TMP/nm.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a numeric nested loop: '$nm' net '$nmn'"; }
+# ...but a step that reads the accumulator only through a function it specialises -- a closure capturing it,
+# lifted to a parameter -- is not independent: each step needs the one before.
+printf '%s\n' '(define tot (\s (\a (match s (snil a) ((scons h t) (tot t (add a h)))))))' \
+  '(define go (\k (\u (if (eq k 0) u (go (sub k 1) (smap (\x (add x (tot u 0))) (srange 0 3)))))))' \
+  '(let ((r (go 6 (scons 1 (scons 1 (scons 1 snil)))))) (add (tot r 0) (mul 1000 (tot r 1))))' > "$TMP/pd2.lin"
+pd2=$(timeout 120 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null); pd2n=$(LIN_FN_OFF=1 timeout 300 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null)
+[ -n "$pd2" ] && [ "$pd2" = "$pd2n" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a step reading the accumulator through a closure: '$pd2' net '$pd2n'"; }
+# ONE VALUE GIVEN TO TWO CALLS is owned by neither: each `fact` updates its accumulator in place, and the
+# starting number they share must survive the first (it was freed under the second).
+printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
+  '(let ((x (big_of 1))) (big_to_string (big_mul (fact 20 x) (fact 25 x))))' > "$TMP/sh2.lin"
+sh2=$(timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>/dev/null)
+[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

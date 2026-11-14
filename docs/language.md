@@ -86,6 +86,9 @@ refer to itself, and definitions may refer to each other.
 ; => true
 ```
 
+The names `_op`, `_k`, `_c` and `_m` are reserved for the runtime's own
+protocols and cannot be defined.
+
 `(define! name type expr)` also states the definition's type. The stated type is
 taken as given rather than checked against the body: it is how the standard
 library gives nominal types such as `bool` and `num` to values that are, underneath,

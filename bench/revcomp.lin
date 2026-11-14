@@ -1,0 +1,10 @@
+; reverse-complement (Computer Language Benchmarks Game): a DNA sequence of 1,000,000 letters, drawn by the
+; benchmark's generator, is reversed and each letter replaced by its complement.  The answer is a checksum of
+; the result, each letter with its position.
+(define next (\seed (mod (add (mul seed 3877) 29573) 139968)))
+(define letter (\s (if (lt s 42403) 97 (if (lt s 70117) 99 (if (lt s 97768) 103 116)))))
+(define draw (\k (\seed (if (eq k 0) snil (let ((s (next seed))) (scons (letter s) (draw (sub k 1) s)))))))
+(define comp (\c (if (eq c 97) 116 (if (eq c 116) 97 (if (eq c 99) 103 (if (eq c 103) 99 c))))))
+(define revcomp (\s (\acc (match s (snil acc) ((scons h t) (revcomp t (scons (comp h) acc)))))))
+(define check (\s (\pos (\sum (match s (snil sum) ((scons h t) (check t (add pos 1) (add sum (mul h (add (mod pos 97) 1))))))))))
+(check (revcomp (draw 1000000 42) snil) 0 0)

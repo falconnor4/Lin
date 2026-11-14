@@ -1,0 +1,109 @@
+; ==============================================================================
+; Lin Standard Library: Regex -- regular expressions
+; ==============================================================================
+; Patterns are text, compiled once into a datatype and matched by backtracking,
+; leftmost alternative first (as Perl does).  Supported:
+;   c          a character (\c: the character c, whatever it is)
+;   .          any character but a newline
+;   [abc] [a-z] [^abc]   a class, its ranges, its complement
+;   x* x+ x?   repetition of the atom before, greedy
+;   p|q        alternatives (at the top level: there are no groups)
+;
+;   (regex p)              the compiled pattern
+;   (re_find r s)          where the first match starts, or -1
+;   (re_count r s)         how many matches, not overlapping, left to right
+;   (re_replace r t s)     every match replaced by the text t
+;   (re_test r s)          whether there is a match
+; A match is never empty: a pattern that could match nothing at a place does not
+; match there.
+; ==============================================================================
+
+(load "bool.lin")
+(load "num.lin")
+(load "list.lin")
+(load "seq.lin")
+(load "string.lin")
+
+(namespace regex)
+
+(datatype Range (rng (lo num) (hi num)))
+; a character; any; a class (neg 1: its complement)
+(datatype Atom (achar (c num)) (aany) (aclass (neg num) (rs Seq Range)))
+; rep: 0 once, 1 any number, 2 at least once, 3 at most once
+(datatype Piece (piece (a Atom) (rep num)))
+(datatype Regex (re (alts Seq (Seq Piece))))
+; a match: what is left of the text, and how many characters it took
+(datatype Res (rnone) (rsome (rest list num) (k num)))
+
+(define _in (\rs (\c (match rs (snil false) ((scons r t) (match r ((rng lo hi)
+  (if (lt c lo) (_in t c) (if (gt c hi) (_in t c) true)))))))))
+(define _ok (\a (\c (match a
+  ((achar x) (eq x c))
+  (aany (if (eq c 10) false true))
+  ((aclass ng rs) (if (eq ng 1) (if (_in rs c) false true) (_in rs c)))))))
+; matching, one function (so it compiles as one loop): mode 0 matches the pieces ps at the text s, k characters
+; taken so far; mode 1 repeats the atom a (rep as in Piece, n times so far) as often as it can, then backs off one
+; at a time, matching ps after it
+(define _match (\mode (\ps (\s (\k (\a (\rep (\n
+  (if (eq mode 0)
+    (match ps
+      (snil (rsome s k))
+      ((scons p rest) (match p ((piece b r)
+        (if (eq r 0)
+          (if (is_empty s) rnone (if (_ok b (head s)) (_match 0 rest (tail s) (add k 1) b 0 0) rnone))
+          (_match 1 rest s k b r 0))))))
+    (if (if (is_empty s) false (if (_ok a (head s)) (if (eq rep 3) (eq n 0) true) false))
+      (match (_match 1 ps (tail s) (add k 1) a rep (add n 1))
+        (rnone (if (lt n (if (eq rep 2) 1 0)) rnone (_match 0 ps s k a rep n)))
+        ((rsome r m) (rsome r m)))
+      (if (lt n (if (eq rep 2) 1 0)) rnone (_match 0 ps s k a rep n))))))))))))
+(define _alts (\alts (\s (match alts
+  (snil rnone)
+  ((scons ps t) (match (_match 0 ps s 0 aany 0 0) (rnone (_alts t s)) ((rsome r k) (if (eq k 0) (_alts t s) (rsome r k)))))))))
+(define _at (\r (\s (match r ((re alts) (_alts alts s))))))
+
+; ---- the pattern, from its text ----
+; a class's ranges, up to the closing bracket
+(datatype PC (pc (rs Seq Range) (rest list num)))
+(define _class (\s (\acc (if (is_empty s) (pc acc s)
+  (let ((c (head s)) (t (tail s)))
+    (if (eq c 93) (pc acc t)
+      (if (if (is_empty t) false (if (eq (head t) 45) (if (is_empty (tail t)) false (if (eq (head (tail t)) 93) false true)) false))
+        (_class (tail (tail t)) (scons (rng c (head (tail t))) acc))
+        (_class t (scons (rng c c) acc)))))))))
+(datatype PA (pa (a Atom) (rest list num)))
+(define _atom (\s (let ((c (head s)) (t (tail s)))
+  (if (eq c 46) (pa aany t)
+    (if (eq c 92) (pa (achar (head t)) (tail t))
+      (if (eq c 91)
+        (if (if (is_empty t) false (eq (head t) 94))
+          (match (_class (tail t) snil) ((pc rs r) (pa (aclass 1 rs) r)))
+          (match (_class t snil) ((pc rs r) (pa (aclass 0 rs) r))))
+        (pa (achar c) t)))))))
+; the pieces of one alternative (reversed), and what follows it
+(datatype PS (pss (ps Seq Piece) (rest list num)))
+(define _pieces (\s (\acc (if (is_empty s) (pss acc s) (if (eq (head s) 124) (pss acc s)
+  (match (_atom s) ((pa a t)
+    (if (is_empty t) (pss (scons (piece a 0) acc) t)
+      (let ((q (head t)))
+        (if (eq q 42) (_pieces (tail t) (scons (piece a 1) acc))
+          (if (eq q 43) (_pieces (tail t) (scons (piece a 2) acc))
+            (if (eq q 63) (_pieces (tail t) (scons (piece a 3) acc))
+              (_pieces t (scons (piece a 0) acc))))))))))))))
+(define _alternatives (\s (\acc (match (_pieces s snil) ((pss ps t)
+  (let ((acc2 (scons (sreverse ps) acc)))
+    (if (is_empty t) (sreverse acc2) (_alternatives (tail t) acc2))))))))
+(define regex (\p (re (_alternatives p snil))))
+
+; ---- using it ----
+(define _find (\r (\s (\i (if (is_empty s) -1 (match (_at r s) (rnone (_find r (tail s) (add i 1))) ((rsome t k) i)))))))
+(define re_find (\r (\s (_find r s 0))))
+(define re_test (\r (\s (if (lt (re_find r s) 0) false true))))
+(define _count (\r (\s (\n (if (is_empty s) n (match (_at r s) (rnone (_count r (tail s) n)) ((rsome t k) (_count r t (add n 1)))))))))
+(define re_count (\r (\s (_count r s 0))))
+(define re_replace (\r (\rep (\s (if (is_empty s) nil (match (_at r s)
+  (rnone (cons (head s) (re_replace r rep (tail s))))
+  ((rsome t k) (str_concat rep (re_replace r rep t)))))))))
+
+(namespace _)
+(export regex)

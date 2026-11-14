@@ -1,0 +1,15 @@
+; fannkuch-redux (Computer Language Benchmarks Game), n = 9: every permutation of 1..n in the benchmark's order;
+; for each, how many prefix reversals bring 1 to the front.  The answer is checksum * 100 + the most flips.
+(datatype R (res (sum num) (mx num)))
+(define join (\a (\b (match a ((res s m) (match b ((res t k) (res (add s t) (if (gt k m) k m))))))))) 
+(define revp (\k (\s (\acc (if (eq k 0) (sappend acc s) (match s (snil acc) ((scons h t) (revp (sub k 1) t (scons h acc)))))))))
+(define flips (\s (\n (match s (snil n) ((scons h t) (if (eq h 1) n (flips (revp h s snil) (add n 1))))))))
+(define rot (\k (\s (match s (snil snil) ((scons h t) (ins (sub k 1) h t))))))
+(define ins (\k (\x (\s (if (eq k 0) (scons x s) (match s (snil (scons x snil)) ((scons h t) (scons h (ins (sub k 1) x t)))))))))
+(define fact (\n (if (leq n 1) 1 (mul n (fact (sub n 1))))))
+(define one (\p (\idx (let ((f (flips p 0))) (res (if (eq (band idx 1) 0) f (sub 0 f)) f)))))
+(define gen (\p (\r (\idx (if (eq r 1) (one p idx) (each p r 0 idx (res 0 0)))))))
+(define each (\p (\r (\i (\idx (\acc (if (eq i r) acc
+  (each (rot r p) r (add i 1) (add idx (fact (sub r 1))) (join acc (gen p (sub r 1) idx))))))))))
+(define out (\x (match x ((res s m) (add (mul s 100) m)))))
+(out (gen (srange 1 10) 9 0))

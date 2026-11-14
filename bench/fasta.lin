@@ -1,0 +1,29 @@
+; fasta (Computer Language Benchmarks Game), n = 100,000: a repeated sequence of 2n letters, then 3n and 5n
+; letters drawn by the benchmark's random generator from two weighted alphabets.  Nothing is printed: the
+; answer is a checksum of every letter with its position.
+(datatype Freq (freq (c num) (p float)))
+(define alu "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA")
+(define iub (scons (freq 97 0.27) (scons (freq 99 0.12) (scons (freq 103 0.12) (scons (freq 116 0.27)
+  (scons (freq 66 0.02) (scons (freq 68 0.02) (scons (freq 72 0.02) (scons (freq 75 0.02) (scons (freq 77 0.02)
+  (scons (freq 78 0.02) (scons (freq 82 0.02) (scons (freq 83 0.02) (scons (freq 86 0.02) (scons (freq 87 0.02)
+  (scons (freq 89 0.02) snil))))))))))))))))
+(define homo (scons (freq 97 0.3029549426680) (scons (freq 99 0.1979883004921) (scons (freq 103 0.1975473066391)
+  (scons (freq 116 0.3015094502008) snil)))))
+; one letter of a weighted alphabet: the first whose cumulative weight reaches r
+(define pick (\t (\r (\acc (match t (snil 0) ((scons f rest) (match f ((freq c p)
+  (let ((a (fadd acc p))) (if (flt r a) c (match rest (snil c) ((scons g more) (pick rest r a)))))))))))))
+(define next (\seed (mod (add (mul seed 3877) 29573) 139968)))
+; the checksum, threaded: sum of letter * (position mod 97 + 1)
+(define mix (\sum (\pos (\c (add sum (mul c (add (mod pos 97) 1)))))))
+(define repeat (\src (\cur (\k (\pos (\sum (if (eq k 0) sum
+  (if (is_empty cur) (repeat src src k pos sum)
+    (repeat src (tail cur) (sub k 1) (add pos 1) (mix sum pos (head cur)))))))))))
+; a drawn sequence's checksum and the generator's seed after it
+(datatype St (st (sum num) (seed num)))
+(define random (\t (\k (\seed (\pos (\sum (if (eq k 0) (st sum seed)
+  (let ((s (next seed)))
+    (random t (sub k 1) s (add pos 1) (mix sum pos (pick t (fdiv (i2f s) 139968.0) 0.0)))))))))))
+(define n 100000)
+(define total (\a (\b (match a ((st s2 seed2) (match b ((st s3 seed3) (add s2 (add s3 (add seed2 seed3))))))))))
+(define second (\a (match a ((st s2 seed2) (total a (random homo (mul 5 n) seed2 0 0))))))
+(add (repeat alu alu (mul 2 n) 0 0) (second (random iub (mul 3 n) 42 0 0)))
