@@ -123,6 +123,13 @@ structure, which shows exactly where a value is shared:
   as a copy, so the loop owns it and updates it in place at every step. One value
   given to two calls that would each own it is given to the second as a copy, so
   both can free what they were given.
+- **Owned all the way down.** Whether a field is owned is decided per
+  constructor, so one place that stores a shared list as a list's rest would
+  stop every list's rest being owned. A value built fresh and used once, from
+  parts that are themselves so, is owned all the way down wherever it goes: the
+  functions it is given get a version in which its fields are owned, so loops
+  over such values rebuild them in place even when other code in the unit
+  shares lists.
 - **Temporaries, locals and fields.** A value built only to be the argument of
   one call that just reads it is freed when that call returns. A value a function
   builds and only lends, and a field of a value it takes apart, are freed where

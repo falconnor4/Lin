@@ -341,5 +341,15 @@ rm1=$(timeout 120 "$LIN_BIN" "$TMP/rm.lin" 2>/dev/null); rmp=$(LIN_FN_POISON=1 t
 # one was, and the unit did not compile -- the net computed it instead.)
 LIN_FN_DEBUG=1 timeout 300 "$LIN_BIN" "$ROOT/test/array.lin" >/dev/null 2>"$TMP/af.err"
 ! grep -q "error:" "$TMP/af.err" && grep -q "folded a call" "$TMP/af.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL test/array.lin's units: a generated unit did not compile"; }
+# OWNED ALL THE WAY DOWN: `keep` stores a shared list as a list's rest, so no list's rest is owned by
+# constructor -- but the list `go` rebuilds at every step is built fresh and used once, and the version of
+# `bump` it calls rebuilds it in place.
+printf '%s\n' '(define bump (\s (match s (snil snil) ((scons h t) (scons (add h 1) (bump t))))))' \
+  '(define go (\k (\s (if (eq k 0) s (go (sub k 1) (bump s))))))' \
+  '(define tot (\s (\a (match s (snil a) ((scons h t) (tot t (add a h)))))))' \
+  '(define keep (\x (\s (scons x s))))' \
+  '(let ((b (srange 0 3))) (add (tot (keep 7 b) 0) (add (tot b 0) (tot (go 3000 (srange 0 200)) 0))))' > "$TMP/pv.lin"
+pv=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pv.lin" 2>"$TMP/pv.err"); pvp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/pv.lin" 2>/dev/null)
+[ "$pv" = "=> 619913" ] && [ "$pvp" = "$pv" ] && grep -q "own what they are given all the way down" "$TMP/pv.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL owned all the way down: '$pv' poisoned '$pvp'"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

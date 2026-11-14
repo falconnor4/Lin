@@ -2373,9 +2373,19 @@ static unsigned char **uparam, *ufresh;
    `(node t t)` stores ONE block in two fields, and taking either apart in place would corrupt the other. */
 static unsigned char **fown; static long fown_n;
 static long ctor_id(const LinCtor *ci);
+static unsigned *vdeep; static int vdeep_n; static unsigned char *vrdo;   /* (see OWNED ALL THE WAY DOWN) */
+#define VBITS ((long)(sizeof(unsigned) * 8))   /* (a version's parameters are a bit set) */
+static int base_deep(const Expr *b) {               /* a value owned all the way down: a field of it is too */
+  while (b && b->op == E_FIELD) b = b->a;
+  if (!b || !vdeep) return 0;
+  if (b->op == E_PARAM) return b->nargs >= 0 && b->nargs < vdeep_n && b->k < VBITS && ((vdeep[b->nargs] >> b->k) & 1u);
+  if (b->op == E_CALL) return b->k >= 0 && b->k < vdeep_n && vrdo && vrdo[b->k];
+  return 0;
+}
 static int field_owned(const Expr *e) {
   long id = e->ci ? ctor_id(e->ci) : 0;
-  return id > 0 && id <= fown_n && e->k < e->ci->k && fown[id][e->k];
+  if (id > 0 && id <= fown_n && e->k < e->ci->k && fown[id][e->k]) return 1;
+  return id > 0 && e->k < e->ci->k && base_deep(e->a);   /* (per value: see OWNED ALL THE WAY DOWN) */
 }
 static int uniq_r(const Expr *e) {
   if (mm_has(MM_UNIQ, e)) return (int)mm_val[MM_UNIQ][e->id];
@@ -2904,6 +2914,161 @@ static void drops(Expr *entry) {
     unsigned char *seen = calloc((size_t)eid + 1, 1); temp_drops((Expr *)td_body, seen); free(seen);
     if (g >= 0) local_drops(&funs[g].body);
   }
+}
+/* OWNED ALL THE WAY DOWN.  Ownership of a field is decided per constructor for the whole unit: one place that
+   stores a shared list as some list's rest (fannkuch's `ins`) and no list's rest is owned anywhere -- so a
+   reversal that could rebuild its list in place builds a new one, and the old one is never freed.  But a value
+   built fresh, used once, from parts that are themselves so, is owned all the way down, wherever it goes: its
+   fields are its own whatever the rest of the unit does.  So a function is given a VERSION per such signature:
+   the calls that hand parameter k a value owned all the way down call a copy of the function in which k is
+   (vdeep), and in that copy a field of k is owned (field_owned) -- the rules for rebuilding in place and for
+   freeing then apply there.  A call's version is chosen from what it is given; a version's own calls are chosen
+   again inside it, so ownership travels down a loop.  vrdo: a version whose result is owned all the way down. */
+static Expr *fu_clone(const Expr *e);
+static int *vorig; static int vcap;
+static const Expr *dv_body; static int dv_g;
+static int dv_once(const Expr *a);
+static int do_val(const Expr *e) {                  /* is e, in function dv_g, owned all the way down? */
+  if (!e) return 0;
+  switch (e->op) {
+  case E_CONST: return 1;
+  case E_CTOR:
+    for (int i = 0; i < e->nargs; i++) {
+      if (e->ci && !field_live(e->ci, i)) continue;
+      const Expr *a = e->args[i]; Shape sa = shape_of(a);
+      if (sa.k == 5 && !(do_val(a) && dv_once(a))) return 0;
+      if (sa.k == 9) return 0;                       /* (a field of no single kind) */
+    }
+    return 1;
+  case E_CALL: return e->k >= 0 && e->k < nfun && vrdo[e->k];
+  case E_PARAM:
+    if (e->nargs != dv_g || dv_g < 0 || e->k >= VBITS || !((vdeep[dv_g] >> e->k) & 1u)) return 0;
+    return occ(dv_body, e) <= 1;
+  case E_FIELD: return do_val(e->a);
+  case E_IF: return do_val(e->b) && do_val(e->c);
+  case E_MATCH: for (int i = 0; i < e->nargs; i++) if (!do_val(e->args[i])) return 0; return 1;
+  default: return 0;
+  }
+}
+static int temp_alone(const Expr *a); static const Expr *td_body;
+static int dv_once(const Expr *a) {                  /* given to one place alone, on any path */
+  if (a->op == E_PARAM || a->op == E_FIELD || a->op == E_CONST || (a->op == E_CTOR && !a->nargs)) return 1;   /* (judged by do_val) */
+  if (a->id < nrefs_cap && nrefs[a->id] <= 1) return 1;
+  td_body = dv_body; return temp_alone(a);
+}
+static int res_do(const Expr *e) {                   /* the values a body ends with */
+  if (e->op == E_IF) return res_do(e->b) && res_do(e->c);
+  if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) if (!res_do(e->args[i])) return 0; return 1; }
+  return do_val(e);
+}
+static Expr *vcopy(const Expr *e, int from, int to, Expr **memo, int memo_n) {   /* the body, its parameters to's */
+  if (!e) return NULL;
+  if (e->op == E_PARAM && e->nargs == from) return funs[to].pnode[e->k];
+  if (e->id < memo_n && memo[e->id]) return memo[e->id];
+  Expr *x = fu_clone(e);
+  x->a = vcopy(e->a, from, to, memo, memo_n); x->b = vcopy(e->b, from, to, memo, memo_n);
+  x->c = e->op == E_CTOR ? e->c : vcopy(e->c, from, to, memo, memo_n);
+  if (e->nargs && e->args) { x->args = A(sizeof(Expr *) * (size_t)e->nargs); for (int i = 0; i < e->nargs; i++) x->args[i] = vcopy(e->args[i], from, to, memo, memo_n); }
+  x = hc(x);
+  if (e->id < memo_n) memo[e->id] = x;
+  return x;
+}
+static int version_of(int h, unsigned mask, int cap) {   /* h's original with these parameters owned all the way down */
+  int o = vorig[h];
+  for (int i = 0; i < nfun; i++) if (vorig[i] == o && vdeep[i] == mask) return i;
+  if (nfun >= cap) return -1;
+  if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
+  if (nfun >= vcap) { vcap = nfun * 2 + 8; vorig = realloc(vorig, sizeof *vorig * (size_t)vcap); vdeep = realloc(vdeep, sizeof *vdeep * (size_t)vcap); vrdo = realloc(vrdo, (size_t)vcap); }
+  int v = nfun++;
+  funs[v] = funs[o]; funs[v].lam = -1;
+  funs[v].pnode = A(sizeof(Expr *) * (size_t)(funs[o].arity ? funs[o].arity : 1));
+  for (int k = 0; k < funs[o].arity; k++) { Expr *q = mke(E_PARAM, funs[o].pnode[k] ? funs[o].pnode[k]->kind : 1); q->k = k; q->nargs = v; funs[v].pnode[k] = q; }
+  int mn = eid; Expr **memo = calloc((size_t)mn + 1, sizeof *memo);
+  funs[v].body = vcopy(funs[o].body, o, v, memo, mn); free(memo);
+  vorig[v] = o; vdeep[v] = mask; vrdo[v] = 1; vdeep_n = nfun;
+  if (dbg > 1) DBG("[f%d: f%d with parameters %x owned all the way down]\n", v, o, mask);
+  return v;
+}
+static int reads_param_of(const Expr *e, int f, unsigned char *seen) {   /* a parameter of f read here? */
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_PARAM) return e->nargs == f;
+  if (reads_param_of(e->a, f, seen) || reads_param_of(e->b, f, seen) || (e->op != E_CTOR && reads_param_of(e->c, f, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (reads_param_of(e->args[i], f, seen)) return 1;
+  return 0;
+}
+static int reads_outer_r(const Expr *e, int f, unsigned char *seen) {   /* a parameter of another function read here? */
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e->op == E_PARAM) return e->nargs != f;
+  if (reads_outer_r(e->a, f, seen) || reads_outer_r(e->b, f, seen) || (e->op != E_CTOR && reads_outer_r(e->c, f, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (reads_outer_r(e->args[i], f, seen)) return 1;
+  return 0;
+}
+static int reads_outer(int f) {                    /* f reads another's parameters, or another reads f's */
+  unsigned char *seen = calloc((size_t)eid + 1, 1); int r = reads_outer_r(funs[f].body, f, seen);
+  for (int g = 0; !r && g < nfun; g++) { if (g == f || !funs[g].body) continue; memset(seen, 0, (size_t)eid + 1); r = reads_param_of(funs[g].body, f, seen); }
+  free(seen); return r;
+}
+static Expr **vr_map; static int vr_n, vr_changed, vr_cap;
+static Expr *vredirect(Expr *e) {                    /* each call: the version its arguments select */
+  if (!e) return NULL;
+  if (e->op == E_PARAM || e->op == E_CONST) return e;
+  if (e->id < vr_n && vr_map[e->id]) return vr_map[e->id];
+  Expr *a = vredirect(e->a), *b = vredirect(e->b), *c = e->op == E_CTOR ? e->c : vredirect(e->c);
+  int ch = a != e->a || b != e->b || c != e->c; Expr **na = NULL;
+  if (e->nargs && e->args) { na = A(sizeof(Expr *) * (size_t)e->nargs); for (int i = 0; i < e->nargs; i++) { na[i] = vredirect(e->args[i]); ch |= na[i] != e->args[i]; } }
+  long k = e->k;
+  /* (not a function that reads an enclosing one's parameters, nor one whose own an inner function reads: a
+     version is a different function, and the closure and its parameters belong together) */
+  if (e->op == E_CALL && e->k >= 0 && e->k < nfun && funs[e->k].body && !funs[vorig[e->k]].known && !reads_outer(vorig[e->k])) {
+    unsigned mask = 0;
+    for (int i = 0; i < e->nargs && i < funs[e->k].arity && i < VBITS; i++) {
+      const Expr *x = e->args[i];
+      if (shape_of(x).k == 5 && do_val(x) && dv_once(x)) mask |= 1u << i;
+    }
+    int t = version_of((int)e->k, mask, vr_cap);
+    if (t >= 0 && t != e->k) { k = t; ch = 1; vr_changed = 1; }
+  }
+  Expr *x = e;
+  if (ch) { x = fu_clone(e); x->a = a; x->b = b; x->c = c; if (na) x->args = na; x->k = k; x = hc(x); }
+  if (e->id < vr_n) vr_map[e->id] = x;
+  return x;
+}
+static Shape unit_shapes(const Expr *entry);
+static void own_versions(Expr **entry) {
+  int n0 = nfun, cap = 2 * n0 + 2;                   /* (at most one more version per function, and the ones they ask for) */
+  vcap = nfun * 2 + 8; vorig = malloc(sizeof *vorig * (size_t)vcap); vdeep = calloc((size_t)vcap, sizeof *vdeep); vrdo = malloc((size_t)vcap);
+  for (int i = 0; i < nfun; i++) { vorig[i] = i; vrdo[i] = 1; }
+  vdeep_n = nfun;
+  for (int round = 0; round <= n0 + 1; round++) {
+    if (nrefs_cap) memset(nrefs, 0, sizeof *nrefs * (size_t)nrefs_cap);
+    mm_new(MM_NUM); for (int i = 0; i < nfun; i++) count_refs(funs[i].body); count_refs(*entry);
+    for (int i = 0; i < nfun; i++) vrdo[i] = 1;      /* (from the top each round: the calls may have been chosen anew) */
+    for (int it = 0, ch = 1; ch && it <= nfun; it++) {   /* which versions' results are owned all the way down */
+      ch = 0;
+      for (int g = 0; g < nfun; g++) {
+        if (!vrdo[g] || !funs[g].body) continue;
+        dv_g = g; dv_body = funs[g].body; mm_new(MM_OCC);
+        if (!res_do(funs[g].body)) { vrdo[g] = 0; ch = 1; }
+      }
+    }
+    vr_changed = 0; vr_cap = cap;
+    int nb = nfun;
+    for (int g = -1; g < nb; g++) {
+      if (g >= 0 && !funs[g].body) continue;
+      dv_g = g; dv_body = g < 0 ? *entry : funs[g].body;
+      vr_n = eid; vr_map = calloc((size_t)vr_n + 1, sizeof *vr_map); mm_new(MM_OCC);
+      Expr *nbdy = vredirect((Expr *)dv_body);
+      free(vr_map);
+      if (g < 0) *entry = nbdy; else funs[g].body = nbdy;
+    }
+    if (!vr_changed) break;
+    unit_shapes(*entry);                             /* (the new versions' parameters get their shapes) */
+  }
+  if (nfun > n0 && dbg) DBG("%d version%s of the unit's functions own what they are given all the way down\n", nfun - n0, nfun - n0 == 1 ? "" : "s");
+  if (dbg > 1) { DBG("[results owned all the way down:"); for (int i = 0; i < nfun; i++) if (vrdo[i]) fprintf(stderr, " f%d", i); fprintf(stderr, "]\n"); }
+  vdeep_n = nfun;
 }
 static void ownership(Expr *entry) {
   uparam = A(sizeof *uparam * (size_t)nfun); ufresh = A((size_t)nfun);
@@ -3659,7 +3824,8 @@ static void fuse_lists(Expr **entry) {
   }
 }
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum) {
-  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
+  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0;
+  free(vorig); free(vdeep); free(vrdo); vorig = NULL; vdeep = NULL; vrdo = NULL; vdeep_n = 0; vcap = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
   Compiled *r = NULL;
   V **known = NULL;                                  /* an argument that is a FUNCTION: the entry's copy is specialised to it */
@@ -3741,7 +3907,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     }
     if (!safe) {}
     else {
-      { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) ownership(entry); }
+      { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) { own_versions(&entry); ownership(entry); } }
       Buf b = nbuf(4096), fb = nbuf(4096), pre = nbuf(1024), pb = nbuf(1024);
       lift();
       for (int i = 0; i < nfun; i++) { put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ");\n"); }
