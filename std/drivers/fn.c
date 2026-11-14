@@ -3021,7 +3021,7 @@ static Expr *vredirect(Expr *e) {                    /* each call: the version i
   long k = e->k;
   /* (not a function that reads an enclosing one's parameters, nor one whose own an inner function reads: a
      version is a different function, and the closure and its parameters belong together) */
-  if (e->op == E_CALL && e->k >= 0 && e->k < nfun && funs[e->k].body && !funs[vorig[e->k]].known && !reads_outer(vorig[e->k])) {
+  if (e->op == E_CALL && e->k > 0 && e->k < nfun && vorig[e->k] != 0 && funs[e->k].body && !funs[vorig[e->k]].known && !reads_outer(vorig[e->k])) {   /* (f0 is the unit's own function: its parallel copy is of it) */
     unsigned mask = 0;
     for (int i = 0; i < e->nargs && i < funs[e->k].arity && i < VBITS; i++) {
       const Expr *x = e->args[i];
