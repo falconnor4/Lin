@@ -300,7 +300,46 @@ pd2=$(timeout 120 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null); pd2n=$(LIN_FN_OFF=1 ti
 # starting number they share must survive the first (it was freed under the second).
 printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
   '(let ((x (big_of 1))) (big_to_string (big_mul (fact 20 x) (fact 25 x))))' > "$TMP/sh2.lin"
-sh2=$(timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>/dev/null)
-[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
+sh2=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>"$TMP/sh2.err")
+[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && grep -q "the second is given a copy" "$TMP/sh2.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
+# A TEMPORARY -- a number built only to be read by one call -- is dropped when the call returns.
+printf '%s\n' '(define go (\i (\a (\n (if (eq i 0) n (go (sub i 1) a (if (gt (big_cmp (big_mul_small a 3) (big_mul_small a 2)) 0) (add n 1) n)))))))' \
+  '(go 20000 (big_of 123456789123456789) 0)' > "$TMP/td.lin"
+td=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/td.lin" 2>"$TMP/td.err"); td1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/td.lin" 2>/dev/null)
+[ "$td" = "=> 20000" ] && [ "$td1" = "$td" ] && grep -q "temporary given to" "$TMP/td.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a temporary dropped: '$td' '$td1'"; }
+# A FIELD of a consumed record, lent and then dead, is dropped where its paths end -- and a LOCAL likewise.
+printf '%s\n' '(datatype R (r (k num) (l Seq num)))' \
+  '(define up (\n (\a (if (eq n 0) a (up (sub n 1) (scons n a))))))' \
+  '(define tot (\s (\a (match s (snil a) ((scons h t) (tot t (add a h)))))))' \
+  '(define mk (\i (\n (if (eq n 0) (r i (up (add (mod i 7) 3) snil)) (mk i (sub n 1))))))' \
+  '(define go (\i (\acc (if (eq i 0) acc (match (mk i 2) ((r k l) (go (sub i 1) (add acc (add k (tot l 0))))))))))' \
+  '(go 3000 0)' > "$TMP/fd.lin"
+fd=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/fd.lin" 2>"$TMP/fd.err")
+[ "$fd" = "=> 4570482" ] && grep -q "field 1 of a consumed r is dropped" "$TMP/fd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field dropped: '$fd'"; }
+# THE SAME PROGRAMS WITH FREED BLOCKS POISONED (LIN_FN_POISON): a block read after it is freed reads an address
+# nothing is at, so a drop made too early fails here rather than by luck.
+for f in fd sh2 td pa bm; do
+  [ -f "$TMP/$f.lin" ] || continue
+  a=$(timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null); b=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null)
+  [ -n "$a" ] && [ "$a" = "$b" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL $f with freed blocks poisoned: '$b', not '$a'"; }
+done
+# (a trie node consumed while one of its children is PICKED by index: the pick reads the block itself, so it is
+# loaded before the node is freed)
+printf '%s\n' '(aget (apush (array 1024 0) 77) 1024)' > "$TMP/ap.lin"
+ap=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/ap.lin" 2>/dev/null)
+[ "$ap" = "=> 77" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a picked child of a freed trie node: '$ap'"; }
+pp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>/dev/null)
+[ "$pp" = "=> 127083" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600 with freed blocks poisoned: '$pp'"; }
+# READ, THEN MOVE: a branch that reads a number from a list and then hands the list on whole moves it once (the
+# number is loaded at the match), so the list stays the callee's to rebuild in place.
+printf '%s\n' '(define bump (\s (match s (snil snil) ((scons h t) (scons (add h 1) (bump t))))))' \
+  '(define go (\k (\s (\acc (if (eq k 0) acc (match s (snil acc) ((scons h t) (go (sub k 1) (bump s) (add acc h)))))))))' \
+  '(go 2000 (srange 0 50) 0)' > "$TMP/rm.lin"
+rm1=$(timeout 120 "$LIN_BIN" "$TMP/rm.lin" 2>/dev/null); rmp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/rm.lin" 2>/dev/null)
+[ "$rm1" = "=> 1999000" ] && [ "$rmp" = "$rm1" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL read then move: '$rm1' poisoned '$rmp'"; }
+# A unit without data has no allocator: no drop or copy function is written into it.  (In test/array.lin's net
+# one was, and the unit did not compile -- the net computed it instead.)
+LIN_FN_DEBUG=1 timeout 300 "$LIN_BIN" "$ROOT/test/array.lin" >/dev/null 2>"$TMP/af.err"
+! grep -q "error:" "$TMP/af.err" && grep -q "folded a call" "$TMP/af.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL test/array.lin's units: a generated unit did not compile"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail
