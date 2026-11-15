@@ -5,7 +5,7 @@
 #include <string.h>
 
 static jmp_buf TJB; static jmp_buf *TJ = &TJB;   /* a pointer: a deferred def check runs INSIDE another check */
-static char TMSG[256];
+static char TMSG[512];
 static int next_id;
 
 static void tfail(const char *fmt, ...) {
@@ -51,6 +51,67 @@ static int occurs(Type *v, Type *t) {
   return (t->kind == TARG) && (occurs(v, t->a) || (t->b && occurs(v, t->b)));
 }
 
+
+/* ---- what a type error says: the two types that clash (variables renamed a, b, .. in order of appearance)
+   and the expression whose typing found the clash, both as text */
+typedef struct { char *b; size_t n, cap; int *ids, nid; } TBuf;
+static void tb_put(TBuf *t, const char *s) {
+  size_t l = strlen(s);
+  if (t->n + l + 1 > t->cap) { t->cap = (t->n + l + 1) * 2; t->b = realloc(t->b, t->cap); }
+  memcpy(t->b + t->n, s, l + 1); t->n += l;
+}
+static Type *find(Type *t);
+static void tb_type(TBuf *t, Type *y, int par) {
+  y = find(y);
+  if (y->kind == TVR) {
+    int i = 0; while (i < t->nid && t->ids[i] != y->id) i++;
+    if (i == t->nid) { t->ids = realloc(t->ids, (size_t)(t->nid + 1) * sizeof *t->ids); t->ids[t->nid++] = y->id; }
+    char tmp[32]; if (i < 26) snprintf(tmp, sizeof tmp, "%c", 'a' + i); else snprintf(tmp, sizeof tmp, "t%d", i);
+    tb_put(t, tmp); return;
+  }
+  if (y->kind == TARROW) { if (par) tb_put(t, "("); tb_type(t, y->a, 1); tb_put(t, " -> "); tb_type(t, y->b, 0); if (par) tb_put(t, ")"); return; }
+  if (y->kind == TNOM) {
+    if (par == 2 && y->a) tb_put(t, "(");
+    tb_put(t, y->name ? y->name : "?");
+    for (Type *k = y->a; k; k = k->b) { tb_put(t, " "); tb_type(t, k->a, 2); }
+    if (par == 2 && y->a) tb_put(t, ")");
+    return;
+  }
+  if (y->kind == TARG) { tb_type(t, y->a, par); return; }
+  tb_put(t, "?");
+}
+/* a term as (shortened) source text: what the reader wrote, give or take the sugar */
+static void tb_term(TBuf *t, const Term *e, int depth);
+static void tb_spine(TBuf *t, const Term *e, int depth) {   /* ((f a) b) as `f a b` */
+  if (e->type == TAPP && !(e->name && e->name[0])) { tb_spine(t, e->l, depth); tb_put(t, " "); if (depth > 3) tb_put(t, ".."); else tb_term(t, e->r, depth + 1); return; }
+  tb_term(t, e, depth + 1);
+}
+static void tb_term(TBuf *t, const Term *e, int depth) {
+  if (!e) return;
+  if (t->n > 90) { tb_put(t, " .."); return; }
+  switch (e->type) {
+  case TVAR: case TNUM: case TFLOAT: tb_put(t, e->name[0] == ' ' ? "_" : e->name); return;
+  case TLAM: tb_put(t, "(\\"); tb_put(t, e->name[0] == ' ' ? "_" : e->name); tb_put(t, " "); tb_term(t, e->l, depth + 1); tb_put(t, ")"); return;
+  case TLET: tb_put(t, "(let (("); tb_put(t, e->name); tb_put(t, " "); tb_term(t, e->l, depth + 1); tb_put(t, ")) "); tb_term(t, e->r, depth + 1); tb_put(t, ")"); return;
+  case TAPP: {
+    if (e->name && !strcmp(e->name, "if") && e->l && e->l->type == TAPP) {
+      tb_put(t, "(if "); tb_term(t, e->l->l, depth + 1); tb_put(t, " "); tb_term(t, e->l->r, depth + 1); tb_put(t, " "); tb_term(t, e->r, depth + 1); tb_put(t, ")"); return;
+    }
+    if (e->name && !strncmp(e->name, "match:", 6)) { tb_put(t, "(match .. ("); tb_put(t, e->name + 6); tb_put(t, " ..))"); return; }
+    tb_put(t, "("); tb_spine(t, e, depth); tb_put(t, ")"); return;
+  }
+  default: tb_put(t, ".."); return;
+  }
+}
+static const Term *tctx;   /* the expression being typed when a unification runs: what an error names */
+static void tmismatch(Type *x, Type *y) {
+  TBuf t = {0}; tb_put(&t, "type mismatch: ");
+  tb_type(&t, x, 0); tb_put(&t, " vs "); tb_type(&t, y, 0);
+  if (tctx) { tb_put(&t, " in "); size_t at = t.n; tb_term(&t, tctx, 0); (void)at; }
+  char m[sizeof TMSG]; snprintf(m, sizeof m, "%s", t.b); free(t.b); free(t.ids);
+  tfail("%s", m);
+}
+
 static void unify(Type *x, Type *y) {
   x = find(x); y = find(y); if (x == y) return;
   if (x->kind == TARROW && y->kind == TARROW) { unify(x->a, y->a); unify(x->b, y->b); return; }
@@ -58,7 +119,7 @@ static void unify(Type *x, Type *y) {
      arguments pairwise.  A nominal value may also be APPLIED as its
      Scott-encoded dispatch (match desugars scrut to application). */
   if (x->kind == TNOM && y->kind == TNOM) {
-    if (strcmp(x->name, y->name)) tfail("type mismatch");
+    if (strcmp(x->name, y->name)) tmismatch(x, y);
     for (Type *xa = x->a, *ya = y->a; xa && ya; xa = xa->b, ya = ya->b) unify(xa->a, ya->a);
     return;
   }
@@ -70,14 +131,14 @@ static void unify(Type *x, Type *y) {
        which must reject a raw numeral/arrow ((head 5), (cons 1 2) stay errors). */
     if (x->kind == TARROW || y->kind == TARROW) {
       Type *nom = (x->kind == TNOM) ? x : y;
-      if (nom->name && (!strcmp(nom->name, "list") || !strcmp(nom->name, "string"))) tfail("type mismatch");
+      if (nom->name && (!strcmp(nom->name, "list") || !strcmp(nom->name, "string"))) tmismatch(x, y);
       return;
     }
-    tfail("type mismatch");
+    tmismatch(x, y);
   }
   if (x->kind == TVR) { if (occurs(x, y)) tfail("infinite type"); x->kind = TLINK; x->a = y; return; }
   if (y->kind == TVR) { if (occurs(y, x)) tfail("infinite type"); y->kind = TLINK; y->a = x; return; }
-  tfail("type mismatch");
+  tmismatch(x, y);
 }
 
 /* ONLY binders live here (`\x.` and the self-recursive `f : a` slot): such an entry is a fresh variable
@@ -192,9 +253,9 @@ static Type *infer_match(Term *t, Type **scrut) {
   for (Type *k = find(ct); k->kind == TARROW && nf < 64; k = find(k->b)) { fields[nf++] = k->a; ct = k->b; }
   ct = find(ct);
   if (ct->kind != TNOM) return r;                    /* not a datatype constructor: loose */
-  unify(*scrut, ct);
+  tctx = t; unify(*scrut, ct);
   for (int i = nf - 1; i >= 0; i--) exp = tarrow(fields[i], exp);
-  unify(b, exp);
+  tctx = t; unify(b, exp);
   return r;
 }
 static Type *infer(Term *t) {
@@ -213,9 +274,9 @@ static Type *infer(Term *t) {
     /* The `if` form ((c a) b), marked by the parser: c is a bool, both branches one type, and that is the
        result.  Without the rule the boolean only unifies loosely with an arrow and the result is untyped. */
     if (t->name && !strcmp(t->name, "if") && t->l && t->l->type == TAPP) {
-      unify(infer(t->l->l), tnom0("bool"));
+      Type *c = infer(t->l->l); tctx = t; unify(c, tnom0("bool"));
       Type *a = infer(t->l->r), *b = infer(t->r);
-      unify(a, b); return a;
+      tctx = t; unify(a, b); return a;
     }
     if (is_match_app(t)) { Type *sc = NULL; return infer_match(t, &sc); }
     if (t->l && t->l->type == TLAM) {
@@ -223,7 +284,7 @@ static Type *infer(Term *t) {
       Type *b = infer(t->l->l); envn--; return b;
     }
     Type *f = infer(t->l), *x = infer(t->r), *r = tvar();
-    unify(f, tarrow(x, r)); return r;
+    tctx = t; unify(f, tarrow(x, r)); return r;
   }
   case TLET: {
     if (env_find(t->name)) {
@@ -266,8 +327,37 @@ static void def_type(Def *d) {
   int ok = d->rec ? type_check_rec(nm ? nm + 1 : d->name, b, &sch, err, sizeof err) : type_check(b, &sch, err, sizeof err);
   d->typing = 0;
   envn = sav;
-  if (!ok) { printf("error: %s\n", err); return; }   /* an ill-typed def reports at its first use */
+  if (!ok) {   /* an ill-typed def reports at its first use, naming itself and where it is */
+    if (d->file) printf("error: %s (in '%s' at %s:%d)\n", err, d->name, d->file, d->line);
+    else printf("error: %s (in '%s' at line %d)\n", err, d->name, d->line);
+    return;
+  }
   d->sch = sch; d->typed = 1; count_free(&sch);
+}
+
+/* A `define!` STATES its type; this checks the body against it.  A concrete contradiction -- the body makes a
+   number where the annotation says bool, takes one argument where it says two of a datatype -- is an error.
+   A type VARIABLE in the annotation stands for whatever the body has there, so `(define! x a ...)` is still
+   how a program says "trust this": the annotation is then the abstraction, and the checker only confirms the
+   two can agree.  A body written in the net's own protocol (a name starting with `_`: _op, _ffi, _cl_cons ..)
+   has no type the checker can derive -- that is what its annotation is FOR -- and stays trusted. */
+static int protocol_body(const Term *t) {
+  if (!t) return 0;
+  if (t->type == TVAR) { const char *b = strrchr(t->name, '.'); b = b ? b + 1 : t->name; return b[0] == '_'; }
+  if (t->type == TLAM && t->name[0] == '_') return 1;
+  return protocol_body(t->l) || protocol_body(t->r);
+}
+int type_check_annot(const char *name, int rec, Term *body, Type *annot, char *err, int errsz) {
+  if (protocol_body(body)) return 1;
+  jmp_buf jb, *sav = TJ; int top = TJ == &TJB; TJ = &jb;
+  if (setjmp(jb)) { TJ = sav; snprintf(err, errsz, "%s", TMSG); return 0; }
+  env_load_defs(top);
+  Scheme sc = scheme_all(annot);
+  if (rec) env_push(name, sc);
+  Type *bt = infer(body);
+  if (rec) envn--;
+  tctx = NULL; unify(bt, instantiate(&sc));
+  TJ = sav; return 1;
 }
 
 int type_check(Term *t, Scheme *out, char *err, int errsz) {

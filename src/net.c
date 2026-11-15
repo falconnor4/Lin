@@ -156,7 +156,7 @@ void net_init(Net *n, int cap) {
   n->nn = 0; n->steps = 0;
   n->root = NULL; n->nroot = 0; n->rootcap = 0; n->free_head = -1; n->nfree = 0; n->pend_head = -1; n->pins = 0;
   n->dem = calloc((size_t)cap, sizeof(unsigned int)); n->dem_stamp = 0;
-  n->vport = calloc((size_t)cap, 1);
+  n->vport = calloc((size_t)cap, 1); n->rootn = calloc((size_t)cap, 1);
   memset(n->drv, 0, sizeof n->drv);
   n->nheld = 0;
   n->era = NULL; n->era_top = n->era_cap = 0;
@@ -176,19 +176,24 @@ void net_free(Net *n) {
     if (n->drv[i] && dslot[i] && DRV_HAS(dslot[i], state_free) && dslot[i]->state_free)
       dslot[i]->state_free(n, n->drv[i]);
   memset(n->drv, 0, sizeof n->drv);
-  free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->dem); free(n->vport); free(n->act_of); free(n->dem_out);
+  free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->dem); free(n->vport); free(n->rootn); free(n->act_of); free(n->dem_out);
   free(n->lv_parent); free(n->lv_depth); free(n->lv_bit); free(n->lv_hash);
   free(n->root); free(n->era); free(n->pend);
 }
 
 void lin_demand(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn) return;
-  for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) return;
+  if (n->rootn[p.node]) for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) return;
   if (n->nroot >= n->rootcap) {
     n->rootcap = n->rootcap ? n->rootcap * 2 : 8;
     n->root = realloc(n->root, (size_t)n->rootcap * sizeof(Port));
   }
-  n->root[n->nroot++] = p;
+  n->root[n->nroot++] = p; n->rootn[p.node]++;   /* (at most a node's 3 ports: no wrap) */
+}
+/* drop the roots past `keep` (the most recent), keeping the per-node counts */
+static void roots_truncate(Net *n, int keep) {
+  for (int i = keep; i < n->nroot; i++) n->rootn[n->root[i].node]--;
+  n->nroot = keep;
 }
 
 static void net_ensure_cap(Net *n, int need) {
@@ -202,6 +207,7 @@ static void net_ensure_cap(Net *n, int need) {
   n->dem = realloc(n->dem, (size_t)nc * sizeof(unsigned int));
   memset(n->dem + n->cap, 0, (size_t)(nc - n->cap) * sizeof(unsigned int));   /* 0 = never marked */
   n->vport = realloc(n->vport, (size_t)nc); memset(n->vport + n->cap, 0, (size_t)(nc - n->cap));
+  n->rootn = realloc(n->rootn, (size_t)nc); memset(n->rootn + n->cap, 0, (size_t)(nc - n->cap));
   n->act_of = realloc(n->act_of, (size_t)nc * sizeof(int)); memset(n->act_of + n->cap, 0xff, (size_t)(nc - n->cap) * sizeof(int));
   n->cap = nc;
 }
@@ -324,7 +330,7 @@ static void ib_push(IntBuf *b, int v) {
 static void node_free(Net *n, int v) {
   if (v <= 0 || v >= n->nn || n->dead[v] == 2) return;
   act_drop(n, v);
-  if (n->nroot) { int w = 0; for (int i = 0; i < n->nroot; i++) if (n->root[i].node != v) n->root[w++] = n->root[i]; n->nroot = w; }
+  if (n->rootn[v]) { int w = 0; for (int i = 0; i < n->nroot; i++) if (n->root[i].node != v) n->root[w++] = n->root[i]; n->nroot = w; n->rootn[v] = 0; }
   n->dead[v] = 2;
   if (n->pend_top >= n->pend_cap) n->pend = realloc(n->pend, (size_t)(n->pend_cap = n->pend_cap ? n->pend_cap * 2 : 256) * sizeof(int));
   n->pend[n->pend_top++] = v; n->nfree++;
@@ -1051,7 +1057,7 @@ static int walk_reaches_redex(Net *n, Port p) {
 long net_force(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || port_whnf(n, p)) return n->steps;
   /* (only for a port that is not a root already: forcing an existing root walks every demand, as before) */
-  { int is_root = 0; for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) { is_root = 1; break; }
+  { int is_root = 0; if (n->rootn[p.node]) for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) { is_root = 1; break; }
     if (!is_root && !walk_reaches_redex(n, p)) {
       res_net = NULL;
       if (reduce_depth) nested_reduce = 1;          /* what a force inside a wave means for reclaiming (net_reduce) */
@@ -1067,7 +1073,7 @@ long net_force(Net *n, Port p) {
   /* Only ever TRUNCATE.  A reduction here can reclaim, which rewrites the root array and can drop
      the root this call added; restoring the old COUNT would then claim entries that no longer name
      anything, and the next demand walk would seed itself from stale indices. */
-  if (n->nroot > save) n->nroot = save;
+  if (n->nroot > save) roots_truncate(n, save);
   return s;
 }
 
@@ -1422,7 +1428,7 @@ Net *net_copy(const Net *n) {
   c->scope = malloc(c->cap * sizeof(Scope)); memcpy(c->scope, n->scope, c->cap * sizeof(Scope));
   c->dead = malloc(c->cap); memcpy(c->dead, n->dead, c->cap);
   c->dem = calloc(c->cap, sizeof(unsigned int)); c->dem_stamp = 0;
-  c->vport = calloc(c->cap, 1);
+  c->vport = calloc(c->cap, 1); c->rootn = calloc(c->cap, 1);
   c->nlv = 0; c->lvcap = 0; c->lv_hcap = 0; c->lv_hash = NULL;
   c->lv_parent = NULL; c->lv_depth = NULL; c->lv_bit = NULL;
   net_level_set(c, n->nlv, n->lv_parent + 1, n->lv_bit + 1);   /* rebuild the trie: parents precede children, ids reload directly */

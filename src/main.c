@@ -561,7 +561,7 @@ void eval_form(Term *t) {
   if (t->type == TDEF || t->type == TDEFX || t->type == TNS || t->type == TOPEN) return;
   int track = lin_form_key && !form_nest && !quiet_forms;
   if (track) { form_count++; lin_form_idx = -1; }
-  if (!type_check(t, &sch, err, sizeof err)) { printf("error: %s\n", err); if (track) form_bad = 1; return; }
+  if (!type_check(t, &sch, err, sizeof err)) { char tmp[300]; printf("error: %s (at %s)\n", err, lin_where(tmp, sizeof tmp, lin_form_line)); if (track) form_bad = 1; return; }
   Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 10);
   if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); if (track) form_bad = 1; return; }
   if (track) {
@@ -668,6 +668,7 @@ static void process_def(Term *t) {
   if (t->type == TDEFX) sch = scheme_all((Type *)t->annot);
   Guard b = {0}; qualify_self = t->name; qualify_free(t->l, &b); qualify_self = NULL; free(b.names);
   Def *d = &defs[ndefs++];
+  d->file = lin_parse_file; d->line = lin_form_line;
   if (curr_ns[0] && !strchr(t->name, '.')) {
     const char *qn = lin_internf("%s.%s", curr_ns, t->name);
     d->name = qn;
@@ -904,6 +905,30 @@ static int run_line_file(const char *path) {
   run_and_report(&net, lin_line_domain); net_free(&net); return 1;
 }
 
+/* A `define!` is checked against its body once the file defining it has been read: an annotation is also how a
+   definition names one that comes LATER (mutual recursion), so at its own form the later one does not exist yet. */
+typedef struct { int def; Type *annot; const char *file; int line; } AnnotCheck;
+static AnnotCheck *annq; static int nannq, cannq;
+static void annot_queue(int def, Type *annot) {
+  if (nannq == cannq) annq = realloc(annq, (size_t)(cannq = cannq ? cannq * 2 : 16) * sizeof *annq);
+  annq[nannq++] = (AnnotCheck){def, annot, lin_parse_file, lin_form_line};
+}
+/* final: the file is read, so every name exists.  Before that (an expression about to run) a check that meets a
+   name not yet defined waits for the end of the file; any other verdict is given now, before the definition runs. */
+static void annot_flush(int from, int final) {
+  int keep = from;
+  for (int i = from; i < nannq; i++) {
+    Def *d = &defs[annq[i].def]; char err[512];
+    const char *bare = strrchr(d->name, '.'); bare = bare ? bare + 1 : d->name;
+    int ok = type_check_annot(bare, d->rec, d->raw ? d->raw : d->term, annq[i].annot, err, sizeof err);
+    if (!ok && !final && !strncmp(err, "unbound variable", 16)) { annq[keep++] = annq[i]; continue; }
+    if (!ok) {
+      if (annq[i].file) printf("error: '%s' does not have the type it states: %s (at %s:%d)\n", d->name, err, annq[i].file, annq[i].line);
+      else printf("error: '%s' does not have the type it states: %s (at line %d)\n", d->name, err, annq[i].line);
+    }
+  }
+  nannq = keep;
+}
 static void export_namespace(const char *name);   /* (export <ns>) re-export */
 static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
@@ -918,10 +943,18 @@ static void form_cb(Term *t, const char *perr, void *ud) {
   else if (t->type == TNS) set_namespace(t->name);
   else if (t->type == TOPEN) open_namespace(t->name);
   else if (t->type == TEXPORT) export_namespace(t->name);
-  else if (t->type == TDEF || t->type == TDEFX) process_def(t);
+  else if (t->type == TDEFX) {
+    Type *annot = (Type *)t->annot;
+    process_def(t);
+    /* the standard library's annotations DECLARE representations (a list is its Scott encoding, a float its
+       bits): what they state is the abstraction, not what the body derives, so those stay trusted */
+    const char *f = lin_parse_file;
+    if (!(quiet_forms || (f && (!strncmp(f, "std/", 4) || strstr(f, "/std/"))))) annot_queue(ndefs - 1, annot);
+  }
+  else if (t->type == TDEF) process_def(t);
   else if (t->type == TDATATYPE) process_datatype(t);
   else if (building) { if (build_term) term_free(build_term); build_term = term_copy(t); }
-  else eval_form(t);
+  else { if (nannq) annot_flush(0, 0); eval_form(t); }
   term_free(t);
 }
 
@@ -963,7 +996,11 @@ static int load_file(const char *path) {
   if (dir_sp >= dir_cap) dir_stack = realloc(dir_stack, (size_t)(dir_cap = dir_cap ? dir_cap * 2 : 16) * sizeof *dir_stack);
   snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
   const char *prev_ns = curr_ns; int prev_n_open = n_open_ns;
+  const char *prev_file = lin_parse_file; lin_parse_file = lin_intern(path, strlen(path));
+  int q0 = nannq;
   parse_forms(src, form_cb, NULL);
+  annot_flush(q0, 1);
+  lin_parse_file = prev_file;
   curr_ns = prev_ns; n_open_ns = prev_n_open;
   if (dir_sp > 0) dir_sp--;
   free(src);
@@ -1193,7 +1230,7 @@ static void repl(void) {
     buf[buf_len] = 0;
 
     if (depth == 0 && !in_str) {
-      parse_forms(buf, form_cb, NULL);
+      parse_forms(buf, form_cb, NULL); annot_flush(0, 1);
       buf_len = 0;
     }
   }
@@ -1355,7 +1392,7 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(argv[i], "-e") || !strcmp(argv[i], "--eval")) {
       if (++i >= argc) { fprintf(stderr, "error: -e requires an argument\n"); return 1; }
-      parse_forms(argv[i], form_cb, NULL); ran_eval = 1; continue;
+      parse_forms(argv[i], form_cb, NULL); annot_flush(0, 1); ran_eval = 1; continue;
     }
     if (argv[i][0] == '-') { fprintf(stderr, "unknown option: %s\n", argv[i]); print_usage(argv[0]); return 1; }
     /* (the one program of the run: the cache may answer for it) */

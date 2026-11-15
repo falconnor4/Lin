@@ -230,6 +230,24 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_NO_CACHE=1` | Do not use the program cache |
 | `LIN_CACHE_DEBUG=1` | Report whether a run came from the program cache |
 
+### Checking the compiler against the net
+
+The net is the definition of the language and the function compiler is an
+optimiser, so the two must never disagree. `test/fuzz_compile.py` generates
+random programs from the shapes the compiler handles -- numeric loops, tree
+recursion, lists built, mapped, filtered and folded, datatypes built and taken
+apart, records rebuilt in loops, closures and partial application, shared values,
+and nested, literal and wildcard patterns -- and requires each one to give the
+net's answer compiled, on one thread, and with `LIN_FN_POISON`. One program in
+six has a size past the parallel threshold; the net alone is too slow there, so
+the compiled program on one thread (which runs no parallel code) is the
+reference that the parallel and poisoned runs must match. A seeded slice runs in
+the test suite; a long run is
+
+```sh
+python3 test/fuzz_compile.py ./lin 500 <seed>
+```
+
 ## Writing a driver
 
 A driver is a C file that includes `src/lin.h`, exports a registration symbol,

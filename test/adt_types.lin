@@ -56,10 +56,10 @@
 ; --- type safety: a different nominal passed to a Point-typed function is rejected ---
 (define! sump (Point -> num) (\p (match p ((point x y) (add x y)))))
 (sump (mkpair 1 2))
-; expect error: type mismatch
+; expect error: type mismatch: Point vs Pair in (sump (mkpair 1 2)) (at test/adt_types.lin:58)
 (define! idp (Point -> Point) (\p p))
 (idp (seg (point 1 2) (point 3 4)))
-; expect error: type mismatch
+; expect error: type mismatch: Point vs Segment in (idp (seg (point 1 2) (point 3 4))) (at test/adt_types.lin:61)
 ; --- generic (parameterised) nominal ADTs ---
 (datatype (Box a) (box v))
 (define! unbox_num (Box num -> num) (\b (match b ((box v) v))))
@@ -69,7 +69,7 @@
 ; expect => 5
 (define! myb (Box bool) (box true))
 (unbox_num myb)
-; expect error: type mismatch
+; expect error: type mismatch: num vs bool in (unbox_num myb) (at test/adt_types.lin:71)
 
 ; --- typed fields: constructors type-check their declared payloads ---
 ; (datatype Name ctor (field Type..)...): a field's type references the type
@@ -81,7 +81,7 @@
 ; expect => 5
 (define! bbad (Box bool) (box true))
 (bval bbad)
-; expect error: type mismatch
+; expect error: type mismatch: num vs bool in (bval bbad) (at test/adt_types.lin:83)
 ; a generic param'd list-like with a typed head + typed tail recurses
 (datatype (L t) (lnil) (lcons (hd t) (tl L t)))
 (define! llen (L num -> num)

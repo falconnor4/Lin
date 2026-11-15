@@ -115,6 +115,11 @@ typedef struct {
      a reader that held a port into a pair a rule just consumed follows the consumed node's old wire one
      hop to where the value went (net_force_val), so wiping it at once would lose the value. */
   int *pend; int pend_top, pend_cap;
+  /* How many demand roots name each node (`root` holds the ports).  Forces nest as deep as the value they
+     read -- a lazy accumulator is a chain as long as its list -- and each adds a root, so a free that
+     searched the whole root list to drop a dead node's entries made every step cost the depth (measured:
+     a fold over 2000 cells, 878k steps in 32 s, quadratic).  A free now looks only when the node IS one. */
+  unsigned char *rootn;
 } Net;
 
 /* wire of a port (drivers read the graph directly) */
@@ -327,6 +332,8 @@ int lin_arith_scalar(const char *fn, int argc, const long *args, long *out, int 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
 void parse_forms(const char *src, FormFn fn, void *ud);
+extern const char *lin_parse_file; extern int lin_form_line;   /* where the form being handled is */
+const char *lin_where(char *buf, size_t n, int line);           /* "file:line" (or "line N") */
 Term *term_new(int type, const char *name, Term *l, Term *r); Term *term_copy(Term *t);
 const char *lin_intern(const char *s, size_t n); const char *lin_internf(const char *fmt, ...);
 void term_free(Term *t); int term_refs(Term *t, const char *name);
@@ -334,6 +341,7 @@ void term_release(Term *t);   /* one node back to the pool (not its children) */
 Term *term_fix(const char *name, Term *body);
 
 /* ---------------- types ---------------- */
+int type_check_annot(const char *name, int rec, Term *body, Type *annot, char *err, int errsz);   /* a define!'s body against its stated type */
 int type_check(Term *t, Scheme *out, char *err, int errsz);
 int type_check_rec(const char *name, Term *body, Scheme *out, char *err, int errsz);
 void scheme_print(Scheme *s);
@@ -469,7 +477,8 @@ long long goi_det(Net *n);
 typedef struct { const char *name; Term *term, *expanded, *raw; Scheme sch; int typed, rec;
                  Net *compiled; int comp_tried;
                  int typing; Scheme hole;           /* typing: its type is being inferred (mutual recursion reaches it) */
-                 Term *expanded_sh; } Def;          /* its expansion inside an operator's MEANING (main.c: in_meaning) */
+                 Term *expanded_sh;
+                 const char *file; int line; } Def;  /* where it was defined, for its errors */          /* its expansion inside an operator's MEANING (main.c: in_meaning) */
 extern Def *defs;
 extern int ndefs, lin_threads;
 Def *def_find(const char *name);

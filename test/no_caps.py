@@ -69,6 +69,7 @@ DECLARED = {
     ("src/type.c", "f[64]"): "the same set, for a single type",
     ("src/type.c", "< 256"): "the same set, as a bound (known limit, see --list)",
     ("src/type.c", "< 26"): "renders a type variable a..z, then falls back to tN (display only)",
+    ("src/type.c", "> 90"): "a type error quotes the expression it found the clash in, shortened past 90 characters (display only)",
     ("std/drivers/readback.c", "< 255"): "byte range check on a terminal payload",
     ("std/drivers/readback.c", "> 255"): "the same byte range check, from the other side",
     ("std/drivers/readback.c", "< 26"): "renders a type variable as a letter, display only",
