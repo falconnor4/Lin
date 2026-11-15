@@ -97,7 +97,8 @@ difference cannot be observed, and otherwise leaves the call to the net:
   compiles, though the cells of the inner and the outer lists hold different
   kinds of value. What a unit is handed from the net is known by how the unit
   uses it: an inner list's head added as a number makes the outer list's
-  elements lists of numbers
+  elements lists of numbers. A function called at two shapes (`nth` on a list
+  of lists and on the lists in it) is given a version for each
 - A structure that is infinite or outgrows memory or the stack while being built:
   the compiled call is abandoned and the net computes the call lazily
 - Any shape of net it does not recognise
@@ -266,8 +267,9 @@ python3 test/coverage.py ./lin [files or directories] [--min-steps N]
 It is the list of what the compiler should learn next. At the time of writing
 the remaining reasons are:
 
-- closures over a variable of an enclosing function, and values left
-  half-duplicated by an earlier form (`examples/linden`);
+- data handed in from the net whose element shapes the unit's own use does not
+  determine, and values left half-duplicated by an earlier form
+  (`examples/linden`'s printing forms);
 - superpositions: a value left half-duplicated in the net by an earlier form
   (`examples/games/tictactoe.lin`), which the compiler's evaluator does not read;
 - `test/regex.lin`'s `Seq` arguments, whose shape is not known when the call is

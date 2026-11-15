@@ -3034,6 +3034,7 @@ static int reads_outer(int f) {                    /* f reads another's paramete
   for (int g = 0; !r && g < nfun; g++) { if (g == f || !funs[g].body) continue; memset(seen, 0, (size_t)eid + 1); r = reads_param_of(funs[g].body, f, seen); }
   free(seen); return r;
 }
+static Shape unit_shapes(const Expr *entry);
 static Expr **vr_map; static int vr_n, vr_changed, vr_cap;
 static Expr *vredirect(Expr *e) {                    /* each call: the version its arguments select */
   if (!e) return NULL;
@@ -3166,6 +3167,7 @@ static int result_numeric(const Expr *entry) {
 static const ShArgs *sha_intern(int n, const Shape *v);
 static Shape sh_mk(const char *dt, int n, const Shape *v);
 static void sh_print(Shape s);
+static int sh_top(Shape s);
 static Shape sh_join(Shape a, Shape b) {
   if (!a.k) return b;
   if (!b.k) return a;
@@ -3273,7 +3275,7 @@ static Shape field_shape(Shape **fld, long nctor, const LinCtor *c, long id, int
   }
   return g;
 }
-static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad, sh_optimistic, sh_guessed;
+static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad, sh_optimistic, sh_guessed, sh_no_fallback;
 static long ctor_id(const LinCtor *ci) { for (long k = 1; lin_ctor_info(k); k++) if (lin_ctor_info(k) == ci) return k; return 0; }
 static void sh_upd(Shape *slot, Shape v) { Shape j = sh_join(*slot, v); if (!sh_eq(j, *slot)) { *slot = j; sh_changed = 1; } }
 /* WHAT A USE SAYS, BACK UP TO WHERE THE VALUE CAME FROM.  A value taken apart as a datatype, or computed with as a
@@ -3406,6 +3408,7 @@ static Shape unit_shapes(const Expr *entry) {
   Shape **fld0 = A(sizeof *fld0 * (size_t)(sh_nctor + 1));   /* (the declared start, for a second attempt) */
   for (long k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; fld0[k] = A(sizeof **fld0 * (size_t)nk); memcpy(fld0[k], sh_fld[k], sizeof **fld0 * (size_t)nk); }
   Shape *esh0 = nesh ? A(sizeof *esh0 * (size_t)nesh) : NULL; if (nesh) memcpy(esh0, esh, sizeof *esh * (size_t)nesh);
+  int okeep = 0, obad = 0; Shape ores = { 0, NULL, NULL }, **opar = NULL, *ofun = NULL, **ofld = NULL, *oesh = NULL; unsigned char *obuilt = NULL;
   for (sh_optimistic = 1; sh_optimistic >= 0; sh_optimistic--) {
     if (sh_optimistic == 0) {                        /* a guess outlived the fixpoint: again, without guessing */
       for (int i = 0; i < nfun; i++) { memset(sh_par[i], 0, sizeof **sh_par * (size_t)(funs[i].arity ? funs[i].arity : 1)); sh_fun[i] = (Shape){ 0, NULL, NULL }; }
@@ -3420,8 +3423,32 @@ static Shape unit_shapes(const Expr *entry) {
       res = shape_of(entry);
       if (!sh_changed) break;
     }
-    if (!sh_guessed) break;
+    if (!sh_guessed || sh_no_fallback) break;
+    if (sh_optimistic == 1) {                        /* (kept: if the old analysis does worse, this is the answer) */
+      okeep = 1; ores = res; obad = sh_bad;
+      opar = A(sizeof *opar * (size_t)(nfun ? nfun : 1)); for (int i = 0; i < nfun; i++) { int a = funs[i].arity ? funs[i].arity : 1; opar[i] = A(sizeof **opar * (size_t)a); memcpy(opar[i], sh_par[i], sizeof **opar * (size_t)a); }
+      ofun = A(sizeof *ofun * (size_t)(nfun ? nfun : 1)); memcpy(ofun, sh_fun, sizeof *ofun * (size_t)nfun);
+      ofld = A(sizeof *ofld * (size_t)(sh_nctor + 1)); for (long k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; ofld[k] = A(sizeof **ofld * (size_t)nk); memcpy(ofld[k], sh_fld[k], sizeof **ofld * (size_t)nk); }
+      oesh = nesh ? A(sizeof *oesh * (size_t)nesh) : NULL; if (nesh) memcpy(oesh, esh, sizeof *esh * (size_t)nesh);
+      obuilt = A((size_t)(sh_nctor + 1)); memcpy(obuilt, sh_built, (size_t)(sh_nctor + 1));
+    }
     if (dbg > 2) DBG("[shapes: a parameter's field was still guessed at the end; again, without guessing]\n");
+  }
+  /* A guess that survives is a value whose parameters nothing says -- a word of unknown kind, which the unit never
+     frees, copies or reads back as data (a field of it reaching the result or the arguments is refused as before).
+     So the optimistic shapes stand when they are clean and the old analysis's are not. */
+  if (okeep) {
+    int top_new = sh_bad || sh_top(res), top_old = obad || sh_top(ores);
+    for (int i = 0; i < nfun; i++) for (int k = 0; k < funs[i].arity; k++) { top_new |= sh_top(sh_par[i][k]); top_old |= sh_top(opar[i][k]); }
+    if (top_new && !top_old) {
+      for (int i = 0; i < nfun; i++) memcpy(sh_par[i], opar[i], sizeof **opar * (size_t)(funs[i].arity ? funs[i].arity : 1));
+      memcpy(sh_fun, ofun, sizeof *ofun * (size_t)nfun);
+      for (long k = 1; k <= sh_nctor; k++) memcpy(sh_fld[k], ofld[k], sizeof **ofld * (size_t)(lin_ctor_info(k)->k + 1));
+      if (nesh) memcpy(esh, oesh, sizeof *esh * (size_t)nesh);
+      memcpy(sh_built, obuilt, (size_t)(sh_nctor + 1));
+      res = ores; sh_bad = obad; sh_g++;
+      if (dbg > 2) DBG("[shapes: the optimistic ones stand]\n");
+    }
   }
   sh_optimistic = 0;
   if (dbg > 2) {
@@ -3433,6 +3460,92 @@ static Shape unit_shapes(const Expr *entry) {
 static void sh_print(Shape s) {                     /* (LIN_FN_DEBUG=3) */
   if (s.k == 5) { fprintf(stderr, "%s", s.dt ? s.dt : "data"); if (s.a) { fprintf(stderr, "("); for (int i = 0; i < s.a->n; i++) { if (i) fprintf(stderr, ","); sh_print(s.a->s[i]); } fprintf(stderr, ")"); } }
   else fprintf(stderr, "%s", s.k == 1 ? "num" : s.k == 3 ? "bool" : s.k == 9 ? "TOP" : "?");
+}
+/* A FUNCTION USED AT TWO SHAPES.  One function's parameter has one shape, so a library function called on a list of
+   lists in one place and on a list of numbers in another (`nth`) joins them to TOP and the unit is handed back.
+   Such a function is given one version per shape its callers give it -- the same body, its own calls to itself
+   kept in the version -- and the shapes are worked out again: monomorphised by need, not by a pass that copies
+   every function.  (Not one a closure ties to another: as for the ownership versions, below.) */
+static int sh_top(Shape s) { if (s.k == 9) return 1; if (s.a) for (int i = 0; i < s.a->n; i++) if (sh_top(s.a->s[i])) return 1; return 0; }
+static int *sv_orig; static Shape **sv_sig; static int sv_n, sv_cap, sv_changed, sv_limit;
+static int sv_version(int g, Shape *sig) {
+  int o = sv_orig[g], ar = funs[o].arity;
+  for (int i = 0; i < nfun; i++) if (i < sv_n && sv_orig[i] == o && sv_sig[i]) {
+    int eq = 1; for (int k = 0; k < ar && eq; k++) eq = sh_eq(sv_sig[i][k], sig[k]);
+    if (eq) return i;
+  }
+  /* (every shape a caller gives gets a version, and the original keeps the callers whose own arguments are still TOP --
+      a call fed by another call of the same function: once that one has its version, its result is no longer the
+      join of both, and the next round sees this caller's shape too) */
+  if (nfun >= sv_limit) return -1;
+  if (nfun >= funcap) funs = realloc(funs, (size_t)(funcap = funcap ? funcap * 2 : 8) * sizeof *funs);
+  if (nfun >= sv_cap) { sv_cap = nfun * 2 + 8; sv_orig = realloc(sv_orig, sizeof *sv_orig * (size_t)sv_cap); sv_sig = realloc(sv_sig, sizeof *sv_sig * (size_t)sv_cap); }
+  int v = nfun++;
+  funs[v] = funs[o]; funs[v].lam = -1;
+  funs[v].pnode = A(sizeof(Expr *) * (size_t)(ar ? ar : 1));
+  for (int k = 0; k < ar; k++) { Expr *q = mke(E_PARAM, funs[o].pnode && funs[o].pnode[k] ? funs[o].pnode[k]->kind : 1); q->k = k; q->nargs = v; funs[v].pnode[k] = q; }
+  int mn = eid; Expr **memo = calloc((size_t)mn + 1, sizeof *memo);
+  funs[v].body = vcopy(funs[o].body, o, v, memo, mn); free(memo);
+  sv_orig[v] = o; sv_sig[v] = A(sizeof *sig * (size_t)(ar ? ar : 1)); memcpy(sv_sig[v], sig, sizeof *sig * (size_t)ar); sv_n = nfun;
+  if (dbg > 1) DBG("[f%d: f%d at another shape]\n", v, o);
+  return v;
+}
+static Expr **sv_map; static int sv_mapn, sv_self;
+static Expr *sv_redirect(Expr *e) {
+  if (!e) return NULL;
+  if (e->op == E_PARAM || e->op == E_CONST) return e;
+  if (e->id < sv_mapn && sv_map[e->id]) return sv_map[e->id];
+  Expr *a = sv_redirect(e->a), *b = sv_redirect(e->b), *c = e->op == E_CTOR ? e->c : sv_redirect(e->c);
+  int ch = a != e->a || b != e->b || c != e->c; Expr **na = NULL;
+  if (e->nargs && e->args) { na = A(sizeof(Expr *) * (size_t)e->nargs); for (int i = 0; i < e->nargs; i++) { na[i] = sv_redirect(e->args[i]); ch |= na[i] != e->args[i]; } }
+  long k = e->k;
+  /* a version's own recursive calls are to itself (vcopy gives it its parameters; its calls are still the original's) */
+  if (e->op == E_CALL && sv_self >= 0 && sv_self < sv_n && sv_orig[sv_self] != sv_self && e->k == sv_orig[sv_self]) { k = sv_self; ch = 1; sv_changed = 1; }
+  else if (e->op == E_CALL && e->k >= 0 && e->k < nfun && e->k < sv_n && funs[e->k].body && !funs[sv_orig[e->k]].known
+      && sv_orig[e->k] != (sv_self >= 0 ? sv_orig[sv_self] : -1) && !reads_outer(sv_orig[e->k])) {
+    int g = (int)e->k, ar = funs[g].arity, top = 0;
+    for (int i = 0; i < ar; i++) top |= sh_top(sh_par[g][i]);
+    if (top) {
+      Shape *sig = A(sizeof *sig * (size_t)(ar ? ar : 1));
+      int ok = 1;
+      for (int i = 0; i < ar; i++) { sig[i] = i < e->nargs ? shape_of(e->args[i]) : (Shape){ 0, NULL, NULL }; ok &= !sh_top(sig[i]); }
+      int t = ok ? sv_version(g, sig) : -1;
+      if (t >= 0 && t != g) { k = t; ch = 1; sv_changed = 1; }
+    }
+  }
+  Expr *x = e;
+  if (ch) { x = fu_clone(e); x->a = a; x->b = b; x->c = c; if (na) x->args = na; x->k = k; x = hc(x); }
+  if (e->id < sv_mapn) sv_map[e->id] = x;
+  return x;
+}
+static Shape shape_versions(Expr **entry, Shape res) {
+  int n0 = nfun; sv_limit = 2 * n0 + 2;
+  { int any = 0; for (int i = 0; i < nfun && !any; i++) for (int k = 0; k < funs[i].arity; k++) any |= sh_top(sh_par[i][k]);
+    if (!any) return res; }
+  sh_no_fallback = 1; res = unit_shapes(*entry);   /* (the versions are chosen by the optimistic shapes: the old analysis's TOP says nothing of which) */
+  sv_cap = nfun * 2 + 8; sv_orig = malloc(sizeof *sv_orig * (size_t)sv_cap); sv_sig = calloc((size_t)sv_cap, sizeof *sv_sig);
+  for (int i = 0; i < nfun; i++) sv_orig[i] = i;
+  sv_n = nfun;
+  for (int round = 0; round <= n0 + 1; round++) {
+    int any = 0; for (int i = 0; i < nfun && !any; i++) for (int k = 0; k < funs[i].arity; k++) any |= sh_top(sh_par[i][k]);
+    if (!any) break;
+    sv_changed = 0; int nb = nfun;
+    for (int g = -1; g < nb; g++) {
+      if (g >= 0 && !funs[g].body) continue;
+      sv_self = g; sv_mapn = eid; sv_map = calloc((size_t)sv_mapn + 1, sizeof *sv_map);
+      sh_g++;                                        /* (shape_of's memo: the shapes stay those just worked out) */
+      Expr *nb2 = sv_redirect(g < 0 ? *entry : funs[g].body);
+      free(sv_map);
+      if (g < 0) *entry = nb2; else funs[g].body = nb2;
+    }
+    if (!sv_changed) break;
+    res = unit_shapes(*entry);
+  }
+  sh_no_fallback = 0;
+  res = unit_shapes(*entry);                         /* (and once more as the unit will be: guessing only if nothing is left to guess) */
+  if (nfun > n0 && dbg) DBG("%d version%s of the unit's functions for the shapes they are called at\n", nfun - n0, nfun - n0 == 1 ? "" : "s");
+  free(sv_orig); free(sv_sig); sv_orig = NULL; sv_sig = NULL;
+  return res;
 }
 /* Can a value of this shape be read back?  Every constructor of every datatype it reaches that the unit builds
    must have fields of a known shape. */
@@ -4064,6 +4177,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
     if (!safe) { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) safe = 1; }
     if (!safe) DBG("declined: a call passes a computation where its callee may not evaluate it\n");
     Shape rshape = safe ? unit_shapes(entry) : (Shape){ 1, NULL };
+    if (safe) rshape = shape_versions(&entry, rshape);
     if (safe && sh_bad) { safe = 0; DBG("declined: a value taken apart as something it is not (a number read as cells?)\n"); }
     for (int k = 0; safe && k < nesh; k++)            /* a data argument is read in by its shape: it must be known */
       if (esh[k].k && !shape_closed(esh[k], 0)) {

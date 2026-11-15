@@ -91,7 +91,12 @@ prog nestedrebuild '(define mk (\k (\a (if (eq k 0) a (mk (sub k 1) (cons (cons 
 prog seqofseq '(define grid (\n (\m (if (eq n 0) snil (scons (srange 0 m) (grid (sub n 1) m))))))
 (define tot (\g (\acc (match g (snil acc) ((scons row rest) (tot rest (add acc (ssum row))))))))
 (tot (grid 10 10) 0)' 450
-for f in nestedlist nestedrebuild seqofseq; do
+# one library function at two shapes (`nth` on a list of lists and on the lists in it): a version per shape
+prog twoshapes '(define pts (cons (cons 1 (cons 2 nil)) (cons (cons 3 (cons 4 nil)) nil)))
+(define g (\i (nth 1 (nth i pts))))
+(define go (\k (\acc (if (eq k 0) acc (go (sub k 1) (add acc (g (mod k 2))))))))
+(go 1000 0)' 3000
+for f in nestedlist nestedrebuild seqofseq twoshapes; do
   a=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null); b=$(LIN_FN_OFF=1 timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null)
   if [ "$a" = "$b" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL $f poisoned: '$a' vs net '$b'"; fi
 done
