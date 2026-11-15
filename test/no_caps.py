@@ -40,6 +40,7 @@ DECLARED = {
     ("std/drivers/fn.c", ">= 4096"): "a parallel reduction's threshold: below a few thousand iterations a thread costs more than it saves (measured: a 4096-step loop is ~10 us)",
     ("std/drivers/fn.c", "params[sizeof(unsigned) * 8]"): "a compiled function's parameters: one bit each of the strictness set",
     ("std/runtime/i64.h", ">= 9223372036854775808"): "2^63, the range of a 64-bit integer: a floor outside it is defined as INT64_MIN (what the soft float and x86 give)",
+    ("std/drivers/fn.c", "#define SHAPE_DEPTH 6"): "how deeply a shape's datatype parameters nest (a list of lists of ...) before the analysis forgets them: a function that wraps its argument once per call would otherwise grow a shape for ever -- forgetting is the old per-constructor analysis, never a wrong answer",
     ("std/drivers/fn.c", "#define SMALL_CONST_NODES 65536"): "how large a value already in the net may be and still be compiled into a unit as a constant (so the program cache can answer for it): past it the value is read in at call time instead -- a policy, never a refusal",
     ("std/drivers/fn.c", "<< 18"): "a data unit's arena: chunks of 2 MB and up are asked for in huge pages (the page's size in words, not a limit)",
     ("std/drivers/fn.c", "<< 21"): "the huge page's size (2 MB): an alignment, not a limit",

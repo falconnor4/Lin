@@ -40,18 +40,25 @@ long lin_ctor_register(const char *dt, const char *name, int m, int i, int k) {
   for (long j = nctors; j-- > 0; )                   /* a reloaded declaration keeps its ID */
     if (!strcmp(ctors[j].dt, dt) && !strcmp(ctors[j].name, name) && ctors[j].m == m && ctors[j].i == i && ctors[j].k == k) return j + 1;
   if (nctors >= cctors) ctors = realloc(ctors, (size_t)(cctors = cctors ? cctors * 2 : 32) * sizeof *ctors);
-  ctors[nctors] = (LinCtor){ lin_intern(dt, strlen(dt)), lin_intern(name, strlen(name)), m, i, k, NULL };
+  ctors[nctors] = (LinCtor){ lin_intern(dt, strlen(dt)), lin_intern(name, strlen(name)), m, i, k, NULL, lin_ctor_prog };
   return ++nctors;
 }
+int lin_ctor_prog;
 void lin_ctor_set_fdesc(long id, const char *fdesc) { if (id >= 1 && id <= nctors && fdesc) ctors[id - 1].fdesc = lin_intern(fdesc, strlen(fdesc)); }
 const char *lin_result_desc;
 const LinCtor *lin_ctor_info(long id) { return id >= 1 && id <= nctors ? &ctors[id - 1] : NULL; }
-long lin_ctor_lookup(const char *name) {             /* the latest declaration of that name wins, as a definition does */
+/* The latest declaration of that name wins, as a definition does -- the PROGRAM's before the library's: a library
+   module loaded lazily, after the program declared a constructor of the same name, stands for one loaded before
+   it (main.c, def_find, says the same of definitions). */
+long lin_ctor_lookup(const char *name) {
   const char *dot = strrchr(name, '.');
-  for (long j = nctors; j-- > 0; ) {
-    const char *cn = ctors[j].name, *cd = strrchr(cn, '.');
-    if (!strcmp(cn, name) || (cd && !strcmp(cd + 1, name)) || (dot && !strcmp(dot + 1, cd ? cd + 1 : cn))) return j + 1;
-  }
+  if (dot) for (long j = nctors; j-- > 0; ) if (!strcmp(ctors[j].name, name)) return j + 1;   /* a qualified name means that one */
+  for (int pass = 1; pass >= 0; pass--)
+    for (long j = nctors; j-- > 0; ) {
+      if (pass && !ctors[j].prog) continue;
+      const char *cn = ctors[j].name, *cd = strrchr(cn, '.');
+      if (!strcmp(cn, name) || (cd && !strcmp(cd + 1, name)) || (dot && !strcmp(dot + 1, cd ? cd + 1 : cn))) return j + 1;
+    }
   return 0;
 }
 long lin_fan_ambiguous;
@@ -203,12 +210,14 @@ int net_read_scott(Net *n, Port p, int m, int *idx, Port *fields, int kmax) {
   for (int a = 0, b = k - 1; a < b; a++, b--) { Port t = fields[a]; fields[a] = fields[b]; fields[b] = t; }   /* (the spine reads them last first) */
   *idx = i; return k;
 }
+/* The end: the list datatype's `\c.\n.n` (its body the second binder, once its marker has reduced away), or the
+   raw terminal `\c.\n.<a value>` the operand lists (num.lin's `_cl_nil`) and the numerals still end in. */
 static int nil_layer(Net *n, Port p) {
   if (!hop_lam(n, &p, 0)) return 0;
   Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));
   if (c.port != 0 || !live(n, c) || n->tag[c.node] != LAM) return 0;
   Port body = skip_dup(n, net_force_val(n, wr(n, (Port){c.node, 2})));
-  return live(n, body) && n->tag[body.node] == LAM;
+  return live(n, body) && n->tag[body.node] == LAM;   /* (a binder's wire is a LAM's port too: `n` itself) */
 }
 static int cons_layer(Net *n, Port p, Layer *out) {
   Port h, t;
@@ -391,6 +400,21 @@ Port net_alloc_bool(Net *n, int val) {
   net_link(n, (Port){bt.node, 2}, (Port){bf.node, 0}, 0); net_link(n, (Port){bf.node, 2}, (Port){val ? bt.node : bf.node, 1}, 0);
   net_link(n, (Port){val ? bf.node : bt.node, 1}, net_alloc(n, ERA, sc), 0);   /* the branch not taken is erased */
   return (Port){bt.node, 0};
+}
+
+/* The end of a list, as the core's list datatype builds it: `\c.\n.((\_c n) NIL)`.  It keeps its constructor
+   marker: without it `\c.\n.n` is exactly the boolean false, and a reader could not tell the two apart. */
+Port net_alloc_list_nil(Net *n) {
+  Scope sc = scope_nil();
+  Port c = net_alloc(n, LAM, sc), nn = net_alloc(n, LAM, sc), ma = net_alloc(n, APP, sc), lc = net_alloc(n, LAM, sc);
+  net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 0);
+  net_link(n, (Port){c.node, 1}, net_alloc(n, ERA, sc), 0);
+  net_link(n, (Port){nn.node, 2}, (Port){ma.node, 1}, 0);
+  net_link(n, (Port){ma.node, 0}, (Port){lc.node, 0}, 1);   /* (the marker is a redex, as a constructor's is: queued) */
+  net_link(n, (Port){ma.node, 2}, alloc_scott(n, lin_list_nil_id, sc), 0);
+  net_link(n, (Port){lc.node, 1}, net_alloc(n, ERA, sc), 0);
+  net_link(n, (Port){lc.node, 2}, (Port){nn.node, 1}, 0);
+  return (Port){c.node, 0};
 }
 
 /* ...and building one is building the numeral of its bits. */

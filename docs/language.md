@@ -100,8 +100,8 @@ come later). A concrete contradiction is an error:
 
 A type variable in the annotation stands for whatever the body has there, so
 `(define! x a ...)` still says "take this as given". The standard library's
-`define!`s are not checked: they are how it gives nominal types such as `bool`,
-`list` and `float` to values that are, underneath, plain lambdas and numbers, and
+`define!`s are not checked: they are how it gives nominal types such as `bool`
+and `float` to values that are, underneath, plain lambdas and numbers, and
 a body written in the runtime's own protocol (names starting with `_`) is taken
 as given too. Ordinary programs should prefer `define` and let the type be
 inferred.
@@ -156,23 +156,27 @@ comparisons produce them; `if` consumes them.
 
 ## Strings and lists
 
-A list is built from `nil` and `cons`, and read with `head`, `tail` and `is_empty`.
-A string literal is a list of character codes.
+`list a` is a datatype the language declares itself, as if by
+`(datatype (list a) (cons (h a) (t list a)) (nil))` in the namespace `list`. Its
+constructors are `cons` and `nil` (also `list.cons` and `list.nil`), and a list
+is taken apart with `match` like any other datatype, or with `head`, `tail` and
+`is_empty`. A string literal is a list of character codes, so it is a value of
+the same type and needs no library.
 
 ```scheme
 (cons 1 (cons 2 (cons 3 nil)))    ; => [1 2 3]
+(match (cons 1 (cons 2 nil)) ((cons a (cons b _)) (add a b)) (_ 0))   ; => 3
 (str_concat "foo" "bar")          ; => "foobar"
 (str_length "hello")              ; => 5
 (str_words "the quick brown fox")
 ; => (scons "the" (scons "quick" (scons "brown" (scons "fox" snil))))
 ```
 
+The empty list has no head: `head nil` answers `nil` itself, which a typed
+program never reads. Its tail is `nil`.
+
 String lengths and indices count bytes, so a non-ASCII character counts as more
 than one.
-
-For lists that programs compute with, prefer `Seq` from the standard library: it
-is a declared datatype, so recursive functions over it are typed and compiled.
-See [Standard library](stdlib.md#sequences).
 
 ## Datatypes and pattern matching
 
@@ -315,7 +319,10 @@ to them by qualified name or open the namespace.
 | `(load "file.lin")` | Read another source file. A `std/` path names a library module |
 
 The standard library needs no `load`. Each module is read the first time a
-program uses one of its names.
+program uses one of its names, and it means what it would have meant read
+before the program: a name the program defines itself (a constructor `scons`
+of its own datatype, say) keeps the program's meaning, even where the library
+has the same name in a namespace it opens.
 
 ## Input and output
 

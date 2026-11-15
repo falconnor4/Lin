@@ -421,6 +421,15 @@ static Term *parse_atom(const char *kw) {
   return term_new(TVAR, kw, NULL, NULL);
 }
 
+/* One value of the core's list datatype: `cons h t` (h non-NULL) or `nil` -- what its constructor builds.  A cell's
+   marker is already reduced away (a literal is a value: reading it should cost nothing); the end keeps its marker,
+   because `\c.\n.n` alone is exactly the boolean false. */
+static Term *list_value(Term *h, Term *t) {
+  Term *b = h ? term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, " c", NULL, NULL), h), t) : term_new(TVAR, " n", NULL, NULL);
+  if (!h && lin_list_nil_id) b = term_new(TAPP, "", term_new(TLAM, "_c", b, NULL), term_new(TNUM, lin_internf("%ld", lin_list_nil_id), NULL, NULL));
+  return term_new(TLAM, " c", term_new(TLAM, " n", b, NULL), NULL);
+}
+
 static Term *parse_term(void) {
   skipws();
   if (!S[P]) pfail("unexpected end of input");
@@ -444,14 +453,14 @@ static Term *parse_term(void) {
     }
     if (S[P] != '"') pfail("unterminated string literal");
     P++;
-    /* A string is a list of character codes, written as the list encoding ITSELF -- cells \c.\n.((c h) t) ending in
-       \c.\n.true -- so a literal needs no library.  Its type, `list num`, is stated on the term (the checker
-       trusts an annotated lambda), and the binder names contain a space so nothing can capture them. */
-    Term *body = term_new(TLAM, " c", term_new(TLAM, " n", term_new(TLAM, " t", term_new(TLAM, " f",
-                   term_new(TVAR, " t", NULL, NULL), NULL), NULL), NULL), NULL);
+    /* A string is a list of character codes, written as values of the core's list datatype ITSELF (main.c,
+       builtin_list) -- each cell `\c.\n.((c h) t)`, the end `\c.\n.((\_c n) NIL)` (list_value) -- so a literal
+       needs no library.  Its type, `list num`, is stated on the term (the
+       checker trusts an annotated lambda), and the binder names contain a space so nothing can capture them. */
+    Term *body = list_value(NULL, NULL);
     for (int i = dlen - 1; i >= 0; i--) {
-      char cb[8]; snprintf(cb, sizeof cb, "%d", dec[i]); Term *ch = term_new(TNUM, lin_intern(cb, strlen(cb)), NULL, NULL);
-      body = term_new(TLAM, " c", term_new(TLAM, " n", term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, " c", NULL, NULL), ch), body), NULL), NULL);
+      char cb[8]; snprintf(cb, sizeof cb, "%d", dec[i]);
+      body = list_value(term_new(TNUM, lin_intern(cb, strlen(cb)), NULL, NULL), body);
     }
     Type *ty = type_nominal("list"); ty->a = type_arg(type_nominal("num"));
     body->annot = ty;

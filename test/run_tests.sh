@@ -152,6 +152,17 @@ fi
 rm -f "$NC_LOG"
 
 # ----------------------------------------------------------------------------
+# Tier 2.79: input arrives as a list (test/io_input.sh).
+# ----------------------------------------------------------------------------
+IO_LOG=$(mktemp)
+if bash test/io_input.sh "$LIN_BIN" >"$IO_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 2)); echo "PASS test/io_input.sh ($(tail -1 "$IO_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/io_input.sh"; cat "$IO_LOG"
+fi
+rm -f "$IO_LOG"
+
+# ----------------------------------------------------------------------------
 # Tier 2.8: the net's demand walk stays proportional to the work (test/net_walk.sh).
 # ----------------------------------------------------------------------------
 NW_LOG=$(mktemp)

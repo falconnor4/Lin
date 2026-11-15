@@ -92,10 +92,13 @@ The compiled code is strict; Lin is lazy. The driver compiles only where the
 difference cannot be observed, and otherwise leaves the call to the net:
 
 - A value used in a way its inferred shape does not allow
-- One constructor holding different kinds of value in one unit, such as a
-  built-in list of strings, whose cells hold both lists and numbers: shapes are
-  tracked per constructor, not per type. A `Seq` of strings is compiled, since
-  its cells and the strings' cells are different constructors
+- A value whose shape cannot be worked out. Shapes follow each value's
+  datatype parameters, so a list of lists of numbers is `list(list(num))` and
+  compiles, though the cells of the inner and the outer lists hold different
+  kinds of value. What a unit is handed from the net is known by how the unit
+  uses it: an inner list's head added as a number makes the outer list's
+  elements lists of numbers. A function called at two shapes (`nth` on a list
+  of lists and on the lists in it) is given a version for each
 - A structure that is infinite or outgrows memory or the stack while being built:
   the compiled call is abandoned and the net computes the call lazily
 - Any shape of net it does not recognise
@@ -261,16 +264,16 @@ expanding, the C compiler, readback), so a slow front end shows up as well:
 python3 test/coverage.py ./lin [files or directories] [--min-steps N]
 ```
 
-It is the list of what the compiler should learn next. At the time of writing,
-261 heavy forms across the corpus are compiled and 15 leave more than 20 000
-steps to the net. Those 15 are in three programs, for three reasons:
+It is the list of what the compiler should learn next. At the time of writing
+the remaining reasons are:
 
-- lists of lists in the std `list` encoding (`examples/linden`): the compiler
-  reads a std list's elements as numbers only;
-- a std `list` (a string) and a declared datatype (`Seq`) in one function
-  (`test/regex.lin`): read as a shape conflict;
+- data handed in from the net whose element shapes the unit's own use does not
+  determine, and values left half-duplicated by an earlier form
+  (`examples/linden`'s printing forms);
 - superpositions: a value left half-duplicated in the net by an earlier form
-  (`examples/games/tictactoe.lin`), which the compiler's evaluator does not read.
+  (`examples/games/tictactoe.lin`), which the compiler's evaluator does not read;
+- `test/regex.lin`'s `Seq` arguments, whose shape is not known when the call is
+  made.
 
 ## Writing a driver
 

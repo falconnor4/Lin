@@ -1,7 +1,7 @@
 ; ==============================================================================
 ; Lin Standard Library: Lists & Linear Sequences
 ; ==============================================================================
-; Scott-encoded lists (O(1) head/tail/pattern-matching) plus Church-encoded
+; Lists (the core's list datatype: O(1) head/tail/pattern-matching) plus Church-encoded
 ; self-iterating lists & folds.  The positional projections (first..eighth) are
 ; thin wrappers over the single generic recursive `nth`, so the projection
 ; family shares one encoding instead of hand-unrolled head/tail chains.
@@ -12,12 +12,15 @@
 
 (namespace list)
 
-; --- Scott list core ---
-(define! nil (list a) (\c (\n bool.true)))
-(define! cons (a -> list a -> list a) (\h (\t (\c (\n ((c h) t))))))
-(define! head (list a -> a) (\l ((l (\h (\t h))) list.nil)))
-(define! tail (list a -> list a) (\l ((l (\h (\t t))) list.nil)))
-(define! is_empty (list a -> bool) (\l ((l (\h (\t bool.false))) bool.true)))
+; --- The list core ---
+; `list a` is the core's own datatype, `(cons h t)` or `nil` (src/main.c, builtin_list): string literals,
+; lists drivers build and the constructors below are one type, matched and typed like any other datatype.
+; `list.cons` and `list.nil` are its constructors.  The empty list has no head: `head nil` answers `nil`
+; itself (as the list encoding always answered something), which a typed program never reads.  Its tail is
+; itself.
+(define! head (list a -> a) (\l (match l ((cons h t) h) (nil list.nil))))
+(define! tail (list a -> list a) (\l (match l ((cons h t) t) (nil list.nil))))
+(define! is_empty (list a -> bool) (\l (match l ((cons h t) bool.false) (nil bool.true))))
 
 ; --- Higher-order list equality (public list_eq over internal _eq) ---
 (define _eq

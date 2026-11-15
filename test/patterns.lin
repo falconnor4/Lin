@@ -56,3 +56,18 @@
 ; expect error: type mismatch: Shape vs T in (match .. (leaf ..)) (at test/patterns.lin:55)
 (match (rect 1 2) ((rect a a) a) (_ 0))
 ; expect error: parse error: match: 'a' is bound twice in one pattern (at test/patterns.lin:57)
+
+; ---- the core's list is a datatype: matched like any other, string literals included.  (This file declares its
+; own `L` with constructors `nil` and `cons` above, and a program's own constructors keep their names -- so the
+; core's are named in full here.)
+(match (list3 1 2 3) ((list.cons a (list.cons b _)) (add a b)) (_ 0))
+; expect => 3
+(match "hi" ((list.cons c _) c) (list.nil 0))
+; expect => 104
+(match "" ((list.cons c _) c) (list.nil 7))
+; expect => 7
+(define sum2 (\l (match l ((list.cons a (list.cons b rest)) (add (add a b) (sum2 rest))) ((list.cons a list.nil) a) (list.nil 0))))
+(sum2 (list5 1 2 3 4 5))
+; expect => 15
+(match (cons 5 nil) (nil 0) ((cons t b) t))
+; expect => 5

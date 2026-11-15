@@ -79,6 +79,9 @@ Def *def_find(const char *name) {
   Def *d;
   if (strchr(name, '.')) return lookup_raw(name);
   if (curr_ns[0] && (d = lookup_raw(dotted(curr_ns, name)))) return d;
+  /* the program's own definition before an opened library namespace: `(open seq)` brings `seq.scons` in
+     under its bare name, and must not take over a `scons` the program declared itself */
+  if ((d = lookup_raw(name)) && d->prog) return d;
   for (int o = n_open_ns - 1; o >= 0; o--) {
     if ((d = lookup_raw(dotted(open_ns[o], name)))) return d;
   }
@@ -674,14 +677,19 @@ void eval_form(Term *t) {
 }
 
 static const char *qualify_self;   /* the definition being read: its own name is bound by its fixpoint */
+static int lz_known(const char *name);   /* (a lazy module defines it: see LAZY MODULES) */
 static void qualify_free(Term *t, Guard *b) {
   if (!t) return;
   if (t->type == TVAR && !strchr(t->name, '.') && !guard_has(b, t->name) && curr_ns[0]) {
     Def *qd = lookup_raw(dotted(curr_ns, t->name));
     if (qd) t->name = qd->name;
     /* a name defined nowhere yet is one this namespace defines further down: two of its definitions that call
-       each other (the first names the second before it exists) */
-    else if (!def_find(t->name) && !(qualify_self && !strcmp(t->name, qualify_self))) t->name = lin_internf("%s.%s", curr_ns, t->name);   /* (its own name: the fixpoint binds it) */
+       each other (the first names the second before it exists) -- unless a library module defines it bare: then
+       it is that module's, which a module loading another first would have had defined already, and here is
+       met while the two load each other (num.lin loads big.lin, which loads string.lin, whose `_ws` names num's
+       `eq` -- not the `str.eq` string.lin defines further down -- before num.lin has got to it) */
+    else if (!def_find(t->name) && !(qualify_self && !strcmp(t->name, qualify_self)) && !lz_known(t->name))
+      t->name = lin_internf("%s.%s", curr_ns, t->name);   /* (its own name: the fixpoint binds it) */
   }
   int bound = (t->type == TLAM || t->type == TLET);   /* a let's name is bound in its value and body */
   if (bound) guard_push(b, t->name);
@@ -724,6 +732,7 @@ static Type *resolve_dt_type(Type *ty, Type **params) {
   return ty;                                        /* TVR / TLINK */
 }
 static void process_datatype(Term *t) {
+  lin_ctor_prog = !quiet_forms;
   int arity = (t->annot) ? (int)(intptr_t)t->annot : 0;    /* (datatype (Name p..) ..) arity; default 0 */
   nominal_register(t->name, arity);                         /* declare `Name` nominal with arity */
   int m = 0; for (Term *c = t->l; c; c = c->r) m++;
@@ -758,7 +767,7 @@ static void process_def(Term *t) {
   if (t->type == TDEFX) sch = scheme_all((Type *)t->annot);
   Guard b = {0}; qualify_self = t->name; qualify_free(t->l, &b); qualify_self = NULL; free(b.names);
   Def *d = &defs[ndefs++];
-  d->file = lin_parse_file; d->line = lin_form_line;
+  d->file = lin_parse_file; d->line = lin_form_line; d->prog = !quiet_forms;
   if (curr_ns[0] && !strchr(t->name, '.')) {
     const char *qn = lin_internf("%s.%s", curr_ns, t->name);
     d->name = qn;
@@ -858,6 +867,7 @@ static int lz_get(const char *name) {
   for (size_t k = def_hash(name) & (lzcap - 1); lzk[k]; k = (k + 1) & (lzcap - 1)) if (!strcmp(lzk[k], name)) return lzv[k];
   return -1;
 }
+static int lz_known(const char *name) { return lz_get(name) >= 0; }
 /* The scan: top-level forms only, strings and comments skipped.  0 = not pure (load it now). */
 static int lz_tok(const char *s, int *i, char *out, int cap) {
   while (s[*i] && (isspace((unsigned char)s[*i]) || s[*i] == ';')) { if (s[*i] == ';') while (s[*i] && s[*i] != '\n') (*i)++; else (*i)++; }
@@ -954,6 +964,7 @@ static void lazy_demand(const char *name) {
   if (!nlzm || !name || !*name) return;
   if (strchr(name, '.')) { lazy_try(name); return; }
   if (curr_ns[0] && lazy_try(dotted(curr_ns, name))) return;
+  { Def *d = lookup_raw(name); if (d && d->prog) return; }   /* (the program's own: def_find takes it first) */
   for (int o = n_open_ns - 1; o >= 0; o--) if (lazy_try(dotted(open_ns[o], name))) return;
   lazy_try(name);
 }
@@ -1020,6 +1031,7 @@ static void annot_flush(int from, int final) {
   nannq = keep;
 }
 static void export_namespace(const char *name);   /* (export <ns>) re-export */
+static int parse_std;                              /* the file being read is the standard library's (load_file) */
 static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
   if (perr) { build_read_err = 1; printf("error: %s\n", perr); return; }
@@ -1038,8 +1050,7 @@ static void form_cb(Term *t, const char *perr, void *ud) {
     process_def(t);
     /* the standard library's annotations DECLARE representations (a list is its Scott encoding, a float its
        bits): what they state is the abstraction, not what the body derives, so those stay trusted */
-    const char *f = lin_parse_file;
-    if (!(quiet_forms || (f && (!strncmp(f, "std/", 4) || strstr(f, "/std/"))))) annot_queue(ndefs - 1, annot);
+    if (!(quiet_forms || parse_std)) annot_queue(ndefs - 1, annot);
   }
   else if (t->type == TDEF) process_def(t);
   else if (t->type == TDATATYPE) process_datatype(t);
@@ -1066,11 +1077,25 @@ static void export_namespace(const char *name) {
     out[nout++] = suffix;
   }
   for (int k = 0; k < nout; k++) {
+    /* A library module loaded LAZILY stands for one the prelude loaded before the program: its exports are
+       older than anything the program defined, so they never shadow a name the program gave a meaning to
+       (measured: a program's own `(datatype List (nil) (cons ..))` read as the core's list after a later form
+       made std load list.lin). */
+    Def *prev = quiet_forms ? lookup_raw(out[k]) : NULL;
+    if (prev && prev->prog) continue;
     const char *fullname = lin_internf("%s.%s", name, out[k]);
     process_def(term_new(TDEF, out[k], term_new(TVAR, fullname, NULL, NULL), NULL));
   }
 }
 
+/* Is this (resolved) file the standard library's -- under its directory, however the load spelled it (`std/num.lin`,
+   or `num.lin` from inside another std module)? */
+static int in_std_dir(const char *full) {
+  static char root[PATH_MAX]; static int have = -1;
+  if (have < 0) { const char *d = getenv("LIN_STD_DIR") ?: "std"; have = realpath(d, root) != NULL; }
+  size_t l = strlen(root);
+  return have && !strncmp(full, root, l) && full[l] == '/';
+}
 static int load_file(const char *path) {
   if (!building && run_line_file(path)) return 1;
   char full[PATH_MAX];
@@ -1087,10 +1112,11 @@ static int load_file(const char *path) {
   snprintf(dir_stack[dir_sp++], PATH_MAX, "%s", dir);
   const char *prev_ns = curr_ns; int prev_n_open = n_open_ns;
   const char *prev_file = lin_parse_file; lin_parse_file = lin_intern(path, strlen(path));
+  int prev_std = parse_std; parse_std = in_std_dir(full);
   int q0 = nannq;
   parse_forms(src, form_cb, NULL);
   annot_flush(q0, 1);
-  lin_parse_file = prev_file;
+  lin_parse_file = prev_file; parse_std = prev_std;
   curr_ns = prev_ns; n_open_ns = prev_n_open;
   if (dir_sp > 0) dir_sp--;
   free(src);
@@ -1437,9 +1463,25 @@ static int load_main_file(const char *path) {
   return ok;
 }
 
+/* THE LIST TYPE IS A DATATYPE, the core's own: `list a` is `(cons h t)` or `nil`, declared here before any
+   source is read, so a string literal (src/parse.c), a list built by a driver and one built by std/list.lin are
+   values of ONE declared datatype -- matched by `match`, typed by the checker, taken apart by the compiler as
+   data like any other.  `cons` is its first constructor and `nil` its second, the order the list encoding has
+   always had (a cell is `\c.\n.((c h) t)`, the end `\c.\n.n`).  The names live in the namespace `list`. */
+long lin_list_cons_id, lin_list_nil_id;
+static void builtin_list(void) {
+  const char *sv = curr_ns; set_namespace("list"); int sq = quiet_forms; quiet_forms = 1;   /* (the language's, not the program's) */
+  parse_forms("(datatype (list a) (cons (h a) (t list a)) (nil))", form_cb, NULL);
+  curr_ns = sv;
+  export_namespace("list");                          /* `cons` and `nil`, bare, with or without std */
+  quiet_forms = sq;
+  lin_list_cons_id = lin_ctor_lookup("list.cons"); lin_list_nil_id = lin_ctor_lookup("list.nil");
+}
+
 int main(int argc, char **argv) {
   bump_stack();
   lin_domains_init();
+  builtin_list();
   /* No driver is loaded by default: the core runs pure Lin, and a program asks for an accelerator
      with `(set_driver "simd")` / `(load "std/drivers/...")`.  std/std.lin activates std/drivers/
      arith.lin, which is where the shared scalar-op table comes from. */
