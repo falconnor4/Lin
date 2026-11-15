@@ -27,6 +27,11 @@
 set -e
 . "$(dirname "$0")/common.sh"
 lin_test_env "${1:-}" "${2:-}" || exit 1
+# Both artifacts recurse the same way: through the Y knot.  The fn driver otherwise copies a recursive definition
+# per call (std/drivers/fn.c, y_expand) -- but not one something OBSERVES, and the probe puts demand roots inside
+# every definition, so the carried artifact would keep the knot while the control copied: a comparison of two
+# recursion mechanisms, not of two schedules.  What is pinned here is the schedule.
+export LIN_Y_OFF=1
 
 PROG=test/bench_runtime.lin
 N=20

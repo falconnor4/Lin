@@ -105,6 +105,36 @@ difference cannot be observed, and otherwise leaves the call to the net:
 
 `LIN_FN_DEBUG=1` prints each decision and the reason for each decline.
 
+### Recursive calls it declines
+
+A recursive definition reaches the net as the Y combinator applied to the
+function, `Y F`. Reduced as it stands, every call copies `F` through the
+combinator's fans, one interaction per node of `F`; a call made late is reached
+through every layer of copies made before it. When the driver declines a call,
+it does not hand that work to the net. It rewrites the call structurally,
+using only the net's own node kinds:
+
+- `(Y F) args` becomes `(F' (Y' F)) args`. `F'` is a copy of `F` made in one
+  pass, and `Y' F` is a new reference for the self argument. `F` itself is
+  never reduced: it stays the pristine definition every later call copies.
+- A value `F` shares with the rest of the net, such as an operator's meaning
+  (shared once per top-level form), is not copied. A fan goes on it instead,
+  which is what the combinator's own copying would leave there. Each fan copies
+  the value once.
+- When a fan meets a reference, as with a function that calls itself twice,
+  the fan copies the reference (`Y` and `F`), not the function the reference
+  would expand to.
+- A definition is copied only when it is private: if `F` reaches its own call
+  or the root, or carries a demand root (something is observing it), the call
+  is left to the net's beta.
+
+Measured with the compiler off, against the combinator alone: a counting loop of
+3200 iterations takes 0.39 s instead of 2.3 s (and the time is now linear),
+and `fib 15` takes 331k steps instead of 740k. The copies are eager, so work
+the net would share between calls on its own (a redex inside `F` that does not
+depend on the argument) is done once per call. `LIN_Y_OFF=1` turns the rewrite
+off.
+
 ### Memory in compiled code
 
 Compiled code allocates from an arena that is released when the call returns.
@@ -227,6 +257,7 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_OFF=1` | Disable the function compiler |
 | `LIN_FN_DEBUG=1` | Print decisions and timings; `2` also prints the generated C |
 | `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
+| `LIN_Y_OFF=1` | Leave declined recursive calls to the Y combinator's own copying (for comparison) |
 | `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance. The whole test suite and every benchmark pass under it |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
