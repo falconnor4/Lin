@@ -16,4 +16,6 @@
 (load "examples/bootstrap/types.lin")
 
 (io_file ".boot-src"
-  (\src (io_print "=> " (io_print (boot_types.tstr (list.head (boot_front.read_forms src))) (io_print "\n" 0))))))
+  (\src (match (boot_front.read_forms src)
+    ((list.cons t _) (io_print "=> " (io_print (boot_types.tstr t) (io_print "\n" 0))))
+    (list.nil (io_print "no datum in .boot-src\n" 0)))))

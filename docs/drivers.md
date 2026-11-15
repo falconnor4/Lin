@@ -261,16 +261,18 @@ expanding, the C compiler, readback), so a slow front end shows up as well:
 python3 test/coverage.py ./lin [files or directories] [--min-steps N]
 ```
 
-It is the list of what the compiler should learn next. At the time of writing,
-261 heavy forms across the corpus are compiled and 15 leave more than 20 000
-steps to the net. Those 15 are in three programs, for three reasons:
+It is the list of what the compiler should learn next. At the time of writing
+the remaining reasons are:
 
-- lists of lists in the std `list` encoding (`examples/linden`): the compiler
-  reads a std list's elements as numbers only;
-- a std `list` (a string) and a declared datatype (`Seq`) in one function
-  (`test/regex.lin`): read as a shape conflict;
+- a constructor field holding different kinds of value in one program: the
+  shape analysis keeps one shape per constructor field, so a list of lists (the
+  inner lists' cells hold numbers, the outer's hold lists) conflicts.
+  `examples/linden` is this. It needs shapes with parameters ("a list of lists
+  of numbers");
 - superpositions: a value left half-duplicated in the net by an earlier form
-  (`examples/games/tictactoe.lin`), which the compiler's evaluator does not read.
+  (`examples/games/tictactoe.lin`), which the compiler's evaluator does not read;
+- `test/regex.lin`'s `Seq` arguments, whose shape is not known when the call is
+  made.
 
 ## Writing a driver
 

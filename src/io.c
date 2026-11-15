@@ -410,7 +410,7 @@ Port net_alloc_list_nil(Net *n) {
   net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 0);
   net_link(n, (Port){c.node, 1}, net_alloc(n, ERA, sc), 0);
   net_link(n, (Port){nn.node, 2}, (Port){ma.node, 1}, 0);
-  net_link(n, (Port){ma.node, 0}, (Port){lc.node, 0}, 0);
+  net_link(n, (Port){ma.node, 0}, (Port){lc.node, 0}, 1);   /* (the marker is a redex, as a constructor's is: queued) */
   net_link(n, (Port){ma.node, 2}, alloc_scott(n, lin_list_nil_id, sc), 0);
   net_link(n, (Port){lc.node, 1}, net_alloc(n, ERA, sc), 0);
   net_link(n, (Port){lc.node, 2}, (Port){nn.node, 1}, 0);
