@@ -105,9 +105,12 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
                                         constructor, in order); field k of a */
 struct Drop { const struct Expr *p; int fn; struct Drop *next; };   /* a parameter dropped at a path's end (drop_paths) */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; const struct Expr *dropx; int dropfn; struct Drop *drops; unsigned dcopy; const char **dcopydt; unsigned tdrop; int *tdropfn; } Expr;   /* dropx: a parameter this call only borrowed and nothing needs after it -- freed (by drop function dropfn) once the call returns */   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* dcopy: ... as a deep copy (of datatype dcopydt[i]): one value two calls would each own */   /* tdrop: arguments built for this call alone, which it only reads: dropped (lin_drop<tdropfn[i]>) once it returns */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Expr *fre; int fren; unsigned clone; const struct Expr *dropx; int dropfn; struct Drop *drops; unsigned dcopy; int *dcopyfn; unsigned tdrop; int *tdropfn; } Expr;   /* dropx: a parameter this call only borrowed and nothing needs after it -- freed (by drop function dropfn) once the call returns */   /* clone: the arguments (a call's) handed over as a copy of their one block */   /* dcopy: ... as a deep copy (by copy function dcopyfn[i]): one value two calls would each own */   /* tdrop: arguments built for this call alone, which it only reads: dropped (lin_drop<tdropfn[i]>) once it returns */   /* fre: a consumed block (fren words) this tail frees */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 (ownership) */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
+typedef struct ShArgs ShArgs;
+typedef struct { unsigned char k; const char *dt; const ShArgs *a; } Shape;     /* (see SHAPES below) */   /* a: the datatype's parameters' shapes (interned), NULL: not known */
+struct ShArgs { int n; Shape s[]; };
 typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
 typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; int cells; } V;   /* cells: a match on the cell encoding */   /* x: to_expr's answer */
 typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int busy; int port; } Lz;   /* 0 port, 1 application, 2 value */   /* port: it was a port (p, env), forced or not */
@@ -1375,12 +1378,12 @@ static int call_fv(Buf *b, long k) {                 /* the callee's lifted para
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 #define CLONE_BITS ((int)(sizeof(((Expr *)0)->clone) * 8))   /* (one bit of the mask per argument) */
 static int clone_words(const Expr *a);
-static int drop_fn(const char *dt); static int deep_owned(const char *dt, int depth);
+static int drop_fn(Shape sh); static int deep_owned(const char *dt, int depth);
 static int read_then_move(const Expr *m, int i);
 static int emit_arg(Buf *b, Buf *pre, const Expr *call, int i, int par, int budget) {
   const Expr *a = call->args[i];
-  if (i < CLONE_BITS && ((call->dcopy >> i) & 1u) && call->dcopydt) {   /* (see own_alone, uniq_calls) */
-    uses_data = 1; put(b, "lin_copy%d(", drop_fn(call->dcopydt[i])); if (!emitx(b, pre, a, par, budget)) return 0; put(b, ")"); return 1;
+  if (i < CLONE_BITS && ((call->dcopy >> i) & 1u) && call->dcopyfn) {   /* (see own_alone, uniq_calls) */
+    uses_data = 1; put(b, "lin_copy%d(", call->dcopyfn[i]); if (!emitx(b, pre, a, par, budget)) return 0; put(b, ")"); return 1;
   }
   if (i < CLONE_BITS && ((call->clone >> i) & 1u)) {
     int w = clone_words(a);
@@ -1916,7 +1919,6 @@ static int run_cc(const char *src, const char *so) {
 }
 
 typedef long (*Entry)(const long *, int threads);
-typedef struct { unsigned char k; const char *dt; } Shape;     /* (see SHAPES below) */
 typedef struct { unsigned long h; Entry fn; int arity, kind; unsigned strict; int *aborted;
                  Shape res; Shape **fld; long nctor; void (*release)(void); Shape *psh; int npsh; } Compiled;   /* psh: each runtime argument's shape */   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
 static Compiled **done; static int ndone, donecap;   /* (pointers: a call holds one while another compiles) */
@@ -2607,11 +2609,14 @@ static void captured(const Expr *e, int f) {
      - the callee does not take it apart itself (then it would already be gone), and
      - the call's result holds none of it: fresh, and every field of its datatypes owned.
    Dropping walks what the value owns and frees each block. */
-static const char **drop_dt; static int ndrop, drop_cap;
-static int drop_fn(const char *dt) {
-  for (int i = 0; i < ndrop; i++) if (drop_dt[i] == dt) return i;
-  if (ndrop >= drop_cap) drop_dt = realloc(drop_dt, sizeof *drop_dt * (size_t)(drop_cap = drop_cap ? drop_cap * 2 : 8));
-  drop_dt[ndrop] = dt; return ndrop++;
+/* One drop (and copy) function per SHAPE of data dropped -- a list of numbers frees its cells; a list of lists
+   frees its cells and the lists in them -- not per datatype. */
+static Shape *drop_sh; static int ndrop, drop_cap;
+static int drop_fn(Shape sh) {
+  sh.k = 5;
+  for (int i = 0; i < ndrop; i++) if (drop_sh[i].dt == sh.dt && drop_sh[i].a == sh.a) return i;
+  if (ndrop >= drop_cap) drop_sh = realloc(drop_sh, sizeof *drop_sh * (size_t)(drop_cap = drop_cap ? drop_cap * 2 : 8));
+  drop_sh[ndrop] = sh; return ndrop++;
 }
 static int deep_owned(const char *dt, int depth) {   /* every data field of dt's values, all the way down, is owned */
   if (depth > 8 || !dt) return 0;
@@ -2695,8 +2700,8 @@ static void own_alone(const Expr *body) {
     Shape sa = shape_of(a);
     if (sa.k == 5 && sa.dt && v[y].i < CLONE_BITS && !((v[y].call->clone >> v[y].i) & 1u)) {
       Expr *c = (Expr *)v[y].call;
-      if (!c->dcopydt) c->dcopydt = A(sizeof(char *) * (size_t)(c->nargs ? c->nargs : 1));
-      c->dcopy |= 1u << v[y].i; c->dcopydt[v[y].i] = sa.dt;
+      if (!c->dcopyfn) c->dcopyfn = A(sizeof(int) * (size_t)(c->nargs ? c->nargs : 1));
+      c->dcopy |= 1u << v[y].i; c->dcopyfn[v[y].i] = drop_fn(sa);
       if (dbg > 1) DBG("[one value given to f%ld and f%ld: the second is given a copy]\n", v[x].call->k, v[y].call->k);
       continue;
     }
@@ -2740,7 +2745,7 @@ static void drop_tails(Expr *e, int g, int k) {      /* each path of g's body: p
   Shape rs = shape_of(call), ps = shape_of(p);
   if (ps.k != 5 || !ps.dt) return;
   if (!(rs.k == 1 || rs.k == 3 || (rs.k == 5 && rs.dt && deep_owned(rs.dt, 0)))) return;
-  ((Expr *)call)->dropx = p; ((Expr *)call)->dropfn = drop_fn(ps.dt);
+  ((Expr *)call)->dropx = p; ((Expr *)call)->dropfn = drop_fn(ps);
   if (dbg > 1) DBG("[f%d's parameter %d is dropped after its call of f%d]\n", g, k, h);
 }
 /* ...and a parameter only LENT on the way to a path's end -- to calls that read it and hand back nothing of it
@@ -2835,7 +2840,7 @@ static void temp_drops(Expr *e, unsigned char *seen) {
         continue; }
       Shape sa = shape_of(a); if (sa.k != 5 || !sa.dt || !deep_owned(sa.dt, 0)) continue;
       if (!e->tdropfn) e->tdropfn = A(sizeof(int) * (size_t)(e->nargs ? e->nargs : 1));
-      e->tdrop |= 1u << i; e->tdropfn[i] = drop_fn(sa.dt);
+      e->tdrop |= 1u << i; e->tdropfn[i] = drop_fn(sa);
       if (dbg > 1) DBG("[a temporary given to f%ld is dropped when it returns]\n", e->k);
     }
   temp_drops(e->a, seen); temp_drops(e->b, seen); if (e->op != E_CTOR) temp_drops(e->c, seen);
@@ -2860,7 +2865,7 @@ static void field_drops(Expr *e, unsigned char *seen) {
         if (!field_owned(f)) continue;
         Shape fs = shape_of(f); if (fs.k != 5 || !fs.dt || !deep_owned(fs.dt, 0)) continue;
         if (contains_dropx(e->args[i], f)) continue;
-        drop_paths(&e->args[i], f, drop_fn(fs.dt), 0);
+        drop_paths(&e->args[i], f, drop_fn(fs), 0);
         if (dbg > 1) DBG("[field %ld of a consumed %s is dropped where its paths end]\n", f->k, f->ci ? f->ci->name : "?");
       }
       free(fl);
@@ -2898,7 +2903,7 @@ static void local_drops(Expr **body) {
     if (contains_dropx(*body, v[i])) continue;
     Shape sh = shape_of(v[i]);
     Expr *before = *body;
-    drop_paths(body, v[i], drop_fn(sh.dt), 0);
+    drop_paths(body, v[i], drop_fn(sh), 0);
     if (dbg > 1 && *body != before) DBG("[a local (f%ld's value) is dropped where its paths end]\n", v[i]->op == E_CALL ? v[i]->k : -1L);
   }
   free(seen); free(v);
@@ -2922,7 +2927,7 @@ static void drops(Expr *entry) {
       if (!p || !uown[g][k] || !funs[g].body) continue;
       Shape ps = shape_of(p); if (ps.k != 5 || !ps.dt) continue;
       if (contains_dropx(funs[g].body, p)) continue;   /* (the single-call drop above already has it) */
-      drop_paths(&funs[g].body, p, drop_fn(ps.dt), 0);
+      drop_paths(&funs[g].body, p, drop_fn(ps), 0);
       if (dbg > 1) DBG("[f%d's parameter %d is dropped where its paths end]\n", g, k);
     }
   }
@@ -3158,9 +3163,19 @@ static int result_numeric(const Expr *entry) {
    so they are numbers here.  Any disagreement (a field holding a number in one place and a tree in another) is
    TOP, and a unit whose result reaches a TOP is not folded -- the net computes it. */
 /* Shape.k: 0 nothing yet, 1 number, 3 boolean, 5 data(dt), 9 top */
+static const ShArgs *sha_intern(int n, const Shape *v);
+static Shape sh_mk(const char *dt, int n, const Shape *v);
+static void sh_print(Shape s);
 static Shape sh_join(Shape a, Shape b) {
   if (!a.k) return b;
   if (!b.k) return a;
+  if (a.k == 5 && b.k == 5 && a.dt == b.dt && a.dt && a.a != b.a) {   /* one datatype: its parameters, joined */
+    if (!a.a) return b;
+    if (!b.a) return a;
+    int n = a.a->n < b.a->n ? a.a->n : b.a->n; Shape *v = calloc((size_t)(n ? n : 1), sizeof *v);
+    for (int i = 0; i < n; i++) v[i] = sh_join(a.a->s[i], b.a->s[i]);
+    Shape r = sh_mk(a.dt, n, v); free(v); return r;
+  }
   if (a.k == b.k && (a.k != 5 || a.dt == b.dt)) return a;
   /* two datatypes in one field: a polymorphic constructor (a Seq of pieces and a Seq of ranges) used at two
      types.  Still a block of SOME datatype, which is all a match needs -- it reads the layout its own
@@ -3168,10 +3183,118 @@ static Shape sh_join(Shape a, Shape b) {
   if (a.k == 5 && b.k == 5) return (Shape){ 5, NULL };
   return (Shape){ 9, NULL };
 }
-static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt; }
-static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad;
+static int sh_eq(Shape a, Shape b) { return a.k == b.k && a.dt == b.dt && a.a == b.a; }
+/* A SHAPE WITH PARAMETERS.  A polymorphic datatype's value says what its parameters hold -- a list of lists of numbers
+   is `list(list(num))` -- because a constructor's field whose declared type is a parameter holds a number in one
+   value and a list in another (the inner lists' cells and the outer's), and only the value can say which.  The
+   parameters are interned (one ShArgs per distinct list), so shapes still compare by pointer; they live for the
+   run, since a compiled unit reads its results back by them.  Nesting deeper than SHAPE_DEPTH forgets the
+   parameters (a function that wraps its argument once per call would otherwise grow a shape for ever). */
+#define SHAPE_DEPTH 6
+static ShArgs **sha_tab; static int sha_n, sha_cap;
+static int sh_depth(Shape s) {
+  int d = 0;
+  if (s.a) for (int i = 0; i < s.a->n; i++) { int x = sh_depth(s.a->s[i]); if (x > d) d = x; }
+  return s.a ? d + 1 : 0;
+}
+static const ShArgs *sha_intern(int n, const Shape *v) {
+  int any = 0; for (int i = 0; i < n; i++) any |= v[i].k != 0;
+  if (!any) return NULL;
+  for (int t = 0; t < sha_n; t++) {
+    const ShArgs *x = sha_tab[t]; if (x->n != n) continue;
+    int eq = 1; for (int i = 0; i < n && eq; i++) eq = sh_eq(x->s[i], v[i]);
+    if (eq) return x;
+  }
+  ShArgs *x = malloc(sizeof *x + sizeof *v * (size_t)n); x->n = n; memcpy(x->s, v, sizeof *v * (size_t)n);
+  if (sha_n == sha_cap) sha_tab = realloc(sha_tab, sizeof *sha_tab * (size_t)(sha_cap = sha_cap ? sha_cap * 2 : 64));
+  sha_tab[sha_n++] = x; return x;
+}
+static Shape sh_mk(const char *dt, int n, const Shape *v) {
+  Shape r = { 5, dt, n > 0 ? sha_intern(n, v) : NULL };
+  if (sh_depth(r) > SHAPE_DEPTH) r.a = NULL;
+  return r;
+}
+static const char *list_dt(void) { const LinCtor *c = lin_ctor_info(lin_list_cons_id); return c ? c->dt : NULL; }
+static const char *dt_named(const char *name, size_t len) {   /* the registry's (interned) name of a datatype */
+  const LinCtor *c;
+  for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt && strlen(c->dt) == len && !strncmp(c->dt, name, len)) return c->dt;
+  return NULL;
+}
+static int dt_nparams(const char *dt) {              /* how many type parameters its constructors' fields name */
+  int n = 0; const LinCtor *c;
+  for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == dt && c->fdesc)
+    for (const char *d = c->fdesc; (d = strchr(d, 'P')); d++) { int i = atoi(d + 1); if (i + 1 > n) n = i + 1; }
+  return n;
+}
+/* A field's declared type (a descriptor: lin.h) read against the parameters' shapes: what that field holds. */
+static Shape desc_shape(const char **d, const Shape *pa, int np) {
+  const char *p = *d;
+  if (!p || !*p) return (Shape){ 0, NULL, NULL };
+  switch (*p) {
+  case 'N': case 'F': *d = p + 1; return (Shape){ 1, NULL, NULL };
+  case 'B': *d = p + 1; return (Shape){ 3, NULL, NULL };
+  case 'P': { int i = atoi(p + 1); *d = fd_skip(p); return pa && i < np ? pa[i] : (Shape){ 0, NULL, NULL }; }
+  case 'L': { *d = p + 1; Shape e = desc_shape(d, pa, np); const char *ldt = list_dt(); return ldt ? sh_mk(ldt, 1, &e) : (Shape){ 5, NULL, NULL }; }
+  case 'D': {
+    const char *q = strchr(p, '('); if (!q) { *d = p + strlen(p); return (Shape){ 0, NULL, NULL }; }
+    const char *dt = dt_named(p + 1, (size_t)(q - p - 1)); int n = dt ? dt_nparams(dt) : 0;
+    Shape *v = n ? calloc((size_t)n, sizeof *v) : NULL; int i = 0; q++;
+    while (*q && *q != ')') { Shape a = desc_shape(&q, pa, np); if (i < n) v[i] = a; i++; }
+    *d = *q == ')' ? q + 1 : q;
+    Shape r = dt ? sh_mk(dt, n, v) : (Shape){ 0, NULL, NULL }; free(v); return r;
+  }
+  default: *d = p + 1; return (Shape){ 0, NULL, NULL };
+  }
+}
+/* ...and the other way: a value of shape v put in a field of that declared type says what the parameters hold. */
+static void desc_bind(const char **d, Shape v, Shape *pa, int np, Shape (*join)(Shape, Shape)) {
+  const char *p = *d;
+  if (!p || !*p) return;
+  switch (*p) {
+  case 'P': { int i = atoi(p + 1); *d = fd_skip(p); if (i < np) pa[i] = join(pa[i], v); return; }
+  case 'L': *d = p + 1; if (v.k == 5 && v.a && v.a->n >= 1) desc_bind(d, v.a->s[0], pa, np, join); else *d = fd_skip(*d); return;
+  case 'D': {
+    const char *q = strchr(p, '('); if (!q) { *d = p + strlen(p); return; }
+    int i = 0; q++;
+    while (*q && *q != ')') { if (v.k == 5 && v.a && i < v.a->n) desc_bind(&q, v.a->s[i], pa, np, join); else q = fd_skip(q); i++; }
+    *d = *q == ')' ? q + 1 : q; return;
+  }
+  default: *d = fd_skip(p); return;
+  }
+}
+/* What field j of constructor c holds in a value of shape v: its declared type read against v's parameters, or --
+   when v says nothing of them -- what the unit stored in that field anywhere (fld, the per-constructor table). */
+static Shape field_shape(Shape **fld, long nctor, const LinCtor *c, long id, int j, Shape v) {
+  Shape g = fld && id > 0 && id <= nctor && fld[id] ? fld[id][j] : (Shape){ 0, NULL, NULL };
+  if (v.k == 5 && v.a && c && v.dt == c->dt && c->fdesc) {
+    const char *d = c->fdesc; for (int i = 0; i < j && *d; i++) d = fd_skip(d);
+    Shape s = desc_shape(&d, v.a->s, v.a->n);
+    if (s.k) return s;
+  }
+  return g;
+}
+static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad, sh_optimistic, sh_guessed;
 static long ctor_id(const LinCtor *ci) { for (long k = 1; lin_ctor_info(k); k++) if (lin_ctor_info(k) == ci) return k; return 0; }
 static void sh_upd(Shape *slot, Shape v) { Shape j = sh_join(*slot, v); if (!sh_eq(j, *slot)) { *slot = j; sh_changed = 1; } }
+/* WHAT A USE SAYS, BACK UP TO WHERE THE VALUE CAME FROM.  A value taken apart as a datatype, or computed with as a
+   number, says so of what it was read from: a parameter is that, and a field of the datatype's parameter says what
+   that parameter holds in the value it was read from -- an inner list's head added as a number makes the outer
+   list's elements lists of numbers.  (What a unit is given from the net is known only by how it is used.) */
+static void sh_use(const Expr *x, Shape X) {
+  if (!x || !X.k || X.k == 9) return;
+  if (x->op == E_PARAM) {
+    if (x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], X);
+    else if (x->nargs >= 0 && x->nargs < nfun && x->k < funs[x->nargs].arity) sh_upd(&sh_par[x->nargs][x->k], X);
+    return;
+  }
+  if (x->op == E_FIELD && x->ci && field_is_param(x->ci, (int)x->k)) {
+    const char *d = x->ci->fdesc; for (long i = 0; i < x->k && *d; i++) d = fd_skip(d);
+    int pi = atoi(d + 1), np = dt_nparams(x->ci->dt);
+    if (pi < 0 || pi >= np) return;
+    Shape *pa = calloc((size_t)np, sizeof *pa); pa[pi] = X;
+    sh_use(x->a, sh_mk(x->ci->dt, np, pa)); free(pa);
+  }
+}
 static unsigned char *sh_fneed;                     /* a function whose result is needed as a number (once each) */
 static void sh_need_num(const Expr *x) {
   if (x->op == E_IF) { sh_need_num(x->b); sh_need_num(x->c); return; }   /* (what the value may be, everywhere) */
@@ -3180,7 +3303,7 @@ static void sh_need_num(const Expr *x) {
     return;
   }
   if (x->op == E_MATCH) { for (int i = 0; i < x->nargs; i++) if (!neutral_branch(x->args[i])) sh_need_num(x->args[i]); return; }
-  if (x->op == E_FIELD && x->ci) { long id = ctor_id(x->ci); if (id > 0 && id <= sh_nctor && x->k < x->ci->k) sh_upd(&sh_fld[id][x->k], (Shape){ 1, NULL }); }
+  if (x->op == E_FIELD && x->ci) { long id = ctor_id(x->ci); if (id > 0 && id <= sh_nctor && x->k < x->ci->k) sh_upd(&sh_fld[id][x->k], (Shape){ 1, NULL }); sh_use(x, (Shape){ 1, NULL, NULL }); }
   else if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], (Shape){ 1, NULL });
   else if (x->op == E_PARAM && x->nargs >= 0 && x->nargs < nfun) sh_upd(&sh_par[x->nargs][x->k], (Shape){ 1, NULL });
 }
@@ -3199,10 +3322,7 @@ static Shape shape_of(const Expr *e) {
   case E_PARAM: r = e->nargs >= 0 && e->nargs < nfun ? sh_par[e->nargs][e->k] : e->k < nesh ? esh[e->k] : (Shape){ 1, NULL }; break;
   case E_IF: shape_of(e->a); r = sh_join(shape_of(e->b), shape_of(e->c)); break;
   case E_MATCH: {
-    if (e->a->op == E_PARAM && e->ci) {             /* (a parameter taken apart: its use says what it is) */
-      if (e->a->nargs < 0 && e->a->k < nesh) sh_upd(&esh[e->a->k], (Shape){ 5, e->ci->dt });
-      else if (e->a->nargs >= 0 && e->a->nargs < nfun) sh_upd(&sh_par[e->a->nargs][e->a->k], (Shape){ 5, e->ci->dt });
-    }
+    if (e->ci) sh_use(e->a, (Shape){ 5, e->ci->dt, NULL });   /* (what is taken apart: its use says what it is, back to where it was read) */
     Shape sc = shape_of(e->a);                       /* what is taken apart must be that datatype's */
     /* a field whose declared type is the datatype's PARAMETER holds whatever this use of the datatype holds:
        taken apart as another datatype than the unit built in it elsewhere (a Seq of pieces, a Seq of ranges),
@@ -3232,17 +3352,27 @@ static Shape shape_of(const Expr *e) {
     long id = ctor_id(e->ci);
     if (id <= 0 || id > sh_nctor) { r.k = 9; break; }
     sh_built[id] = 1;
+    int np = dt_nparams(e->ci->dt); Shape *pa = np ? A(sizeof *pa * (size_t)np) : NULL;
+    const char *d = e->ci->fdesc;
     for (int j = 0; j < e->nargs; j++) {
-      sh_upd(&sh_fld[id][j], shape_of(e->args[j]));
+      Shape aj = shape_of(e->args[j]);
+      { Shape g = aj; g.a = NULL; sh_upd(&sh_fld[id][j], g); }   /* (the per-constructor table: what ANY value holds there -- no parameters, which differ by value) */
       const Expr *x = e->args[j];
       if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], sh_fld[id][j]);
+      if (np && d && *d) desc_bind(&d, aj, pa, np, sh_join);   /* (what this value's parameters hold) */
     }
-    r.k = 5; r.dt = e->ci->dt; break;
+    r = np ? sh_mk(e->ci->dt, np, pa) : (Shape){ 5, e->ci->dt, NULL }; break;
   }
   case E_FIELD: {
     { Shape sc = shape_of(e->a); if (sc.k && !(sc.k == 5 && e->ci && (!sc.dt || sc.dt == e->ci->dt))) sh_bad = 1; }
     long id = ctor_id(e->ci);
-    r = id > 0 && id <= sh_nctor && e->k < e->ci->k ? sh_fld[id][e->k] : (Shape){ 9, NULL };
+    Shape sv = shape_of(e->a);
+    r = id > 0 && id <= sh_nctor && e->k < e->ci->k ? field_shape(sh_fld, sh_nctor, e->ci, id, (int)e->k, sv) : (Shape){ 9, NULL };
+    /* OPTIMISM: a field of the datatype's parameter, read from a value whose parameters are not known YET, is
+       nothing yet -- the per-constructor table would say what any value holds there (a number in an inner list's
+       cell, a list in the outer's: TOP), and a join never comes back down from TOP.  If such a guess survives to
+       the last round, the unit's shapes are worked out again without it (unit_shapes). */
+    if (sh_optimistic && (sv.k == 0 || (sv.k == 5 && !sv.a && sv.dt == e->ci->dt)) && field_is_param(e->ci, (int)e->k)) { r = (Shape){ 0, NULL, NULL }; sh_guessed = 1; }
     break;
   }
   default: r.k = 9; break;
@@ -3273,14 +3403,36 @@ static Shape unit_shapes(const Expr *entry) {
   }
   if (sh_cap < eid) { sh_cap = eid * 2 + 64; sh_memo = realloc(sh_memo, sizeof *sh_memo * (size_t)sh_cap); sh_gen = realloc(sh_gen, sizeof *sh_gen * (size_t)sh_cap); memset(sh_gen, 0, sizeof *sh_gen * (size_t)sh_cap); }
   Shape res = { 0, NULL };
-  for (int round = 0; round < 1000; round++) {
-    sh_changed = 0; sh_bad = 0;
-    sh_g++;
-    for (int i = 0; i < nfun; i++) sh_upd(&sh_fun[i], shape_of(funs[i].body));
-    res = shape_of(entry);
-    if (!sh_changed) break;
+  Shape **fld0 = A(sizeof *fld0 * (size_t)(sh_nctor + 1));   /* (the declared start, for a second attempt) */
+  for (long k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; fld0[k] = A(sizeof **fld0 * (size_t)nk); memcpy(fld0[k], sh_fld[k], sizeof **fld0 * (size_t)nk); }
+  Shape *esh0 = nesh ? A(sizeof *esh0 * (size_t)nesh) : NULL; if (nesh) memcpy(esh0, esh, sizeof *esh * (size_t)nesh);
+  for (sh_optimistic = 1; sh_optimistic >= 0; sh_optimistic--) {
+    if (sh_optimistic == 0) {                        /* a guess outlived the fixpoint: again, without guessing */
+      for (int i = 0; i < nfun; i++) { memset(sh_par[i], 0, sizeof **sh_par * (size_t)(funs[i].arity ? funs[i].arity : 1)); sh_fun[i] = (Shape){ 0, NULL, NULL }; }
+      for (long k = 1; k <= sh_nctor; k++) memcpy(sh_fld[k], fld0[k], sizeof **sh_fld * (size_t)(lin_ctor_info(k)->k + 1));
+      memset(sh_built, 0, (size_t)(sh_nctor + 1)); memset(sh_fneed, 0, (size_t)(nfun ? nfun : 1));
+      if (nesh) memcpy(esh, esh0, sizeof *esh * (size_t)nesh);
+    }
+    for (int round = 0; round < 1000; round++) {
+      sh_changed = 0; sh_bad = 0; sh_guessed = 0;
+      sh_g++;
+      for (int i = 0; i < nfun; i++) sh_upd(&sh_fun[i], shape_of(funs[i].body));
+      res = shape_of(entry);
+      if (!sh_changed) break;
+    }
+    if (!sh_guessed) break;
+    if (dbg > 2) DBG("[shapes: a parameter's field was still guessed at the end; again, without guessing]\n");
+  }
+  sh_optimistic = 0;
+  if (dbg > 2) {
+    for (int i = 0; i < nfun; i++) { fprintf(stderr, "fn: [shapes f%d:", i); for (int j = 0; j < funs[i].arity; j++) { fprintf(stderr, " "); sh_print(sh_par[i][j]); } fprintf(stderr, " -> "); sh_print(sh_fun[i]); fprintf(stderr, "]\n"); }
+    fprintf(stderr, "fn: [shape of the entry: "); sh_print(res); fprintf(stderr, "]\n");
   }
   return res;
+}
+static void sh_print(Shape s) {                     /* (LIN_FN_DEBUG=3) */
+  if (s.k == 5) { fprintf(stderr, "%s", s.dt ? s.dt : "data"); if (s.a) { fprintf(stderr, "("); for (int i = 0; i < s.a->n; i++) { if (i) fprintf(stderr, ","); sh_print(s.a->s[i]); } fprintf(stderr, ")"); } }
+  else fprintf(stderr, "%s", s.k == 1 ? "num" : s.k == 3 ? "bool" : s.k == 9 ? "TOP" : "?");
 }
 /* Can a value of this shape be read back?  Every constructor of every datatype it reaches that the unit builds
    must have fields of a known shape. */
@@ -3291,8 +3443,8 @@ static int shape_closed(Shape s, int depth) {   /* depth: datatypes on the walk 
     const LinCtor *c = lin_ctor_info(k);
     if (c->dt != s.dt || !sh_built[k]) continue;
     for (int j = 0; j < c->k; j++) {
-      Shape f = sh_fld[k][j];
-      if (f.k == 5 ? (f.dt != s.dt && !shape_closed(f, depth + 1)) : !(f.k == 1 || f.k == 3)) return 0;
+      Shape f = field_shape(sh_fld, sh_nctor, c, k, j, s);
+      if (f.k == 5 ? (!(f.dt == s.dt && f.a == s.a) && !shape_closed(f, depth + 1)) : !(f.k == 1 || f.k == 3)) return 0;
     }
   }
   return 1;
@@ -3992,17 +4144,20 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       if (data) put(&b, "%s", DATA_RT); else put(&b, "#define LIN_ENTER\n#define LIN_LEAVE\n#define LIN_TASK_START(ss)\n#define LIN_JOINED 0\nint lin_fn_aborted;\n");
       { Buf db = nbuf(256);                            /* (written first: a drop function may call for another datatype's) */
       for (int d = 0; data && d < ndrop; d++) {        /* (drop_fn may add datatypes while these are written; a unit without data has no allocator to free into) */
-        const char *dt = drop_dt[d]; int box = -1, untag = dt_boxed(dt, &box) == 1; const LinCtor *c;
+        Shape ds = drop_sh[d]; const char *dt = ds.dt; int box = -1, untag = dt_boxed(dt, &box) == 1; const LinCtor *c;
+#define FS(k, j) field_shape(sh_fld, sh_nctor, c, k, j, ds)
+#define FDROP(k, j) (field_live(c, j) && k <= sh_nctor && FS(k, j).k == 5 && FS(k, j).dt && k <= fown_n && fown[k][j])
         put(&db, "static void lin_drop%d(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1;%s", d, untag ? " {" : " switch (o[0]) {");
         for (long k = 1; (c = lin_ctor_info(k)); k++) {
           if (c->dt != dt || c->k == 0) continue;
           if (!untag) put(&db, " case %d: {", c->i);
           int last = -1;
-          for (int j = 0; j < c->k; j++) if (field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j]) last = j;
+          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
           for (int j = 0; j < c->k; j++) {
-            if (!(field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j])) continue;
-            if (j == last && sh_fld[k][j].dt == dt) put(&db, " nx = o[%d];", j + !untag);     /* (the rest of a list: the loop, not a call) */
-            else put(&db, " lin_drop%d(o[%d]);", drop_fn(sh_fld[k][j].dt), j + !untag);
+            if (!FDROP(k, j)) continue;
+            Shape fs = FS(k, j);
+            if (j == last && fs.dt == dt && fs.a == ds.a) put(&db, " nx = o[%d];", j + !untag);     /* (the rest of a list: the loop, not a call) */
+            else put(&db, " lin_drop%d(o[%d]);", drop_fn(fs), j + !untag);
           }
           put(&db, " lin_free(o, %d);", c->k + !untag);
           if (!untag) put(&db, " break; }");
@@ -4016,16 +4171,19 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
           if (!untag) put(&db, " case %d: {", c->i);
           put(&db, " long *n = lin_alloc(%d); __builtin_memcpy(n, o, %d * 8); *dst = (long)n;", c->k + !untag, c->k + !untag);
           int last = -1;
-          for (int j = 0; j < c->k; j++) if (field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j]) last = j;
+          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
           for (int j = 0; j < c->k; j++) {
-            if (!(field_live(c, j) && k <= sh_nctor && sh_fld[k][j].k == 5 && sh_fld[k][j].dt && k <= fown_n && fown[k][j])) continue;
-            if (j == last && sh_fld[k][j].dt == dt) put(&db, " nx = o[%d]; t = &n[%d];", j + !untag, j + !untag);
-            else put(&db, " n[%d] = lin_copy%d(o[%d]);", j + !untag, drop_fn(sh_fld[k][j].dt), j + !untag);
+            if (!FDROP(k, j)) continue;
+            Shape fs = FS(k, j);
+            if (j == last && fs.dt == dt && fs.a == ds.a) put(&db, " nx = o[%d]; t = &n[%d];", j + !untag, j + !untag);
+            else put(&db, " n[%d] = lin_copy%d(o[%d]);", j + !untag, drop_fn(fs), j + !untag);
           }
           if (!untag) put(&db, " break; }");
         }
         put(&db, " } if (!t) return r; dst = t; v = nx; } *dst = v; return r; }\n");
       }
+#undef FS
+#undef FDROP
       }
         for (int d = 0; data && d < ndrop; d++) put(&b, "static void lin_drop%d(long v);\nstatic long lin_copy%d(long v);\n", d, d);
         put(&b, "%s", db.s); free(db.s); }
@@ -4211,21 +4369,21 @@ static const LinCtor *rd_word(const char *dt, long w, const long **fields) {
 }
 static long cid_of(const LinCtor *ci) { return ctor_id(ci); }
 /* pass 1: how often each block is reached (a block's fields are walked once) -- iteratively: results are deep */
-typedef struct { long w; const char *dt; } RTodo;
-static void rf_count(Reif *R, long w0, const char *dt0) {
+typedef struct { long w; Shape s; } RTodo;
+static void rf_count(Reif *R, long w0, Shape s0) {
   RTodo *st = malloc(sizeof *st * 64); long sp = 0, sc = 64;
-  st[sp++] = (RTodo){ w0, dt0 };
+  st[sp++] = (RTodo){ w0, s0 };
   while (sp && !R->bad) {
     RTodo t = st[--sp];
-    const long *f; const LinCtor *ci = rd_word(t.dt, t.w, &f);
+    const long *f; const LinCtor *ci = rd_word(t.s.dt, t.w, &f);
     if (!ci) { R->bad = 1; break; }
     if (!(t.w & 1)) { RBlk *b = rb_get(R, t.w, 1); if (b->refs++) continue; }
     long id = cid_of(ci);
     for (int j = 0; j < ci->k; j++) {
-      Shape fs = R->c->fld[id][j];
+      Shape fs = field_shape(R->c->fld, R->c->nctor, ci, id, j, t.s);
       if (fs.k != 5) continue;
       if (sp >= sc) st = realloc(st, sizeof *st * (size_t)(sc *= 2));
-      st[sp++] = (RTodo){ f[j], fs.dt };
+      st[sp++] = (RTodo){ f[j], fs };
     }
   }
   free(st);
@@ -4281,7 +4439,7 @@ static Port rf_build(Reif *R, long w, Shape s) {
   if (b && b->outs) return b->outs[b->used++];
   long id = cid_of(ci);
   Port *fp = malloc(sizeof *fp * (size_t)(ci->k + 1));
-  for (int j = 0; j < ci->k && !R->bad; j++) fp[j] = rf_build(R, f[j], R->c->fld[id][j]);
+  for (int j = 0; j < ci->k && !R->bad; j++) fp[j] = rf_build(R, f[j], field_shape(R->c->fld, R->c->nctor, ci, id, j, s));
   Port v = R->bad ? NONE : rf_ctor(R, ci, fp);
   free(fp);
   if (R->bad || !b || b->refs < 2) return v;
@@ -4303,7 +4461,7 @@ static Port result_port(Net *n, const Compiled *c, long r) {
   if (c->kind != 5) return net_alloc_scott(n, r);   /* (a float is the numeral of its bits) */
   static unsigned long lbl;
   Reif R = { n, c, NULL, 0, 0, 0, 0, lbl };   /* (each block is walked once: the arena bounds the walk) */
-  rf_count(&R, r, c->res.dt);
+  rf_count(&R, r, c->res);
   Port v = NONE;
   if (!R.bad) {
     RfArg a = { &R, r, NONE };
@@ -4406,7 +4564,7 @@ static long ms_value(Marsh *M, Port p, Shape s, int depth) {
   int box = 0, untag = dt_boxed(s.dt, &box) == 1;
   if (cells_dt && s.dt == cells_dt) {               /* a list: its spine read in a loop */
     long first = 0, *link = &first;
-    Shape hs = M->c->fld[ctor_id(cell_cons)][0];
+    Shape hs = field_shape(M->c->fld, M->c->nctor, cell_cons, ctor_id(cell_cons), 0, s);
     for (long k = 0; !M->bad; k++) {
       Port h, t;
       if (k > n->nn) { M->bad = 1; break; }
@@ -4440,7 +4598,7 @@ static long ms_value(Marsh *M, Port p, Shape s, int depth) {
       for (int j = 0; j < k && !M->bad; j++, fd = fd_skip(fd)) {
         char *f = desc && fd && *fd ? td_subst(fd, ta, na) : NULL;
         ms_desc = f;
-        blk[j + !untag] = ms_value(M, fp[j], M->c->fld[id][j], depth + 1);
+        blk[j + !untag] = ms_value(M, fp[j], field_shape(M->c->fld, M->c->nctor, ci, id, j, s), depth + 1);
         ms_desc = NULL; free(f);
       }
       free(ta);

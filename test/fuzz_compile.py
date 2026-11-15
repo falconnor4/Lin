@@ -149,6 +149,23 @@ class Gen:
         k = r.randint(-5, 9)
         self.uses.append(f"(let ((g ({mk} {k}))) (sfoldl (\\a (\\x (add a x))) (g 1) ({ap} g ({b} {self.size(20)}))))")
 
+    def nested(self):
+        """lists of lists and Seqs of Seqs: built, taken apart with nested patterns, rebuilt, summed"""
+        r = self.r
+        mk, sm, rb = self.name("nmk"), self.name("nsum"), self.name("nrb")
+        if r.random() < 0.5:   # the core's list, nested patterns
+            self.defs.append(f"(define {mk} (\\k (\\a (if (eq k 0) a ({mk} (sub k 1) (cons (cons {self.arith(['k'], 1)} (cons {self.arith(['k'], 1)} nil)) a))))))")
+            self.defs.append(f"(define {sm} (\\l (\\acc (match l (nil acc) ((cons (cons x (cons y _)) rest) ({sm} rest {self.arith(['acc', 'x', 'y'])})) ((cons _ rest) ({sm} rest acc))))))")
+            self.defs.append(f"(define {rb} (\\l (match l (nil nil) ((cons (cons x (cons y _)) rest) (cons (cons y (cons x nil)) ({rb} rest))) ((cons _ rest) ({rb} rest)))))")
+            src = f"({mk} {self.size(15)} nil)"
+            if r.random() < 0.5:
+                src = f"({rb} {src})"
+            self.uses.append(f"({sm} {src} {r.randint(0, 5)})")
+        else:                  # Seq of Seq
+            self.defs.append(f"(define {mk} (\\n (\\m (if (eq n 0) snil (scons (srange 0 m) ({mk} (sub n 1) m))))))")
+            self.defs.append(f"(define {sm} (\\g (\\acc (match g (snil acc) ((scons row rest) ({sm} rest (add acc (sfoldl (\\a (\\x {self.arith(['a', 'x'])})) 0 row))))))))")
+            n = self.size(12); self.uses.append(f"({sm} ({mk} {min(n, 60)} {r.randint(0, 12)}) {r.randint(0, 5)})")
+
     def shared(self):
         if not self.uses:
             self.loop()
@@ -157,7 +174,7 @@ class Gen:
 
     def program(self):
         for _ in range(self.r.randint(1, 4)):
-            self.r.choice([self.loop, self.tree, self.lists, self.trees, self.record, self.higher, self.patterns, self.closures, self.shared])()
+            self.r.choice([self.loop, self.tree, self.lists, self.trees, self.record, self.higher, self.patterns, self.closures, self.nested, self.shared])()
         e = self.uses[0]
         for u in self.uses[1:]:
             e = f"({self.r.choice(['add', 'bxor', 'sub'])} {e} {u})"

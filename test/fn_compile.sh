@@ -79,6 +79,22 @@ prog strbuild '(define rep (\n (\acc (if (eq n 0) acc (rep (sub n 1) (cons 97 ac
 prog strmap '(define up (\s (if (str_is_empty s) s (cons (if (and (geq (head s) 97) (leq (head s) 122)) (sub (head s) 32) (head s)) (up (tail s))))))
 (up "hello world")' '"HELLO WORLD"'
 prog strint '(str_parse_int "90210")' 90210
+# lists of lists, and a Seq of Seqs: a constructor field of the datatype's parameter holds a number in the inner
+# values and a list in the outer, so the analysis follows each value's parameters (list(list(num))), not one shape
+# per field -- built, taken apart with nested patterns, rebuilt, summed, all in one unit
+prog nestedlist '(define mk (\k (\a (if (eq k 0) a (mk (sub k 1) (cons (cons k (cons (mul k 2) nil)) a))))))
+(define sp (\l (\acc (match l (nil acc) ((cons (cons x (cons y _)) rest) (sp rest (add acc (add x y)))) ((cons _ rest) (sp rest acc))))))
+(sp (mk 50 nil) 0)' 3825
+prog nestedrebuild '(define mk (\k (\a (if (eq k 0) a (mk (sub k 1) (cons (cons k (cons (mul k 2) nil)) a))))))
+(define sw (\l (match l (nil nil) ((cons (cons x (cons y _)) rest) (cons (cons y (cons x nil)) (sw rest))) ((cons _ rest) (sw rest)))))
+(sw (mk 3 nil))' '[[2 1] [4 2] [6 3]]'
+prog seqofseq '(define grid (\n (\m (if (eq n 0) snil (scons (srange 0 m) (grid (sub n 1) m))))))
+(define tot (\g (\acc (match g (snil acc) ((scons row rest) (tot rest (add acc (ssum row))))))))
+(tot (grid 10 10) 0)' 450
+for f in nestedlist nestedrebuild seqofseq; do
+  a=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null); b=$(LIN_FN_OFF=1 timeout 120 "$LIN_BIN" "$TMP/$f.lin" 2>/dev/null)
+  if [ "$a" = "$b" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL $f poisoned: '$a' vs net '$b'"; fi
+done
 # MEMORY: a block a match consumes and nothing else holds goes back to the allocator, so a loop that builds and
 # consumes a list each round runs in the memory of one list (measured: 200M cells in 12 MB)
 prog freed '(datatype L (ln) (lc h t))
