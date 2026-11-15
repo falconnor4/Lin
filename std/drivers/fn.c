@@ -4867,6 +4867,11 @@ static long y_expanded;
    copy and 2 to the original, so the next copy's fan goes below it and each fan copies a value once.  A part
    something observes (a demand root inside it, as a build-time pass publishes) is being evaluated, not kept as a
    definition: copying it would leave it below a chain of fans, one per call, that the demand pulls through. */
+/* THE SIZE BOUND.  A copy is the whole of F, branches the call never takes included; the knot copies lazily, only
+   what each call reaches.  Small F: the copy is cheaper than the knot's fan interactions.  Large F (measured: a
+   std array helper of 11k nodes, copied per call, allocated 23M nodes where the knot made 4M, and ran 3.6x
+   slower): the knot wins, so a definition past the bound is left to it. */
+#define Y_COPY_MAX 2048
 static int y_copy(Net *n, int root, int avoid1, int avoid2, Scope lab, long *size) {
   int *list = NULL; long nl = 0, cl = 64; YMap seen = {0}; int ok = 1, res = -1;
   ym_put(&seen, root, 0); list = malloc(sizeof *list * (size_t)cl); list[nl++] = root;
@@ -4879,6 +4884,7 @@ static int y_copy(Net *n, int root, int avoid1, int avoid2, Scope lab, long *siz
       if (n->rootn && n->rootn[w.node]) { ok = 0; break; }   /* observed (a demand root on it): being evaluated, not a definition */
       if (n->tag[w.node] == DUP && w.port) continue; /* a fan's copy port: F's own sharing (its source is reached too) or an input */
       if (ym_get(&seen, w.node) >= 0) continue;
+      if (nl >= Y_COPY_MAX) { ok = 0; break; }      /* too big to copy whole: the knot copies what a call uses */
       ym_put(&seen, w.node, (int)nl);
       if (nl == cl) list = realloc(list, sizeof *list * (size_t)(cl *= 2));
       list[nl++] = w.node;
