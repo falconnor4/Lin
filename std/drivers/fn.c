@@ -112,18 +112,29 @@ typedef struct Env { int lam; struct Lz *t; struct Env *next; } Env;
 typedef struct V { int k; int lam; Env *env; Expr *e; struct Lz *a, *b; struct Lz **args; int nargs; Expr *x; int cells; } V;   /* cells: a match on the cell encoding */   /* x: to_expr's answer */
 typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int busy; int port; } Lz;   /* 0 port, 1 application, 2 value */   /* port: it was a port (p, env), forced or not */
 
-/* One compile attempt's memory: everything is freed together. */
+/* One compile attempt's memory: everything is freed together, so it is carved from chunks rather than asked of
+   malloc one object at a time (measured: 8.7M callocs, a fifth of examples/games/tictactoe.lin).  A chunk is
+   as large as the attempt has needed so far, doubled; an object larger than a quarter of one gets its own. */
 static void **arena; static int narena, arcap;
-static void *A(size_t sz) {
-  void *p = calloc(1, sz);
+static char *ar_at; static size_t ar_left, ar_chunk;
+static void *ar_keep(void *p) {
   if (narena >= arcap) arena = realloc(arena, (size_t)(arcap = arcap ? arcap * 2 : 1024) * sizeof *arena);
   arena[narena++] = p; return p;
+}
+static void *A(size_t sz) {
+  sz = (sz + 15) & ~(size_t)15;
+  if (sz > ar_left) {
+    if (!ar_chunk) ar_chunk = 4096 * 16;
+    if (sz > ar_chunk / 4) return ar_keep(calloc(1, sz));
+    ar_at = ar_keep(calloc(1, ar_chunk)); ar_left = ar_chunk; ar_chunk *= 2;
+  }
+  void *p = ar_at; ar_at += sz; ar_left -= sz; return p;
 }
 struct Memo;
 static struct Memo **memo; static int memocap;
 static void arena_free(void) {
   for (int i = 0; i < narena; i++) free(arena[i]);
-  narena = 0;
+  narena = 0; ar_left = 0; ar_at = NULL; ar_chunk = 0;
   if (memocap) memset(memo, 0, (size_t)memocap * sizeof *memo);   /* its entries lived in the arena */
 }
 
@@ -475,7 +486,10 @@ static V *eval_at(Port p, Env *env) {
     fail("a variable bound outside the function"); return NULL;
   }
   if (t == APP && p.port == 1) return apply(eval(W(N, (Port){p.node, 0}), env), lzp(W(N, (Port){p.node, 2}), env));
-  fail("a node the evaluator does not read"); return NULL;
+  { static const char *const tn[] = {"lambda", "application", "fan", "eraser", "root"};   /* (which, so the coverage report can say) */
+    static char why[96]; snprintf(why, sizeof why, "a node the evaluator does not read (%s, port %d)", t >= 0 && t < 5 ? tn[t] : "?", p.port);
+    fail(why); }
+  return NULL;
 }
 
 /* Constants: a numeral answers the cell markers bit by bit, its terminal answers with its SIGN. */

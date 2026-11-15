@@ -89,10 +89,21 @@ refer to itself, and definitions may refer to each other.
 The names `_op`, `_k`, `_c` and `_m` are reserved for the runtime's own
 protocols and cannot be defined.
 
-`(define! name type expr)` also states the definition's type. The stated type is
-taken as given rather than checked against the body: it is how the standard
-library gives nominal types such as `bool` and `num` to values that are, underneath,
-plain lambdas. Ordinary programs should prefer `define` and let the type be
+`(define! name type expr)` also states the definition's type, and the body is
+checked against it once the file is read (so the body may name definitions that
+come later). A concrete contradiction is an error:
+
+```scheme
+(define! half (num -> bool) (\x (div x 2)))
+; error: 'half' does not have the type it states: type mismatch: num vs bool (at file.lin:1)
+```
+
+A type variable in the annotation stands for whatever the body has there, so
+`(define! x a ...)` still says "take this as given". The standard library's
+`define!`s are not checked: they are how it gives nominal types such as `bool`,
+`list` and `float` to values that are, underneath, plain lambdas and numbers, and
+a body written in the runtime's own protocol (names starting with `_`) is taken
+as given too. Ordinary programs should prefer `define` and let the type be
 inferred.
 
 ```scheme
@@ -195,9 +206,48 @@ A datatype may take type parameters and may refer to itself:
 ```
 
 `(match value branch ...)` chooses a branch by constructor. A branch is
-`(constructor body)` for a constructor without fields, or
-`((constructor field ...) body)`, which binds the fields by position. Branches may
-appear in any order. Every constructor of the type needs a branch.
+`(pattern body)`, and a pattern is
+
+| Pattern | Matches |
+|---------|---------|
+| `constructor` | a constructor without fields |
+| `(constructor p ...)` | that constructor, with each field matching its pattern `p` |
+| `name` | anything, binding it to `name` |
+| `_` | anything |
+| `5`, `-1` | that number |
+
+so patterns nest: `((cons a (cons b rest)) ...)` takes a list of at least two
+elements. Branches are tried from the top, and the first that matches is taken.
+They may name constructors in any order.
+
+```scheme
+(datatype L (nil) (cons (h num) (t L)))
+(define pairs (\l (match l
+  ((cons a (cons b rest)) (cons (add a b) (pairs rest)))
+  ((cons a nil) (cons a nil))
+  (nil nil))))
+
+(define fib (\n (match n (0 0) (1 1) (k (add (fib (sub k 1)) (fib (sub k 2)))))))
+(fib 20)
+; => 6765
+```
+
+A match is checked when it is read. Every value must be covered: a constructor
+(or, below a constructor, a field's constructor) that no branch matches is an
+error, and so is a number pattern with no branch for the other numbers. A branch
+that can never be chosen, because earlier branches take every value it would, is
+an error too -- which is also what catches a misspelt constructor, since an
+unknown name in a pattern is a variable:
+
+```scheme
+(match c (red 1) (gren 2) (blue 3))
+; error: parse error: match: the branch blue is never chosen: 'gren' is not a
+;        constructor, so it is a variable and takes every value (at file.lin:1)
+```
+
+A match compiles to the datatype's own dispatch (a value applied to one branch
+per constructor), with a number pattern becoming an `eq` test, so nested
+patterns cost what the hand-written nested matches would.
 
 ## Types
 
@@ -206,8 +256,11 @@ checked before it runs.
 
 ```scheme
 (add 1 true)
-; error: type mismatch
+; error: type mismatch: num vs bool in (add 1 true) (at file.lin:1)
 ```
+
+An error names the two types that clash, the expression whose typing found the
+clash, and where: the file and line of the form, and for a definition, its name.
 
 | Type | Written |
 |------|---------|
@@ -313,13 +366,11 @@ A result is printed according to its type:
 
 ## Limitations
 
-- A `match` that omits a constructor is not rejected; it evaluates to a function
-  awaiting the missing branch.
-- Patterns bind fields only: there are no nested patterns, literals in patterns,
-  wildcards or guards.
-- `define!` annotations are trusted, not checked.
+- Patterns have no guards, and no string or float literals.
+- A type variable in a `define!` annotation is not held to be polymorphic: the
+  body only has to agree with the annotation, not be as general as it.
 - There are no type classes or traits: integer and float operations have
   different names, and a container's element operations are passed explicitly
   (see `omap_insert`).
 - There are no records; a datatype's fields are positional.
-- Type errors report the kind of error but not its location.
+- Type errors give the form's line, not the column of the expression within it.

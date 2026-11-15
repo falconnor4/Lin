@@ -40,7 +40,7 @@ run_test() {
 printf "Running Lin Confluence & Stability Test Suite against %s\n" "$LIN_BIN"
 
 printf "[Tier 1: Core Interaction Calculus & Primitives]\n"
-for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/mutual.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/seq.lin test/array.lin test/string_ops.lin test/omap.lin test/hmap.lin test/big.lin test/regex.lin test/adt_types.lin test/loop.lin; do
+for f in test/levels.lin test/basics.lin test/booleans.lin test/combinators.lin test/pairs.lin test/scott.lin test/scott_arith.lin test/float.lin test/vector.lin test/math.lin test/strings.lin test/string.lin test/adts.lin test/multi_file.lin test/modules.lin test/numbers.lin test/higher_order.lin test/let.lin test/mutual.lin test/test_escapes_utf8.lin test/types.lin test/datatype.lin test/patterns.lin test/seq.lin test/array.lin test/string_ops.lin test/omap.lin test/hmap.lin test/big.lin test/regex.lin test/adt_types.lin test/loop.lin; do
   run_test "$f"
 done
 
@@ -106,6 +106,21 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Tier 2.7: the function compiler never changes an answer.
+#   test/fuzz_compile.py generates random programs (loops, tree recursion, lists, datatypes, records,
+#   closures, nested / literal / wildcard patterns, some past the parallel threshold) and requires the
+#   net's answer from each compiled, on one thread, and with freed blocks poisoned.  A seeded slice runs
+#   here; `python3 test/fuzz_compile.py ./lin 500 <seed>` runs a long one.
+# ----------------------------------------------------------------------------
+FZ_LOG=$(mktemp)
+if python3 test/fuzz_compile.py "$LIN_BIN" 16 3 >"$FZ_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 16)); echo "PASS test/fuzz_compile.py ($(tail -1 "$FZ_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/fuzz_compile.py"; cat "$FZ_LOG"
+fi
+rm -f "$FZ_LOG"
+
+# ----------------------------------------------------------------------------
 # Tier 2.75: Lévy optimality -- the engine's actual headline claim.
 #   A value-based test cannot see a re-reduced shared redex: the answer is still right, only the
 #   work is wrong.  test/optimality.py measures the work instead (see its docstring).
@@ -135,6 +150,17 @@ else
   fail=$((fail+1)); echo "FAIL test/no_caps.py"; cat "$NC_LOG"
 fi
 rm -f "$NC_LOG"
+
+# ----------------------------------------------------------------------------
+# Tier 2.8: the net's demand walk stays proportional to the work (test/net_walk.sh).
+# ----------------------------------------------------------------------------
+NW_LOG=$(mktemp)
+if bash test/net_walk.sh "$LIN_BIN" >"$NW_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/net_walk.sh ($(tail -1 "$NW_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/net_walk.sh"; cat "$NW_LOG"
+fi
+rm -f "$NW_LOG"
 
 # ----------------------------------------------------------------------------
 # Tier 2.85: a datatype's constructor type describes EVERY field.

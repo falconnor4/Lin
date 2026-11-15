@@ -1,0 +1,58 @@
+; match: branches in any order, `_` and variables, nested constructor patterns, number literals --
+; and the checks: a constructor no branch covers, or a branch nothing reaches, is an error.
+
+(datatype Shape (circle (r num)) (rect (w num) (h num)) (dot))
+(datatype T (leaf (v num)) (node (l T) (r T)))
+
+; branches in any order: the constructor, not the position, decides
+(match (rect 3 4) (dot 0) ((rect w h) (mul w h)) ((circle r) r))
+; expect => 12
+(match (circle 5) ((rect w h) (mul w h)) ((circle r) r) (dot 0))
+; expect => 5
+
+; a wildcard or a variable takes whatever is left
+(define area (\s (match s ((rect w h) (mul w h)) (_ 0))))
+(add (area (rect 2 5)) (add (area dot) (area (circle 9))))
+; expect => 10
+(match (circle 7) ((rect w h) 0) (other (match other ((circle r) r) (_ 1))))
+; expect => 7
+
+; nested patterns: a dispatch on the field, in place
+(define depth2 (\t (match t ((node (node a b) _) 2) ((node (leaf x) _) x) ((leaf v) v))))
+(add (depth2 (node (node (leaf 1) (leaf 2)) (leaf 3))) (add (depth2 (node (leaf 40) (leaf 0))) (depth2 (leaf 100))))
+; expect => 142
+
+; number literals: an `eq` test, with a catch-all for the rest
+(define fib (\n (match n (0 0) (1 1) (k (add (fib (sub k 1)) (fib (sub k 2)))))))
+(fib 20)
+; expect => 6765
+
+; literals inside a constructor pattern, and rows tried top to bottom
+(define cls (\t (match t ((leaf 0) 100) ((leaf v) v) ((node (leaf 0) r) 200) ((node l r) 300))))
+(add (cls (leaf 0)) (add (cls (leaf 7)) (add (cls (node (leaf 0) (leaf 1))) (cls (node (leaf 5) (leaf 1))))))
+; expect => 607
+
+; a recursive function over nested patterns: sum adjacent pairs of leaves
+(datatype L (nil) (cons (h num) (t L)))
+(define pairs (\l (match l ((cons a (cons b rest)) (cons (add a b) (pairs rest))) ((cons a nil) (cons a nil)) (nil nil))))
+(define total (\l (match l (nil 0) ((cons h t) (add h (total t))))))
+(total (pairs (cons 1 (cons 2 (cons 3 (cons 4 (cons 5 nil)))))))
+; expect => 15
+
+; ---- errors
+(match (circle 1) ((circle r) r) (dot 0))
+; expect error: parse error: match: no branch for 'rect' (at test/patterns.lin:43)
+(match (leaf 1) ((leaf v) v) ((node (leaf a) r) a))
+; expect error: parse error: match: no branch for 'node' in a field of 'node' (at test/patterns.lin:45)
+(match 3 (0 1) (1 2))
+; expect error: parse error: match: no branch for numbers other than 0, 1 (at test/patterns.lin:47)
+(match dot (circl 1) (dot 2) (_ 3))
+; expect error: parse error: match: the branch dot is never chosen: 'circl' is not a constructor, so it is a variable and takes every value (at test/patterns.lin:49)
+(match dot (_ 1) (dot 2))
+; expect error: parse error: match: the branch dot is never chosen (an earlier branch takes every value it would) (at test/patterns.lin:51)
+(match dot ((rect w) w) (_ 0))
+; expect error: parse error: match: 'rect' has 2 fields, the pattern gives 1 (at test/patterns.lin:53)
+(match dot ((leaf v) v) (_ 0))
+; expect error: type mismatch: Shape vs T in (match .. (leaf ..)) (at test/patterns.lin:55)
+(match (rect 1 2) ((rect a a) a) (_ 0))
+; expect error: parse error: match: 'a' is bound twice in one pattern (at test/patterns.lin:57)

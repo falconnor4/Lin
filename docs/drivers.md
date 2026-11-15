@@ -230,6 +230,48 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_NO_CACHE=1` | Do not use the program cache |
 | `LIN_CACHE_DEBUG=1` | Report whether a run came from the program cache |
 
+### Checking the compiler against the net
+
+The net is the definition of the language and the function compiler is an
+optimiser, so the two must never disagree. `test/fuzz_compile.py` generates
+random programs from the shapes the compiler handles -- numeric loops, tree
+recursion, lists built, mapped, filtered and folded, datatypes built and taken
+apart, records rebuilt in loops, closures and partial application, shared values,
+and nested, literal and wildcard patterns -- and requires each one to give the
+net's answer compiled, on one thread, and with `LIN_FN_POISON`. One program in
+six has a size past the parallel threshold; the net alone is too slow there, so
+the compiled program on one thread (which runs no parallel code) is the
+reference that the parallel and poisoned runs must match. A seeded slice runs in
+the test suite; a long run is
+
+```sh
+python3 test/fuzz_compile.py ./lin 500 <seed>
+```
+
+### What the compiler leaves to the net
+
+`test/coverage.py` runs programs (by default every `.lin` under `test`,
+`examples` and `bench`) and reports, per top-level form, the reduction steps and
+time the net still spent after the compiler had its turn, with the reasons the
+compiler gave where it declined, ranked by time. It also lists the slowest files
+with their wall time split into net, compiling and the rest (reading, checking,
+expanding, the C compiler, readback), so a slow front end shows up as well:
+
+```sh
+python3 test/coverage.py ./lin [files or directories] [--min-steps N]
+```
+
+It is the list of what the compiler should learn next. At the time of writing,
+261 heavy forms across the corpus are compiled and 15 leave more than 20 000
+steps to the net. Those 15 are in three programs, for three reasons:
+
+- lists of lists in the std `list` encoding (`examples/linden`): the compiler
+  reads a std list's elements as numbers only;
+- a std `list` (a string) and a declared datatype (`Seq`) in one function
+  (`test/regex.lin`): read as a shape conflict;
+- superpositions: a value left half-duplicated in the net by an earlier form
+  (`examples/games/tictactoe.lin`), which the compiler's evaluator does not read.
+
 ## Writing a driver
 
 A driver is a C file that includes `src/lin.h`, exports a registration symbol,

@@ -3,63 +3,63 @@
 ; so those cases are kept at the very end.
 
 (foo 1)
-; expect error: unbound variable 'foo'
+; expect error: unbound variable 'foo' (at test/types.lin:5)
 
 (1 true)
 ; expect => (\a (\b (\c b)))
 
 (\x (x x))
-; expect error: infinite type
+; expect error: infinite type (at test/types.lin:11)
 
 999
 ; expect => 999
 
 (\x (y x))
-; expect error: unbound variable 'y'
+; expect error: unbound variable 'y' (at test/types.lin:17)
 
 ((\x x) x)
-; expect error: unbound variable 'x'
+; expect error: unbound variable 'x' (at test/types.lin:20)
 
 (undefined_fn 5)
-; expect error: unbound variable 'undefined_fn'
+; expect error: unbound variable 'undefined_fn' (at test/types.lin:23)
 
 (head 5)
 ; expect => (\a (\b a))
 
 (tail true)
-; expect error: type mismatch
+; expect error: type mismatch: list a vs bool in (tail true) (at test/types.lin:29)
 
 (cons 1 2)
 ; expect => "...
 
 (succ true)
-; expect error: type mismatch
+; expect error: type mismatch: num vs bool in (succ true) (at test/types.lin:35)
 
 ; (pred true) is also a mismatch: bool and num are now distinct nominal types.
 
 (pred true)
-; expect error: type mismatch
+; expect error: type mismatch: num vs bool in (pred true) (at test/types.lin:40)
 
 (fst 3)
 ; expect => (\a (\b (\c b)))
 
 (lambda y (y y))
-; expect error: infinite type
+; expect error: infinite type (at test/types.lin:46)
 
 ()
-; expect error: parse error: empty '('
+; expect error: parse error: empty '(' (at test/types.lin:49)
 
 ()
-; expect error: parse error: empty '('
+; expect error: parse error: empty '(' (at test/types.lin:52)
 
 ; a stray ')' after a complete form: the form still evaluates
 (add 1 2))
 ; expect => 3
-; expect error: parse error: unexpected ')'
+; expect error: parse error: unexpected ')' (at test/types.lin:56)
 
 500
 ; expect => 500
 
 ; unterminated forms (must be last -- they abort the rest of the file)
 (1
-; expect error: parse error: missing ')'
+; expect error: parse error: missing ')' (at test/types.lin:64)
