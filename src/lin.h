@@ -418,10 +418,13 @@ Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) ch
    `((\_c (d_i f1..fk)) ID)` and a match branch for it `((\_m BRANCH) ID)`, redexes that beta away -- and ID
    names an entry here: the datatype, the constructor, its index among the m constructors and its k fields.
    Drivers and readback ask by ID; nothing in the core's reduction depends on it. */
-typedef struct { const char *dt, *name; int m, i, k; const char *fdesc; } LinCtor;
+typedef struct { const char *dt, *name; int m, i, k; const char *fdesc; int prog; } LinCtor;   /* prog: declared by the program, not the library */
 long lin_ctor_register(const char *dt, const char *name, int m, int i, int k);   /* its ID, >= 1 */
 const LinCtor *lin_ctor_info(long id);                                          /* NULL: no such ID */
 long lin_ctor_lookup(const char *name);
+extern int lin_ctor_prog;   /* set by the loader: a constructor registered now is the program's (it wins a lookup by name) */
+/* The core's own list datatype (src/main.c, builtin_list): its constructors' IDs, 0 before it is declared. */
+extern long lin_list_cons_id, lin_list_nil_id;
 /* The constructor's FIELD TYPES as descriptors (type_desc), concatenated: what lets a reader print a value of a
    declared datatype by its type alone, markers or not.  NULL until stated. */
 void lin_ctor_set_fdesc(long id, const char *fdesc);
@@ -466,6 +469,7 @@ extern int lin_build_depth;
 int lin_build_gate(const char *fn, int pure);
 extern int lin_build_observed;
 Port net_alloc_scott(Net *n, long k); Port net_alloc_scott_at(Net *n, long k, Scope lvl); Port net_alloc_bool(Net *n, int v);
+Port net_alloc_list_nil(Net *n);   /* the end of a list (the core's list datatype's `nil`) */
 Port net_alloc_float(Net *n, double d);
 /* Float boxes are net structure like any other; the TABLE behind the index is a driver's
    (std/drivers/values.c, the DT_FLOAT provider), reached through net_box_value /
@@ -479,7 +483,8 @@ typedef struct { const char *name; Term *term, *expanded, *raw; Scheme sch; int 
                  Net *compiled; int comp_tried;
                  int typing; Scheme hole;           /* typing: its type is being inferred (mutual recursion reaches it) */
                  Term *expanded_sh;
-                 const char *file; int line; } Def;  /* where it was defined, for its errors */          /* its expansion inside an operator's MEANING (main.c: in_meaning) */
+                 const char *file; int line;        /* where it was defined, for its errors */
+                 int prog; } Def;                   /* made by the program, not the library (a lazy module's export never shadows it) */          /* its expansion inside an operator's MEANING (main.c: in_meaning) */
 extern Def *defs;
 extern int ndefs, lin_threads;
 Def *def_find(const char *name);

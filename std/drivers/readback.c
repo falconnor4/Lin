@@ -423,15 +423,10 @@ static int eff_shape(Net *n, Port p) {
 }
 
 /* The string encoding, built here because readback is who needs one (an input line, a command's
-   output): cells of character-code numerals, ended as a source literal is (src/parse.c): `\c.\n.true`. */
+   output): a list (the core's list datatype) of character-code numerals, built as a source literal is. */
 static Port net_alloc_string(Net *n, const char *s) {
   Scope sc = scope_nil();
-  Port c_nil = net_alloc(n, LAM, sc), n_nil = net_alloc(n, LAM, sc);
-  net_link(n, (Port){c_nil.node, 2}, (Port){n_nil.node, 0}, 0);
-  net_link(n, (Port){n_nil.node, 2}, net_alloc_bool(n, 1), 0);      /* the end answers true */
-  net_link(n, (Port){n_nil.node, 1}, net_alloc(n, ERA, sc), 0);
-  net_link(n, (Port){c_nil.node, 1}, net_alloc(n, ERA, sc), 0);
-  Port cur = (Port){c_nil.node, 0};
+  Port cur = net_alloc_list_nil(n);
   for (long i = (long)strlen(s) - 1; i >= 0; i--) {
     Port ch = net_alloc_scott(n, (unsigned char)s[i]);
     Port c_lam = net_alloc(n, LAM, sc), n_lam = net_alloc(n, LAM, sc);

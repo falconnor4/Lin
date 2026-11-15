@@ -319,27 +319,26 @@ static int field_is_param(const LinCtor *ci, int j) {
   for (int i = 0; d && *d && i < j; i++) d = fd_skip(d);
   return d && *d == 'P';
 }
+/* A branch that is a constructor with no fields -- an immediate word -- takes the kind the other branches say.  In a
+   typed program the branches agree anyway; the one place they do not is the library's `head`, whose empty case
+   answers `nil` (an immediate: a number where a number is read, the empty list where a list is), as the list
+   encoding's end always answered one word whatever was asked of it. */
+static int neutral_branch(const Expr *x) { return x && ((x->op == E_CTOR && x->nargs == 0) || (x->op == E_CONST && x->box)); }
 static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci) {
   Expr *e = mke(E_FIELD, field_is_bool(ci, j) ? 3 : 1); e->a = scrut; e->k = j; e->untag = untag; e->ci = ci; return hc(e);
 }
-/* THE CELL ENCODING AS A DATATYPE.  Lists, strings and the std's sequences are cells `\c.\n.((c h) t)` ended by
-   `\c.\n.true` -- no constructor marker, but two constructors all the same, and the compiler gives them the
-   datatype treatment under a name no source can write: a cell is a block {h, t}, the end an immediate.  A value
-   applied to branches with no marker is taken apart as cells; whether it really is a list is the SHAPE analysis'
-   question (a numeral is cells too, of bits -- one used both ways is not compiled).  The end answers `true` to
-   whatever it is given, which a program reads only as a boolean: here it is a constant every shape accepts. */
+/* THE LIST DATATYPE.  A list is the core's own datatype (src/main.c, builtin_list): `(cons h t)`, a block {h, t},
+   or `nil`, an immediate.  A value built by its constructors carries their marker, and a `match` on it is the
+   datatype's own; a list may also be APPLIED to two branches with no marker (`(l (\h (\t ..)) z)`, the way the
+   encoding was used before it was declared), and that is taken apart as the same datatype: the cell branch gets
+   the fields, the end the second branch.  Whether a value applied that way really is a list is the SHAPE
+   analysis' question (a numeral is cells too, of bits, ended by a sign -- one used both ways is not compiled). */
 static const LinCtor *cell_cons, *cell_nil;
 static const char *cells_dt;
-static void cells_init(void) {
-  if (cell_cons && lin_ctor_info(1)) {               /* (re-read: the registry may have moved) */
-    cell_cons = lin_ctor_info(lin_ctor_lookup(" cons")); cell_nil = lin_ctor_info(lin_ctor_lookup(" nil"));
-    return;
-  }
-  lin_ctor_register(" cells", " cons", 2, 0, 2); lin_ctor_register(" cells", " nil", 2, 1, 0);
-  cell_cons = lin_ctor_info(lin_ctor_lookup(" cons")); cell_nil = lin_ctor_info(lin_ctor_lookup(" nil"));
+static void cells_init(void) {                       /* (re-read each time: the registry may have moved) */
+  cell_cons = lin_ctor_info(lin_list_cons_id); cell_nil = lin_ctor_info(lin_list_nil_id);
   cells_dt = cell_cons ? cell_cons->dt : NULL;
 }
-static Expr *end_true(void) { Expr *e = mke(E_CONST, 3); e->k = 3; e->box = 1; return hc(e); }   /* (3: true, and the end) */
 static Expr *field_expr(Expr *scrut, int j, int untag, const LinCtor *ci);
 static V *cells_add(V *m, Lz *x) {
   if (m->nargs == 0) {                               /* the cell branch is a FUNCTION of the cell's two parts */
@@ -352,8 +351,10 @@ static V *cells_add(V *m, Lz *x) {
   V *b = force(m->args[0]);
   for (int j = 0; b && j < 2; j++) { V *fv = mkv(V_SYM); fv->e = field_expr(m->e, j, r->untag, cell_cons); b = apply(b, ready(fv)); }
   if (!(r->args[0] = to_expr(b))) return NULL;
-  r->args[1] = end_true();                           /* the end answers true, whatever the second branch was */
-  r->kind = r->args[0]->kind;
+  if (!(r->args[1] = to_expr(force(x)))) return NULL;   /* the end: the second branch */
+  int k0 = r->args[0]->kind, k1 = r->args[1]->kind;
+  r->kind = r->args[0]->op == E_CALL || neutral_branch(r->args[0]) ? k1 : r->args[1]->op == E_CALL || neutral_branch(r->args[1]) ? k0
+          : k0 == k1 ? k0 : (k0 == 5 || k1 == 5 ? 5 : 1);
   V *res = mkv(V_SYM); res->e = hc(r); return res;
 }
 static V *match_add(V *m, Lz *x) {
@@ -386,6 +387,7 @@ static V *match_add(V *m, Lz *x) {
     for (int j = 0; b && j < c2->k; j++) { V *fv = mkv(V_SYM); fv->e = field_expr(m->e, j, untag, c2); b = apply(b, ready(fv)); }
     if (!(r->args[i] = to_expr(b))) return NULL;
     if (r->args[i]->op == E_CALL) continue;          /* (a recursive call has the kind the other branches say) */
+    if (neutral_branch(r->args[i])) { if (kind < 0 && i == ci->m - 1) kind = r->args[i]->kind; continue; }
     int bk = r->args[i]->kind;
     kind = kind < 0 ? bk : (kind == bk ? kind : (kind == 5 || bk == 5 ? 5 : 1));
   }
@@ -538,7 +540,7 @@ static int const_str(V *v, char *buf, int cap) {
   for (; v && !failed && n < cap - 1; ) {
     V *r = apply(apply(v, ready(mkv(V_MCONS))), ready(mkv(V_MNIL)));
     if (!r) return 0;
-    if (r->k != V_MCELL) { buf[n] = 0; return n > 0; }       /* the terminal: \c.\n.true answers true */
+    if (r->k != V_MCELL) { buf[n] = 0; return n > 0 && r->k == V_MNIL; }   /* the end answers with the second branch */
     int ok; long ch = const_int(force(r->a), &ok);
     if (!ok || ch <= 0 || ch > UCHAR_MAX) return 0;
     buf[n++] = (char)ch; v = force(r->b);
@@ -600,7 +602,10 @@ static int input_of(Port p);
 static int list_end(const Net *n, Port p) {
   Port c = dhop(n, p); if (!is(n, c, LAM, 0)) return 0;
   Port nn = dhop(n, W(n, (Port){c.node, 2})); if (!is(n, nn, LAM, 0)) return 0;
-  return is(n, dhop(n, W(n, (Port){nn.node, 2})), LAM, 0);
+  Port b = dhop(n, W(n, (Port){nn.node, 2}));
+  Port ma, mi; int ml;                               /* (`\c.\n.((\_c n) NIL)`: the marker, then the second binder) */
+  if (marker_app(b, &ma, &ml, &mi)) b = dhop(n, ma);
+  return b.node == nn.node && b.port == 1;
 }
 /* A constant list: the cells answer the markers one by one, the end answers with a boolean.  Speculative: a value
    that is not a list leaves no trace. */
@@ -621,7 +626,7 @@ static Expr *const_cells(V *v) {
       if (nh == cap) { Expr **o = hs; hs = A(sizeof *hs * (size_t)(cap = cap ? cap * 2 : 16)); if (nh) memcpy(hs, o, sizeof *hs * (size_t)nh); }
       hs[nh++] = h; v = force(r->b); continue;
     }
-    if (r->k == V_CLO) { int bo; const_bool(r, &bo); ok = bo && !failed; }
+    ok = r->k == V_MNIL;                             /* the end: it answered with the second branch */
     break;
   }
   fail_quiet--;
@@ -3174,7 +3179,7 @@ static void sh_need_num(const Expr *x) {
     if (!sh_fneed[x->k]) { sh_fneed[x->k] = 1; sh_changed = 1; sh_need_num(funs[x->k].body); }
     return;
   }
-  if (x->op == E_MATCH) { for (int i = 0; i < x->nargs; i++) if (!(x->args[i]->op == E_CONST && x->args[i]->box)) sh_need_num(x->args[i]); return; }
+  if (x->op == E_MATCH) { for (int i = 0; i < x->nargs; i++) if (!neutral_branch(x->args[i])) sh_need_num(x->args[i]); return; }
   if (x->op == E_FIELD && x->ci) { long id = ctor_id(x->ci); if (id > 0 && id <= sh_nctor && x->k < x->ci->k) sh_upd(&sh_fld[id][x->k], (Shape){ 1, NULL }); }
   else if (x->op == E_PARAM && x->nargs < 0 && x->k < nesh) sh_upd(&esh[x->k], (Shape){ 1, NULL });
   else if (x->op == E_PARAM && x->nargs >= 0 && x->nargs < nfun) sh_upd(&sh_par[x->nargs][x->k], (Shape){ 1, NULL });
@@ -3207,7 +3212,8 @@ static Shape shape_of(const Expr *e) {
       if (fid > 0 && fid <= sh_nctor) sh_upd(&sh_fld[fid][e->a->k], (Shape){ 5, e->ci->dt });
     } else
     if (sc.k && !(sc.k == 5 && e->ci && (!sc.dt || sc.dt == e->ci->dt))) { if (dbg > 2) DBG("[shape: match on op %d (f%d.%ld k%ld) shape %d %s, wanted %s]\n", e->a->op, e->a->nargs, e->a->k, e->a->k, sc.k, sc.dt ? sc.dt : "-", e->ci ? e->ci->dt : "?"); sh_bad = 1; }
-    for (int i = 0; i < e->nargs; i++) r = sh_join(r, shape_of(e->args[i]));
+    { int any = 0; for (int i = 0; i < e->nargs; i++) any |= !neutral_branch(e->args[i]);
+      for (int i = 0; i < e->nargs; i++) { Shape b = shape_of(e->args[i]); if (!any || !neutral_branch(e->args[i])) r = sh_join(r, b); } }
     break;
   }
   case E_CALL:
@@ -4232,19 +4238,15 @@ static Scope fresh_label(Reif *R) {                   /* a sharing point no othe
 }
 static Port rf_ctor(Reif *R, const LinCtor *ci, const Port *fields) {
   Net *n = R->n; Scope sc = scope_nil();
-  if (cells_dt && ci->dt == cells_dt) {             /* a cell `\c.\n.((c h) t)`, or the end `\c.\n.true`: no marker */
+  if (cells_dt && ci->dt == cells_dt && ci->k == 2) {   /* a cell `\c.\n.((c h) t)`: its marker reduced (a list end keeps
+                                                     its marker below: `\c.\n.n` alone would read as the boolean false) */
     Port c = net_alloc(n, LAM, sc), nn = net_alloc(n, LAM, sc);
     net_link(n, (Port){c.node, 2}, (Port){nn.node, 0}, 1);
     net_link(n, (Port){nn.node, 1}, net_alloc(n, ERA, sc), 1);
-    if (ci->k == 2) {
-      Port a1 = net_alloc(n, APP, sc), a2 = net_alloc(n, APP, sc);
-      net_link(n, (Port){a1.node, 0}, (Port){c.node, 1}, 1); net_link(n, (Port){a1.node, 2}, fields[0], 1);
-      net_link(n, (Port){a2.node, 0}, (Port){a1.node, 1}, 1); net_link(n, (Port){a2.node, 2}, fields[1], 1);
-      net_link(n, (Port){nn.node, 2}, (Port){a2.node, 1}, 1);
-    } else {
-      net_link(n, (Port){c.node, 1}, net_alloc(n, ERA, sc), 1);
-      net_link(n, (Port){nn.node, 2}, net_alloc_bool(n, 1), 1);
-    }
+    Port a1 = net_alloc(n, APP, sc), a2 = net_alloc(n, APP, sc);
+    net_link(n, (Port){a1.node, 0}, (Port){c.node, 1}, 1); net_link(n, (Port){a1.node, 2}, fields[0], 1);
+    net_link(n, (Port){a2.node, 0}, (Port){a1.node, 1}, 1); net_link(n, (Port){a2.node, 2}, fields[1], 1);
+    net_link(n, (Port){nn.node, 2}, (Port){a2.node, 1}, 1);
     return (Port){c.node, 0};
   }
   Port *lam = malloc(sizeof *lam * (size_t)ci->m);
