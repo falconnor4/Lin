@@ -330,7 +330,11 @@ static void ib_push(IntBuf *b, int v) {
 static void node_free(Net *n, int v) {
   if (v <= 0 || v >= n->nn || n->dead[v] == 2) return;
   act_drop(n, v);
-  if (n->rootn[v]) { int w = 0; for (int i = 0; i < n->nroot; i++) if (n->root[i].node != v) n->root[w++] = n->root[i]; n->nroot = w; n->rootn[v] = 0; }
+  /* its demand roots go (in order): searched from the top, where a force's root is, and only as far as the
+     count says -- a free that scanned every root cost the depth of the forces nested around it */
+  for (int k = n->rootn[v], i = n->nroot - 1; k && i >= 0; i--)
+    if (n->root[i].node == v) { memmove(&n->root[i], &n->root[i + 1], (size_t)(n->nroot - i - 1) * sizeof(Port)); n->nroot--; k--; }
+  n->rootn[v] = 0;
   n->dead[v] = 2;
   if (n->pend_top >= n->pend_cap) n->pend = realloc(n->pend, (size_t)(n->pend_cap = n->pend_cap ? n->pend_cap * 2 : 256) * sizeof(int));
   n->pend[n->pend_top++] = v; n->nfree++;
@@ -967,10 +971,19 @@ static const Net *res_net; static Port res_at;
    every wave re-walked each enclosing force's spine for nothing (measured: 20 roots deep on a binary tree, 59M
    of 63M walk steps, 200 per interaction fired).  Inside a force only its root is walked: everything fired is
    still needed (it is needed by p, which is needed), and what the enclosing demands want waits until the
-   force returns -- which is when they would see it anyway.  -1: the top-level reduction, ROOT and all roots. */
-static const Net *floor_net; static int walk_floor = -1;
+   force returns -- which is when they would see it anyway.  No force: the top-level reduction, ROOT and all roots.
+   The force's root is named by its PORT, not its index: a node freed mid-reduction drops its root entries and
+   the array closes up, so an index goes stale -- and a stale one past the end fell back to walking every root,
+   which made each wave of a force cost the depth of the forces around it (measured: a lazy fold over 2000
+   cells, 878k steps in 32 s, quadratic).  It is found from the top: inner forces' roots are gone when it runs. */
+static const Net *floor_net; static Port floor_port;
 static void net_mark_demand(Net *n) {
-  int first = (floor_net == n && walk_floor >= 0 && walk_floor < n->nroot) ? walk_floor : -1;
+  int first = -1;
+  if (floor_net == n) {
+    if (n->rootn[floor_port.node])   /* (no root names the node: consumed, known without a search) */
+      for (int i = n->nroot - 1; i >= 0; i--) if (n->root[i].node == floor_port.node && n->root[i].port == floor_port.port) { first = i; break; }
+    if (first < 0) { res_net = NULL; n->dem_cnt = 0; ++n->dem_stamp; if (!n->dem_stamp) n->dem_stamp = 1; return; }   /* its node was consumed: the value moved on, and the reader that forced it follows the wire (net_force_val) */
+  }
   int resume = res_net == n && n->nroot == first + 1 && NAT_IN(n, res_at.node) && !n->dead[res_at.node];
   res_net = NULL;
   unsigned int stamp;
@@ -1066,10 +1079,10 @@ long net_force(Net *n, Port p) {
        rewrite -- a driver reading, then folding -- invalidates the walk's resume point, as the reducer itself does) */
   int save = n->nroot;
   lin_demand(n, p);
-  const Net *sfn = floor_net; int sfl = walk_floor;
-  if (n->nroot > save) { floor_net = n; walk_floor = n->nroot - 1; }   /* (an existing root: walk as before) */
+  const Net *sfn = floor_net; Port sfp = floor_port;
+  if (n->nroot > save) { floor_net = n; floor_port = p; }   /* (an existing root: walk as before) */
   long s = net_reduce(n, n->steps + (1L << 22));
-  floor_net = sfn; walk_floor = sfl;
+  floor_net = sfn; floor_port = sfp;
   /* Only ever TRUNCATE.  A reduction here can reclaim, which rewrites the root array and can drop
      the root this call added; restoring the old COUNT would then claim entries that no longer name
      anything, and the next demand walk would seed itself from stale indices. */
