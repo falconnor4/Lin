@@ -64,7 +64,7 @@ method and the full table):
 | Benchmarks Game fannkuch-redux, n = 9 | 18 ms | 36 ms | 2.0× slower |
 | Words in a 1M-character string | 5 ms | 9 ms | 1.8× slower |
 | Array, 1M strided writes and reads | 7 ms | 19 ms | 2.7× slower |
-| Benchmarks Game pidigits, 2,000 digits | 557 ms | 1407 ms | 2.5× slower |
+| Benchmarks Game pidigits, 2,000 digits | 454 ms | 857 ms | 1.9× slower |
 
 Lin is ahead on 14 of the 21 benchmarks and level with the C on two more: where it
 runs work in parallel that the C runs on one core, where it shares a computation

@@ -21,6 +21,7 @@ export LIN_NATIVE_CACHE="$TMP/cache"
 pass=0; fail=0
 ok() { pass=$((pass+1)); }
 bad() { fail=$((fail+1)); echo "FAIL $1"; }
+unset LIN_FN_POISON   # (a LIN_FN_ setting makes every run a full one: this suite is about the cache)
 run() { LIN_CACHE_DEBUG=1 timeout 120 "$LIN_BIN" "$@" 2>"$TMP/err"; }
 hit() { grep -q "run from compiled units" "$TMP/err"; }
 
