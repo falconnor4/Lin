@@ -136,7 +136,7 @@ it can be made executable and run as a command.
 | `LIN_STEPS=<n>` | Stop reduction after `n` rewrite steps |
 | `LIN_LEAKCHECK=1` | With `-b`, report what the result still reaches |
 | `LIN_TRACE=1` | Trace reduction |
-| `LIN_WAVE_STATS=1` | Print parallel-reduction statistics at exit |
+| `LIN_WAVE_STATS=1` | Print reduction statistics at exit: waves, interactions fired, parallel batches, and `walked`, the demand-walk steps (`test/net_walk.sh` keeps it proportional to the work) |
 
 ## Next steps
 

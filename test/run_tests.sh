@@ -152,6 +152,17 @@ fi
 rm -f "$NC_LOG"
 
 # ----------------------------------------------------------------------------
+# Tier 2.8: the net's demand walk stays proportional to the work (test/net_walk.sh).
+# ----------------------------------------------------------------------------
+NW_LOG=$(mktemp)
+if bash test/net_walk.sh "$LIN_BIN" >"$NW_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/net_walk.sh ($(tail -1 "$NW_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/net_walk.sh"; cat "$NW_LOG"
+fi
+rm -f "$NW_LOG"
+
+# ----------------------------------------------------------------------------
 # Tier 2.85: a datatype's constructor type describes EVERY field.
 #   The count comes from the program (test/datatype_arity.sh), so this pins the property and not a
 #   number: the compiler used to scope a constructor's parameters and fields to a fixed 16, which

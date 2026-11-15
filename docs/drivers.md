@@ -248,6 +248,30 @@ the test suite; a long run is
 python3 test/fuzz_compile.py ./lin 500 <seed>
 ```
 
+### What the compiler leaves to the net
+
+`test/coverage.py` runs programs (by default every `.lin` under `test`,
+`examples` and `bench`) and reports, per top-level form, the reduction steps and
+time the net still spent after the compiler had its turn, with the reasons the
+compiler gave where it declined, ranked by time. It also lists the slowest files
+with their wall time split into net, compiling and the rest (reading, checking,
+expanding, the C compiler, readback), so a slow front end shows up as well:
+
+```sh
+python3 test/coverage.py ./lin [files or directories] [--min-steps N]
+```
+
+It is the list of what the compiler should learn next. At the time of writing,
+261 heavy forms across the corpus are compiled and 15 leave more than 20 000
+steps to the net. Those 15 are in three programs, for three reasons:
+
+- lists of lists in the std `list` encoding (`examples/linden`): the compiler
+  reads a std list's elements as numbers only;
+- a std `list` (a string) and a declared datatype (`Seq`) in one function
+  (`test/regex.lin`): read as a shape conflict;
+- superpositions: a value left half-duplicated in the net by an earlier form
+  (`examples/games/tictactoe.lin`), which the compiler's evaluator does not read.
+
 ## Writing a driver
 
 A driver is a C file that includes `src/lin.h`, exports a registration symbol,

@@ -977,6 +977,7 @@ static const Net *res_net; static Port res_at;
    which made each wave of a force cost the depth of the forces around it (measured: a lazy fold over 2000
    cells, 878k steps in 32 s, quadratic).  It is found from the top: inner forces' roots are gone when it runs. */
 static const Net *floor_net; static Port floor_port;
+static long walk_steps;   /* demand-walk steps, for LIN_WAVE_STATS (`walked=`): what test/net_walk.sh holds down */
 static void net_mark_demand(Net *n) {
   int first = -1;
   if (floor_net == n) {
@@ -997,6 +998,7 @@ static void net_mark_demand(Net *n) {
     for (;;) {
       int u = p.node;
       if (u < 0 || u >= n->nn || n->dead[u]) break;
+      walk_steps++;
       if (r == first) { arr[2] = arr[1]; arr[1] = arr[0]; arr[0] = p; }
       /* Visited PER PORT, not per node: an APP reached at its result and at its argument continues
          differently, so a node-level mark would cut the second path off and leave the redexes it
@@ -1148,9 +1150,10 @@ static void wave_pool_start(int want) {
   wpool_n = want - 1; ensure_tact(); wpool = calloc((size_t)wpool_n, sizeof *wpool);
   for (int i = 0; i < wpool_n; i++) pthread_create(&wpool[i], NULL, wave_worker, (void *)(intptr_t)(i + 1));
 }
-static int lin_wstats = -1; static long wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width;
+static int lin_wstats = -1; static long wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width, wv_walked;
 static void wv_report(void) {
-  fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld width=%ld\n", wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width);
+  wv_walked = walk_steps;
+  fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld width=%ld walked=%ld\n", wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width, wv_walked);
 }
 
 static int *fw_tkey; static unsigned *fw_tgen; static int fw_tcap; static unsigned fw_gen;

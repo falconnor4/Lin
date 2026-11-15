@@ -134,7 +134,58 @@ static int shrink_count_to(const Term *t, const char *x, int lim) {   /* (stops 
   return c > lim ? lim : c;
 }
 static int shrink_count(const Term *t, const char *x) { return shrink_count_to(t, x, 2); }
-static int shrink_free(const Term *t, const char *x) { return shrink_count_to(t, x, 1) > 0; }
+/* EVERY BINDER COUNTED IN ONE WALK.  Asking "how often does x occur" of a body per redex re-walked the body per
+   binder: an expanded program (every definition inlined at each use) has thousands of nested binders, and the
+   questions were quadratic in its size (measured: examples/games/tictactoe.lin, 20 s, 87% of it here).  One walk
+   with the binders in scope (a name maps to its innermost binder) counts them all, stored on the binder as
+   `occ`.  Shrinking only ever lowers a count -- an argument used once moves, one used never is dropped, none is
+   duplicated -- so a stored count is an upper bound, and an upper bound is safe: it can only keep a redex. */
+static unsigned sp_hash(const char *s);
+typedef struct { const char *nm; int top; } OccName;
+typedef struct { Term *b; int prev; } OccBind;
+static OccName *occ_nm; static size_t occ_cap, occ_n; static OccBind *occ_st; static int occ_sp, occ_stcap;
+static OccName *occ_slot(const char *nm) {
+  if ((occ_n + 1) * 2 > occ_cap) {
+    OccName *o = occ_nm; size_t oc = occ_cap;
+    occ_cap = occ_cap ? occ_cap * 2 : 256; occ_nm = calloc(occ_cap, sizeof *occ_nm); occ_n = 0;
+    for (size_t i = 0; i < oc; i++) if (o[i].nm) { OccName *s2 = occ_slot(o[i].nm); s2->top = o[i].top; }
+    free(o);
+  }
+  size_t j = sp_hash(nm) & (occ_cap - 1);
+  while (occ_nm[j].nm && occ_nm[j].nm != nm && strcmp(occ_nm[j].nm, nm)) j = (j + 1) & (occ_cap - 1);
+  if (!occ_nm[j].nm) { occ_nm[j].nm = nm; occ_nm[j].top = -1; occ_n++; }
+  return &occ_nm[j];
+}
+static void occ_enter(Term *b) {                     /* b's name now means b (until occ_pop) */
+  if (occ_sp == occ_stcap) occ_st = realloc(occ_st, (size_t)(occ_stcap = occ_stcap ? occ_stcap * 2 : 256) * sizeof *occ_st);
+  OccName *s = occ_slot(b->name); occ_st[occ_sp] = (OccBind){b, s->top}; s->top = occ_sp++;
+}
+static void occ_pop(void) { OccBind *e = &occ_st[--occ_sp]; occ_slot(e->b->name)->top = e->prev; }
+static Term *occ_binder(const char *nm) { int i = occ_slot(nm)->top; return i >= 0 ? occ_st[i].b : NULL; }
+enum { OCC_MANY = 255 };                             /* (a count past what a byte holds: "many", never decremented) */
+static void occ_walk(Term *t) {
+  for (; t; t = t->r) {                              /* (the right spine iteratively, as everywhere here) */
+    if (t->type == TVAR) { if (t->name[0]) { Term *b = occ_binder(t->name); if (b && b->occ < OCC_MANY) b->occ++; } return; }
+    if (t->type == TLAM && t->name[0]) { t->occ = 1; occ_enter(t); occ_walk(t->l); occ_pop(); return; }
+    occ_walk(t->l);                                  /* (a let's value means the enclosing names) */
+    if (t->type == TLET && t->name[0]) { t->occ = 1; occ_enter(t); occ_walk(t->r); occ_pop(); return; }
+  }
+}
+/* A term shrinking DROPS (an argument nobody uses, a dead let's value): the binders its names meant lose those
+   uses, so a let used only inside it is seen to be dead too.  `shrink` keeps the binders in scope as it goes. */
+static void occ_drop(Term *t) {
+  for (; t; t = t->r) {
+    if (t->type == TVAR) { if (t->name[0]) { Term *b = occ_binder(t->name); if (b && b->occ > 1 && b->occ < OCC_MANY) b->occ--; } return; }
+    if (t->type == TLAM && t->name[0]) { occ_enter(t); occ_drop(t->l); occ_pop(); return; }
+    occ_drop(t->l);
+    if (t->type == TLET && t->name[0]) { occ_enter(t); occ_drop(t->r); occ_pop(); return; }
+  }
+}
+/* what the stored count says (0 / 1 / 2 = more), or the walk when it was never counted */
+static int occ_of(const Term *binder, const Term *scope) {
+  if (!binder->occ) return shrink_count(scope, binder->name);
+  return binder->occ - 1 > 2 ? 2 : binder->occ - 1;
+}
 static int shrink_seq;
 static void shrink_rename(Term *t, const char *from, const char *to) {   /* free occurrences of `from` in t */
   if (!t) return;
@@ -167,6 +218,36 @@ static void sp_names(const Term *t, SpTab *C, int *n) {   /* every name an argum
 }
 /* (the names the argument being substituted mentions, when they fit the table: a binder among them is renamed) */
 static const SpTab *ss_names;
+/* ...and when they do not: the same set, grown to fit.  Without it each binder under the substitution asked
+   whether the argument mentions its name and whether the body still uses x -- two walks per binder, quadratic in
+   an expanded program (measured: examples/games/tictactoe.lin, 20 s, nearly all of it here).  Renaming a binder
+   the argument merely mentions is always safe, so the set answers alone. */
+typedef struct { const char **nm; size_t cap, n; } NameSet;
+static NameSet ss_big;
+static int ns_has(const NameSet *S, const char *nm) {
+  if (!S->cap) return 0;
+  for (size_t j = sp_hash(nm) & (S->cap - 1); S->nm[j]; j = (j + 1) & (S->cap - 1)) if (S->nm[j] == nm || !strcmp(S->nm[j], nm)) return 1;
+  return 0;
+}
+static void ns_put(NameSet *S, const char *nm) {
+  if ((S->n + 1) * 2 > S->cap) {
+    const char **o = S->nm; size_t oc = S->cap;
+    S->cap = S->cap ? S->cap * 2 : 256; S->nm = calloc(S->cap, sizeof *S->nm); S->n = 0;
+    for (size_t i = 0; i < oc; i++) if (o[i]) ns_put(S, o[i]);
+    free(o);
+  }
+  size_t j = sp_hash(nm) & (S->cap - 1);
+  while (S->nm[j]) { if (S->nm[j] == nm || !strcmp(S->nm[j], nm)) return; j = (j + 1) & (S->cap - 1); }
+  S->nm[j] = nm; S->n++;
+}
+static void ns_names(const Term *t, NameSet *S) {   /* as sp_names, unbounded */
+  for (; t; t = t->r) {
+    if (t->name && t->name[0] && t->type == TVAR && !shrink_protocol(t->name)) ns_put(S, t->name);
+    if (t->type == TVAR) return;
+    ns_names(t->l, S);
+  }
+}
+#define SS_CAPTURES(nm) (ss_names ? sp_find(ss_names, (nm)) >= 0 : ns_has(&ss_big, (nm)))
 /* t[x := a]: consumes t, copies a at the (single) occurrence */
 static Term *shrink_subst(Term *t, const char *x, const Term *a) {
   if (!t) return NULL;
@@ -176,7 +257,7 @@ static Term *shrink_subst(Term *t, const char *x, const Term *a) {
   }
   if (t->type == TLAM && t->name) {
     if (!strcmp(t->name, x)) return t;              /* shadowed: nothing below is x */
-    if (ss_names ? sp_find(ss_names, t->name) >= 0 : (shrink_free(a, t->name) && shrink_free(t, x))) {   /* the binder would capture a free name of a */
+    if (SS_CAPTURES(t->name)) {   /* the binder would capture a free name of a */
       const char *fresh = lin_internf(" s%d", shrink_seq++);
       shrink_rename(t->l, t->name, fresh);
       t->name = fresh;
@@ -184,7 +265,7 @@ static Term *shrink_subst(Term *t, const char *x, const Term *a) {
   }
   if (t->type == TLET && t->name) {
     if (!strcmp(t->name, x)) { t->l = shrink_subst(t->l, x, a); return t; }   /* the value means our x */
-    if (ss_names ? sp_find(ss_names, t->name) >= 0 : (shrink_free(a, t->name) && shrink_free(t->r, x))) {   /* the body would capture a free name of a */
+    if (SS_CAPTURES(t->name)) {   /* the body would capture a free name of a */
       const char *fresh = lin_internf(" s%d", shrink_seq++);
       shrink_rename(t->r, t->name, fresh);          /* (the value's occurrences mean the enclosing one) */
       t->name = fresh;
@@ -244,13 +325,17 @@ static Term *shrink_spine(Term *t) {                  /* NULL: not such a redex 
   if (nc >= SP_SLOTS / 2) return NULL;
   for (int i = 0; i < n; i++) if (sp_find(&C, lam[i]->name) >= 0) return NULL;   /* an argument names a parameter */
   for (int i = 0; i < n; i++) arg[i] = shrink(arg[i]);
+  for (int i = 0; i < n; i++) occ_enter(lam[i]);
   b = shrink(b);
+  for (int i = 0; i < n; i++) occ_pop();
   unsigned char cnt[SP_ARGS] = {0};
-  sp_count(b, &T, n == SP_ARGS ? ~(uint64_t)0 : (((uint64_t)1 << n) - 1), cnt);
+  int counted = 1; for (int i = 0; i < n; i++) counted &= lam[i]->occ != 0;
+  if (counted) for (int i = 0; i < n; i++) cnt[i] = (unsigned char)(lam[i]->occ - 1 > 2 ? 2 : lam[i]->occ - 1);
+  else sp_count(b, &T, n == SP_ARGS ? ~(uint64_t)0 : (((uint64_t)1 << n) - 1), cnt);
   uint64_t once = 0; int again = 0;
   for (int i = 0; i < n; i++) {
     if (cnt[i] == 1) { once |= (uint64_t)1 << i; again |= arg[i] && arg[i]->type == TLAM; }
-    else if (cnt[i] == 0) { term_free(arg[i]); arg[i] = NULL; }
+    else if (cnt[i] == 0) { occ_drop(arg[i]); term_free(arg[i]); arg[i] = NULL; }
   }
   b = sp_subst(b, &T, once, arg, &C);
   for (int i = n - 1; i >= 0; i--) {                 /* a parameter used more than once keeps its redex */
@@ -263,16 +348,17 @@ static int shrink_protocol(const char *x) { return !strcmp(x, "_op") || !strcmp(
 static Term *shrink(Term *t) {
   if (!t) return NULL;
   if (t->type == TAPP) { Term *r = shrink_spine(t); if (r) return r; }
-  t->l = shrink(t->l);
-  t->r = shrink(t->r);
+  if (t->type == TLAM && t->name[0]) { occ_enter(t); t->l = shrink(t->l); occ_pop(); t->r = shrink(t->r); }
+  else if (t->type == TLET && t->name[0]) { t->l = shrink(t->l); occ_enter(t); t->r = shrink(t->r); occ_pop(); }
+  else { t->l = shrink(t->l); t->r = shrink(t->r); }
   /* a `let` nothing names (its value refers to itself or not at all) is never demanded: it goes */
-  if (t->type == TLET && t->name && !shrink_free(t->r, t->name)) {
-    Term *body = t->r; t->r = NULL; term_free(t); return body;
+  if (t->type == TLET && t->name && !occ_of(t, t->r)) {
+    Term *body = t->r; t->r = NULL; occ_drop(t->l); term_free(t); return body;
   }
   if (t->type == TAPP && t->l && t->l->type == TLAM && t->l->name && !shrink_protocol(t->l->name)) {   /* (an annotation is the checker's, which has run) */
     Term *lam = t->l, *arg = t->r;
     /* (a binder found used twice stays so: substituting into its body renames around it, never removes a use) */
-    int uses = lam->nl ? 2 : shrink_count(lam->l, lam->name);
+    int uses = lam->nl ? 2 : occ_of(lam, lam->l);
     if (uses > 1) lam->nl = 1;
     if (uses <= 1) {
       Term *body = lam->l; lam->l = NULL;
@@ -283,9 +369,13 @@ static Term *shrink(Term *t) {
         SpTab C; memset(&C, 0, sizeof C); int nc = 0;
         sp_names(arg, &C, &nc);
         const SpTab *sv = ss_names; ss_names = nc < SP_SLOTS / 2 ? &C : NULL;
+        NameSet svb = ss_big;
+        if (!ss_names) { ss_big = (NameSet){0}; ns_names(arg, &ss_big); }
         body = shrink_subst(body, lam->name, arg);
-        ss_names = sv;
+        if (!ss_names) free(ss_big.nm);
+        ss_big = svb; ss_names = sv;
       }
+      if (uses == 0) occ_drop(arg);
       term_free(arg); term_release(lam); term_release(t);
       return again ? shrink(body) : body;
     }
@@ -296,7 +386,7 @@ static Term *shrink(Term *t) {
 static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, int *compiled, char *err, int errsz) {
   Term *ex = expand_defs(t);
   Term *opt = optimize ? egraph_optimize(ex) : ex;
-  if (opt != ex && !getenv("LIN_NO_SHRINK")) opt = shrink(opt);   /* what the e-graph's rewrites leave linear */
+  if (opt != ex && !getenv("LIN_NO_SHRINK")) { occ_walk(opt); opt = shrink(opt); }   /* what the e-graph's rewrites leave linear */
   int ok = compile(opt, net, err, errsz);
   if (!ok) { if (opt != ex) term_free(opt); term_free(ex); return -1; }
   if (compiled) *compiled = net->nn;
@@ -456,7 +546,7 @@ Term *expand_defs(Term *t) {
     res = term_new(TLET, gm[i].name, term_copy(gm[i].d->expanded_sh), res);
   free(gm);
   gm = sgm; ngm = sn; cgm = sc; gm_on = son;
-  if (!getenv("LIN_NO_SHRINK")) res = shrink(res);  /* (see shrink) */
+  if (!getenv("LIN_NO_SHRINK")) { occ_walk(res); res = shrink(res); }  /* (see shrink, occ_walk) */
   return res;
 }
 
