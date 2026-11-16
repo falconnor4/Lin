@@ -1435,6 +1435,10 @@ static int mv_find(const Expr *x) {
     if (mv[k].x == x || (mv[k].base && x->op == E_FIELD && x->a == mv[k].base && x->k == mv[k].k)) return mv[k].v;
   return -1;
 }
+static int mv_slot(const Expr *base, long k) {     /* the flag of slot k of base, moved out of an enclosing arm, or -1 */
+  for (int q = mv_n - 1; q >= 0; q--) if (!mv[q].x && mv[q].base == base && mv[q].k == k) return mv[q].v;
+  return -1;
+}
 static void mv_push(const Expr *x, const Expr *base, long k, int v) {
   if (mv_n == mv_c) mv = realloc(mv, sizeof *mv * (size_t)(mv_c = mv_c ? mv_c * 2 : 16));
   mv[mv_n].x = x; mv[mv_n].base = base; mv[mv_n].k = k; mv[mv_n].v = v; mv_n++; }
@@ -1642,6 +1646,123 @@ static void rc_own_copy(Buf *b, const Expr *e, int words) {   /* after `long *_o
   for (int j = 0; oc && j < oc->k; j++) if (rc_fdrop(oc, j, vs) >= 0) put(b, "lin_dup(_n[%d]); ", j + !e->untag);
   put(b, "lin_drop%d((long)_o); _o = _n; } ", drop_fn(shape_of(e->c)));
 }
+/* MOVED OUT OF AN ARM (counted).  A branch of a match that takes apart a block it owns, and ends -- on every path --
+   by rebuilding that block in place, never otherwise using the block whole: a data field of it used at most once on
+   any path is MOVED to that use when the block is unique (tested as the branch begins: nothing in it can take a
+   count of the block), and the rebuild does not release what that slot held.  `(_bal c (_ins cmp k v l) mk mv r)`
+   then hands the child down without a count, and the insertion rebuilds the whole path in place. */
+static int occ_like; static unsigned occ(const Expr *in, const Expr *x); static unsigned *nrefs; static int nrefs_cap;
+static int rc_arm_field(const Expr *m, int i, const LinCtor *ac, int j, Shape ss);
+static const LinCtor *rc_arm_ci(const Expr *m, int i) {
+  if (!m->ci) return NULL;
+  const LinCtor *c; for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == m->ci->dt && c->i == i) return c;
+  return NULL;
+}
+static int rc_arm_tails(const Expr *e, const Expr *p) {   /* every path ends rebuilding in p */
+  if (!e) return 0;
+  const Expr *K, *S; long off;
+  if (e->op == E_IF && !indexed_pick(e, &K, &S, &off)) return rc_arm_tails(e->b, p) && rc_arm_tails(e->c, p);
+  if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) if (!rc_arm_tails(e->args[i], p)) return 0; return e->nargs > 0; }
+  const Expr *f0, *x0;
+  return e->op == E_CTOR && e->c == p && e->nargs && !indexed_update(e, &K, &off, &f0, &x0);
+}
+static int rc_whole_r(const Expr *e, const Expr *p, unsigned char *seen) {   /* p used whole: not taken apart, read, or rebuilt in */
+  if (!e) return 0;
+  if (e == p) return 1;
+  if (e->op == E_PARAM || e->op == E_CONST || (e->id < (eid + 1) && seen[e->id])) return 0;
+  if (e->id < (eid + 1)) seen[e->id] = 1;
+  if (e->op == E_FIELD) return e->a == p ? 0 : rc_whole_r(e->a, p, seen);
+  if (e->op == E_MATCH && e->a == p) { for (int i = 0; i < e->nargs; i++) if (rc_whole_r(e->args[i], p, seen)) return 1; return 0; }
+  if (e->op == E_CTOR && e->c == p) { for (int i = 0; i < e->nargs; i++) if (rc_whole_r(e->args[i], p, seen)) return 1; return 0; }
+  { const Expr *K, *S; long off; if (e->op == E_IF && indexed_pick(e, &K, &S, &off) && S == p) return rc_whole_r(K, p, seen); }
+  if (rc_whole_r(e->a, p, seen) || rc_whole_r(e->b, p, seen) || (e->op != E_CTOR && rc_whole_r(e->c, p, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (rc_whole_r(e->args[i], p, seen)) return 1;
+  return 0;
+}
+static int rc_borrowed(int g, int k);
+static int rc_arm_moves(const Expr *m, int i) {
+  const Expr *p = m->a;
+  if (!p || p->op != E_PARAM || p->nargs != emitting || rc_borrowed(emitting, (int)p->k)) return 0;
+  const LinCtor *ac = rc_arm_ci(m, i); if (!ac || ac->k <= 0) return 0;
+  if (!rc_arm_tails(m->args[i], p)) { if (dbg > 2) DBG("[arm %d of a match on p%ld: a path does not rebuild in it]\n", i, p->k); return 0; }
+  unsigned char *seen = calloc((size_t)eid + 1, 1); int w = rc_whole_r(m->args[i], p, seen); free(seen);
+  if (w) { if (dbg > 2) DBG("[arm %d of a match on p%ld: it is used whole]\n", i, p->k); return 0; }
+  Shape ss = shape_of(p);
+  for (int j = 0; j < ac->k; j++) if (rc_arm_field(m, i, ac, j, ss)) return 1;
+  return 0;
+}
+/* (the order the emitted code evaluates an arm in, followed path by path: a value used twice is bound where its
+   region begins; a constructor's fields in order; a call's or an operator's operands in no order.  The field may be
+   used any number of times before it is handed on (consumed) on a path, and not at all after) */
+static const Expr *hz_p; static long hz_j; static int hz_bad, hz_any;
+static unsigned char *hz_t, *hz_done;               /* touches the field (2: yes, 1: no); bound already on this path */
+static int hz_isF(const Expr *e) { return e->op == E_FIELD && e->a == hz_p && e->k == hz_j; }
+static int hz_touch(const Expr *e) {
+  if (!e || e->id > eid) return e != NULL;
+  if (hz_t[e->id]) return hz_t[e->id] == 2;
+  int r = hz_isF(e);
+  if (!r && e->op != E_PARAM && e->op != E_CONST) {
+    r = hz_touch(e->a) || hz_touch(e->b) || (e->op != E_CTOR && hz_touch(e->c));
+    for (int i = 0; !r && i < e->nargs && e->args; i++) r = hz_touch(e->args[i]);
+  }
+  hz_t[e->id] = r ? 2 : 1; return r;
+}
+static int hz(const Expr *e, int consumed, int ctx);
+static void hz_shared(const Expr *e, int *consumed, const Expr ***marked, int *nm, unsigned char *seen) {   /* a region's bindings, first */
+  if (!e || e->op == E_PARAM || e->op == E_CONST || e->id > eid || seen[e->id]) return;
+  seen[e->id] = 1;
+  if (!hz_touch(e)) return;
+  if (e->id < nrefs_cap && nrefs[e->id] > 1 && !hz_isF(e) && !hz_done[e->id]) {
+    *consumed = hz(e, *consumed, 1); hz_done[e->id] = 1;
+    *marked = realloc(*marked, sizeof **marked * (size_t)(*nm + 1)); (*marked)[(*nm)++] = e; return;
+  }
+  if (e->op == E_IF || e->op == E_MATCH) { hz_shared(e->a, consumed, marked, nm, seen); return; }   /* (an arm is a region of its own) */
+  hz_shared(e->a, consumed, marked, nm, seen); hz_shared(e->b, consumed, marked, nm, seen); if (e->op != E_CTOR) hz_shared(e->c, consumed, marked, nm, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) hz_shared(e->args[i], consumed, marked, nm, seen);
+}
+static int hz_region(const Expr *e, int consumed, int ctx) {
+  const Expr **marked = NULL; int nm = 0; unsigned char *seen = calloc((size_t)eid + 2, 1);
+  hz_shared(e, &consumed, &marked, &nm, seen); free(seen);
+  int r = hz(e, consumed, ctx);
+  for (int q = 0; q < nm; q++) hz_done[marked[q]->id] = 0;
+  free(marked); return r;
+}
+static int hz(const Expr *e, int consumed, int ctx) {
+  if (!e || hz_bad) return consumed;
+  if (hz_isF(e)) { if (consumed) hz_bad = 1; if (ctx) hz_any = 1; return consumed | ctx; }
+  if (e->op == E_PARAM || e->op == E_CONST || !hz_touch(e) || (e->id <= eid && hz_done[e->id])) return consumed;
+  { const Expr *K, *S; long off;
+    if (e->op == E_IF && indexed_pick(e, &K, &S, &off)) { consumed = hz(K, consumed, 0); return hz(S, consumed, 0); } }
+  switch (e->op) {
+  case E_FIELD: return hz(e->a, consumed, 0);
+  case E_IF: { int c = hz(e->a, consumed, 0); return hz_region(e->b, c, ctx) | hz_region(e->c, c, ctx); }
+  case E_MATCH: { int c = hz(e->a, consumed, 0), r = c; for (int i = 0; i < e->nargs; i++) r |= hz_region(e->args[i], c, ctx); return r; }
+  case E_CTOR: { int c = consumed; for (int i = 0; i < e->nargs; i++) if (!e->ci || field_live(e->ci, i)) c = hz(e->args[i], c, 1); return c; }
+  default: {                                         /* (operands in no order) */
+    int nk = 0, cons = 0, out = consumed;
+    for (int i = 0; i < e->nargs && e->args; i++) if (hz_touch(e->args[i])) nk++;
+    if (e->a && hz_touch(e->a)) nk++;
+    if (e->b && hz_touch(e->b)) nk++;
+    for (int i = 0; i < e->nargs && e->args; i++) {
+      int ci = e->op == E_CALL && e->k >= 0 && e->k < nfun && !rc_borrowed((int)e->k, i);
+      int o = hz(e->args[i], consumed, ci); if (o && !consumed) cons = 1; out |= o;
+    }
+    if (e->a) out |= hz(e->a, consumed, 0);
+    if (e->b) out |= hz(e->b, consumed, 0);
+    if (cons && nk > 1) hz_bad = 1;
+    return out; }
+  }
+}
+static int rc_arm_field(const Expr *m, int i, const LinCtor *ac, int j, Shape ss) {   /* field j moves out of arm i */
+  long k = ctor_id(ac);
+  if (k <= 0 || k > sh_nctor || !field_live(ac, j)) return 0;
+  Shape fs = field_shape(sh_fld, sh_nctor, ac, k, j, ss); if (fs.k != 5 || !fs.dt) return 0;
+  hz_p = m->a; hz_j = j; hz_bad = hz_any = 0;
+  hz_t = calloc((size_t)eid + 2, 1); hz_done = calloc((size_t)eid + 2, 1);
+  hz_region(m->args[i], 0, 1);
+  free(hz_t); free(hz_done); hz_t = hz_done = NULL;
+  return !hz_bad && hz_any;
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
@@ -1781,7 +1902,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         for (int i = 0; i < e->nargs; i++) { n += tcount_m(e->args[i], 1, NULL, e->c, hole); other += tcount_m(e->args[i], 2, NULL, e->c, 0); }
         if (other) n = 0;   /* (the block itself read whole: something may take a count of it) */
         Shape ovs; const LinCtor *oci = rc_old_ci(e, &ovs);
-        if (n == 1 && tcount_m(c, 1, NULL, e->c, hole) == 1 && rc_fdrop(oci, hole, ovs) >= 0) {
+        if (n == 1 && tcount_m(c, 1, NULL, e->c, hole) == 1 && rc_fdrop(oci, hole, ovs) >= 0 && mv_slot(e->c, hole) < 0) {
           hm = nvar++; put(b, "int _m%d = lin_uniq((long *)(", hm); if (!emitx(b, pre, e->c, par, budget - 1)) return 0; put(b, ")); ");
           mv_push(NULL, e->c, hole, hm);
         }
@@ -1881,6 +2002,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         for (int i = 0; ok && i < e->nargs; i++) {
           const Expr *a = e->args[i];
           if (SAMEF(a) || a == dp_hole || rc_fdrop(oci, i, ovs) < 0) continue;
+          if (mv_slot(e->c, i) >= 0) continue;   /* (moved out of the arm: see MOVED OUT OF AN ARM) */
           unsigned n = a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))   /* (`cond ? new : old`: the old is kept, not used) */
             ? tcount_m(a->a, 1, NULL, e->c, i) + tcount_m(SAMEF(a->c) ? a->b : a->c, 1, NULL, e->c, i) : tcount_m(a, 1, NULL, e->c, i);
           if (n != 1) continue;
@@ -1915,12 +2037,14 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         int fd = rc_on() ? rc_fdrop(oci, i, ovs) : -1;   /* (counted: a store releases what it replaces -- as what it was) */
         if (a == dp_hole && fd >= 0) {
           if (dp_hole_m >= 0) put(b, "if (_m%d != 2) ", dp_hole_m);
+          else if (mv_slot(e->c, i) >= 0) put(b, "if (_m%d != 2) ", mv_slot(e->c, i));
           put(b, "lin_drop%d(_o[%d]); ", fd, i + !e->untag); continue;
         }   /* (its call writes it; the old value goes) */
         if (SAMEF(a) || a == dp_hole) continue;   /* (the hole of a destination-passing cell: its call writes it) */
         if (fd >= 0) {
           if (a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))) put(b, "if (%s_c%d) ", SAMEF(a->c) ? "" : "!", i);
-          if (mvs[i] >= 0) put(b, "{ long _old = _o[%d]; _o[%d] = _a%d; if (_m%d != 2) lin_drop%d(_old); } ", i + !e->untag, i + !e->untag, i, mvs[i], fd);
+          int am = mvs[i] >= 0 ? mvs[i] : mv_slot(e->c, i);
+          if (am >= 0) put(b, "{ long _old = _o[%d]; _o[%d] = _a%d; if (_m%d != 2) lin_drop%d(_old); } ", i + !e->untag, i + !e->untag, i, am, fd);
           else put(b, "{ long _old = _o[%d]; _o[%d] = _a%d; lin_drop%d(_old); } ", i + !e->untag, i + !e->untag, i, fd);
           continue;
         }
@@ -2002,6 +2126,18 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         put(b, "; })");
         for (int j = 0; j < nfl; j++) if (fl[j]) fl[j]->var = -1;
         free(fl);
+        if (!ok) return 0;
+      } else if (rc_on() && !par && rc_arm_moves(e, i)) {   /* (counted: see MOVED OUT OF AN ARM) */
+        const LinCtor *ac = rc_arm_ci(e, i); Shape ss = shape_of(e->a); int uv = nvar++, mv0 = mv_n;
+        put(b, "({ int _u%d = lin_uniq((long *)_s); ", uv);
+        for (int j = 0; j < ac->k; j++) {
+          if (!rc_arm_field(e, i, ac, j, ss)) continue;
+          int m = nvar++; put(b, "int _m%d = _u%d; ", m, uv); mv_push(NULL, e->a, j, m);
+        }
+        tailpos = tp;
+        int ok = emit_region(b, pre, e->args[i], par, budget - 1);
+        mv_n = mv0;
+        put(b, "; })");
         if (!ok) return 0;
       } else if ((tailpos = tp, !emit_region(b, pre, e->args[i], par, budget - 1))) return 0;
       if (rcf >= 0) { put(b, "; })"); rcf_n--; }
