@@ -1708,21 +1708,23 @@ static int hz_touch(const Expr *e) {
   hz_t[e->id] = r ? 2 : 1; return r;
 }
 static int hz(const Expr *e, int consumed, int ctx);
-static void hz_shared(const Expr *e, int *consumed, const Expr ***marked, int *nm, unsigned char *seen) {   /* a region's bindings, first */
-  if (!e || e->op == E_PARAM || e->op == E_CONST || e->id > eid || seen[e->id]) return;
-  seen[e->id] = 1;
+static unsigned *hz_seen, hz_stamp_n;
+static void hz_shared(const Expr *e, int *consumed, const Expr ***marked, int *nm, unsigned char *unused) {   /* a region's bindings, first */
+  (void)unused; unsigned *seen = hz_seen; unsigned st = hz_stamp_n;
+  if (!e || e->op == E_PARAM || e->op == E_CONST || e->id > eid || seen[e->id] == st) return;
+  seen[e->id] = st;
   if (!hz_touch(e)) return;
   if (e->id < nrefs_cap && nrefs[e->id] > 1 && !hz_isF(e) && !hz_done[e->id]) {
-    *consumed = hz(e, *consumed, 1); hz_done[e->id] = 1;
+    *consumed = hz(e, *consumed, 1); hz_stamp_n = st; hz_done[e->id] = 1;
     *marked = realloc(*marked, sizeof **marked * (size_t)(*nm + 1)); (*marked)[(*nm)++] = e; return;
   }
-  if (e->op == E_IF || e->op == E_MATCH) { hz_shared(e->a, consumed, marked, nm, seen); return; }   /* (an arm is a region of its own) */
-  hz_shared(e->a, consumed, marked, nm, seen); hz_shared(e->b, consumed, marked, nm, seen); if (e->op != E_CTOR) hz_shared(e->c, consumed, marked, nm, seen);
-  for (int i = 0; i < e->nargs && e->args; i++) hz_shared(e->args[i], consumed, marked, nm, seen);
+  if (e->op == E_IF || e->op == E_MATCH) { hz_shared(e->a, consumed, marked, nm, NULL); return; }   /* (an arm is a region of its own) */
+  hz_shared(e->a, consumed, marked, nm, NULL); hz_shared(e->b, consumed, marked, nm, NULL); if (e->op != E_CTOR) hz_shared(e->c, consumed, marked, nm, NULL);
+  for (int i = 0; i < e->nargs && e->args; i++) hz_shared(e->args[i], consumed, marked, nm, NULL);
 }
 static int hz_region(const Expr *e, int consumed, int ctx) {
-  const Expr **marked = NULL; int nm = 0; unsigned char *seen = calloc((size_t)eid + 2, 1);
-  hz_shared(e, &consumed, &marked, &nm, seen); free(seen);
+  const Expr **marked = NULL; int nm = 0;
+  hz_stamp_n++; hz_shared(e, &consumed, &marked, &nm, NULL);
   int r = hz(e, consumed, ctx);
   for (int q = 0; q < nm; q++) hz_done[marked[q]->id] = 0;
   free(marked); return r;
@@ -1758,9 +1760,9 @@ static int rc_arm_field(const Expr *m, int i, const LinCtor *ac, int j, Shape ss
   if (k <= 0 || k > sh_nctor || !field_live(ac, j)) return 0;
   Shape fs = field_shape(sh_fld, sh_nctor, ac, k, j, ss); if (fs.k != 5 || !fs.dt) return 0;
   hz_p = m->a; hz_j = j; hz_bad = hz_any = 0;
-  hz_t = calloc((size_t)eid + 2, 1); hz_done = calloc((size_t)eid + 2, 1);
+  hz_t = calloc((size_t)eid + 2, 1); hz_done = calloc((size_t)eid + 2, 1); hz_seen = calloc((size_t)eid + 2, sizeof *hz_seen); hz_stamp_n = 0;
   hz_region(m->args[i], 0, 1);
-  free(hz_t); free(hz_done); hz_t = hz_done = NULL;
+  free(hz_t); free(hz_done); free(hz_seen); hz_t = hz_done = NULL; hz_seen = NULL;
   return !hz_bad && hz_any;
 }
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
@@ -3374,6 +3376,87 @@ static unsigned rc_refs_r(const Expr *e, const Expr *a, unsigned char *seen) {  
 }
 static unsigned rc_refs(const Expr *body, const Expr *a) { unsigned char *seen = calloc((size_t)eid + 1, 1); unsigned n = rc_refs_r(body, a, seen); free(seen); return n; }
 static void rc_leaves(Expr **slot, int f);
+/* THE LAST USE MOVES.  A parameter handed to a call or a constructor that nothing evaluated after it uses is handed
+   on -- its reference moves -- though it was used before (lent, or given a count of its own): `(f72 ps (rest)
+   (f123 .. s ..) s)` hands s to the next step instead of a new reference and a release.  Liveness is followed
+   backwards in the order the emitted code evaluates: a constructor's fields in order, a call's operands in no
+   order (the call itself comes after all of them), the arms of a choice after its test, and a value used twice
+   both where its region binds it and where it is used (whichever the emitter does, the answer is safe). */
+static int lu_f; static long lu_k; static int lu_cap;
+static unsigned char *lu_after, *lu_has, *lu_memo;   /* live after a node (any visit); contains the parameter; visited with live_after 0 / 1 */
+static int lu_isP(const Expr *e) { return e->op == E_PARAM && e->nargs == lu_f && e->k == lu_k; }
+static int lu_contains(const Expr *e) {
+  if (!e) return 0;
+  if (lu_isP(e)) return 1;
+  if (e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap) return e->id >= lu_cap;   /* (a node made since: assume so) */
+  if (lu_has[e->id]) return lu_has[e->id] == 2;
+  int r = lu_contains(e->a) || lu_contains(e->b) || (e->op != E_CTOR && lu_contains(e->c)) || (e->op == E_CTOR && e->c && lu_contains(e->c));
+  for (int i = 0; !r && i < e->nargs && e->args; i++) r = lu_contains(e->args[i]);
+  lu_has[e->id] = r ? 2 : 1; return r;
+}
+static int lu(const Expr *e, int la);
+static unsigned *lu_seen; static unsigned lu_stamp, lu_stamp_n;   /* (one array for every region of a walk: a region is a stamp) */
+static void lu_bound(const Expr *e, int la, unsigned char *unused) {   /* a region's shared values, as if bound where it begins */
+  (void)unused;
+  if (!e || e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap || lu_seen[e->id] == lu_stamp || !lu_contains(e)) return;
+  lu_seen[e->id] = lu_stamp;
+  if (e->id < nrefs_cap && nrefs[e->id] > 1) { unsigned st = lu_stamp; lu(e, 1); lu_stamp = st; return; }   /* (bound early: anything after may follow it) */
+  if (e->op == E_IF || e->op == E_MATCH) { lu_bound(e->a, la, NULL); return; }
+  lu_bound(e->a, la, NULL); lu_bound(e->b, la, NULL); lu_bound(e->c, la, NULL);
+  for (int i = 0; i < e->nargs && e->args; i++) lu_bound(e->args[i], la, NULL);
+}
+static int lu_region(const Expr *e, int la) {
+  unsigned st = lu_stamp; lu_stamp = ++lu_stamp_n; lu_bound(e, la, NULL); lu_stamp = st;
+  return lu(e, la);
+}
+static int lu(const Expr *e, int la) {               /* is the parameter live before e, given whether it is after */
+  if (!e) return la;
+  if (e->id >= lu_cap) return 1;
+  lu_after[e->id] |= la;
+  if (lu_isP(e)) return 1;
+  if (e->op == E_PARAM || e->op == E_CONST || !lu_contains(e)) return la;
+  if (lu_memo[e->id] & (la ? 2 : 1)) return 1;      /* (visited so: it contains the parameter, so it is live before) */
+  lu_memo[e->id] |= la ? 2 : 1;
+  { const Expr *K, *S; long off;
+    if (e->op == E_IF && indexed_pick(e, &K, &S, &off)) { int l = lu(S, la); return lu(K, l); } }
+  switch (e->op) {
+  case E_FIELD: return lu(e->a, la);
+  case E_IF: { int b = lu_region(e->b, la), c = lu_region(e->c, la); return lu(e->a, b || c); }
+  case E_MATCH: { int any = 0; for (int i = 0; i < e->nargs; i++) any |= lu_region(e->args[i], la); return lu(e->a, any); }
+  case E_CTOR: {
+    int l = la;
+    for (int i = e->nargs - 1; i >= 0; i--) if (!e->ci || field_live(e->ci, i)) l = lu(e->args[i], l);
+    if (e->c) l = lu(e->c, l);
+    return l; }
+  default: {                                         /* (operands in no order; the call after them all) */
+    int n = 0;
+    const Expr *k[2] = { e->a, e->b };
+    for (int i = 0; i < 2; i++) n += k[i] && lu_contains(k[i]);
+    for (int i = 0; i < e->nargs && e->args; i++) n += lu_contains(e->args[i]);
+    for (int i = 0; i < 2; i++) if (k[i]) lu(k[i], la || n > 1);
+    for (int i = 0; i < e->nargs && e->args; i++) lu(e->args[i], la || n > 1);
+    return la || n > 0; }
+  }
+}
+static unsigned char **lu_cache; static int *lu_cache_cap;   /* (per parameter of the unit) */
+static int lu_last(const Expr *body, int f, long k, const Expr *site) {   /* is site the last use of f's parameter k? */
+  if (f < 0 || f >= nfun || k < 0 || k >= funs[f].arity || !site) return 0;
+  if (!lu_cache) { lu_cache = calloc((size_t)nfun, sizeof *lu_cache); lu_cache_cap = calloc((size_t)nfun, sizeof *lu_cache_cap); }
+  if (!lu_cache[f]) { lu_cache[f] = calloc((size_t)funs[f].arity, sizeof(unsigned char *)); }
+  unsigned char **pc = (unsigned char **)lu_cache[f];
+  if (!pc[k]) {
+    lu_f = f; lu_k = k; lu_cap = eid;
+    lu_after = calloc((size_t)eid + 1, 1); lu_has = calloc((size_t)eid + 1, 1); lu_memo = calloc((size_t)eid + 1, 1);
+    lu_seen = calloc((size_t)eid + 1, sizeof *lu_seen); lu_stamp = lu_stamp_n = 0;
+    lu_region(body, 0);
+    free(lu_has); free(lu_memo); free(lu_seen); lu_seen = NULL; pc[k] = lu_after; lu_cache_cap[f] = eid;
+  }
+  return site->id < lu_cache_cap[f] && !pc[k][site->id];
+}
+static void lu_reset(void) {
+  if (lu_cache) { for (int f = 0; f < nfun; f++) if (lu_cache[f]) { unsigned char **pc = (unsigned char **)lu_cache[f]; for (int k = 0; k < funs[f].arity; k++) free(pc[k]); free(pc); } free(lu_cache); free(lu_cache_cap); }
+  lu_cache = NULL; lu_cache_cap = NULL;
+}
 static int rc_seen_cap;                              /* (the nodes the walk's `seen` covers: rc_leaves makes more as it goes) */
 static void rc_marks(Expr *e, const Expr *body, int f, unsigned char *seen) {
   if (!e || e->op == E_PARAM || e->op == E_CONST) return;
@@ -3402,7 +3485,8 @@ static void rc_marks(Expr *e, const Expr *body, int f, unsigned char *seen) {
         continue;
       }
       int once;
-      if (a->op == E_PARAM || a->op == E_FIELD) {   /* (by value, on the paths through this place: see rc_like) */
+      if (a->op == E_PARAM && a->nargs == f && f >= 0 && !rc_borrowed(f, (int)a->k)) once = lu_last(body, f, a->k, e);   /* (see THE LAST USE MOVES) */
+      else if (a->op == E_PARAM || a->op == E_FIELD) {   /* (by value, on the paths through this place: see rc_like) */
         occ_like = 1; once = e->op == E_CALL ? occ_through(body, a, e) <= 1 : occ_stored(body, a) <= 1; occ_like = 0;
       } else once = (a->id < nrefs_cap && nrefs[a->id] <= 1) || (e->op == E_CALL ? occ_through(body, a, e) <= 1 : occ_stored(body, a) <= 1);
       /* moved: what a path hands on once -- a call's result or a constructor (every call returns a reference of its
@@ -3580,6 +3664,7 @@ static void rc_borrow(Expr *entry) {
     if (rc_bor[g][k] && dbg > 1) DBG("[counted: f%d's parameter %d is borrowed]\n", g, k);
 }
 static void rc_all(Expr *entry) {
+  lu_cache = NULL; lu_cache_cap = NULL;              /* (a compile that failed part way left its own: the arena is gone, they leak) */
   rc_borrow(entry);
   if (nrefs_cap) memset(nrefs, 0, sizeof *nrefs * (size_t)nrefs_cap);
   mm_new(MM_NUM); for (int i = 0; i < nfun; i++) count_refs(funs[i].body); count_refs(entry);
@@ -3589,6 +3674,7 @@ static void rc_all(Expr *entry) {
     free(seen);
     if (g >= 0) rc_leaves(&funs[g].body, g);       /* (what a body ends with is handed to its caller; the entry's is read back) */
   }
+  lu_reset();                                        /* (while nfun and the arities are still the ones it was built for) */
 }
 static void drops(Expr *entry) {
   ndrop = 0;
