@@ -2999,27 +2999,44 @@ static void tail_uses(const Expr *e, unsigned *n);
    the tail call, its arguments evaluated, or after the value a path ends with. */
 static int fun_reads(int h);
 static int rc_borrowed(int g, int k); static unsigned char **rc_bor; static int rc_held(const Expr *a, int f);
+/* (the value a drop is for: the same node, or -- a parameter -- the same parameter of the same function, whatever
+   node names it there) */
+#define PEQ(x, p) ((x) == (p) || ((x) && (p)->op == E_PARAM && (x)->op == E_PARAM && (x)->nargs == (p)->nargs && (x)->k == (p)->k))
+static int contains(const Expr *e, const Expr *x, int depth);
+static int pcontains_r(const Expr *e, const Expr *p, unsigned char *seen) {
+  if (!e) return 0;
+  if (PEQ(e, p)) return 1;
+  if (e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (pcontains_r(e->a, p, seen) || pcontains_r(e->b, p, seen) || pcontains_r(e->c, p, seen)) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (pcontains_r(e->args[i], p, seen)) return 1;
+  return 0;
+}
+static int pcontains(const Expr *e, const Expr *p) {
+  if (p->op != E_PARAM) return contains(e, p, 0);
+  unsigned char *seen = calloc((size_t)eid + 1, 1); int r = pcontains_r(e, p, seen); free(seen); return r;
+}
 static int lent_only(const Expr *e, const Expr *p, unsigned char *seen) {   /* p in e only as a lent argument */
-  if (!e || e == p) return e != p;
+  if (!e || PEQ(e, p)) return !PEQ(e, p);
   if (e->op == E_PARAM || e->op == E_CONST || seen[e->id]) return 1;
   seen[e->id] = 1;
-  if (!contains(e, p, 0)) return 1;
-  if (e->op == E_FIELD && e->a == p) return 1;   /* (counted: reading a field of p borrows p -- a field handed on is given its own reference) */
-  if (e->op == E_MATCH && e->a == p) {   /* (counted: taking p apart reads it; only a rebuild in it, below, hands it on) */
+  if (!pcontains(e, p)) return 1;
+  if (e->op == E_FIELD && PEQ(e->a, p)) return 1;   /* (counted: reading a field of p borrows p -- a field handed on is given its own reference) */
+  if (e->op == E_MATCH && PEQ(e->a, p)) {   /* (counted: taking p apart reads it; only a rebuild in it, below, hands it on) */
     for (int i = 0; i < e->nargs; i++) if (!lent_only(e->args[i], p, seen)) return 0;
     return 1;
   }
-  if (e->op == E_CTOR && e->c == p) return 0;        /* (rebuilt in p: handed on) */
+  if (e->op == E_CTOR && PEQ(e->c, p)) return 0;        /* (rebuilt in p: handed on) */
   if (e->op == E_CTOR && e->args) {                  /* (a field given a new reference of p: p is still p's) */
     for (int i = 0; i < e->nargs; i++) {
-      if (e->args[i] == p) { if (!(i < CLONE_BITS && ((e->rcdup >> i) & 1u))) return 0; }
+      if (PEQ(e->args[i], p)) { if (!(i < CLONE_BITS && ((e->rcdup >> i) & 1u))) return 0; }
       else if (!lent_only(e->args[i], p, seen)) return 0;
     }
     return lent_only(e->a, p, seen) && lent_only(e->b, p, seen);
   }
   if (e->op == E_VOP) {                              /* (a read lends it; a consumer was handed it, unless given a new reference) */
     for (int i = 0; i < e->nargs; i++) {
-      if (e->args[i] == p) { if (vop_takes(e, i) && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u))) return 0; }
+      if (PEQ(e->args[i], p)) { if (vop_takes(e, i) && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u))) return 0; }
       else if (!lent_only(e->args[i], p, seen)) return 0;
     }
     return 1;
@@ -3027,7 +3044,7 @@ static int lent_only(const Expr *e, const Expr *p, unsigned char *seen) {   /* p
   if (e->op == E_CALL) {
     /* (a callee reading p as a lifted parameter borrows it) */
     for (int i = 0; i < e->nargs; i++) {
-      if (e->args[i] == p) { if (!(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !rc_borrowed((int)e->k, i)) return 0; }
+      if (PEQ(e->args[i], p)) { if (!(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !rc_borrowed((int)e->k, i)) return 0; }
       else if (!lent_only(e->args[i], p, seen)) return 0;
     }
     return 1;
@@ -3053,13 +3070,13 @@ static void drop_at(Expr **slot, const Expr *p, int fn) {   /* this path's end, 
 static int rc_owned_scrut(const Expr *e, int f); static int ho_f;   /* (REFERENCE COUNTING, below) */
 static void drop_paths(Expr **slot, const Expr *p, int fn, int seen) {
   Expr *e = *slot;
-  if (e == p) return;                                /* (handed on whole) */
-  if (e->op == E_CTOR && e->c == p) return;         /* (rebuilt in: the block is the result) */
+  if (PEQ(e, p)) return;                                /* (handed on whole) */
+  if (e->op == E_CTOR && PEQ(e->c, p)) return;         /* (rebuilt in: the block is the result) */
   if ((e->op == E_IF && !indexed_pick(e, &(const Expr *){0}, &(const Expr *){0}, &(long){0})) || (e->op == E_MATCH && e->a != p)) {
     const Expr *c = e->a;
     if (!lent(c, p)) return;
     Expr *c2 = A(sizeof *c2); *c2 = *e; c2->id = eid++; c2->var = -1; *slot = c2;
-    int s2 = seen || contains(c, p, 0);
+    int s2 = seen || pcontains(c, p);
     if (e->op == E_IF) { drop_paths(&c2->b, p, fn, s2); drop_paths(&c2->c, p, fn, s2); return; }
     c2->args = A(sizeof(Expr *) * (size_t)(e->nargs ? e->nargs : 1)); memcpy(c2->args, e->args, sizeof(Expr *) * (size_t)e->nargs);
     for (int i = 0; i < e->nargs; i++) drop_paths(&c2->args[i], p, fn, s2);
@@ -3074,13 +3091,13 @@ static void drop_paths(Expr **slot, const Expr *p, int fn, int seen) {
   }
   if (e->op == E_MATCH) return;                      /* (p taken apart: what becomes of it is the match's business) */
   if (e->op == E_CALL && fun_reads((int)e->k)) {   /* (counted: it reads p as a lifted parameter -- p goes once it returns) */
-    for (int i = 0; i < e->nargs; i++) if (e->args[i] == p && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !rc_borrowed((int)e->k, i)) return;
+    for (int i = 0; i < e->nargs; i++) if (PEQ(e->args[i], p) && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !rc_borrowed((int)e->k, i)) return;
     if (!lent(e, p)) return;
     drop_after = 1; drop_at(slot, p, fn); drop_after = 0; return;
   }
-  if (e->op == E_CALL) { if (fun_reads((int)e->k)) return; for (int i = 0; i < e->nargs; i++) if (e->args[i] == p && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !(rc_borrowed((int)e->k, i))) return; }
+  if (e->op == E_CALL) { if (fun_reads((int)e->k)) return; for (int i = 0; i < e->nargs; i++) if (PEQ(e->args[i], p) && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !(rc_borrowed((int)e->k, i))) return; }
   if (!lent(e, p)) return;
-  if (seen || contains(e, p, 0)) drop_at(slot, p, fn);
+  if (seen || pcontains(e, p)) drop_at(slot, p, fn);
 }
 /* A TEMPORARY: a value built to be an argument of one call, named nowhere else, which that call only reads (it
    does not own the parameter and hands back none of it).  Nothing frees it -- the callee does not own it, and
@@ -3339,6 +3356,13 @@ static void rc_marks(Expr *e, const Expr *body, int f, unsigned char *seen) {
       if (a->op == E_PARAM || a->op == E_FIELD) {   /* (by value, on the paths through this place: see rc_like) */
         occ_like = 1; once = e->op != E_CTOR ? occ_through(body, a, e) <= 1 : occ_stored(body, a) <= 1; occ_like = 0;
         if (!once && a->op == E_PARAM && a->nargs == f && f >= 0 && !rc_borrowed(f, (int)a->k)) once = lu_last(body, f, a->k, e);   /* (see THE LAST USE MOVES) */
+        /* (not when this very place also names it: `(smap (kick bs) bs)` lends the list to the closure -- a lifted
+           parameter of the map, or another argument -- while the map consumes it; the uses are at once, and the
+           one that moves needs a count of its own) */
+        if (once && a->op == E_PARAM && e->op == E_CALL) {
+          if (e->k < lifted && fv_has((int)e->k, a->nargs, a->k)) once = 0;
+          for (int j = 0; j < e->nargs && once; j++) if (j != i && pcontains(e->args[j], a)) once = 0;
+        }
       } else once = (a->id < nrefs_cap && nrefs[a->id] <= 1) || (e->op != E_CTOR ? occ_through(body, a, e) <= 1 : occ_stored(body, a) <= 1);
       /* moved: what a path hands on once -- a call's result or a constructor (every call returns a reference of its
          own), a parameter (every parameter is owned), a field of a block this branch takes apart */
@@ -3352,6 +3376,10 @@ static void rc_marks(Expr *e, const Expr *body, int f, unsigned char *seen) {
         }
 #undef RC_SAMEF
       }
+      /* (a choice is handed on through its leaves only where nothing else names it: one bound to a local that other
+         places read too is ONE evaluation, and private copies of it would be a second -- the local is dropped
+         where its paths end, and this place takes a count of its own) */
+      if (moved && (a->op == E_IF || a->op == E_MATCH) && !(a->id < nrefs_cap && nrefs[a->id] <= 1)) moved = 0;
       if (moved && (a->op == E_IF || a->op == E_MATCH)) { rc_leaves(&e->args[i], f); continue; }
       if (!moved) e->rcdup |= 1u << i;
     }
@@ -3592,6 +3620,7 @@ static void ownership(Expr *entry) {
      function reading it for as long as it runs), and used once on any path (a block rebuilt while a later use still
      reads it would be read changed).  That a CALLER holds it too is not this function's question: the block's count
      is, when it is rebuilt -- one, and it is rebuilt in place; more, and it is copied. */
+  lift();                                            /* (what each function reads of others' parameters: rc_marks) */
   uparam = A(sizeof *uparam * (size_t)nfun);
   for (int i = 0; i < nfun; i++) { int a = funs[i].arity ? funs[i].arity : 1; uparam[i] = A((size_t)a); memset(uparam[i], 1, (size_t)a); }
   for (int i = 0; i < nfun; i++) { mm_new(MM_NUM); captured(funs[i].body, i); }
