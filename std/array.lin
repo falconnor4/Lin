@@ -1,20 +1,18 @@
 ; ==============================================================================
 ; Lin Standard Library: Array -- indexed storage with in-place update
 ; ==============================================================================
-; An array of n elements is a 32-way radix trie whose bottom nodes hold 32 elements
-; each: `get` and `set` walk one node per five bits of the index (4 for a million
-; elements).  It is ordinary
-; Lin -- a datatype and `match` -- so it is persistent by default: `aset` returns a
-; new array and the old one is unchanged.  And because it is a datatype, the
-; function compiler reads it as C blocks and proves ownership from the net: an
-; array nothing else holds is updated IN PLACE, path node by path node, which is
-; what a mutable vector costs.  No mutation, no borrow checker, no GC.
+; An array is a value of type `vec a`.  Compiled, it is one flat block of its elements: read by index, set IN
+; PLACE when the code holds the only reference to it (its count says so) and copied when it does not, grown by
+; doubling -- what a mutable vector costs, with no mutation in the language.  On the net (and wherever a vector
+; crosses between the net and compiled code) it is its pure meaning: a 32-way radix trie whose bottom nodes hold
+; 32 elements, `get` and `set` walking one node per five bits of the index.  Either way it is persistent: `aset`
+; returns a new array and the old one, if anything still holds it, is unchanged.
 ;
 ;   (array n x)        n copies of x
 ;   (alen a)           its length
 ;   (aget a i)         element i
 ;   (aset a i x)       a with element i replaced
-;   (apush a x)        a with x appended (grows a level when full)
+;   (apush a x)        a with x appended
 ;   (afold f z a)      f over the elements in order, from z
 ;   (aof_seq s)        the elements of a Seq, as an array
 ;   (ato_seq a)        the array's elements, as a Seq
