@@ -3385,44 +3385,97 @@ static void rc_leaves(Expr **slot, int f);
 static int lu_f; static long lu_k; static int lu_cap;
 static unsigned char *lu_after, *lu_has, *lu_memo;   /* live after a node (any visit); contains the parameter; visited with live_after 0 / 1 */
 static int lu_isP(const Expr *e) { return e->op == E_PARAM && e->nargs == lu_f && e->k == lu_k; }
-static int lu_contains(const Expr *e) {
+static unsigned *lu_opq; static unsigned lu_opq_st;   /* (the values a region binds, while its body is walked as if they were names) */
+static int lu_contains(const Expr *e) {              /* the parameter in e -- not behind a name, in a walk that has them */
   if (!e) return 0;
   if (lu_isP(e)) return 1;
   if (e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap) return e->id >= lu_cap;   /* (a node made since: assume so) */
-  if (lu_has[e->id]) return lu_has[e->id] == 2;
-  int r = lu_contains(e->a) || lu_contains(e->b) || (e->op != E_CTOR && lu_contains(e->c)) || (e->op == E_CTOR && e->c && lu_contains(e->c));
+  if (lu_opq_st && lu_opq[e->id] && lu_opq[e->id] <= lu_opq_st) return 0;
+  if (!lu_opq_st && lu_has[e->id]) return lu_has[e->id] == 2;
+  int r = lu_contains(e->a) || lu_contains(e->b) || lu_contains(e->c);
   for (int i = 0; !r && i < e->nargs && e->args; i++) r = lu_contains(e->args[i]);
-  lu_has[e->id] = r ? 2 : 1; return r;
+  if (!lu_opq_st) lu_has[e->id] = r ? 2 : 1;
+  return r;
 }
 static int lu(const Expr *e, int la);
-static unsigned *lu_seen; static unsigned lu_stamp, lu_stamp_n;   /* (one array for every region of a walk: a region is a stamp) */
-static void lu_bound(const Expr *e, int la, unsigned char *unused) {   /* a region's shared values, as if bound where it begins */
-  (void)unused;
+static unsigned char *lu_ev; static int *lu_evlog, lu_nev, lu_cev;
+static int lu_ev_mark(void) { return lu_nev; }
+static void lu_ev_undo(int m) { while (lu_nev > m) lu_ev[lu_evlog[--lu_nev]] = 0; }
+static unsigned *lu_seen; static unsigned lu_stamp, lu_stamp_n;
+static void lu_bound(const Expr *e, const Expr ***v, int *n) {   /* a region's shared values that hold the parameter */
   if (!e || e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap || lu_seen[e->id] == lu_stamp || !lu_contains(e)) return;
   lu_seen[e->id] = lu_stamp;
-  if (e->id < nrefs_cap && nrefs[e->id] > 1) { unsigned st = lu_stamp; lu(e, 1); lu_stamp = st; return; }   /* (bound early: anything after may follow it) */
-  if (e->op == E_IF || e->op == E_MATCH) { lu_bound(e->a, la, NULL); return; }
-  lu_bound(e->a, la, NULL); lu_bound(e->b, la, NULL); lu_bound(e->c, la, NULL);
-  for (int i = 0; i < e->nargs && e->args; i++) lu_bound(e->args[i], la, NULL);
+  if (lu_opq[e->id]) return;                         /* (bound by an enclosing region: a name here) */
+  if (e->id < nrefs_cap && nrefs[e->id] > 1) { *v = realloc(*v, sizeof **v * (size_t)(*n + 1)); (*v)[(*n)++] = e; return; }
+  if (e->op == E_IF || e->op == E_MATCH) { lu_bound(e->a, v, n); return; }   /* (an arm is a region of its own) */
+  lu_bound(e->a, v, n); lu_bound(e->b, v, n); lu_bound(e->c, v, n);
+  for (int i = 0; i < e->nargs && e->args; i++) lu_bound(e->args[i], v, n);
 }
+static int lu_direct_r(const Expr *e, unsigned st) {   /* the parameter, not behind a name (lu_opq) */
+  if (!e) return 0;
+  if (lu_isP(e)) return 1;
+  if (e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap) return e && e->id >= lu_cap;
+  if (lu_opq[e->id] == lu_opq_st || lu_seen[e->id] == st) return 0;
+  lu_seen[e->id] = st;
+  if (lu_direct_r(e->a, st) || lu_direct_r(e->b, st) || lu_direct_r(e->c, st)) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (lu_direct_r(e->args[i], st)) return 1;
+  return 0;
+}
+static int lu_direct(const Expr *e) { return lu_direct_r(e, ++lu_stamp_n); }
 static int lu_region(const Expr *e, int la) {
-  unsigned st = lu_stamp; lu_stamp = ++lu_stamp_n; lu_bound(e, la, NULL); lu_stamp = st;
+  /* a shared value is bound where its region begins, or computed where it is used -- both are followed */
+  const Expr **v = NULL; int n = 0;
+  { unsigned st = lu_stamp; lu_stamp = ++lu_stamp_n; lu_bound(e, &v, &n); lu_stamp = st; }
+  int body = la;
+  if (n) {                                           /* the body after the bindings, they being names there */
+    unsigned so = lu_opq_st; lu_opq_st = ++lu_stamp_n;
+    for (int i = 0; i < n; i++) lu_opq[v[i]->id] = lu_opq_st;
+    { int m = lu_ev_mark(); body = lu(e, la); lu_ev_undo(m); }
+    /* (bindings in no order among themselves: one is followed by any other that holds the parameter itself --
+       not through a binding, which is a name there) */
+    int direct = 0, *dv = calloc((size_t)n, sizeof *dv);
+    for (int i = 0; i < n; i++) { lu_opq[v[i]->id] = 0; dv[i] = lu_direct(v[i]); lu_opq[v[i]->id] = lu_opq_st; direct += dv[i]; }
+    for (int i = 0; i < n; i++) lu_opq[v[i]->id] = 0;
+    lu_opq_st = so;
+    for (int i = 0; i < n; i++) { int m = lu_ev_mark(); lu(v[i], body || direct - dv[i] > 0); lu_ev_undo(m); }
+    free(dv);
+  }
+  free(v);
   return lu(e, la);
 }
+/* (a value used twice is computed once: where it is used LAST, in the walk's model -- which is never earlier than
+   where the emitter computes it, so what it says is live, is -- and a name at its other uses.  The walk goes
+   backwards, so the last use is the first one met; the arms of a choice undo each other's: lu_evlog) */
 static int lu(const Expr *e, int la) {               /* is the parameter live before e, given whether it is after */
   if (!e) return la;
   if (e->id >= lu_cap) return 1;
+  if (lu_opq[e->id] && lu_opq[e->id] <= lu_opq_st) return la;   /* (bound already, here or in an enclosing region: a name) */
+  if (e->id < nrefs_cap && nrefs[e->id] > 1 && e->op != E_PARAM && e->op != E_CONST) {
+    if (lu_ev[e->id]) return la;                     /* (computed at a later use: a name here) */
+    lu_ev[e->id] = 1;
+    if (lu_nev == lu_cev) lu_evlog = realloc(lu_evlog, sizeof *lu_evlog * (size_t)(lu_cev = lu_cev ? lu_cev * 2 : 64));
+    lu_evlog[lu_nev++] = e->id;
+  }
   lu_after[e->id] |= la;
   if (lu_isP(e)) return 1;
   if (e->op == E_PARAM || e->op == E_CONST || !lu_contains(e)) return la;
-  if (lu_memo[e->id] & (la ? 2 : 1)) return 1;      /* (visited so: it contains the parameter, so it is live before) */
-  lu_memo[e->id] |= la ? 2 : 1;
+  if (!lu_opq_st) {                                  /* (visited so: it contains the parameter, so it is live before -- not in a
+                                                        walk where the region's bindings are names: there it is a tree, walked once) */
+    int bit = la ? 2 : 1;
+    if (lu_memo[e->id] & bit) return 1;
+    lu_memo[e->id] |= bit; }
   { const Expr *K, *S; long off;
     if (e->op == E_IF && indexed_pick(e, &K, &S, &off)) { int l = lu(S, la); return lu(K, l); } }
   switch (e->op) {
   case E_FIELD: return lu(e->a, la);
-  case E_IF: { int b = lu_region(e->b, la), c = lu_region(e->c, la); return lu(e->a, b || c); }
-  case E_MATCH: { int any = 0; for (int i = 0; i < e->nargs; i++) any |= lu_region(e->args[i], la); return lu(e->a, any); }
+  case E_IF: {
+    int m = lu_ev_mark(), b = lu_region(e->b, la); lu_ev_undo(m);
+    int c = lu_region(e->c, la); lu_ev_undo(m);
+    return lu(e->a, b || c); }
+  case E_MATCH: {
+    int any = 0, m = lu_ev_mark();
+    for (int i = 0; i < e->nargs; i++) { any |= lu_region(e->args[i], la); lu_ev_undo(m); }
+    return lu(e->a, any); }
   case E_CTOR: {
     int l = la;
     for (int i = e->nargs - 1; i >= 0; i--) if (!e->ci || field_live(e->ci, i)) l = lu(e->args[i], l);
@@ -3447,9 +3500,10 @@ static int lu_last(const Expr *body, int f, long k, const Expr *site) {   /* is 
   if (!pc[k]) {
     lu_f = f; lu_k = k; lu_cap = eid;
     lu_after = calloc((size_t)eid + 1, 1); lu_has = calloc((size_t)eid + 1, 1); lu_memo = calloc((size_t)eid + 1, 1);
-    lu_seen = calloc((size_t)eid + 1, sizeof *lu_seen); lu_stamp = lu_stamp_n = 0;
+    lu_seen = calloc((size_t)eid + 1, sizeof *lu_seen); lu_opq = calloc((size_t)eid + 1, sizeof *lu_opq); lu_stamp = lu_stamp_n = lu_opq_st = 0;
+    lu_ev = calloc((size_t)eid + 1, 1); lu_nev = 0;
     lu_region(body, 0);
-    free(lu_has); free(lu_memo); free(lu_seen); lu_seen = NULL; pc[k] = lu_after; lu_cache_cap[f] = eid;
+    free(lu_has); free(lu_memo); free(lu_seen); free(lu_opq); free(lu_ev); lu_seen = lu_opq = NULL; lu_ev = NULL; pc[k] = lu_after; lu_cache_cap[f] = eid;
   }
   return site->id < lu_cache_cap[f] && !pc[k][site->id];
 }
@@ -3485,9 +3539,9 @@ static void rc_marks(Expr *e, const Expr *body, int f, unsigned char *seen) {
         continue;
       }
       int once;
-      if (a->op == E_PARAM && a->nargs == f && f >= 0 && !rc_borrowed(f, (int)a->k)) once = lu_last(body, f, a->k, e);   /* (see THE LAST USE MOVES) */
-      else if (a->op == E_PARAM || a->op == E_FIELD) {   /* (by value, on the paths through this place: see rc_like) */
+      if (a->op == E_PARAM || a->op == E_FIELD) {   /* (by value, on the paths through this place: see rc_like) */
         occ_like = 1; once = e->op == E_CALL ? occ_through(body, a, e) <= 1 : occ_stored(body, a) <= 1; occ_like = 0;
+        if (!once && a->op == E_PARAM && a->nargs == f && f >= 0 && !rc_borrowed(f, (int)a->k)) once = lu_last(body, f, a->k, e);   /* (see THE LAST USE MOVES) */
       } else once = (a->id < nrefs_cap && nrefs[a->id] <= 1) || (e->op == E_CALL ? occ_through(body, a, e) <= 1 : occ_stored(body, a) <= 1);
       /* moved: what a path hands on once -- a call's result or a constructor (every call returns a reference of its
          own), a parameter (every parameter is owned), a field of a block this branch takes apart */
