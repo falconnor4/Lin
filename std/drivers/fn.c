@@ -2535,9 +2535,14 @@ static int tail_reads(const Expr *e, const Expr *x) {
   }
   return only_reads(e, x);
 }
+static const Expr *cst_root;                       /* the branch ctor_slot_tail works in */
 static void ctor_slot_tail(Expr **slot, Expr *s, int nf, int branch, int words) {
   Expr *e = *slot;
   if (e == s) return;                                /* (the block itself, handed on) */
+  /* A tail the branch ALSO uses elsewhere -- `(let ((c (cmp xs ys))) (if (eq c 0) .. c))` -- is one value: a private
+     copy of it would be a second node, computed a second time (exponentially, down a recursion; and twice over a
+     value someone owns, freed twice).  It is left shared, and this path does not free the block early. */
+  if (e->op != E_CTOR && e->op != E_IF && e->op != E_MATCH && cst_root && occ(cst_root, e) > 1) return;
   Expr *c2 = A(sizeof *c2); *c2 = *e; c2->id = eid++; c2->var = -1; *slot = c2;
   if (e->op == E_CTOR && e->nargs == nf && nf > 0 && !e->c) { c2->c = s; c2->rtag = branch + 1; return; }
   if (e->op == E_IF) { ctor_slot_tail(&c2->b, s, nf, branch, words); ctor_slot_tail(&c2->c, s, nf, branch, words); return; }
@@ -2590,7 +2595,9 @@ static void mark_reuse(Expr *e, int f) {
       const LinCtor *c2 = NULL; int nf = -1;
       for (long k = 1; (c2 = lin_ctor_info(k)); k++) if (c2->i == i && e->ci && c2->dt == e->ci->dt) { nf = c2->k; break; }
       if (nf > 0 && tail_reads(e->args[i], e->a)) {
+        cst_root = e->args[i];
         ctor_slot_tail(&e->args[i], e->a, nf, i, nf + !e->untag);
+        cst_root = NULL;
         if (!e->freeb) e->freeb = A((size_t)e->nargs);
         e->freeb[i] = 1;                               /* (its fields are read into locals first: emitx, E_MATCH) */
       }
@@ -2976,7 +2983,7 @@ static int do_val(const Expr *e) {                  /* is e, in function dv_g, o
   case E_PARAM:
     if (e->nargs != dv_g || dv_g < 0 || e->k >= VBITS || !((vdeep[dv_g] >> e->k) & 1u)) return 0;
     return occ(dv_body, e) <= 1;
-  case E_FIELD: return do_val(e->a);
+  case E_FIELD: return do_val(e->a) && occ(dv_body, e) <= 1;   /* (a field handed on twice is owned by neither) */
   case E_IF: return do_val(e->b) && do_val(e->c);
   case E_MATCH: for (int i = 0; i < e->nargs; i++) if (!do_val(e->args[i])) return 0; return 1;
   default: return 0;
