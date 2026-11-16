@@ -3336,102 +3336,72 @@ static void rc_leaves(Expr **slot, int f);
    on -- its reference moves -- though it was used before (lent, or given a count of its own): `(f72 ps (rest)
    (f123 .. s ..) s)` hands s to the next step instead of a new reference and a release.  Liveness is followed
    backwards in the order the emitted code evaluates: a constructor's fields in order, a call's operands in no
-   order (the call itself comes after all of them), the arms of a choice after its test, and a value used twice
-   both where its region binds it and where it is used (whichever the emitter does, the answer is safe). */
+   order (the call itself comes after all of them), the arms of a choice after its test -- and a region's
+   bindings exactly where the emitter puts them (emit_region's own choice: lu_region), names after that.  A value
+   the walk does not know to be bound is followed at every place it is used, which can only say more is live. */
 static int lu_f; static long lu_k; static int lu_cap;
-static unsigned char *lu_after, *lu_has, *lu_memo;   /* live after a node (any visit); contains the parameter; visited with live_after 0 / 1 */
+static unsigned char *lu_after, *lu_memo;   /* live after a node (any visit); contains the parameter; visited with live_after 0 / 1 */
 static int lu_isP(const Expr *e) { return e->op == E_PARAM && e->nargs == lu_f && e->k == lu_k; }
-static unsigned *lu_opq; static unsigned lu_opq_st;   /* (the values a region binds, while its body is walked as if they were names) */
-static int lu_contains(const Expr *e) {              /* the parameter in e -- not behind a name, in a walk that has them */
+static unsigned char *lu_has_v; static unsigned *lu_has_ep, lu_epoch;   /* (remembered while the names stay the same) */
+static int lu_contains(const Expr *e) {              /* the parameter in e, not behind a bound name */
   if (!e) return 0;
   if (lu_isP(e)) return 1;
   if (e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap) return e->id >= lu_cap;   /* (a node made since: assume so) */
-  if (lu_opq_st && lu_opq[e->id] && lu_opq[e->id] <= lu_opq_st) return 0;
-  if (!lu_opq_st && lu_has[e->id]) return lu_has[e->id] == 2;
+  if (bound(e)) return 0;
+  if (lu_has_ep[e->id] == lu_epoch) return lu_has_v[e->id];
   int r = lu_contains(e->a) || lu_contains(e->b) || lu_contains(e->c);
   for (int i = 0; !r && i < e->nargs && e->args; i++) r = lu_contains(e->args[i]);
-  if (!lu_opq_st) lu_has[e->id] = r ? 2 : 1;
+  lu_has_ep[e->id] = lu_epoch; lu_has_v[e->id] = (unsigned char)r;
   return r;
 }
 static int lu(const Expr *e, int la);
-static unsigned char *lu_ev; static int *lu_evlog, lu_nev, lu_cev;
-static int lu_ev_mark(void) { return lu_nev; }
-static void lu_ev_undo(int m) { while (lu_nev > m) lu_ev[lu_evlog[--lu_nev]] = 0; }
-static unsigned *lu_seen; static unsigned lu_stamp, lu_stamp_n;
-static void lu_bound(const Expr *e, const Expr ***v, int *n) {   /* a region's shared values that hold the parameter */
-  if (!e || e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap || lu_seen[e->id] == lu_stamp || !lu_contains(e)) return;
-  lu_seen[e->id] = lu_stamp;
-  if (lu_opq[e->id]) return;                         /* (bound by an enclosing region: a name here) */
-  if (e->id < nrefs_cap && nrefs[e->id] > 1) { *v = realloc(*v, sizeof **v * (size_t)(*n + 1)); (*v)[(*n)++] = e; return; }
-  if (e->op == E_IF || e->op == E_MATCH) { lu_bound(e->a, v, n); return; }   /* (an arm is a region of its own) */
-  lu_bound(e->a, v, n); lu_bound(e->b, v, n); lu_bound(e->c, v, n);
-  for (int i = 0; i < e->nargs && e->args; i++) lu_bound(e->args[i], v, n);
-}
-static int lu_direct_r(const Expr *e, unsigned st) {   /* the parameter, not behind a name (lu_opq) */
-  if (!e) return 0;
-  if (lu_isP(e)) return 1;
-  if (e->op == E_PARAM || e->op == E_CONST || e->id >= lu_cap) return e && e->id >= lu_cap;
-  if (lu_opq[e->id] == lu_opq_st || lu_seen[e->id] == st) return 0;
-  lu_seen[e->id] = st;
-  if (lu_direct_r(e->a, st) || lu_direct_r(e->b, st) || lu_direct_r(e->c, st)) return 1;
-  for (int i = 0; i < e->nargs && e->args; i++) if (lu_direct_r(e->args[i], st)) return 1;
-  return 0;
-}
-static int lu_direct(const Expr *e) { return lu_direct_r(e, ++lu_stamp_n); }
+static int lu_inner(const Expr *e, int la);
 static int lu_region(const Expr *e, int la) {
-  /* a shared value is bound where its region begins, or computed where it is used -- both are followed */
-  const Expr **v = NULL; int n = 0;
-  { unsigned st = lu_stamp; lu_stamp = ++lu_stamp_n; lu_bound(e, &v, &n); lu_stamp = st; }
-  int body = la;
-  if (n) {                                           /* the body after the bindings, they being names there */
-    unsigned so = lu_opq_st; lu_opq_st = ++lu_stamp_n;
-    for (int i = 0; i < n; i++) lu_opq[v[i]->id] = lu_opq_st;
-    { int m = lu_ev_mark(); body = lu(e, la); lu_ev_undo(m); }
-    /* (bindings in no order among themselves: one is followed by any other that holds the parameter itself --
-       not through a binding, which is a name there) */
-    int direct = 0, *dv = calloc((size_t)n, sizeof *dv);
-    for (int i = 0; i < n; i++) { lu_opq[v[i]->id] = 0; dv[i] = lu_direct(v[i]); lu_opq[v[i]->id] = lu_opq_st; direct += dv[i]; }
-    for (int i = 0; i < n; i++) lu_opq[v[i]->id] = 0;
-    lu_opq_st = so;
-    for (int i = 0; i < n; i++) { int m = lu_ev_mark(); lu(v[i], body || direct - dv[i] > 0); lu_ev_undo(m); }
-    free(dv);
+  /* the bindings emit_region would make here, in its order (dependencies first) */
+  st_grow(); stamp += 2;
+  count_uses(e);
+  const Expr **cand = NULL; int nc = 0, cc = 0, nk = 0;
+  certain(e, cert(e), &cand, &nc, &cc);
+  unsigned *tails = calloc((size_t)eid + 1, sizeof *tails); tail_uses(e, tails);
+  for (int i = 0; i < nc; i++) {
+    const Expr *x = cand[i];
+    if (x->op == E_CALL && tails[x->id] >= st_uses[x->id]) continue;
+    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD) cand[nk++] = x;
   }
-  free(v);
-  return lu(e, la);
+  free(tails);
+  int *sv = calloc((size_t)(nk ? nk : 1), sizeof *sv), *ss = calloc((size_t)(nk ? nk : 1), sizeof *ss);
+  for (int i = 0; i < nk; i++) { Expr *x = (Expr *)cand[i]; sv[i] = x->var; ss[i] = x->vscope; }
+  for (int i = 0; i < nk; i++) { Expr *x = (Expr *)cand[i]; x->var = 0x7fffffff; x->vscope = fscope; }
+  if (nk) lu_epoch++;
+  int l = lu(e, la);                                 /* (the body: the bindings are names in it) */
+  for (int i = nk - 1; i >= 0; i--) {                /* (each binding: what is bound before it is a name in it) */
+    Expr *x = (Expr *)cand[i]; x->var = sv[i]; x->vscope = ss[i]; lu_epoch++;
+    l = lu_inner(x, l);
+  }
+  free(sv); free(ss); free(cand);
+  return l;
 }
-/* (a value used twice is computed once: where it is used LAST, in the walk's model -- which is never earlier than
-   where the emitter computes it, so what it says is live, is -- and a name at its other uses.  The walk goes
-   backwards, so the last use is the first one met; the arms of a choice undo each other's: lu_evlog) */
 static int lu(const Expr *e, int la) {               /* is the parameter live before e, given whether it is after */
   if (!e) return la;
   if (e->id >= lu_cap) return 1;
-  if (lu_opq[e->id] && lu_opq[e->id] <= lu_opq_st) return la;   /* (bound already, here or in an enclosing region: a name) */
-  if (e->id < nrefs_cap && nrefs[e->id] > 1 && e->op != E_PARAM && e->op != E_CONST) {
-    if (lu_ev[e->id]) return la;                     /* (computed at a later use: a name here) */
-    lu_ev[e->id] = 1;
-    if (lu_nev == lu_cev) lu_evlog = realloc(lu_evlog, sizeof *lu_evlog * (size_t)(lu_cev = lu_cev ? lu_cev * 2 : 64));
-    lu_evlog[lu_nev++] = e->id;
-  }
+  if (bound(e)) return la;                           /* (a name) */
+  return lu_inner(e, la);
+}
+static int lu_inner(const Expr *e, int la) {
+  if (!e) return la;
+  if (e->id >= lu_cap) return 1;
   lu_after[e->id] |= la;
   if (lu_isP(e)) return 1;
   if (e->op == E_PARAM || e->op == E_CONST || !lu_contains(e)) return la;
-  if (!lu_opq_st) {                                  /* (visited so: it contains the parameter, so it is live before -- not in a
-                                                        walk where the region's bindings are names: there it is a tree, walked once) */
-    int bit = la ? 2 : 1;
+  { int bit = la ? 2 : 1;                            /* (met again unbound: it is computed again, and holds the parameter) */
     if (lu_memo[e->id] & bit) return 1;
     lu_memo[e->id] |= bit; }
   { const Expr *K, *S; long off;
     if (e->op == E_IF && indexed_pick(e, &K, &S, &off)) { int l = lu(S, la); return lu(K, l); } }
   switch (e->op) {
   case E_FIELD: return lu(e->a, la);
-  case E_IF: {
-    int m = lu_ev_mark(), b = lu_region(e->b, la); lu_ev_undo(m);
-    int c = lu_region(e->c, la); lu_ev_undo(m);
-    return lu(e->a, b || c); }
-  case E_MATCH: {
-    int any = 0, m = lu_ev_mark();
-    for (int i = 0; i < e->nargs; i++) { any |= lu_region(e->args[i], la); lu_ev_undo(m); }
-    return lu(e->a, any); }
+  case E_IF: { int b = lu_region(e->b, la), c = lu_region(e->c, la); return lu(e->a, b || c); }
+  case E_MATCH: { int any = 0; for (int i = 0; i < e->nargs; i++) any |= lu_region(e->args[i], la); return lu(e->a, any); }
   case E_CTOR: {
     int l = la;
     for (int i = e->nargs - 1; i >= 0; i--) if (!e->ci || field_live(e->ci, i)) l = lu(e->args[i], l);
@@ -3455,11 +3425,12 @@ static int lu_last(const Expr *body, int f, long k, const Expr *site) {   /* is 
   unsigned char **pc = (unsigned char **)lu_cache[f];
   if (!pc[k]) {
     lu_f = f; lu_k = k; lu_cap = eid;
-    lu_after = calloc((size_t)eid + 1, 1); lu_has = calloc((size_t)eid + 1, 1); lu_memo = calloc((size_t)eid + 1, 1);
-    lu_seen = calloc((size_t)eid + 1, sizeof *lu_seen); lu_opq = calloc((size_t)eid + 1, sizeof *lu_opq); lu_stamp = lu_stamp_n = lu_opq_st = 0;
-    lu_ev = calloc((size_t)eid + 1, 1); lu_nev = 0;
+    lu_after = calloc((size_t)eid + 1, 1); lu_memo = calloc((size_t)eid + 1, 1);
+    fscope++;                                        /* (a scope of its own: no binding of an earlier emission is a name here) */
+    lu_has_v = calloc((size_t)eid + 1, 1); lu_has_ep = calloc((size_t)eid + 1, sizeof *lu_has_ep); lu_epoch = 1;
     lu_region(body, 0);
-    free(lu_has); free(lu_memo); free(lu_seen); free(lu_opq); free(lu_ev); lu_seen = lu_opq = NULL; lu_ev = NULL; pc[k] = lu_after; lu_cache_cap[f] = eid;
+    fscope++;
+    free(lu_memo); free(lu_has_v); free(lu_has_ep); pc[k] = lu_after; lu_cache_cap[f] = eid;
   }
   return site->id < lu_cache_cap[f] && !pc[k][site->id];
 }
@@ -3468,6 +3439,14 @@ static void lu_reset(void) {
   lu_cache = NULL; lu_cache_cap = NULL;
 }
 static int rc_seen_cap;                              /* (the nodes the walk's `seen` covers: rc_leaves makes more as it goes) */
+static int rc_entry_tail(const Expr *e, const Expr *x) {   /* is x a value the entry ends with -- nothing runs after it but the arena's release */
+  if (!e) return 0;
+  if (e == x) return 1;
+  { const Expr *K, *S; long off; if (e->op == E_IF && indexed_pick(e, &K, &S, &off)) return 0; }
+  if (e->op == E_IF) return rc_entry_tail(e->b, x) || rc_entry_tail(e->c, x);
+  if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) if (rc_entry_tail(e->args[i], x)) return 1; }
+  return 0;
+}
 static void rc_marks(Expr *e, const Expr *body, int f, unsigned char *seen) {
   if (!e || e->op == E_PARAM || e->op == E_CONST) return;
   if (e->id < rc_seen_cap) { if (seen[e->id]) return; seen[e->id] = 1; }
@@ -3485,6 +3464,7 @@ static void rc_marks(Expr *e, const Expr *body, int f, unsigned char *seen) {
       if (e->op == E_CALL && (((e->clone >> i) & 1u) || ((e->dcopy >> i) & 1u))) continue;
       if (e->op == E_CALL && rc_borrowed((int)e->k, i)) {   /* (lent: see BORROWED PARAMETERS) */
         if (rc_held(a, f) || a->op == E_PARAM || a->op == E_FIELD) continue;   /* (held, or the caller's own: it releases it later) */
+        if (f < 0 && rc_entry_tail(body, e)) continue;   /* (the entry's last call: the unit's arena goes with what it was lent) */
         if (!(a->id < nrefs_cap && nrefs[a->id] <= 1)) continue;   /* (a value used elsewhere too is a local: local_drops) */
         /* built for this call: released when it returns (a choice hands on a reference of its own on every arm) */
         if (a->op == E_IF || a->op == E_MATCH) rc_leaves(&e->args[i], f);
@@ -4910,7 +4890,7 @@ static void gen_data_fns(Buf *dbp, int d) {
         Shape ds = drop_sh[d]; const char *dt = ds.dt; int box = -1, untag = dt_boxed(dt, &box) == 1; const LinCtor *c;
 #define FS(k, j) field_shape(sh_fld, sh_nctor, c, k, j, ds)
 #define FDROP(k, j) (field_live(c, j) && k <= sh_nctor && FS(k, j).k == 5 && FS(k, j).dt && (rc_on() || (k <= fown_n && fown[k][j])))
-        put(dbp, "static void lin_drop%d(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1;%s%s", d, rc_on() ? " if (!lin_dec(o)) return;" : "", untag ? " {" : " switch (o[0]) {");
+        put(dbp, "static void lin_drop%d_(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1;%s%s", d, rc_on() ? " if (!lin_dec(o)) return;" : "", untag ? " {" : " switch (o[0]) {");
         for (long k = 1; (c = lin_ctor_info(k)); k++) {
           if (c->dt != dt || c->k == 0) continue;
           if (!untag) put(dbp, " case %d: {", c->i);
@@ -5177,7 +5157,8 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
           for (; ngen < ndrop; ngen++) gen_data_fns(&db, ngen);
           put(&b, "%s", db.s); free(db.s);
           Buf pr = nbuf(256);
-          for (int d = 0; d < ndrop; d++) put(&pr, "static void lin_drop%d(long v);\nstatic long lin_copy%d(long v);\n%s", d, d, rc_on() ? "" : "");
+          for (int d = 0; d < ndrop; d++)   /* (an immediate is no block: tested where it is dropped, not in a call) */
+            put(&pr, "static void lin_drop%d_(long v);\nstatic inline void lin_drop%d(long v) { if (!(v & 1)) lin_drop%d_(v); }\nstatic long lin_copy%d(long v);\n", d, d, d, d);
           for (int d = 0; rc_on() && d < ndrop; d++) put(&pr, "static void lin_share%d(long v);\n", d);
           Buf nb = nbuf(b.len + pr.len + 1);
           put(&nb, "%.*s%s%s", (int)proto_at, b.s, pr.s, b.s + proto_at);
