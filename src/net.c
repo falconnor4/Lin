@@ -17,6 +17,12 @@
 
 Scope scope_nil(void) { return 0; }
 static int in_parallel;   /* a wave is running threaded: no interning there (see below) */
+static void fx_note(Net *n, int fan);        /* fresh labels: below, beside the erasure rules */
+static void fx_free(Net *n);
+static void fx_alloc_note(Net *n, int id);
+static void fx_rebuild(Net *n);
+static void fx_dirty_fan(Net *n, int fan);
+static inline int lv_is_fresh(const Net *n, Scope s);
 static int reduce_depth;  /* how deep the reducer is; only the outermost may publish or reclaim */
 int lin_reduce_nested(void) { return reduce_depth > 1; }   /* (inside a force made from within a reduction: someone above holds ports of this net) */
 static int nested_reduce; /* a driver's reducer ran inside the wave being dispatched (see net_flush_free) */
@@ -61,6 +67,7 @@ static void lv_rehash(Net *n, int cap) {
   /* ids are 1..nlv: `l < nlv` left the LAST live level out of the table, so looking its path up
      again interned a second id for a path that already had one. */
   for (int l = 1; l <= n->nlv; l++) {
+    if (!n->lv_parent[l] && n->lv_bit[l] == 3) continue;   /* a fresh label: no path names it (net_fresh_label) */
     unsigned h = ((unsigned)n->lv_parent[l] * 2654435761u + (unsigned)n->lv_bit[l]) & (unsigned)(cap - 1);
     while (n->lv_hash[h]) h = (h + 1) & (unsigned)(cap - 1);
     n->lv_hash[h] = l; }
@@ -118,6 +125,13 @@ Scope scope_rebase(Net *n, const Net *src, Scope lvl, Scope s) {
      the target trie.)  result = lvl ++ path_of(s) */
   int cur = (int)lvl;
   if (!s) return (Scope)cur;
+  if (!src->lv_parent[s] && src->lv_bit[s] == 3) {   /* a fresh label: a fresh one here, one per source label */
+    static const Net *mf_src, *mf_dst; static Scope *mf; static int mfcap;
+    if (mf_src != src || mf_dst != n) { mf_src = src; mf_dst = n; if (mf) memset(mf, 0, (size_t)mfcap * sizeof *mf); }
+    if ((int)s >= mfcap) { int c = (int)s * 2 + 64; mf = realloc(mf, (size_t)c * sizeof *mf); memset(mf + mfcap, 0, (size_t)(c - mfcap) * sizeof *mf); mfcap = c; }
+    if (!mf[s]) mf[s] = net_fresh_label(n);
+    return mf[s];
+  }
   int d = src->lv_depth[s];
   unsigned char *p = lv_path_reserve(d);
   int l = (int)s;
@@ -139,6 +153,7 @@ void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit)
     n->lv_depth[l] = n->lv_parent[l] ? n->lv_depth[n->lv_parent[l]] + 1 : 1;
   }
   lv_rehash(n, lv_hcap_for(nlv));
+  fx_rebuild(n);                        /* the nodes are in place (a load, a copy): their fresh fans, found again */
 }
 
 int net_level_count(const Net *n) { return n->nlv; }
@@ -161,6 +176,7 @@ void net_init(Net *n, int cap) {
   n->nheld = 0;
   n->era = NULL; n->era_top = n->era_cap = 0;
   n->pend = NULL; n->pend_top = n->pend_cap = 0;
+  n->fx = NULL;
   net_alloc(n, ROOT, scope_nil());
 }
 
@@ -179,6 +195,7 @@ void net_free(Net *n) {
   free(n->tag); free(n->wire); free(n->scope); free(n->act); free(n->dead); free(n->dem); free(n->vport); free(n->rootn); free(n->act_of); free(n->dem_out);
   free(n->lv_parent); free(n->lv_depth); free(n->lv_bit); free(n->lv_hash);
   free(n->root); free(n->era); free(n->pend);
+  fx_free(n);
 }
 
 void lin_demand(Net *n, Port p) {
@@ -247,6 +264,7 @@ Port net_alloc(Net *n, int tag, Scope sc) {
     abort();
   }
   n->tag[id] = tag; n->dead[id] = 0; n->scope[id] = sc;
+  if (tag == DUP && sc && lv_is_fresh(n, sc)) fx_alloc_note(n, id);
   for (int i = 0; i < 3; i++) n->wire[id * 3 + i] = NONE;
   return (Port){id, 0};
 }
@@ -283,7 +301,7 @@ long lin_fold_total(void) { return fold_count; }
 
 typedef struct { Port *p; int top, cap; } ActBuf;
 typedef struct { int *v; int top, cap; } IntBuf;
-static IntBuf *t_fr, *t_er;            /* per-worker freed nodes / noted erasers, merged after a wave */
+static IntBuf *t_fr, *t_er, *t_fx;      /* per-worker freed nodes / noted erasers / fresh-labelled fans, merged after a wave */
 static __thread int my_tid;   /* 0 = a caller thread, i = pool worker i (the pool is not OpenMP) */
 static ActBuf *t_act;
 static int n_tact;
@@ -306,7 +324,8 @@ static void ensure_tact(void) {
   if (m > n_tact) {
     t_act = realloc(t_act, (size_t)m * sizeof(ActBuf));
     t_fr = realloc(t_fr, (size_t)m * sizeof(IntBuf)); t_er = realloc(t_er, (size_t)m * sizeof(IntBuf));
-    for (int i = n_tact; i < m; i++) { t_act[i] = (ActBuf){0}; t_fr[i] = t_er[i] = (IntBuf){0}; }
+    t_fx = realloc(t_fx, (size_t)m * sizeof(IntBuf));
+    for (int i = n_tact; i < m; i++) { t_act[i] = (ActBuf){0}; t_fr[i] = t_er[i] = t_fx[i] = (IntBuf){0}; }
     n_tact = m;
   }
 }
@@ -325,10 +344,12 @@ static void ib_push(IntBuf *b, int v) {
   if (b->top >= b->cap) b->v = realloc(b->v, (size_t)(b->cap = b->cap ? b->cap * 2 : 256) * sizeof(int));
   b->v[b->top++] = v;
 }
+static void fx_alloc_note(Net *n, int id) { if (in_parallel) ib_push(&t_fx[my_tid], id); else fx_note(n, id); }
 
 /* Put `v` on the pending list.  Serial only.  `dead == 2` means "already on a list". */
 static void node_free(Net *n, int v) {
   if (v <= 0 || v >= n->nn || n->dead[v] == 2) return;
+  if (n->tag[v] == DUP && n->fx) fx_dirty_fan(n, v);
   act_drop(n, v);
   /* its demand roots go (in order): searched from the top, where a force's root is, and only as far as the
      count says -- a free that scanned every root cost the depth of the forces nested around it */
@@ -398,6 +419,7 @@ static void era_drain(Net *n) {
       era_attach(n, f, (Port){x, 0}, x);
       era_attach(n, a, (Port){x, 2}, e);
     } else if (t == DUP) {
+      if (n->fx) fx_dirty_fan(n, x);                    /* a fresh label's copy may have just died (net_fresh_label) */
       /* BOTH copies erased: nobody needs what the fan copies, so its input is erased instead -- the
          outcome of the fan meeting an eraser at its principal, reached from the other side.  (One copy
          erased still WAITS: see the rules above.) */
@@ -411,6 +433,160 @@ static void era_drain(Net *n) {
       }
     }
   }
+}
+
+/* ---------------- fresh labels: a duplication retired when one copy can no longer be observed ----------------
+   A fan waits when an eraser reaches ONE of its copy ports (see the erasure rules): collapsing it there is
+   unsound, because a fan's partner is found by its label and the partner may still be on its way.  A label that
+   ONE act of duplication owns (net_fresh_label) lets the core decide it for the whole duplication at once.  Each
+   fan of the label is a copying fan (its copy ports lead to the copies' consumers) or a fan-in (its copy ports
+   bring the copies' values in: the binder or the result of something duplicated).  The two copies are worlds
+   that meet only through the label's own fans, and a copy's world is observed only through a copying fan's copy
+   port on that side.  So when, on one side, every fan's copy port is cut or erased or is a fan-in's -- a value
+   coming IN -- nothing on that side can ever reach an observer: annihilating such fans or commuting one gives
+   exactly what wires to the other side give.  The rule then retires the whole label: every fan becomes the wire
+   principal -- other copy, and the values the fan-ins held for the dead side get erasers.  Local in what it
+   rewrites (each fan and its own ports), decided at the safepoint, and only for labels no position can name. */
+typedef struct { int *v; int n, cap; Scope lab; unsigned char dirty; } FxSet;
+struct LinFresh {
+  int *slot_of;  int slotcap;               /* level -> set + 1 (0: not a live fresh label) */
+  FxSet *set;    int nset, cset;
+  int *freeset;  int nfreeset, cfreeset;    /* sets whose label died: reused */
+  Scope *freelv; int nfreelv, cfreelv;      /* fresh levels no fan carries: reused */
+  int *dirty;    int ndirty, cdirty;
+};
+static inline int lv_is_fresh(const Net *n, Scope s) { return s && (int)s <= n->nlv && !n->lv_parent[s] && n->lv_bit[s] == 3; }
+static struct LinFresh *fx_get(Net *n) { if (!n->fx) n->fx = calloc(1, sizeof *n->fx); return n->fx; }
+static int fx_set_of(Net *n, Scope lab, int make) {
+  struct LinFresh *f = fx_get(n);
+  if ((int)lab < f->slotcap && f->slot_of[lab]) return f->slot_of[lab] - 1;
+  if (!make) return -1;
+  if ((int)lab >= f->slotcap) {
+    int c = (int)lab * 2 + 64; f->slot_of = realloc(f->slot_of, (size_t)c * sizeof(int));
+    memset(f->slot_of + f->slotcap, 0, (size_t)(c - f->slotcap) * sizeof(int)); f->slotcap = c;
+  }
+  int k;
+  if (f->nfreeset) k = f->freeset[--f->nfreeset];
+  else {
+    if (f->nset == f->cset) f->set = realloc(f->set, (size_t)(f->cset = f->cset ? f->cset * 2 : 64) * sizeof(FxSet));
+    k = f->nset++; f->set[k] = (FxSet){0};
+  }
+  f->set[k].n = 0; f->set[k].lab = lab; f->set[k].dirty = 0;
+  f->slot_of[lab] = k + 1;
+  return k;
+}
+Scope net_fresh_label(Net *n) {
+  struct LinFresh *f = fx_get(n);
+  int l;
+  if (f->nfreelv) l = (int)f->freelv[--f->nfreelv];
+  else {
+    if (n->nlv + 2 > n->lvcap) lv_ensure(n, n->nlv + 2);
+    l = ++n->nlv;                                   /* not interned: no path reaches it */
+    n->lv_parent[l] = 0; n->lv_bit[l] = 3; n->lv_depth[l] = 1;
+  }
+  fx_set_of(n, (Scope)l, 1);
+  return (Scope)l;
+}
+static void fx_note(Net *n, int fan) {
+  int k = fx_set_of(n, n->scope[fan], 1);
+  FxSet *x = &n->fx->set[k];
+  if (x->n == x->cap) x->v = realloc(x->v, (size_t)(x->cap = x->cap ? x->cap * 2 : 8) * sizeof(int));
+  x->v[x->n++] = fan;
+}
+static void fx_dirty_fan(Net *n, int fan) {
+  if (!lv_is_fresh(n, n->scope[fan])) return;
+  int k = fx_set_of(n, n->scope[fan], 0);
+  if (k < 0) return;
+  struct LinFresh *f = n->fx;
+  if (f->set[k].dirty) return;
+  f->set[k].dirty = 1;
+  if (f->ndirty == f->cdirty) f->dirty = realloc(f->dirty, (size_t)(f->cdirty = f->cdirty ? f->cdirty * 2 : 64) * sizeof(int));
+  f->dirty[f->ndirty++] = k;
+}
+/* flow at a port: 1 an OUTPUT (a value leaves it), 0 an INPUT, -1 not decided here (a fan, a root) */
+static int fx_flow(const Net *n, Port q) {
+  int t = n->tag[q.node];
+  if (t == LAM) return q.port != 2;
+  if (t == APP) return q.port == 1;
+  if (t == ERA) return 0;
+  return -1;
+}
+static int fx_wired(const Net *n, int f, int k) { Port q = WIRE(n, ((Port){f, k})); return mutual(n, q, (Port){f, k}); }
+/* 1 copying fan, 2 fan-in, 0 not decided by its neighbours */
+static int fx_role(const Net *n, int f) {
+  if (fx_wired(n, f, 0)) { int o = fx_flow(n, WIRE(n, ((Port){f, 0}))); if (o >= 0) return o ? 1 : 2; }
+  for (int k = 1; k <= 2; k++) if (fx_wired(n, f, k)) { int o = fx_flow(n, WIRE(n, ((Port){f, k}))); if (o >= 0) return o ? 2 : 1; }
+  return 0;
+}
+static int fx_gone(const Net *n, int f, int k) {
+  if (!fx_wired(n, f, k)) return 1;
+  Port q = WIRE(n, ((Port){f, k})); return n->tag[q.node] == ERA && q.port == 0;
+}
+static long fx_retired;
+long net_fresh_retired(void) { return fx_retired; }
+/* look at set k: drop fans that left; retire the label if one side is dead; free it if no fan is left */
+static void fx_check(Net *n, int k) {
+  struct LinFresh *f = n->fx; FxSet *x = &f->set[k];
+  x->dirty = 0;
+  int m = 0;
+  for (int i = 0; i < x->n; i++) {
+    int v = x->v[i];
+    if (v > 0 && v < n->nn && !n->dead[v] && n->tag[v] == DUP && n->scope[v] == x->lab) x->v[m++] = v;
+  }
+  x->n = m;
+  if (!m) {                                         /* the duplication is over: its label and set are reused */
+    f->slot_of[x->lab] = 0;
+    if (f->nfreelv == f->cfreelv) f->freelv = realloc(f->freelv, (size_t)(f->cfreelv = f->cfreelv ? f->cfreelv * 2 : 64) * sizeof(Scope));
+    f->freelv[f->nfreelv++] = x->lab;
+    if (f->nfreeset == f->cfreeset) f->freeset = realloc(f->freeset, (size_t)(f->cfreeset = f->cfreeset ? f->cfreeset * 2 : 64) * sizeof(int));
+    f->freeset[f->nfreeset++] = k;
+    return;
+  }
+  for (int dead = 1; dead <= 2; dead++) {
+    int keep = 3 - dead, ok = 1;
+    for (int i = 0; i < m && ok; i++) {
+      int v = x->v[i];
+      if (!fx_wired(n, v, 0) || !fx_wired(n, v, keep)) { ok = 0; break; }   /* (a cut principal or kept side: undecided) */
+      if (fx_gone(n, v, dead)) continue;
+      Port q = WIRE(n, ((Port){v, dead}));
+      if (fx_role(n, v) != 2 || (n->tag[q.node] == DUP && n->scope[q.node] == x->lab)) ok = 0;   /* a live copy, or not plainly a value */
+    }
+    if (!ok) continue;
+    for (int i = 0; i < m; i++) {                   /* the dead side: erasers dropped, values erased */
+      int v = x->v[i]; Port q = WIRE(n, ((Port){v, dead})); int w = fx_wired(n, v, dead);
+      WIRE(n, ((Port){v, dead})) = NONE;
+      if (!w) continue;
+      WIRE(n, q) = NONE;
+      if (n->tag[q.node] == ERA && q.port == 0) { n->dead[q.node] = 1; node_free(n, q.node); }
+      else { int e = net_alloc(n, ERA, scope_nil()).node; net_link(n, (Port){e, 0}, q, 1); }
+    }
+    for (int i = 0; i < m; i++) {                   /* each fan: the wire principal -- kept copy */
+      int v = x->v[i]; Port a = WIRE(n, ((Port){v, 0})), b = WIRE(n, ((Port){v, keep}));
+      WIRE(n, ((Port){v, 0})) = WIRE(n, ((Port){v, keep})) = NONE;
+      n->dead[v] = 1; node_free(n, v);
+      net_link(n, a, b, 1);
+      fx_retired++;
+    }
+    x->n = 0;
+    fx_check(n, k);                                 /* (now empty: frees the label) */
+    return;
+  }
+}
+/* The safepoint: no wave in flight, nothing pinned, no claim held over the structure. */
+static void fx_process(Net *n) {
+  struct LinFresh *f = n->fx;
+  if (!f || !f->ndirty || in_parallel || n->pins || n->nheld) return;
+  while (f->ndirty) { int k = f->dirty[--f->ndirty]; if (k < f->nset && f->set[k].dirty) fx_check(n, k); }
+}
+static void fx_free(Net *n) {
+  struct LinFresh *f = n->fx; if (!f) return;
+  for (int i = 0; i < f->nset; i++) free(f->set[i].v);
+  free(f->set); free(f->slot_of); free(f->freeset); free(f->freelv); free(f->dirty); free(f); n->fx = NULL;
+}
+/* a net made from another's arrays (a copy, a load): its fresh fans, found again */
+static void fx_rebuild(Net *n) {
+  fx_free(n);
+  for (int i = 1; i < n->nn; i++) if (!n->dead[i] && n->tag[i] == DUP && lv_is_fresh(n, n->scope[i])) fx_note(n, i);
 }
 
 void net_sever(Net *n, Port p) {
@@ -435,6 +611,7 @@ void net_drop(Net *n, int v) {
   if (v <= 0 || v >= n->nn || n->dead[v] == 2 || n->tag[v] == ROOT) return;
   n->dead[v] = 1;
   for (int p = 0; p < 3; p++) if (is_input(n->tag[v], p)) era_attach(n, WIRE(n, ((Port){v, p})), (Port){v, p}, 0);
+  else if (n->fx) { Port c = WIRE(n, ((Port){v, p})); if (c.node > 0 && c.node < n->nn && !n->dead[c.node] && n->tag[c.node] == DUP) fx_dirty_fan(n, c.node); }
   node_free(n, v);
 }
 
@@ -442,6 +619,7 @@ void net_drop(Net *n, int v) {
    wave whose snapshot still names this wave's indices, and a pinned readback walk holds ports. */
 static void net_flush_free(Net *n) {
   if (reduce_depth > 1 || n->pins) return;
+  fx_process(n);
   while (n->pend_top > 0) {
     int v = n->pend[--n->pend_top];
     n->tag[v] = ERA;
@@ -1232,7 +1410,8 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
         t_act[t].top = 0;
         for (int j = 0; j < t_fr[t].top; j++) node_free(n, t_fr[t].v[j]);
         for (int j = 0; j < t_er[t].top; j++) era_note(n, t_er[t].v[j]);
-        t_fr[t].top = t_er[t].top = 0;
+        for (int j = 0; j < t_fx[t].top; j++) fx_note(n, t_fx[t].v[j]);
+        t_fr[t].top = t_er[t].top = t_fx[t].top = 0;
       }
       if (lin_wstats) { wv_batch++; wv_par += n_int; }
     }
@@ -1439,6 +1618,7 @@ static long net_reduce_body(Net *n, long limit) {
 
 Net *net_copy(const Net *n) {
   Net *c = malloc(sizeof(Net)); *c = *n;
+  c->fx = NULL;                       /* (rebuilt from the copied nodes by net_level_set) */
   c->tag = malloc(c->cap); memcpy(c->tag, n->tag, c->cap);
   c->wire = malloc(c->cap * 3 * sizeof(Port)); memcpy(c->wire, n->wire, c->cap * 3 * sizeof(Port));
   c->scope = malloc(c->cap * sizeof(Scope)); memcpy(c->scope, n->scope, c->cap * sizeof(Scope));

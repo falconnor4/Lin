@@ -108,32 +108,33 @@ difference cannot be observed, and otherwise leaves the call to the net:
 ### Recursive calls it declines
 
 A recursive definition reaches the net as the Y combinator applied to the
-function, `Y F`. Reduced as it stands, every call copies `F` through the
-combinator's fans, one interaction per node of `F`; a call made late is reached
-through every layer of copies made before it. When the driver declines a call,
-it does not hand that work to the net. It rewrites the call structurally,
-using only the net's own node kinds:
+function, `Y F`. Reduced as it stands, every call runs the combinator's own
+machinery: its self-application is unfolded, and `F` is copied through layers of
+the combinator's fans. When the driver declines a call, it rewrites it with the
+equation the combinator computes, `Y v = v (Y v)`, using only the net's own node
+kinds:
 
-- `(Y F) args` becomes `(F' (Y' F)) args`. `F'` is a copy of `F` made in one
-  pass, and `Y' F` is a new reference for the self argument. `F` itself is
-  never reduced: it stays the pristine definition every later call copies.
-- A value `F` shares with the rest of the net, such as an operator's meaning
-  (shared once per top-level form), is not copied. A fan goes on it instead,
-  which is what the combinator's own copying would leave there. Each fan copies
-  the value once.
-- When a fan meets a reference, as with a function that calls itself twice,
-  the fan copies the reference (`Y` and `F`), not the function the reference
-  would expand to.
-- A definition is copied only when it is private: if `F` reaches its own call
-  or the root, or carries a demand root (something is observing it), the call
-  is left to the net's beta.
+- `(Y v) args` becomes `(v₁ (Y' v₂)) args`, where `v₁` and `v₂` are the two
+  sides of one new fan on `v`. Nothing of `v` is copied by the driver: the fan
+  copies it as each call reaches it, so a call pays only for what it uses (an
+  untaken branch is never copied), and whatever is reduced in front of the fan is
+  reduced once and shared by every call. There is no walk over `v` and no limit
+  on its size.
+- `Y'` is a copy of the combinator (a fixed dozen nodes) on a new application,
+  and the old pair is erased, so a demand root that named it goes with it.
+- The fan's label is the call's own (`net_fresh_label`). Once the call's copy
+  can no longer be observed, the core turns the call's fans into wires to the
+  definition's side (see [the architecture](architecture.md)). Without that,
+  every call would leave its fans waiting in the definition and the net would
+  grow with every call.
 
-Measured with the compiler off, against the combinator alone: a counting loop of
-3200 iterations takes 0.39 s instead of 2.3 s (and the time is now linear),
-and `fib 15` takes 331k steps instead of 740k. The copies are eager, so work
-the net would share between calls on its own (a redex inside `F` that does not
-depend on the argument) is done once per call. `LIN_Y_OFF=1` turns the rewrite
-off.
+Measured with the compiler off, against the combinator alone, on a counting loop:
+the net stays at about 2,500 nodes however many calls are made (the combinator's
+grows to 3.4 million after 12,800 calls), and 12,800 calls take 4.7 s instead of
+98 s. The steps are the combinator's: the fan does the same copying, lazily. A
+loop whose accumulator is never forced keeps every call's world alive, because
+the unevaluated sums are still needed; that is the cost of laziness, not of the
+rewrite. `LIN_Y_OFF=1` turns the rewrite off.
 
 ### Memory in compiled code
 

@@ -121,6 +121,8 @@ typedef struct {
      searched the whole root list to drop a dead node's entries made every step cost the depth (measured:
      a fold over 2000 cells, 878k steps in 32 s, quadratic).  A free now looks only when the node IS one. */
   unsigned char *rootn;
+  /* FRESH LABELS (net_fresh_label): the fans of each, and the labels to look at again.  Core-private. */
+  struct LinFresh *fx;
 } Net;
 
 /* wire of a port (drivers read the graph directly) */
@@ -130,6 +132,13 @@ static inline Port net_wire(const Net *n, Port p) { return n->wire[p.node * 3 + 
    Church TRUE are one net -- so anything that needs to know what a node MEANS states the encoding it
    expects (LIN_ENC_* above, and the readers that take one). */
 Port net_alloc(Net *n, int tag, Scope sc);
+/* A LABEL NO OTHER FAN HAS, for one act of duplication a driver introduces (a recursive call's copy of its
+   definition, say).  Every fan that ever carries it descends from that one duplication, which is what lets the
+   core retire it: once every fan of the label either has one copy cut or erased, or is a fan-in whose copy on
+   that side only brings a value in, that copy can never be observed, and the fans become wires to the other
+   copy (the values they held for the dead copy get erasers).  Interning never produces this level, so no
+   position-derived label can coincide with it; a level is reused only when no fan carries it any more. */
+Scope net_fresh_label(Net *n);
 void net_link(Net *n, Port a, Port b, int enqueue);
 /* Cut the wire at `p` at both ends and ERASE what was on the other side: the partner end gets an eraser,
    so the subgraph behind it is reclaimed by the erasure rules (a shared one, behind a DUP, survives for its
@@ -181,8 +190,11 @@ enum { LIN_ENC_NUM, LIN_ENC_BOOL, LIN_ENC_CONS, LIN_ENC_STR, LIN_ENC_OP, LIN_ENC
    change: a net carries no carrier names, so `read_value`/`print` take the encoding (LIN_ENC_*) /
    the domain (DT_*) the caller expects, and the number moves.  ABI 7 is ERASURE: there is no collector,
    so `net_sever` now ERASES what it cuts loose and `net_drop` consumes a node, and a driver that disposed
-   of structure by cutting it and waiting for a sweep would now leak. */
-#define LIN_DRIVER_ABI   7u
+   of structure by cutting it and waiting for a sweep would now leak.  ABI 8 is FRESH LABELS: a duplication
+   given a label of its own (net_fresh_label) is retired by the core once one of its copies can no longer be
+   observed -- its fans become wires without interacting -- so a driver must not hold a port into such a fan
+   across a safepoint expecting the fan to still be there. */
+#define LIN_DRIVER_ABI   8u
 #define LIN_CAP_NATIVE_NUM 0x01u                 /* satur `_ffi` arithmetic */
 #define LIN_CAP_FIXED      0x02u                 /* beta / annihilate / erase */
 #define LIN_CAP_COMMUTE    0x04u                 /* LAM|APP x DUP (allocating) */

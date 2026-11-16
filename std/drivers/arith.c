@@ -284,17 +284,51 @@ static void arith_recycled(Net *n, void *st, int node) {
   (void)n; (void)st;
   if (node >= 0 && node < chain_cap) { app_chain[node] = -1; node_gen[node]++; }
 }
-static int chain_has(int ci, int fan) {
-  for (int k = ci; k >= 0; k = chs[k].next) if (chs[k].fan == fan && node_gen[fan] == chs[k].gen) return 1;
+/* A CHOICE WHOSE FAN IS GONE never comes back (its slot's generation moves on), so it is unlinked the first time a
+   walk passes it.  Chains share their tails, and a split inside a body copied once per call adds a link per call:
+   left in place, the dead links of every finished call were walked by every later fold (measured: a counting loop
+   of 20000 calls on the net spent 90% of its time here, the walk growing with the calls made so far). */
+static int choice_live(const Net *n, int k) {
+  int f = chs[k].fan;
+  return f < n->nn && !n->dead[f] && n->tag[f] == DUP && f < chain_cap && node_gen[f] == chs[k].gen;
+}
+static void chain_prune(const Net *n, int *head) {
+  int *at = head;
+  while (*at >= 0) {
+    if (!choice_live(n, *at)) { *at = chs[*at].next; continue; }
+    at = &chs[*at].next;
+  }
+}
+static int chain_has(const Net *n, int *head, int fan) {
+  chain_prune(n, head);
+  for (int k = *head; k >= 0; k = chs[k].next) if (chs[k].fan == fan) return 1;
   return 0;
 }
 static void chain_apply(Net *n, int app) {
   lin_fan_unchoose_all();
   if (app < 0 || app >= chain_cap) return;
-  for (int k = app_chain[app]; k >= 0; k = chs[k].next) {
-    int f = chs[k].fan;
-    if (f < n->nn && !n->dead[f] && n->tag[f] == DUP && node_gen[f] == chs[k].gen) lin_fan_choose(f, chs[k].port);
-  }
+  chain_prune(n, &app_chain[app]);
+  for (int k = app_chain[app]; k >= 0; k = chs[k].next) lin_fan_choose(chs[k].fan, chs[k].port);
+}
+/* THE CHOICES THEMSELVES ARE RECLAIMED: once the array has doubled since it was last compacted, only the chains
+   some redex still names are kept (pruned of gone fans, shared tails still shared).  The array then stays the
+   size of what is live, not of every split ever made. */
+static int chs_live_at = 256;
+static int *chs_map; static int chs_mapcap;
+static int chs_copy(Choice *to, int *nto, int k) {
+  if (k < 0) return -1;
+  if (chs_map[k] >= 0) return chs_map[k];
+  int nx = chs_copy(to, nto, chs[k].next);
+  to[*nto] = chs[k]; to[*nto].next = nx;
+  return chs_map[k] = (*nto)++;
+}
+static void chs_compact(const Net *n) {
+  if (chs_mapcap < nchs) { chs_map = realloc(chs_map, (size_t)(chs_mapcap = nchs) * sizeof *chs_map); }
+  for (int i = 0; i < nchs; i++) chs_map[i] = -1;
+  Choice *to = malloc((size_t)(cchs > 0 ? cchs : 1) * sizeof *to); int nto = 0;
+  for (int a = 0; a < chain_cap; a++) if (app_chain[a] >= 0) { chain_prune(n, &app_chain[a]); app_chain[a] = chs_copy(to, &nto, app_chain[a]); }
+  free(chs); chs = to; nchs = nto;
+  chs_live_at = nto * 2 > 256 ? nto * 2 : 256;
 }
 static int chain_push(int parent, int fan, int port) {
   if (nchs >= cchs) chs = realloc(chs, (size_t)(cchs = cchs ? cchs * 2 : 256) * sizeof *chs);
@@ -325,7 +359,7 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
   int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
   lin_fan_unchoose_all();
   /* An operand behind a fan's PRINCIPAL (one not chosen) is superposed: one value per copy -- split. */
-  if (lin_fan_undecided >= 0 && (shared || argc < slots) && !chain_has(app_chain[app], lin_fan_undecided)) {
+  if (lin_fan_undecided >= 0 && (shared || argc < slots) && !chain_has(n, &app_chain[app], lin_fan_undecided)) {
     sup_fan = lin_fan_undecided; free(fargs); free(c); return EV_SUP;
   }
   if (argc < slots) { free(fargs); free(c); return EV_WAIT; }
@@ -575,6 +609,8 @@ static int arith_claim(const Net *ncn, Port p1, Port p2) {
 static void op_split(Net *n, int lam, int app, int f) {
   Scope sf = n->scope[f], sa = n->scope[app];
   Port res = wire_at(n, app, 1), list = wire_at(n, app, 2);
+  chain_grow(n);
+  if (nchs >= chs_live_at) chs_compact(n);         /* (before `parent` is read: compaction renumbers the chains) */
   int parent = app_chain[app];
   int d1 = net_alloc(n, DUP, sf).node, d2 = net_alloc(n, DUP, sf).node, r = net_alloc(n, DUP, sf).node;
   int a1 = net_alloc(n, APP, sa).node, a2 = net_alloc(n, APP, sa).node;

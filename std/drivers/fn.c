@@ -98,12 +98,12 @@ static int y_call(const Net *n, Port p1, Port p2, int *h, int *appy, int *F) {
   *h = a; *appy = b; *F = f.node;
   return 1;
 }
-/* (Y F) however it is consumed -- applied, shared by a fan (a function that calls itself twice), passed on */
-static int y_fix(const Net *n, Port p1, Port p2, int *h, int *appy, int *F) {
+/* (Y v) however it is consumed -- applied, shared by a fan, passed on -- and whatever v is */
+static int y_fix(const Net *n, Port p1, Port p2, int *h, int *appy) {
   if (p1.port || p2.port || !live(n, p1) || !live(n, p2)) return 0;
   int a = n->tag[p1.node] == LAM ? p1.node : p2.node, b = a == p1.node ? p2.node : p1.node;
-  if (n->tag[a] != LAM || n->tag[b] != APP || !is(n, W(n, (Port){b, 2}), LAM, 0) || !is_y(n, a)) return 0;
-  *h = a; *appy = b; *F = W(n, (Port){b, 2}).node;
+  if (n->tag[a] != LAM || n->tag[b] != APP || !is_y(n, a)) return 0;
+  *h = a; *appy = b;
   return 1;
 }
 
@@ -4454,7 +4454,7 @@ static int form_recall(uint64_t key, int idx, int threads, long *word, int *kind
 static int fn_off = -1;   /* LIN_FN_OFF: refuse every call (the differential's control run) */
 static int fn_claim(const Net *n, Port p1, Port p2) {
   if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
-  int h, a, F; return y_call(n, p1, p2, &h, &a, &F) || y_fix(n, p1, p2, &h, &a, &F);   /* (LIN_FN_OFF: claimed, and declined -- the cheap rewrite or the beta) */
+  int h, a, F; return y_call(n, p1, p2, &h, &a, &F) || y_fix(n, p1, p2, &h, &a);   /* (LIN_FN_OFF: claimed, and declined -- the cheap rewrite or the beta) */
 }
 
 /* A STRUCTURE RESULT, BUILT INTO THE NET.  The unit's answer is a word: a number, a boolean, or a datatype's value
@@ -4839,53 +4839,38 @@ static Compiled *compile_pref(Net *n, int F, const Port *ap, int *an, int car) {
   }
   return compile_fn_ex(n, F, ap, an);
 }
-/* A RECURSIVE CALL THE UNIT DOES NOT TAKE, MADE CHEAP.  `(Y F) args` reduces by duplicating F through the knot, one
-   fan interaction per node of F per call (measured: ~300 per iteration of a counting loop, 2 of them betas), and a
-   call made late is reached through as many layers of copies as calls before it.  When F is CLOSED and PRIVATE --
-   joined to the rest of the net by the one wire into the call -- the call is rewritten to `(F' (Y F)) args`: F' an
-   eager copy of F (labels kept: what the knot's copying would give), the original `(Y F)` left untouched as the
-   self argument.  F is never reduced, only copied, so every later call copies the same pristine F.  Anything else
-   -- an F that reaches its own call or the root, one shared through a fan -- is left to the net's beta. */
-typedef struct { int *k, *v; long cap, n; } YMap;
-static int ym_get(YMap *m, int key) { if (!m->cap) return -1; for (long h = ((unsigned long)key * 2654435761u) & (m->cap - 1); m->k[h] >= 0; h = (h + 1) & (m->cap - 1)) if (m->k[h] == key) return m->v[h]; return -1; }
-static void ym_put(YMap *m, int key, int val) {
-  if ((m->n + 1) * 2 > m->cap) {
-    int *ok = m->k, *ov = m->v; long oc = m->cap; m->cap = m->cap ? m->cap * 2 : 256; m->k = malloc(sizeof *m->k * (size_t)m->cap); m->v = malloc(sizeof *m->v * (size_t)m->cap); m->n = 0;
-    for (long i = 0; i < m->cap; i++) m->k[i] = -1;
-    for (long i = 0; i < oc; i++) if (ok[i] >= 0) ym_put(m, ok[i], ov[i]);
-    free(ok); free(ov);
-  }
-  long h = ((unsigned long)key * 2654435761u) & (m->cap - 1); while (m->k[h] >= 0) h = (h + 1) & (m->cap - 1);
-  m->k[h] = key; m->v[h] = val; m->n++;
-}
-static int y_off = -1;
-static long y_expanded;
-/* Copy the part of the net hanging off `root` (all but its port 0), or return -1 when that part is not private: it
-   reaches `avoid` (the call, the combinator) or the root.  A wire into a fan's COPY port from a node outside is an
-   INPUT -- a value shared with the rest of the net (an operator's meaning, shared per form) -- and is not copied:
-   a fan labelled `lab` (the knot's own label, what its copying would leave there) goes on it, copy port 1 to the
-   copy and 2 to the original, so the next copy's fan goes below it and each fan copies a value once.  A part
-   something observes (a demand root inside it, as a build-time pass publishes) is being evaluated, not kept as a
-   definition: copying it would leave it below a chain of fans, one per call, that the demand pulls through. */
-/* THE SIZE BOUND.  A copy is the whole of F, branches the call never takes included; the knot copies lazily, only
-   what each call reaches.  Small F: the copy is cheaper than the knot's fan interactions.  Large F (measured: a
-   std array helper of 11k nodes, copied per call, allocated 23M nodes where the knot made 4M, and ran 3.6x
-   slower): the knot wins, so a definition past the bound is left to it. */
-#define Y_COPY_MAX 2048
-static int y_copy(Net *n, int root, int avoid1, int avoid2, Scope lab, long *size) {
-  int *list = NULL; long nl = 0, cl = 64; YMap seen = {0}; int ok = 1, res = -1;
-  ym_put(&seen, root, 0); list = malloc(sizeof *list * (size_t)cl); list[nl++] = root;
+/* A RECURSIVE CALL THE UNIT DOES NOT TAKE, MADE CHEAP.  `(Y v) args` reduced as it stands goes through the
+   combinator's own machinery every call: `(\x. h (x x))` duplicated by its fans, the self-application unfolded,
+   and v copied through layers of those fans (measured: ~300 fan interactions per iteration of a counting loop,
+   2 of them betas, and a time that grows faster than the loop).  What the combinator computes is one equation,
+   `Y v = v (Y v)`, and that is the rewrite:
+
+       (Y v) args   ->   (v1 (Y' v2)) args,      v1 and v2 the two sides of ONE new fan on v.
+
+   Nothing of v is copied here: the fan copies it as each call reaches it, so a call pays for what it uses (an
+   untaken branch is never copied), and what is reduced in front of the fan -- a redex of v that does not depend on
+   the argument -- is reduced once and shared by every call: the sharing is the net's own.  There is no walk over
+   v, so no size of v matters, and v need not be closed or private.  Y' is a copy of the combinator (a fixed dozen
+   nodes) on a new application; the old pair is dropped -- an eraser takes the old combinator -- so whatever named
+   it (a demand root) goes with it, and a reference fires only when its own value is demanded.
+
+   THE FAN'S LABEL is the call's own (net_fresh_label): no other fan carries it, so the core can retire the
+   duplication as soon as the call's copy can no longer be observed -- the call returned, or what it left is
+   garbage -- and its fans become wires to the definition's side.  Without that, every call would leave its fans
+   waiting in the definition (an eraser at one copy port waits), and later calls would walk through all of
+   them: the net would grow with the number of calls and the time with its square. */
+/* a copy of the combinator: everything hanging off `h` but its port 0, or -1 when that is not closed */
+static int y_copy(Net *n, int h) {
+  int *list = NULL; long nl = 0, cl = 32; int ok = 1, res = -1;
+  list = malloc(sizeof *list * (size_t)cl); list[nl++] = h;
   for (long i = 0; i < nl && ok; i++) {
     int u = list[i]; int np = n->tag[u] == ERA ? 1 : 3;
     for (int k = 0; k < np; k++) {
-      if (u == root && k == 0) continue;
+      if (u == h && k == 0) continue;
       Port w = W(n, (Port){u, k});
-      if (w.node <= 0 || !live(n, w) || w.node == avoid1 || w.node == avoid2 || n->tag[w.node] == ROOT) { ok = 0; break; }
-      if (n->rootn && n->rootn[w.node]) { ok = 0; break; }   /* observed (a demand root on it): being evaluated, not a definition */
-      if (n->tag[w.node] == DUP && w.port) continue; /* a fan's copy port: F's own sharing (its source is reached too) or an input */
-      if (ym_get(&seen, w.node) >= 0) continue;
-      if (nl >= Y_COPY_MAX) { ok = 0; break; }      /* too big to copy whole: the knot copies what a call uses */
-      ym_put(&seen, w.node, (int)nl);
+      if (w.node <= 0 || !live(n, w) || n->tag[w.node] == ROOT) { ok = 0; break; }
+      long j; for (j = 0; j < nl && list[j] != w.node; j++) ;
+      if (j < nl) continue;
       if (nl == cl) list = realloc(list, sizeof *list * (size_t)(cl *= 2));
       list[nl++] = w.node;
     }
@@ -4896,72 +4881,39 @@ static int y_copy(Net *n, int root, int avoid1, int avoid2, Scope lab, long *siz
     for (long i = 0; i < nl; i++) {
       int u = list[i], np = n->tag[u] == ERA ? 1 : 3;
       for (int k = 0; k < np; k++) {
-        if (u == root && k == 0) continue;
-        Port w = W(n, (Port){u, k}); long j = ym_get(&seen, w.node);
-        if (j < 0) {                                /* an input */
-          Port e = net_alloc(n, DUP, lab);
-          net_link(n, (Port){e.node, 0}, w, 1);
-          net_link(n, (Port){e.node, 2}, (Port){u, k}, 0);
-          net_link(n, (Port){e.node, 1}, (Port){cp[i], k}, 0);
-          continue;
-        }
+        if (u == h && k == 0) continue;
+        Port w = W(n, (Port){u, k}); long j; for (j = 0; j < nl && list[j] != w.node; j++) ;
         if (j < i || (j == i && (int)w.port < k)) continue;   /* (each wire once) */
         net_link(n, (Port){cp[i], k}, (Port){cp[j], w.port}, 1);
       }
     }
-    res = cp[0]; *size += nl; free(cp);
+    res = cp[0]; free(cp);
   }
-  free(list); free(seen.k); free(seen.v);
+  free(list);
   return res;
 }
-static long y_nodes, y_splits;
-static int y_expand(Net *n, int h, int appy, int F) {
+static int y_off = -1;
+static int y_expand(Net *n, int h, int appy) {
   if (y_off < 0) y_off = getenv("LIN_Y_OFF") != NULL;
-  if (y_off || W(n, (Port){appy, 2}).node != F || W(n, (Port){F, 0}).node != appy) return 0;   /* (F wired straight into the call) */
-  Port hv = W(n, (Port){h, 1});
-  if (!is(n, hv, DUP, 0)) return 0;
-  Scope lab = n->scope[hv.node];
-  Port out = W(n, (Port){appy, 1});
-  if (is(n, out, DUP, 0)) {                         /* SHARED: the fan copies the reference, not what it expands to */
-    int Yc = y_copy(n, h, appy, F, lab, &y_nodes);
-    if (Yc < 0) return 0;
-    int Fc = y_copy(n, F, appy, h, lab, &y_nodes);
-    if (Fc < 0) { /* (Y copied, F not private: drop the copy -- an eraser on it reclaims it) */
-      int e = net_alloc(n, ERA, scope_nil()).node; net_link(n, (Port){e, 0}, (Port){Yc, 0}, 1); return 0; }
-    Port a2 = net_alloc(n, APP, n->scope[appy]);
-    Port s1 = W(n, (Port){out.node, 1}), s2 = W(n, (Port){out.node, 2});
-    net_link(n, (Port){a2.node, 2}, (Port){Fc, 0}, 0);
-    net_link(n, (Port){appy, 1}, s1, 1);
-    net_link(n, (Port){a2.node, 1}, s2, 1);
-    net_drop(n, out.node);
-    net_link(n, (Port){a2.node, 0}, (Port){Yc, 0}, 1);
-    net_link(n, (Port){h, 0}, (Port){appy, 0}, 1);
-    y_splits++;
-    return 1;
-  }
-  int Fc = y_copy(n, F, appy, h, lab, &y_nodes);
-  if (Fc < 0) return 0;
-  /* (Y F) args  ->  (F' (Y' F)) args.  The self argument is a NEW reference -- Y copied (a dozen nodes), F moved
-     onto a new application -- and the old pair is dropped (an eraser takes the old Y): whatever named the old
-     pair (a demand root a pass published on it) dies with it, so a reference fires only when its own self
-     argument is demanded, never again for a demand that was already met. */
-  int Yc = y_copy(n, h, appy, F, lab, &y_nodes);
-  if (Yc < 0) {                                     /* (cannot happen for a closed Y; undo the copy of F) */
-    int e = net_alloc(n, ERA, scope_nil()).node; net_link(n, (Port){e, 0}, (Port){Fc, 0}, 1); return 0; }
+  if (y_off) return 0;
+  int Yc = y_copy(n, h);
+  if (Yc < 0) return 0;
+  Port out = W(n, (Port){appy, 1}), v = W(n, (Port){appy, 2});
+  Port d = net_alloc(n, DUP, net_fresh_label(n));
   Port b = net_alloc(n, APP, n->scope[appy]), a2 = net_alloc(n, APP, n->scope[appy]);
+  net_link(n, (Port){d.node, 0}, v, 1);            /* the one fan on v */
+  net_link(n, (Port){b.node, 0}, (Port){d.node, 1}, 1);
   net_link(n, (Port){b.node, 1}, out, 1);
-  net_link(n, (Port){a2.node, 2}, (Port){F, 0}, 0);
+  net_link(n, (Port){a2.node, 2}, (Port){d.node, 2}, 1);
   net_link(n, (Port){b.node, 2}, (Port){a2.node, 1}, 1);
-  net_link(n, (Port){b.node, 0}, (Port){Fc, 0}, 1);
-  net_drop(n, appy);                                /* (its function, the old Y, gets the eraser; F has moved) */
+  net_drop(n, appy);                                /* (its function, the old combinator, gets the eraser; v has moved) */
   net_link(n, (Port){a2.node, 0}, (Port){Yc, 0}, 1);   /* a redex, queued: fired when the self argument is demanded */
-  y_expanded++;
   return 1;
 }
 /* a call the unit declines: the cheap rewrite above, else the net's own beta */
 static void y_decline(Net *n, Port p1, Port p2, int *changed) {
-  int h, appy, F;
-  if (y_fix(n, p1, p2, &h, &appy, &F) && y_expand(n, h, appy, F)) { (*changed)++; n->steps++; return; }
+  int h, appy;
+  if (y_fix(n, p1, p2, &h, &appy) && y_expand(n, h, appy)) { (*changed)++; n->steps++; return; }
   if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
 }
 static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
