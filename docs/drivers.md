@@ -171,6 +171,93 @@ structure, which shows exactly where a value is shared:
 - **Unread fields are not computed.** A constructor field that no part of the
   program reads is never evaluated or stored, matching lazy semantics.
 
+### Reference counting
+
+What the ownership analysis alone cannot prove unshared it leaves to the arena,
+which is released when the call returns: fannkuch built 12.2M blocks and freed
+0.6M of them. So every block carries a count, in the word before it, and compiled
+code keeps it exact, in the manner of Perceus. `LIN_FN_RC=0` turns counting off
+and leaves the ownership analysis alone.
+
+- **Every value has an owner.** A call or constructor given something its giver
+  still needs (a parameter used again, a field of a block that stays, a value
+  used twice) is given a new reference. Every owned parameter is released where
+  its paths end, and a block is freed when its last reference goes.
+- **Borrowing.** A parameter a function only reads (takes apart without
+  rebuilding in it, reads the fields of, lends on) is borrowed: the caller takes
+  no count for the call and the callee releases nothing. This is a fixpoint over
+  the unit. A tail call that hands an owned value to a parameter keeps that
+  parameter owned, so loops stay loops.
+- **Moves.** The last use of a parameter takes its reference. Liveness follows
+  the order the emitted code evaluates, including the values each region binds,
+  where the emitter binds them. A field consumed once by what is stored back in
+  its own slot of a block rebuilt in place is moved, decided at run time, so
+  nested updates do not copy every level. A branch that takes apart a block it
+  owns moves out the fields it uses once, if on every path it then rebuilds that
+  block in place or drops it. A balanced-tree insertion then rebuilds its whole
+  path in place. A block dropped after its fields moved out is simply freed.
+- **In place by count.** A rebuild in place first checks that the block's count
+  is one, and copies it otherwise. Both forms of destination passing work, and
+  drops on a path that ends in a cell with a hole run before the call that fills
+  the hole, so the loop stays a loop.
+- **Threads.** A count is plain arithmetic while one thread alone can see the
+  block. What forked tasks, parallel loops and reductions are handed is frozen
+  first: never counted again and freed with the unit, so threads reading one
+  structure never write to it. A list a parallel map splits among the threads is
+  marked shared instead: its counts are negated and from then on atomic, and it
+  is freed as it is consumed. A shared block held by a single reference becomes
+  local again. A parameter that is read all the way down (no part of it is ever
+  given a count) is handed to threads unmarked.
+
+### Owned vectors
+
+`std/array.lin`'s arrays have their own type, `vec a`, and their operations
+(`array`, `alen`, `aget`, `aset`, `apush`) are `_op` heads like the arithmetic
+operators. On the net, and in any driver that does not know them, their meaning
+is a 32-way radix trie, written in Lin. The function compiler keeps a vector as
+one flat block, `{length, capacity, elements}`:
+
+- `aget` is a load and `alen` a word.
+- `aset` writes in place when the vector's count is one, and copies otherwise.
+  The old array is still there for whoever holds it, so the operation is
+  persistent, but the copy is paid only when the old array is actually used again.
+- `apush` grows the capacity by doubling.
+
+Elements that are data are counted like fields. A unit whose vector crosses
+between the net and compiled code, as an argument or a result, is compiled again
+with the operations as their meaning, the trie.
+
+Blocks built and freed on one thread, by ownership alone and counted:
+
+| Benchmark | Built | Freed (ownership) | Freed (counted) |
+|-----------|------:|-------------:|-------:|
+| fannkuch | 12.2M | 0.6M | 10.0M |
+| words | 1.9M | 1.0M | 1.9M |
+| omap | 518K | 0 | 518K |
+| knucleotide | 695K | 81K | 445K |
+
+Wall-clock times in ms (`bench/run.sh`, best of three, cached), ownership
+alone (`LIN_FN_RC=0`) / counted, in one session on a shared 4-core machine
+(expect ±20%):
+
+| Benchmark | Lin | Lin `-t 1` |
+|-----------|-----|------------|
+| array | 43 / 11 | 42 / 12 |
+| fannkuch | 35 / 28 | 101 / 75 |
+| mandel | 31 / 26 | 109 / 88 |
+| omap | 96 / 101 | 139 / 121 |
+| nqueens | 157 / 163 | 202 / 164 |
+| pidigits | 1147 / 1334 | 1238 / 1211 |
+| knucleotide | 58 / 90 | 63 / 67 |
+| regexredux | 37 / 64 | 59 / 82 |
+| bst | 29 / 37 | 29 / 39 |
+| words | 13 / 18 | 14 / 22 |
+
+What the counted programs still pay for is counts: the regex matcher returns the
+rest of its input, so it cannot borrow it, and every step takes and releases a
+count of the string; `words` and `bst` pay for the count word itself, which makes
+a two-word cell three.
+
 ### Loops
 
 - **Tail calls** are loops.
@@ -260,6 +347,9 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
 | `LIN_Y_OFF=1` | Leave declined recursive calls to the Y combinator's own copying (for comparison) |
 | `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance. The whole test suite and every benchmark pass under it |
+| `LIN_FN_RC=0` | No reference counting: the ownership analysis alone, and vectors kept as their trie (see above) |
+| `LIN_FN_STATS=1` | Report the blocks each unit built and freed, per size |
+| `LIN_FN_LEAKS=1` | Number every allocation site and report, when a unit ends, the sites whose blocks are still held, printing the code around each |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
 | `LIN_NO_CACHE=1` | Do not use the program cache |

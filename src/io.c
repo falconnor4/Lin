@@ -26,6 +26,7 @@ void lin_domains_init(void) {
   nominal_register("num", 0);
   nominal_register("float", 0);
   nominal_register("list", 1);
+  nominal_register("vec", 1);    /* (std/array.lin: a vector's type, whatever stores it) */
 }
 
 /* ---------------- fan walks ----------------  Fan chains: `dup_hop` is the crossing walk, `skip_dup` the plain one.  A CHAIN MAY CYCLE and the bound

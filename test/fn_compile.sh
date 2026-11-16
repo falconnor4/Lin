@@ -184,7 +184,8 @@ cap=$(timeout 120 "$LIN_BIN" "$TMP/cap.lin" 2>/dev/null)
 # bodies starts from a COPY of a body and rebuilds in it; the list a step was computed from is DROPPED once the
 # step is built (the eraser, in compiled code); and the simulation the energy is read from is computed ONCE,
 # though the energy's inner loop names it at every body.
-LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/cap.lin" >/dev/null 2>"$TMP/cap.err"
+# (the ownership analysis's own reports: it is what LIN_FN_RC=0 runs on its own; counting builds on it)
+LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/cap.lin" >/dev/null 2>"$TMP/cap.err"
 for what in "is given a copy" "is dropped after its call" "is computed once"; do
   grep -q "$what" "$TMP/cap.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL n-body: no parameter '$what'"; }
 done
@@ -246,7 +247,7 @@ printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_smal
 bm=$(timeout 120 "$LIN_BIN" "$TMP/bm.lin" 2>/dev/null)
 [ "$bm" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL big_mul: '$bm'"; }
 sed 's/(digits 0 2000 1/(digits 0 600 1/' "$ROOT/bench/pidigits.lin" > "$TMP/pd.lin"
-pd=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>"$TMP/pd.err")
+pd=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>"$TMP/pd.err")
 [ "$pd" = "=> 127083" ] && grep -q "dropped where its paths end" "$TMP/pd.err" && ! grep -q "guard fired" "$TMP/pd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600: '$pd'"; }
 # REGULAR EXPRESSIONS compiled: a pattern built in the net is read in -- its Seqs of pieces and of ranges by
 # the types it was declared at, as no single shape of `scons` can say -- and the matching loop runs as C.
@@ -321,12 +322,12 @@ pd2=$(timeout 120 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null); pd2n=$(LIN_FN_OFF=1 ti
 # starting number they share must survive the first (it was freed under the second).
 printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
   '(let ((x (big_of 1))) (big_to_string (big_mul (fact 20 x) (fact 25 x))))' > "$TMP/sh2.lin"
-sh2=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>"$TMP/sh2.err")
+sh2=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>"$TMP/sh2.err")
 [ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && grep -q "the second is given a copy" "$TMP/sh2.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
 # A TEMPORARY -- a number built only to be read by one call -- is dropped when the call returns.
 printf '%s\n' '(define go (\i (\a (\n (if (eq i 0) n (go (sub i 1) a (if (gt (big_cmp (big_mul_small a 3) (big_mul_small a 2)) 0) (add n 1) n)))))))' \
   '(go 20000 (big_of 123456789123456789) 0)' > "$TMP/td.lin"
-td=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/td.lin" 2>"$TMP/td.err"); td1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/td.lin" 2>/dev/null)
+td=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/td.lin" 2>"$TMP/td.err"); td1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/td.lin" 2>/dev/null)
 [ "$td" = "=> 20000" ] && [ "$td1" = "$td" ] && grep -q "temporary given to" "$TMP/td.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a temporary dropped: '$td' '$td1'"; }
 # A FIELD of a consumed record, lent and then dead, is dropped where its paths end -- and a LOCAL likewise.
 printf '%s\n' '(datatype R (r (k num) (l Seq num)))' \
@@ -335,8 +336,12 @@ printf '%s\n' '(datatype R (r (k num) (l Seq num)))' \
   '(define mk (\i (\n (if (eq n 0) (r i (up (add (mod i 7) 3) snil)) (mk i (sub n 1))))))' \
   '(define go (\i (\acc (if (eq i 0) acc (match (mk i 2) ((r k l) (go (sub i 1) (add acc (add k (tot l 0))))))))))' \
   '(go 3000 0)' > "$TMP/fd.lin"
-fd=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/fd.lin" 2>"$TMP/fd.err")
+fd=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/fd.lin" 2>"$TMP/fd.err")
 [ "$fd" = "=> 4570482" ] && grep -q "field 1 of a consumed r is dropped" "$TMP/fd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field dropped: '$fd'"; }
+# COUNTED (the default), the same program frees every block it builds: what it holds when it ends is nothing.
+fdc=$(LIN_FN_STATS=1 timeout 120 "$LIN_BIN" -t 1 "$TMP/fd.lin" 2>"$TMP/fdc.err")
+fdb=$(sed -n 's/^lin: blocks of [0-9]* words: \([0-9]*\) built, \([0-9]*\) freed/\1 \2/p' "$TMP/fdc.err" | awk '{b+=$1; f+=$2} END {print b+0, f+0}')
+[ "$fdc" = "=> 4570482" ] && [ "${fdb% *}" -gt 0 ] && [ "${fdb% *}" = "${fdb#* }" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL counted, every block freed: '$fdc' built/freed '$fdb'"; }
 # THE SAME PROGRAMS WITH FREED BLOCKS POISONED (LIN_FN_POISON): a block read after it is freed reads an address
 # nothing is at, so a drop made too early fails here rather than by luck.
 for f in fd sh2 td pa bm; do

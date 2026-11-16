@@ -1001,6 +1001,11 @@ enum { LIN_OP_ADD = 0, LIN_OP_MUL, LIN_OP_SUB, LIN_OP_EQ, LIN_OP_LT, LIN_OP_LEQ,
        LIN_OP_FADD, LIN_OP_FSUB, LIN_OP_FMUL, LIN_OP_FDIV, LIN_OP_FEQ, LIN_OP_FLT, LIN_OP_FLEQ,
        LIN_OP_FMIN, LIN_OP_FMAX, LIN_OP_FSQRT, LIN_OP_FFLOOR, LIN_OP_FTOI, LIN_OP_ITOF, LIN_OP_FABS,
        LIN_OP_FSIGN, LIN_OP_FFRACT, LIN_OP_N };
+/* VECTOR OPERATIONS (std/array.lin): `_op` heads past LIN_OP_N, so no fold driver claims them -- their pure
+   meaning (a trie) is what the net computes; the function compiler may keep a vector flat (std/drivers/fn.c). */
+enum { LIN_VOP_NEW = 64, LIN_VOP_LEN, LIN_VOP_GET, LIN_VOP_SET, LIN_VOP_PUSH };
+#define LIN_VOP_FIRST LIN_VOP_NEW
+#define LIN_VOP_LAST LIN_VOP_PUSH
 #define LIN_OP_IS_FLOAT(c) ((c) >= LIN_OP_FADD && (c) < LIN_OP_N)
 #define LIN_OP_IS_CMP(c) (((c) >= LIN_OP_EQ && (c) <= LIN_OP_GEQ) || ((c) >= LIN_OP_FEQ && (c) <= LIN_OP_FLEQ))
 static inline const char *lin_op_fn(int code) {
