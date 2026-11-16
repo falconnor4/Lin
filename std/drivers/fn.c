@@ -98,6 +98,14 @@ static int y_call(const Net *n, Port p1, Port p2, int *h, int *appy, int *F) {
   *h = a; *appy = b; *F = f.node;
   return 1;
 }
+/* (Y v) however it is consumed -- applied, shared by a fan, passed on -- and whatever v is */
+static int y_fix(const Net *n, Port p1, Port p2, int *h, int *appy) {
+  if (p1.port || p2.port || !live(n, p1) || !live(n, p2)) return 0;
+  int a = n->tag[p1.node] == LAM ? p1.node : p2.node, b = a == p1.node ? p2.node : p1.node;
+  if (n->tag[a] != LAM || n->tag[b] != APP || !is_y(n, a)) return 0;
+  *h = a; *appy = b;
+  return 1;
+}
 
 /* ---- the evaluator --------------------------------------------------------------------------- */
 enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FROW[k]) over args */
@@ -4446,7 +4454,7 @@ static int form_recall(uint64_t key, int idx, int threads, long *word, int *kind
 static int fn_off = -1;   /* LIN_FN_OFF: refuse every call (the differential's control run) */
 static int fn_claim(const Net *n, Port p1, Port p2) {
   if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
-  int h, a, F; return !fn_off && y_call(n, p1, p2, &h, &a, &F);
+  int h, a, F; return y_call(n, p1, p2, &h, &a, &F) || y_fix(n, p1, p2, &h, &a);   /* (LIN_FN_OFF: claimed, and declined -- the cheap rewrite or the beta) */
 }
 
 /* A STRUCTURE RESULT, BUILT INTO THE NET.  The unit's answer is a word: a number, a boolean, or a datatype's value
@@ -4831,14 +4839,92 @@ static Compiled *compile_pref(Net *n, int F, const Port *ap, int *an, int car) {
   }
   return compile_fn_ex(n, F, ap, an);
 }
+/* A RECURSIVE CALL THE UNIT DOES NOT TAKE, MADE CHEAP.  `(Y v) args` reduced as it stands goes through the
+   combinator's own machinery every call: `(\x. h (x x))` duplicated by its fans, the self-application unfolded,
+   and v copied through layers of those fans (measured: ~300 fan interactions per iteration of a counting loop,
+   2 of them betas, and a time that grows faster than the loop).  What the combinator computes is one equation,
+   `Y v = v (Y v)`, and that is the rewrite:
+
+       (Y v) args   ->   (v1 (Y' v2)) args,      v1 and v2 the two sides of ONE new fan on v.
+
+   Nothing of v is copied here: the fan copies it as each call reaches it, so a call pays for what it uses (an
+   untaken branch is never copied), and what is reduced in front of the fan -- a redex of v that does not depend on
+   the argument -- is reduced once and shared by every call: the sharing is the net's own.  There is no walk over
+   v, so no size of v matters, and v need not be closed or private.  Y' is a copy of the combinator (a fixed dozen
+   nodes) on a new application; the old pair is dropped -- an eraser takes the old combinator -- so whatever named
+   it (a demand root) goes with it, and a reference fires only when its own value is demanded.
+
+   THE FAN'S LABEL is the call's own (net_fresh_label): no other fan carries it, so the core can retire the
+   duplication as soon as the call's copy can no longer be observed -- the call returned, or what it left is
+   garbage -- and its fans become wires to the definition's side.  Without that, every call would leave its fans
+   waiting in the definition (an eraser at one copy port waits), and later calls would walk through all of
+   them: the net would grow with the number of calls and the time with its square. */
+/* a copy of the combinator: everything hanging off `h` but its port 0, or -1 when that is not closed */
+static int y_copy(Net *n, int h) {
+  int *list = NULL; long nl = 0, cl = 32; int ok = 1, res = -1;
+  list = malloc(sizeof *list * (size_t)cl); list[nl++] = h;
+  for (long i = 0; i < nl && ok; i++) {
+    int u = list[i]; int np = n->tag[u] == ERA ? 1 : 3;
+    for (int k = 0; k < np; k++) {
+      if (u == h && k == 0) continue;
+      Port w = W(n, (Port){u, k});
+      if (w.node <= 0 || !live(n, w) || n->tag[w.node] == ROOT) { ok = 0; break; }
+      long j; for (j = 0; j < nl && list[j] != w.node; j++) ;
+      if (j < nl) continue;
+      if (nl == cl) list = realloc(list, sizeof *list * (size_t)(cl *= 2));
+      list[nl++] = w.node;
+    }
+  }
+  if (ok) {
+    int *cp = malloc(sizeof *cp * (size_t)nl);
+    for (long i = 0; i < nl; i++) cp[i] = net_alloc(n, n->tag[list[i]], n->scope[list[i]]).node;
+    for (long i = 0; i < nl; i++) {
+      int u = list[i], np = n->tag[u] == ERA ? 1 : 3;
+      for (int k = 0; k < np; k++) {
+        if (u == h && k == 0) continue;
+        Port w = W(n, (Port){u, k}); long j; for (j = 0; j < nl && list[j] != w.node; j++) ;
+        if (j < i || (j == i && (int)w.port < k)) continue;   /* (each wire once) */
+        net_link(n, (Port){cp[i], k}, (Port){cp[j], w.port}, 1);
+      }
+    }
+    res = cp[0]; free(cp);
+  }
+  free(list);
+  return res;
+}
+static int y_off = -1;
+static int y_expand(Net *n, int h, int appy) {
+  if (y_off < 0) y_off = getenv("LIN_Y_OFF") != NULL;
+  if (y_off) return 0;
+  int Yc = y_copy(n, h);
+  if (Yc < 0) return 0;
+  Port out = W(n, (Port){appy, 1}), v = W(n, (Port){appy, 2});
+  Port d = net_alloc(n, DUP, net_fresh_label(n));
+  Port b = net_alloc(n, APP, n->scope[appy]), a2 = net_alloc(n, APP, n->scope[appy]);
+  net_link(n, (Port){d.node, 0}, v, 1);            /* the one fan on v */
+  net_link(n, (Port){b.node, 0}, (Port){d.node, 1}, 1);
+  net_link(n, (Port){b.node, 1}, out, 1);
+  net_link(n, (Port){a2.node, 2}, (Port){d.node, 2}, 1);
+  net_link(n, (Port){b.node, 2}, (Port){a2.node, 1}, 1);
+  net_drop(n, appy);                                /* (its function, the old combinator, gets the eraser; v has moved) */
+  net_link(n, (Port){a2.node, 0}, (Port){Yc, 0}, 1);   /* a redex, queued: fired when the self argument is demanded */
+  return 1;
+}
+/* a call the unit declines: the cheap rewrite above, else the net's own beta */
+static void y_decline(Net *n, Port p1, Port p2, int *changed) {
+  int h, appy;
+  if (y_fix(n, p1, p2, &h, &appy) && y_expand(n, h, appy)) { (*changed)++; n->steps++; return; }
+  if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
+}
 static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
   (void)limit;
   int folded = 0;
   for (int i = 0; i < nred; i++) {
     Port p1 = rx[2 * i], p2 = rx[2 * i + 1];
+    if (fn_off) { y_decline(n, p1, p2, changed); continue; }
     int h, appy, F;
     if (!y_call(n, p1, p2, &h, &appy, &F)) {           /* an earlier fold in this wave took it */
-      if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
+      y_decline(n, p1, p2, changed);
       continue;
     }
     /* (the call WITH its arguments first, when some are not numbers yet: that unit is the one that runs, and a
@@ -4959,19 +5045,19 @@ static int fn_reduce(Net *n, Port *rx, int nred, long limit, int *changed) {
       if (!y_call(n, p1, p2, &h, &appy, &F)) { ok = 0; break; }   /* forcing rewrote the call itself */
     }
     if (!ok) {
-      if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
+      y_decline(n, p1, p2, changed);
       continue;
     }
     extern int lin_threads;
     long r = c->fn(args, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
     if (c->aborted && *c->aborted) {                 /* a data unit's guard fired: the net computes it, lazily */
       DBG("the data unit's guard fired: the net computes it\n");
-      if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
+      y_decline(n, p1, p2, changed);
       continue;
     }
     Port val = result_port(n, c, r);
     if (val.node < 0) {
-      if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
+      y_decline(n, p1, p2, changed);
       continue;
     }
     Port out = W(n, (Port){call, 1});

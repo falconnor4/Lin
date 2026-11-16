@@ -105,6 +105,37 @@ difference cannot be observed, and otherwise leaves the call to the net:
 
 `LIN_FN_DEBUG=1` prints each decision and the reason for each decline.
 
+### Recursive calls it declines
+
+A recursive definition reaches the net as the Y combinator applied to the
+function, `Y F`. Reduced as it stands, every call runs the combinator's own
+machinery: its self-application is unfolded, and `F` is copied through layers of
+the combinator's fans. When the driver declines a call, it rewrites it with the
+equation the combinator computes, `Y v = v (Y v)`, using only the net's own node
+kinds:
+
+- `(Y v) args` becomes `(v₁ (Y' v₂)) args`, where `v₁` and `v₂` are the two
+  sides of one new fan on `v`. Nothing of `v` is copied by the driver: the fan
+  copies it as each call reaches it, so a call pays only for what it uses (an
+  untaken branch is never copied), and whatever is reduced in front of the fan is
+  reduced once and shared by every call. There is no walk over `v` and no limit
+  on its size.
+- `Y'` is a copy of the combinator (a fixed dozen nodes) on a new application,
+  and the old pair is erased, so a demand root that named it goes with it.
+- The fan's label is the call's own (`net_fresh_label`). Once the call's copy
+  can no longer be observed, the core turns the call's fans into wires to the
+  definition's side (see [the architecture](architecture.md)). Without that,
+  every call would leave its fans waiting in the definition and the net would
+  grow with every call.
+
+Measured with the compiler off, against the combinator alone, on a counting loop:
+the net stays at about 2,500 nodes however many calls are made (the combinator's
+grows to 3.4 million after 12,800 calls), and 12,800 calls take 2.1 s instead of
+98 s, with the time growing in proportion to the calls. The steps are the combinator's: the fan does the same copying, lazily. A
+loop whose accumulator is never forced keeps every call's world alive, because
+the unevaluated sums are still needed; that is the cost of laziness, not of the
+rewrite. `LIN_Y_OFF=1` turns the rewrite off.
+
 ### Memory in compiled code
 
 Compiled code allocates from an arena that is released when the call returns.
@@ -227,6 +258,7 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_OFF=1` | Disable the function compiler |
 | `LIN_FN_DEBUG=1` | Print decisions and timings; `2` also prints the generated C |
 | `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
+| `LIN_Y_OFF=1` | Leave declined recursive calls to the Y combinator's own copying (for comparison) |
 | `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance. The whole test suite and every benchmark pass under it |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |

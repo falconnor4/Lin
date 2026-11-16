@@ -174,6 +174,17 @@ fi
 rm -f "$NW_LOG"
 
 # ----------------------------------------------------------------------------
+# Tier 2.81: declined recursive calls are copied structurally, not by the Y knot (test/y_refs.sh).
+# ----------------------------------------------------------------------------
+YR_LOG=$(mktemp)
+if bash test/y_refs.sh "$LIN_BIN" >"$YR_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 1)); echo "PASS test/y_refs.sh ($(tail -1 "$YR_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/y_refs.sh"; cat "$YR_LOG"
+fi
+rm -f "$YR_LOG"
+
+# ----------------------------------------------------------------------------
 # Tier 2.85: a datatype's constructor type describes EVERY field.
 #   The count comes from the program (test/datatype_arity.sh), so this pins the property and not a
 #   number: the compiler used to scope a constructor's parameters and fields to a fixed 16, which

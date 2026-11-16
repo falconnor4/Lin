@@ -66,6 +66,7 @@ string or a constructor, and no node carries a name or a payload.
 | `DUP` × `DUP`, different labels | They pass through each other |
 | `DUP` × `LAM` or `APP` | The node is copied, and the duplication moves to its other ports |
 | `ERA` × any node | The node is removed, and erasers are placed on its other ports |
+| A fresh label's copy no longer observable | Every fan of the label becomes a wire to the other copy (see below) |
 
 Every rule is local: it reads and writes only the two nodes of the redex and the
 wires at their ports. That locality is what makes parallel reduction safe.
@@ -80,6 +81,22 @@ comparing two labels is an integer comparison, however deeply nested the scopes.
 Because a shared value is one piece of net, work done on it is done once for all
 of its users. A redex and every copy that would arise from it are reduced in a
 single step; `test/optimality.py` checks the step counts this implies.
+
+An eraser that reaches one copy port of a fan waits there: collapsing that fan
+alone is unsound, because its partner, found by its label, may still be on its
+way. A driver that starts one act of duplication can give it a label of its own
+(`net_fresh_label`); no position-derived label can coincide with it, so every
+fan that ever carries it descends from that one duplication. The core can then
+decide for the whole duplication at once. A fan either copies a value to its two
+copies' consumers, or brings each copy's value in (a binder or a result of
+something duplicated). When, on one side, every fan of the label has its copy
+port cut or erased, or only brings a value in, nothing on that side can be
+observed any more. Every fan of the label then becomes a wire to the other side,
+and the values held for the dead side get erasers. This is checked at the
+safepoint, only for labels whose fans just lost a copy or left, and it rewrites
+only those fans and their own ports. A recursive call's copy of its definition is
+the case it was made for (see [the drivers](drivers.md)): without it, every call
+leaves its fans waiting in the definition and later calls walk through them all.
 
 A `let` binds one net that every use shares, including uses inside its own value.
 A recursive definition is therefore a cycle in the net, not an unrolling.
