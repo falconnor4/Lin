@@ -1165,6 +1165,35 @@ static void captures(const Expr *e, unsigned char *seen, const Expr ***out, int 
   captures(e->a, seen, out, n); captures(e->b, seen, out, n); if (e->op != E_CTOR) captures(e->c, seen, out, n);
   for (int i = 0; i < e->nargs && e->args; i++) captures(e->args[i], seen, out, n);
 }
+/* (counted) WHAT A THREAD IS HANDED is marked shared first (see gen_data_fns): the function that marks a value of
+   shape s, or -1 -- a number needs none, and a value whose shape is not known cannot be marked, so its unit counts
+   atomically instead (rc_mt) */
+static int rc_mt;
+static int rc_on(void); static int drop_fn(Shape sh); static Shape shape_of(const Expr *e);
+static int rc_share_fn(Shape s) {
+  if (!rc_on() || s.k == 1 || s.k == 3) return -1;
+  if (s.k == 5 && s.dt) return drop_fn(s);
+  rc_mt = 1; return -1;
+}
+static int reads_p_r(const Expr *e, int f, long k, unsigned char *seen) {
+  if (!e) return 0;
+  if (e->op == E_PARAM) return e->nargs == f && e->k == k;
+  if (seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (reads_p_r(e->a, f, k, seen) || reads_p_r(e->b, f, k, seen) || reads_p_r(e->c, f, k, seen)) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (reads_p_r(e->args[i], f, k, seen)) return 1;
+  return 0;
+}
+static int reads_p(const Expr *e, int f, long k) { unsigned char *seen = calloc((size_t)eid + 1, 1); int r = reads_p_r(e, f, k, seen); free(seen); return r; }
+/* the shares of f's data parameters (named p<k>, or `<pre>[<k>]`) that x reads -- all of them when x is NULL */
+static void rc_share_params(Buf *b, int f, const Expr *x, const char *arr, const char *idx) {
+  if (!rc_on() || f < 0 || f >= nfun || !funs[f].pnode) return;
+  for (int k = 0; k < funs[f].arity; k++) {
+    if (!funs[f].pnode[k] || (x && !reads_p(x, f, k))) continue;
+    int sf = rc_share_fn(shape_of(funs[f].pnode[k])); if (sf < 0) continue;
+    if (arr) put(b, "lin_share%d(%s[%s%d]); ", sf, arr, idx, k); else put(b, "lin_share%d(p%d); ", sf, k);
+  }
+}
 /* A TASK: x on a new thread (while `d < dmax`), as a function of the parameters and the locals it reads.
    Writes the start to b; `call` gets the same computation made here, for when no thread was started.
    Returns the site's number: the join is `sp<k>_ ? (pthread_join(t<k>_, 0), LIN_JOINED, s<k>_.r) : <call>`. */
@@ -1186,6 +1215,13 @@ static int fork_open(Buf *b, Buf *pre, const Expr *x, int budget, Buf *call, int
   put(b, "S%d s%d_ = { {", k, k); plistn(b, 0, np); put(b, "%s}, {", np ? "" : "0");
   for (int c = 0; c < nc; c++) put(b, "%sv%d", c ? ", " : "", cap[c]->var);
   put(b, "%s}, d, 0 }; pthread_t t%d_; ", nc ? "" : "0", k);
+  if (rc_on()) {                                     /* (counted: what both threads will read is marked shared first) */
+    Buf sh = nbuf(64);
+    if (emitting >= 0) rc_share_params(&sh, emitting, x, NULL, NULL);
+    for (int c = 0; c < nc; c++) { int sf = rc_share_fn(shape_of(cap[c])); if (sf >= 0) put(&sh, "lin_share%d(v%d); ", sf, cap[c]->var); }
+    if (sh.len) put(b, "if (d < dmax) { %s} ", sh.s);
+    free(sh.s);
+  }
   put(b, "int sp%d_ = d < dmax && !pthread_create(&t%d_, &attr, run%d, &s%d_); ", k, k, k, k);
   put(call, "site%d(", k); plistn(call, 0, np);
   for (int c = 0; c < nc; c++) put(call, "%sv%d", np || c ? ", " : "", cap[c]->var);
@@ -1543,6 +1579,12 @@ static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per 
   /* every G at once: the threads and this one take states in turn */
   put(&w, "  long *g = malloc(sizeof(long) * (size_t)(n + 1));\n");
   put(&w, "  PL%d s = { st, g, n, 0, d }; int T = lin_threads_ > 0 ? lin_threads_ : 1; pthread_t t[T]; int nt = 0;\n", f);
+  if (rc_on()) {                                     /* (counted: the states every thread reads, marked shared) */
+    Buf sh = nbuf(64), ix = nbuf(32); put(&ix, "i * %d + ", ar);
+    rc_share_params(&sh, f, NULL, "st", ix.s);
+    if (sh.len) put(&w, "  if (T > 1 && n > 1) for (long i = 0; i < n; i++) { %s}\n", sh.s);
+    free(sh.s); free(ix.s);
+  }
   put(&w, "  for (int k = 1; k < T && k < n; k++) { if (__sync_add_and_fetch(&lin_live, 1) > 2 * T) { __sync_sub_and_fetch(&lin_live, 1); break; }\n");
   put(&w, "    if (pthread_create(&t[nt], &attr, plrun%d, &s)) { __sync_sub_and_fetch(&lin_live, 1); break; } nt++; }\n", f);
   put(&w, "  for (long i; (i = __sync_fetch_and_add(&s.next, 1)) < n; ) g[i] = f%d_g(", f);
@@ -1733,8 +1775,10 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       put(b, "({ long v%d = 0; ", hv);
       /* (counted: the field the call rebuilds, of a block rebuilt in place, is moved into it -- see COUNTED MOVES) */
       int hm = -1, mv0 = mv_n;
-      if (rc_on() && e->c && !(par && e->c->op != E_PARAM) && (e->c->op == E_PARAM || bound(e->c)) && !tcount_m(e, 2, NULL, e->c, 0)) {
-        unsigned n = 0; for (int i = 0; i < e->nargs; i++) n += tcount_m(e->args[i], 1, NULL, e->c, hole);
+      if (rc_on() && e->c && !(par && e->c->op != E_PARAM) && (e->c->op == E_PARAM || bound(e->c))) {
+        unsigned n = 0, other = 0;
+        for (int i = 0; i < e->nargs; i++) { n += tcount_m(e->args[i], 1, NULL, e->c, hole); other += tcount_m(e->args[i], 2, NULL, e->c, 0); }
+        if (other) n = 0;   /* (the block itself read whole: something may take a count of it) */
         Shape ovs; const LinCtor *oci = rc_old_ci(e, &ovs);
         if (n == 1 && tcount_m(c, 1, NULL, e->c, hole) == 1 && rc_fdrop(oci, hole, ovs) >= 0) {
           hm = nvar++; put(b, "int _m%d = lin_uniq((long *)(", hm); if (!emitx(b, pre, e->c, par, budget - 1)) return 0; put(b, ")); ");
@@ -2358,6 +2402,7 @@ static void red_run(Buf *b, const Red *red, int data, const char *threads, const
   else put(b, "  if (%s > 1 && %s > %s && %s - %s >= 4096) {\n", threads, hi, lo, hi, lo);
   put(b, "    long next = %s; pthread_t t[%s]; R q[%s];%s\n", hi, threads, threads,
       data ? " pthread_attr_t ra; pthread_attr_init(&ra); pthread_attr_setstacksize(&ra, (size_t)256 << 20);" : "");
+  if (data && rc_on()) { Buf sh = nbuf(64); rc_share_params(&sh, 0, red->g, NULL, NULL); if (sh.len) put(b, "    %s\n", sh.s); free(sh.s); }   /* (counted: read by every thread) */
   put(b, "    for (int k = 0; k < %s; k++) { R r = { {", threads); plist(b, 0);
   put(b, "}, %s, (%s - %s) / ((long)%s * 64) + 1, 0, &next }; q[k] = r; pthread_create(&t[k], %s, rrun, &q[k]); }\n", lo, hi, lo, threads, data ? "&ra" : "0");
   put(b, "    long acc = p%d;\n    for (int k = 0; k < %s; k++) { pthread_join(t[k], 0); acc = ", red->acc, threads);
@@ -4045,12 +4090,14 @@ static const char *DATA_RT =
   "#ifdef LIN_STATS\nstatic long lin_na[9], lin_nf[9];\n#define LIN_NA(n) lin_na[(n) < 8 ? (n) : 8]++\n#define LIN_NF(n) lin_nf[(n) < 8 ? (n) : 8]++\n#else\n#define LIN_NA(n)\n#define LIN_NF(n)\n#endif\n"
   "static inline long *lin_alloc(long n) { LIN_NA(n); long *f = lin_fl[n & 7]; if (n < 8 && f) { lin_fl[n] = (long *)f[0]; f[-1] = 1; return f; }\n"
   "  if (__builtin_expect(lin_hp + n + 1 > lin_he, 0)) lin_refill(n + 1); long *r = lin_hp + 1; r[-1] = 1; lin_hp += n + 1; return r; }\n"
-  /* (a unit running on more than one thread counts atomically: a block may be held by two tasks) */
+  /* (a count is touched only by the thread that can see the block: what is handed to another thread is first
+     marked SHARED -- count 0, see gen_data_fns -- and a shared block is never counted, rebuilt in, or freed before
+     the unit ends.  Only a unit that hands a thread something it cannot mark counts atomically: lin_mt) */
   "static int lin_mt;\n"
-  "static inline long lin_dup(long v) { if (!(v & 1)) { long *p = (long *)v; if (lin_mt) __atomic_fetch_add(&p[-1], 1, __ATOMIC_RELAXED); else p[-1]++; } return v; }\n"
+  "static inline long lin_dup(long v) { if (!(v & 1)) { long *p = (long *)v; if (!p[-1]) return v; if (lin_mt) __atomic_fetch_add(&p[-1], 1, __ATOMIC_RELAXED); else p[-1]++; } return v; }\n"
   "static inline long lin_take(int *m, long v) { if (*m == 1) { *m = 2; return v; } return lin_dup(v); }\n"
   "static inline int lin_uniq(long *p) { return (lin_mt ? __atomic_load_n(&p[-1], __ATOMIC_ACQUIRE) : p[-1]) == 1; }\n"
-  "static inline int lin_dec(long *p) { if (lin_mt) return __atomic_sub_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0; return --p[-1] == 0; }\n"
+  "static inline int lin_dec(long *p) { if (!p[-1]) return 0; if (lin_mt) return __atomic_sub_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0; return --p[-1] == 0; }\n"
   /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
   "#ifdef LIN_POISON\n"   /* (LIN_FN_POISON: a freed block's words become an address nothing is at -- read after its free, it faults) */
   "static inline void lin_free(long *p, long n) { if (p[-1] > 1) { fprintf(stderr, \"lin: a block freed while %ld references hold it\\n\", p[-1]); abort(); } for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
@@ -4571,8 +4618,72 @@ static void fuse_lists(Expr **entry) {
     if (dbg) DBG("fused f%d's list into f%d: f%d\n", u.p, u.c, F);
   }
 }
+/* A DATATYPE SHAPE's functions: its drop, its copy, and (counted) its SHARE -- a structure handed to another thread
+   is marked as held by more than one (count 0): never counted again, never rebuilt in place, never freed before the
+   unit ends -- so a count is only ever touched by the one thread that can see it, and is never atomic. */
+static void gen_data_fns(Buf *dbp, int d) {
+#define db (*dbp)
+        Shape ds = drop_sh[d]; const char *dt = ds.dt; int box = -1, untag = dt_boxed(dt, &box) == 1; const LinCtor *c;
+#define FS(k, j) field_shape(sh_fld, sh_nctor, c, k, j, ds)
+#define FDROP(k, j) (field_live(c, j) && k <= sh_nctor && FS(k, j).k == 5 && FS(k, j).dt && (rc_on() || (k <= fown_n && fown[k][j])))
+        put(dbp, "static void lin_drop%d(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1;%s%s", d, rc_on() ? " if (!lin_dec(o)) return;" : "", untag ? " {" : " switch (o[0]) {");
+        for (long k = 1; (c = lin_ctor_info(k)); k++) {
+          if (c->dt != dt || c->k == 0) continue;
+          if (!untag) put(dbp, " case %d: {", c->i);
+          int last = -1;
+          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
+          for (int j = 0; j < c->k; j++) {
+            if (!FDROP(k, j)) continue;
+            Shape fs = FS(k, j);
+            if (j == last && fs.dt == dt && fs.a == ds.a) put(dbp, " nx = o[%d];", j + !untag);     /* (the rest of a list: the loop, not a call) */
+            else put(dbp, " lin_drop%d(o[%d]);", drop_fn(fs), j + !untag);
+          }
+          put(dbp, " lin_free(o, %d);", c->k + !untag);
+          if (!untag) put(dbp, " break; }");
+        }
+        put(dbp, " } v = nx; } }\n");
+      /* a COPY of what a drop would free -- the owned structure, down the same fields -- sharing the rest */
+      {
+        put(dbp, "static long lin_copy%d(long v) { long r = v, *dst = &r; while (!(v & 1)) { long *o = (long *)v, *t = 0; long nx = 1;%s", d, untag ? " {" : " switch (o[0]) {");
+        for (long k = 1; (c = lin_ctor_info(k)); k++) {
+          if (c->dt != dt || c->k == 0) continue;
+          if (!untag) put(dbp, " case %d: {", c->i);
+          put(dbp, " long *n = lin_alloc(%d); __builtin_memcpy(n, o, %d * 8); *dst = (long)n;", c->k + !untag, c->k + !untag);
+          int last = -1;
+          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
+          for (int j = 0; j < c->k; j++) {
+            if (!FDROP(k, j)) continue;
+            Shape fs = FS(k, j);
+            if (j == last && fs.dt == dt && fs.a == ds.a) put(dbp, " nx = o[%d]; t = &n[%d];", j + !untag, j + !untag);
+            else put(dbp, " n[%d] = lin_copy%d(o[%d]);", j + !untag, drop_fn(fs), j + !untag);
+          }
+          if (!untag) put(dbp, " break; }");
+        }
+        put(dbp, " } if (!t) return r; dst = t; v = nx; } *dst = v; return r; }\n");
+      }
+      if (rc_on()) {
+        put(dbp, "static void lin_share%d(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1; if (!o[-1]) return; o[-1] = 0;%s", d, untag ? " {" : " switch (o[0]) {");
+        for (long k = 1; (c = lin_ctor_info(k)); k++) {
+          if (c->dt != dt || c->k == 0) continue;
+          if (!untag) put(dbp, " case %d: {", c->i);
+          int last = -1;
+          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
+          for (int j = 0; j < c->k; j++) {
+            if (!FDROP(k, j)) continue;
+            Shape fs = FS(k, j);
+            if (j == last && fs.dt == dt && fs.a == ds.a) put(dbp, " nx = o[%d];", j + !untag);
+            else put(dbp, " lin_share%d(o[%d]);", drop_fn(fs), j + !untag);
+          }
+          if (!untag) put(dbp, " break; }");
+        }
+        put(dbp, " } v = nx; } }\n");
+      }
+#undef FS
+#undef FDROP
+#undef db
+}
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum) {
-  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0; rcf_n = 0; mv_n = 0; rc_bor = NULL;
+  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0; rcf_n = 0; mv_n = 0; rc_bor = NULL; rc_mt = 0;
   free(vorig); free(vdeep); free(vrdo); vorig = NULL; vdeep = NULL; vrdo = NULL; vdeep_n = 0; vcap = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
   Compiled *r = NULL;
@@ -4701,6 +4812,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
             { int c = 0; for (int j = 0; j < funs[i].arity; j++) put(&fb, j == K ? "%sq" : "%sp%d", c++ ? ", " : "", j);
               Buf fu = nbuf(64); fv_params(&fu, i, 0, 0); if (nfv[i]) put(&fb, "%s%s", c ? ", " : "", fu.s); free(fu.s); if (!np) put(&fb, "0"); }
             put(&fb, "}, 0, 0 };\n    if (k < T - 1) { for (long j = n / T; j > 0; j--) q = ((long *)q)[%d]; x.stop = q; }\n    s[k] = x;\n  }\n", tf);
+            if (rc_on()) rc_mt = 1;                    /* (counted: a list split among threads -- its elements may be shared between the parts) */
             put(&fb, "  for (int k = 0; k < T; k++) { if (pthread_create(&t[k], &ra, pmrun%d, &s[k])) break; started++; }\n", i);
             put(&fb, "  for (int k = 0; k < started; k++) pthread_join(t[k], 0);\n  pthread_attr_destroy(&ra);\n");
             put(&fb, "  if (started < T) lin_fn_aborted = 1;\n  lin_pm_busy = 0;\n  (void)LIN_JOINED;\n");
@@ -4720,50 +4832,9 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
       if (data && getenv("LIN_FN_POISON")) put(&b, "#define LIN_POISON 1\n");
       if (data && getenv("LIN_FN_STATS")) put(&b, "#define LIN_STATS 1\n");   /* (blocks built and freed, per size: is memory the live data?) */
       if (data) put(&b, "%s", DATA_RT); else put(&b, "#define LIN_ENTER\n#define LIN_LEAVE\n#define LIN_TASK_START(ss)\n#define LIN_JOINED 0\nint lin_fn_aborted;\n");
+      size_t proto_at = b.len; int ngen = 0;          /* (the prototypes go here once every shape is known: see gen_data_fns) */
       { Buf db = nbuf(256);                            /* (written first: a drop function may call for another datatype's) */
-      for (int d = 0; data && d < ndrop; d++) {        /* (drop_fn may add datatypes while these are written; a unit without data has no allocator to free into) */
-        Shape ds = drop_sh[d]; const char *dt = ds.dt; int box = -1, untag = dt_boxed(dt, &box) == 1; const LinCtor *c;
-#define FS(k, j) field_shape(sh_fld, sh_nctor, c, k, j, ds)
-#define FDROP(k, j) (field_live(c, j) && k <= sh_nctor && FS(k, j).k == 5 && FS(k, j).dt && (rc_on() || (k <= fown_n && fown[k][j])))
-        put(&db, "static void lin_drop%d(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1;%s%s", d, rc_on() ? " if (!lin_dec(o)) return;" : "", untag ? " {" : " switch (o[0]) {");
-        for (long k = 1; (c = lin_ctor_info(k)); k++) {
-          if (c->dt != dt || c->k == 0) continue;
-          if (!untag) put(&db, " case %d: {", c->i);
-          int last = -1;
-          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
-          for (int j = 0; j < c->k; j++) {
-            if (!FDROP(k, j)) continue;
-            Shape fs = FS(k, j);
-            if (j == last && fs.dt == dt && fs.a == ds.a) put(&db, " nx = o[%d];", j + !untag);     /* (the rest of a list: the loop, not a call) */
-            else put(&db, " lin_drop%d(o[%d]);", drop_fn(fs), j + !untag);
-          }
-          put(&db, " lin_free(o, %d);", c->k + !untag);
-          if (!untag) put(&db, " break; }");
-        }
-        put(&db, " } v = nx; } }\n");
-      /* a COPY of what a drop would free -- the owned structure, down the same fields -- sharing the rest */
-      {
-        put(&db, "static long lin_copy%d(long v) { long r = v, *dst = &r; while (!(v & 1)) { long *o = (long *)v, *t = 0; long nx = 1;%s", d, untag ? " {" : " switch (o[0]) {");
-        for (long k = 1; (c = lin_ctor_info(k)); k++) {
-          if (c->dt != dt || c->k == 0) continue;
-          if (!untag) put(&db, " case %d: {", c->i);
-          put(&db, " long *n = lin_alloc(%d); __builtin_memcpy(n, o, %d * 8); *dst = (long)n;", c->k + !untag, c->k + !untag);
-          int last = -1;
-          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
-          for (int j = 0; j < c->k; j++) {
-            if (!FDROP(k, j)) continue;
-            Shape fs = FS(k, j);
-            if (j == last && fs.dt == dt && fs.a == ds.a) put(&db, " nx = o[%d]; t = &n[%d];", j + !untag, j + !untag);
-            else put(&db, " n[%d] = lin_copy%d(o[%d]);", j + !untag, drop_fn(fs), j + !untag);
-          }
-          if (!untag) put(&db, " break; }");
-        }
-        put(&db, " } if (!t) return r; dst = t; v = nx; } *dst = v; return r; }\n");
-      }
-#undef FS
-#undef FDROP
-      }
-        for (int d = 0; data && d < ndrop; d++) put(&b, "static void lin_drop%d(long v);\nstatic long lin_copy%d(long v);\n", d, d);
+      for (; data && ngen < ndrop; ngen++) gen_data_fns(&db, ngen);   /* (drop_fn may add datatypes while these are written; a unit without data has no allocator to free into) */
         put(&b, "%s", db.s); free(db.s); }
       put(&b, "%s", fb.s);
       if (ok && data) {                                /* data: on its own large stack, the tree recursions forked */
@@ -4804,12 +4875,23 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
         }
         put(&b, "  lin_res = %s; return 0; }\n", eb.s);
         free(ebp.s);
-        put(&b, "long lin_fn_entry(const long *a, int threads) { lin_threads_ = threads; lin_args = a; lin_fn_aborted = 0;%s\n", data ? " lin_mt = threads > 1;" : "");
+        put(&b, "long lin_fn_entry(const long *a, int threads) { lin_threads_ = threads; lin_args = a; lin_fn_aborted = 0;%s\n", data ? (!rc_on() || rc_mt ? " lin_mt = threads > 1;" : " lin_mt = 0;") : "");
         put(&b, "  pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);\n");
         /* a structure result stays in the arena until the driver has built it into the net (lin_fn_release) */
         put(&b, "  if (pthread_create(&t, &at, lin_run, 0)) { lin_fn_aborted = 1; return 0; } pthread_join(t, 0);%s return lin_res; }\n",
             numeric ? " lin_free_all();" : "");
         put(&b, "void lin_fn_release(void) { lin_free_all(); }\n");
+        {                                              /* the shapes the parallel code and the entry met, then every prototype */
+          Buf db = nbuf(256);
+          for (; ngen < ndrop; ngen++) gen_data_fns(&db, ngen);
+          put(&b, "%s", db.s); free(db.s);
+          Buf pr = nbuf(256);
+          for (int d = 0; d < ndrop; d++) put(&pr, "static void lin_drop%d(long v);\nstatic long lin_copy%d(long v);\n%s", d, d, rc_on() ? "" : "");
+          for (int d = 0; rc_on() && d < ndrop; d++) put(&pr, "static void lin_share%d(long v);\n", d);
+          Buf nb = nbuf(b.len + pr.len + 1);
+          put(&nb, "%.*s%s%s", (int)proto_at, b.s, pr.s, b.s + proto_at);
+          free(b.s); free(pr.s); b = nb;
+        }
         DBG("compiling a data unit (%d function%s, %d numeric argument%s, %d parallel site%s%s):\n%s\n", nfun, nfun == 1 ? "" : "s", nnum, nnum == 1 ? "" : "s", nsite, nsite == 1 ? "" : "s", numeric ? "" : ", a structure result", b.s + strlen(LIN_I64_SRC));
         r = compile_src(b.s, nnum, numeric ? (rbool ? 3 : 1) : 5, rshape);
         if (r) r->strict = funs[0].strict;
