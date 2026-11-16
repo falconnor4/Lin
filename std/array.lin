@@ -59,18 +59,29 @@
 ; how many inner levels n elements need
 (define _depth_for (\n (\d (if (leq n (shl 32 (mul 5 d))) d (_depth_for n (add d 1))))))
 
-(define array (\n (\x (let ((d (_depth_for n 0))) (arr n d (_tfill d x 0 n))))))
-(define alen (\a (match a ((arr n d t) n))))
-(define aget (\a (\i (match a ((arr n d t) (_tget t i d))))))
-(define aset (\a (\i (\x (match a ((arr n d t) (arr n d (_tset t i d x))))))))
-(define apush (\a (\x (match a ((arr n d t)
+(define _anew (\n (\x (let ((d (_depth_for n 0))) (arr n d (_tfill d x 0 n))))))
+(define _alen (\a (match a ((arr n d t) n))))
+(define _aget (\a (\i (match a ((arr n d t) (_tget t i d))))))
+(define _aset (\a (\i (\x (match a ((arr n d t) (arr n d (_tset t i d x))))))))
+(define _apush (\a (\x (match a ((arr n d t)
   (if (lt n (shl 32 (mul 5 d)))
     (arr (add n 1) d (_tset t n d x))
     (arr (add n 1) (add d 1) (_tset (tnode t tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty tempty) n (add d 1) x))))))))
+
+; THE OPERATIONS are `_op` heads (std/num.lin explains the shape), indexes 64..68 (std/runtime/pattern.h,
+; LIN_VOP_*), whose meaning is the trie above: that is what the net computes, and what every driver that does
+; not know them falls back to.  Typed `vec a`, the trie is no part of an array's type -- so the function
+; compiler is free to keep an array as one flat block of its elements, rebuilt in place when it holds the only
+; reference (std/drivers/fn.c, OWNED VECTORS).
+(define! array (num -> a -> vec a) (\n (\x ((\_op ((\_k (_anew n x)) _op)) (num._cl_cons 64 (num._cl_cons n (num._cl_cons x num._cl_nil)))))))
+(define! alen (vec a -> num) (\a ((\_op ((\_k (_alen a)) _op)) (num._cl_cons 65 (num._cl_cons a num._cl_nil)))))
+(define! aget (vec a -> num -> a) (\a (\i ((\_op ((\_k (_aget a i)) _op)) (num._cl_cons 66 (num._cl_cons a (num._cl_cons i num._cl_nil)))))))
+(define! aset (vec a -> num -> a -> vec a) (\a (\i (\x ((\_op ((\_k (_aset a i x)) _op)) (num._cl_cons 67 (num._cl_cons a (num._cl_cons i (num._cl_cons x num._cl_nil)))))))))
+(define! apush (vec a -> a -> vec a) (\a (\x ((\_op ((\_k (_apush a x)) _op)) (num._cl_cons 68 (num._cl_cons a (num._cl_cons x num._cl_nil)))))))
 ; in index order, the first (alen a) elements
 (define _afold (\f (\z (\a (\i (\n (if (lt i n) (_afold f (f z (aget a i)) a (add i 1) n) z)))))))
 (define afold (\f (\z (\a (_afold f z a 0 (alen a))))))
-(define aempty (arr 0 0 tempty))
+(define aempty (array 0 0))
 (define _aof (\s (\a (match s (snil a) ((scons h t) (_aof t (apush a h)))))))
 (define aof_seq (\s (_aof s aempty)))
 (define ato_seq (\a (sreverse (afold (\acc (\x (scons x acc))) snil a))))

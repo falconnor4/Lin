@@ -1,0 +1,26 @@
+; OWNED VECTORS (std/array.lin, std/drivers/fn.c): the same answers whether a vector is the net's trie or,
+; in counted compiled code, one flat block rebuilt in place when it holds the only reference
+(load "std/std.lin")
+; persistent: the old vector is unchanged by a set of a vector still in use
+(let ((a (array 5 1))) (add (aget a 2) (aget (aset a 2 10) 2)))
+; expect => 11
+; elements that are data: a list stored, read, replaced
+(ssum (aget (aset (array 3 snil) 1 (srange 0 10)) 1))
+; expect => 45
+(let ((a (aset (array 3 snil) 0 (srange 0 4)))) (add (ssum (aget a 0)) (ssum (aget (aset a 0 (srange 0 3)) 0))))
+; expect => 9
+; growing by pushes, past every capacity
+(alen (afold (\v (\x (apush v x))) (array 0 0) (array 1000 7)))
+; expect => 1000
+(afold (\s (\x (add s x))) 0 (aof_seq (srange 0 100000)))
+; expect => 4999950000
+; a vector of vectors: one inner vector shared by both slots, then one of them replaced
+(let ((m (array 2 (array 2 0)))) (add (aget (aget (aset m 1 (aset (aget m 1) 1 9)) 1) 1) (aget (aget m 1) 1)))
+; expect => 9
+; out of range: a set changes nothing, and a read past the end of an untouched vector is its fill value
+(aget (aset (array 3 4) 7 9) 1)
+; expect => 4
+; a vector that crosses the unit's edge: kept by the net as its trie
+(define v (aset (array 50 3) 7 8))
+(add (aget v 7) (alen v))
+; expect => 58
