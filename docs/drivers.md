@@ -236,25 +236,27 @@ Blocks built and freed on one thread, by ownership alone and counted:
 | omap | 518K | 0 | 518K |
 | knucleotide | 695K | 81K | 445K |
 
-Run times in ms, best of five, ownership alone (`LIN_FN_RC=0`) / counted. The
-single-thread runs are `-t 1`, the four-thread runs `-t 4`:
+Wall-clock times in ms (`bench/run.sh`, best of three, cached), ownership
+alone (`LIN_FN_RC=0`) / counted, in one session on a shared 4-core machine
+(expect ±20%):
 
-| Benchmark | `-t 1` | `-t 4` |
-|-----------|--------|--------|
-| array | 25 / 8 | 25 / 9 |
-| fannkuch | 104 / 96 | 34 / 25 |
-| omap | 112 / 103 | 78 / 74 |
-| nbody | 21 / 20 | 17 / 18 |
-| binarytrees | 18 / 17 | 12 / 14 |
-| revcomp | 14 / 15 | 14 / 14 |
-| words | 10 / 11 | 9 / 12 |
-| knucleotide | 50 / 66 | 48 / 60 |
-| regexredux | 50 / 66 | 34 / 61 |
-| pidigits | 1177 / 1416 | 1252 / 1434 |
+| Benchmark | Lin | Lin `-t 1` |
+|-----------|-----|------------|
+| array | 43 / 11 | 42 / 12 |
+| fannkuch | 35 / 28 | 101 / 75 |
+| mandel | 31 / 26 | 109 / 88 |
+| omap | 96 / 101 | 139 / 121 |
+| nqueens | 157 / 163 | 202 / 164 |
+| pidigits | 1147 / 1334 | 1238 / 1211 |
+| knucleotide | 58 / 90 | 63 / 67 |
+| regexredux | 37 / 64 | 59 / 82 |
+| bst | 29 / 37 | 29 / 39 |
+| words | 13 / 18 | 14 / 22 |
 
-The programs still slower when counted spend it on counts: the regex matcher
-returns the rest of its input, so it cannot borrow it, and every step takes and
-releases a count of the string. pidigits does the same with its big numbers.
+What the counted programs still pay for is counts: the regex matcher returns the
+rest of its input, so it cannot borrow it, and every step takes and releases a
+count of the string; `words` and `bst` pay for the count word itself, which makes
+a two-word cell three.
 
 ### Loops
 
@@ -347,6 +349,7 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance. The whole test suite and every benchmark pass under it |
 | `LIN_FN_RC=0` | No reference counting: the ownership analysis alone, and vectors kept as their trie (see above) |
 | `LIN_FN_STATS=1` | Report the blocks each unit built and freed, per size |
+| `LIN_FN_LEAKS=1` | Number every allocation site and report, when a unit ends, the sites whose blocks are still held, printing the code around each |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
 | `LIN_NO_CACHE=1` | Do not use the program cache |
