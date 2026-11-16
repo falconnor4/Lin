@@ -918,7 +918,8 @@ static int emitting;   /* the unit function being written: a parameter of anothe
    ...)`, that writes its result through `dst` instead of returning it: the cell is built FIRST, with a hole where
    the call's result goes, and the call becomes a tail call given the hole's address.  cc turns that into a loop.
    `hasd[f]`: f has the form; `tailpos`: the expression about to be written is in tail position of one. */
-static unsigned char *hasd; static int tailpos; static const struct Expr *dp_hole; static int dp_hole_m = -1;   /* (counted: the move flag of the hole's old value, or -1) */
+static unsigned char *hasd; static int tailpos; static const struct Expr *dp_hole;
+static const char *dp_pending; static const struct Expr *dp_pending_node;   /* (drops a cell's hole call is preceded by) */ static int dp_hole_m = -1;   /* (counted: the move flag of the hole's old value, or -1) */
 static int emitting;
 static int dp_self;   /* how the function being written names ITSELF: 0 `_d`, 1 `_ds` (its loop), 2 `_dp` (a stretch of its loop) */
 static const char *dp_name(long k) { return k != emitting || !dp_self ? "_d" : dp_self == 1 ? "_ds" : "_dp"; }
@@ -1215,6 +1216,9 @@ static void captures(const Expr *e, unsigned char *seen, const Expr ***out, int 
    shape s, or -1 -- a number needs none, and a value whose shape is not known cannot be marked, so its unit counts
    atomically instead (rc_mt) */
 static int rc_mt; static int rc_is_pure(int g, int k);
+/* (how a value handed to threads is marked: FROZEN -- what tasks all read, freed with the unit -- or, for a list a
+   parallel map splits among them, SHARED: counted atomically, and freed as it is consumed) */
+static const char *rc_mark = "freeze";
 static int rc_on(void); static int drop_fn(Shape sh); static Shape shape_of(const Expr *e);
 static int rc_share_fn(Shape s) {
   if (!rc_on() || s.k == 0 || s.k == 1 || s.k == 3) return -1;   /* (k 0: nothing is known of it -- no count is taken of it anywhere) */
@@ -1237,7 +1241,7 @@ static void rc_share_params(Buf *b, int f, const Expr *x, const char *arr, const
   for (int k = 0; k < funs[f].arity; k++) {
     if (!funs[f].pnode[k] || (x && !reads_p(x, f, k)) || rc_is_pure(f, k)) continue;   /* (no count of it is ever taken) */
     int sf = rc_share_fn(shape_of(funs[f].pnode[k])); if (sf < 0) continue;
-    if (arr) put(b, "lin_share%d(%s[%s%d]); ", sf, arr, idx, k); else put(b, "lin_share%d(p%d); ", sf, k);
+    if (arr) put(b, "lin_%s%d(%s[%s%d]); ", rc_mark, sf, arr, idx, k); else put(b, "lin_%s%d(p%d); ", rc_mark, sf, k);
   }
 }
 /* A TASK: x on a new thread (while `d < dmax`), as a function of the parameters and the locals it reads.
@@ -1264,7 +1268,7 @@ static int fork_open(Buf *b, Buf *pre, const Expr *x, int budget, Buf *call, int
   if (rc_on()) {                                     /* (counted: what both threads will read is marked shared first) */
     Buf sh = nbuf(64);
     if (emitting >= 0) rc_share_params(&sh, emitting, x, NULL, NULL);
-    for (int c = 0; c < nc; c++) { int sf = rc_share_fn(shape_of(cap[c])); if (sf >= 0) put(&sh, "lin_share%d(v%d); ", sf, cap[c]->var); }
+    for (int c = 0; c < nc; c++) { int sf = rc_share_fn(shape_of(cap[c])); if (sf >= 0) put(&sh, "lin_freeze%d(v%d); ", sf, cap[c]->var); }
     if (sh.len) put(b, "if (d < dmax) { %s} ", sh.s);
     free(sh.s);
   }
@@ -1481,6 +1485,34 @@ static int mv_find(const Expr *x) {
     if (mv[k].x == x || (mv[k].base && x->op == E_FIELD && x->a == mv[k].base && x->k == mv[k].k)) return mv[k].v;
   return -1;
 }
+/* (the arms whose block is tested as they begin: a drop of that block there is specialised -- see rc_spec_drop) */
+static int rc_like(const Expr *x, const Expr *a);
+static struct ArmCtx { const Expr *p; int uv, untag; const LinCtor *ci; Shape ss; } *arm; static int arm_n, arm_c;
+static int mv_slot(const Expr *base, long k);
+static int rc_fdrop(const LinCtor *ci, int j, Shape vs);
+/* A BLOCK DROPPED WHERE ITS FIELDS WERE MOVED OUT.  If it was the only reference (tested as its arm began) the
+   fields moved are another's now: the rest are released and the block freed.  If not, nothing moved, and it is
+   released as any reference is. */
+static int rc_spec_drop(Buf *b, const Expr *p, int fn) {
+  for (int q = arm_n - 1; q >= 0; q--) {
+    if (!(arm[q].p == p || rc_like(arm[q].p, p))) continue;
+    const LinCtor *ci = arm[q].ci; int any = 0;
+    for (int j = 0; j < ci->k; j++) if (mv_slot(arm[q].p, j) >= 0) any = 1;
+    if (!any) return 0;
+    put(b, "if (_u%d) { long *_q = (long *)(", arm[q].uv);
+    if (p->op == E_PARAM) put(b, "p%ld", p->k); else return 0;
+    put(b, "); ");
+    for (int j = 0; j < ci->k; j++) {
+      int fd = rc_fdrop(ci, j, arm[q].ss); if (fd < 0) continue;
+      int m = mv_slot(arm[q].p, j);
+      if (m >= 0) put(b, "if (_m%d != 2) ", m);
+      put(b, "lin_drop%d(_q[%d]); ", fd, j + !arm[q].untag);
+    }
+    put(b, "lin_free(_q, %d); } else lin_drop%d(p%ld); ", ci->k + !arm[q].untag, fn, p->k);
+    return 1;
+  }
+  return 0;
+}
 static int mv_slot(const Expr *base, long k) {     /* the flag of slot k of base, moved out of an enclosing arm, or -1 */
   for (int q = mv_n - 1; q >= 0; q--) if (!mv[q].x && mv[q].base == base && mv[q].k == k) return mv[q].v;
   return -1;
@@ -1695,8 +1727,14 @@ static const LinCtor *rc_arm_ci(const Expr *m, int i) {
   const LinCtor *c; for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == m->ci->dt && c->i == i) return c;
   return NULL;
 }
-static int rc_arm_tails(const Expr *e, const Expr *p) {   /* every path ends rebuilding in p */
+static int rc_like(const Expr *x, const Expr *a);
+static int drops_of(const Expr *e, const Expr *p) {  /* does e's path end drop p? */
+  for (const struct Drop *d = e->drops; d; d = d->next) if (d->p == p || rc_like(d->p, p)) return 1;
+  return 0;
+}
+static int rc_arm_tails(const Expr *e, const Expr *p) {   /* every path ends rebuilding in p, or dropping it */
   if (!e) return 0;
+  if (e->drops && drops_of(e, p)) return 1;
   const Expr *K, *S; long off;
   if (e->op == E_IF && !indexed_pick(e, &K, &S, &off)) return rc_arm_tails(e->b, p) && rc_arm_tails(e->c, p);
   if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) if (!rc_arm_tails(e->args[i], p)) return 0; return e->nargs > 0; }
@@ -1826,7 +1864,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
           put(b, "long v%d = ", f0 + q); if (!emitx(b, pre, d->p, par, budget - 1)) return 0; put(b, "; ");
           Expr *x = (Expr *)d->p; held[q] = x; hv[2 * q] = x->var; hv[2 * q + 1] = x->vscope; x->var = f0 + q; x->vscope = fscope; q++; } }
 #define DROPS() do { int q_ = 0; for (struct Drop *d = e->drops; d; d = d->next) if (MINE(d)) { \
-        if (LOCAL(d)) put(b, "lin_drop%d(v%d); ", d->fn, f0 + q_++); else put(b, "lin_drop%d(p%ld); ", d->fn, d->p->k); } } while (0)
+        if (LOCAL(d)) put(b, "lin_drop%d(v%d); ", d->fn, f0 + q_++); else if (!rc_on() || !rc_spec_drop(b, d->p, d->fn)) put(b, "lin_drop%d(p%ld); ", d->fn, d->p->k); } } while (0)
 #define UNHOLD() do { for (int q_ = 0; q_ < nfd; q_++) { held[q_]->var = hv[2 * q_]; held[q_]->vscope = hv[2 * q_ + 1]; } } while (0)
       if (e->op == E_CALL) {                         /* the arguments, then the drops, then the call (a tail call stays one) */
         int a0 = nvar; nvar += e->nargs;
@@ -1835,6 +1873,14 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         Expr **na = A(sizeof(Expr *) * (size_t)(e->nargs + 1)); t.args = na; t.clone = 0; t.rcdup = 0;   /* (the locals already hold them, references and all) */
         for (int i = 0; i < e->nargs; i++) { Expr *v = mke(E_PARAM, e->args[i]->kind); v->var = a0 + i; v->vscope = fscope; na[i] = v; }
         tailpos = tp; int ok = emitx(b, pre, &t, par, budget - 1); put(b, "; })"); UNHOLD(); return ok;
+      }
+      if (tp && rc_on() && e->op == E_CTOR && !t.rcself) {   /* (a cell with a hole: its fields, the drops, then the call that fills it -- a loop stays one) */
+        Buf db = nbuf(64); Buf *sb = b; b = &db; DROPS(); b = sb;
+        const char *sp = dp_pending; const Expr *sn = dp_pending_node; dp_pending = db.s; dp_pending_node = &t;
+        tailpos = tp; int ok = emitx(b, pre, &t, par, budget - 1);
+        if (dp_pending) put(b, "; %s0L", dp_pending);   /* (no hole was filled: the drops follow the value) */
+        dp_pending = sp; dp_pending_node = sn; free(db.s);
+        put(b, "; })"); UNHOLD(); return ok;
       }
       int rdup = t.rcself; t.rcself = 0;              /* (a held value a drop may free: its own reference first -- rc_leaves) */
       put(b, "long r_ = "); if (rdup) put_dup(b, e); else put(b, "("); int ok = emitx(b, pre, &t, par, budget - 1);   /* the value, then the drops */
@@ -1950,7 +1996,9 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       dp_hole = sh; dp_hole_m = shm;
       c->var = sv; c->vscope = ss;
       if (!ok) return 0;
-      put(b, "); LIN_SET(dst, (long)v%d); f%ld%s(&v%d[%d]", ov, c->k, dp_name(c->k), ov, hole + !e->untag);
+      put(b, "); ");
+      if (dp_pending && dp_pending_node == e) { put(b, "%s", dp_pending); dp_pending = NULL; }   /* (see the drops path) */
+      put(b, "LIN_SET(dst, (long)v%d); f%ld%s(&v%d[%d]", ov, c->k, dp_name(c->k), ov, hole + !e->untag);
       for (int i = 0; i < c->nargs; i++) put(b, ", v%d", a0 + i);
       if (!call_fv(b, c->k)) return 0;
       put(b, "%s); })", dp_stop(c->k)); return 1;
@@ -2151,13 +2199,15 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       } else if (rc_on() && !par && rc_arm_moves(e, i)) {   /* (counted: see MOVED OUT OF AN ARM) */
         const LinCtor *ac = rc_arm_ci(e, i); Shape ss = shape_of(e->a); int uv = nvar++, mv0 = mv_n;
         put(b, "({ int _u%d = lin_uniq((long *)_s); ", uv);
+        if (arm_n == arm_c) arm = realloc(arm, sizeof *arm * (size_t)(arm_c = arm_c ? arm_c * 2 : 8));
+        arm[arm_n].p = e->a; arm[arm_n].uv = uv; arm[arm_n].ci = ac; arm[arm_n].ss = ss; arm[arm_n].untag = e->untag; arm_n++;
         for (int j = 0; j < ac->k; j++) {
           if (!rc_arm_field(e, i, ac, j, ss)) continue;
           int m = nvar++; put(b, "int _m%d = _u%d; ", m, uv); mv_push(NULL, e->a, j, m);
         }
         tailpos = tp;
         int ok = emit_region(b, pre, e->args[i], par, budget - 1);
-        mv_n = mv0;
+        mv_n = mv0; arm_n--;
         put(b, "; })");
         if (!ok) return 0;
       } else if ((tailpos = tp, !emit_region(b, pre, e->args[i], par, budget - 1))) return 0;
@@ -4475,14 +4525,14 @@ static const char *DATA_RT =
      that hands a thread something it cannot mark counts everything atomically: lin_mt) */
   "static int lin_mt;\n"
   "static inline long lin_dup(long v) { if (!(v & 1)) { long *p = (long *)v; long c = __atomic_load_n(&p[-1], __ATOMIC_RELAXED);\n"
-  "  if (c > 0 && !lin_mt) p[-1] = c + 1; else if (c > 0) __atomic_fetch_add(&p[-1], 1, __ATOMIC_RELAXED); else __atomic_fetch_sub(&p[-1], 1, __ATOMIC_RELAXED); } return v; }\n"
+  "  if (c > 0 && !lin_mt) p[-1] = c + 1; else if (c > 0) __atomic_fetch_add(&p[-1], 1, __ATOMIC_RELAXED); else if (c) __atomic_fetch_sub(&p[-1], 1, __ATOMIC_RELAXED); } return v; }\n"
   "static inline void lin_dupn(long v, long k) { if (!(v & 1) && k > 0) { long *p = (long *)v; long c = __atomic_load_n(&p[-1], __ATOMIC_RELAXED);\n"
-  "  if (c > 0 && !lin_mt) p[-1] = c + k; else if (c > 0) __atomic_fetch_add(&p[-1], k, __ATOMIC_RELAXED); else __atomic_fetch_sub(&p[-1], k, __ATOMIC_RELAXED); } }\n"
+  "  if (c > 0 && !lin_mt) p[-1] = c + k; else if (c > 0) __atomic_fetch_add(&p[-1], k, __ATOMIC_RELAXED); else if (c) __atomic_fetch_sub(&p[-1], k, __ATOMIC_RELAXED); } }\n"
   "static inline long lin_take(int *m, long v) { if (*m == 1) { *m = 2; return v; } return lin_dup(v); }\n"
   "static inline int lin_uniq(long *p) { long c = __atomic_load_n(&p[-1], __ATOMIC_ACQUIRE); if (c == 1) return 1; if (c == -1) { p[-1] = 1; return 1; } return 0; }\n"
   "static inline int lin_dec(long *p) { long c = __atomic_load_n(&p[-1], __ATOMIC_RELAXED);\n"
   "  if (c > 0 && !lin_mt) { p[-1] = c - 1; return c == 1; } if (c > 0) return __atomic_sub_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0;\n"
-  "  return __atomic_add_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0; }\n"
+  "  return c && __atomic_add_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0; }\n"
   /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
   "#ifdef LIN_POISON\n"   /* (LIN_FN_POISON: a freed block's words become an address nothing is at -- read after its free, it faults) */
   "static inline void lin_free(long *p, long n) { if (p[-1] > 1) { fprintf(stderr, \"lin: a block freed while %ld references hold it\\n\", p[-1]); abort(); } for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
@@ -5020,6 +5070,9 @@ static void gen_data_fns(Buf *dbp, int d) {
       put(dbp, "static void lin_share%d(long v) { if (lin_mt || (v & 1)) return; long *o = (long *)v; if (o[-1] < 0) return; o[-1] = -o[-1];", d);
       if (ed >= 0) put(dbp, " for (long i = 0; i < o[0]; i++) lin_share%d(o[i + 2]);", ed);
       put(dbp, " }\n");
+      put(dbp, "static void lin_freeze%d(long v) { if (lin_mt || (v & 1)) return; long *o = (long *)v; if (o[-1] <= 0) return; o[-1] = 0;", d);
+      if (ed >= 0) put(dbp, " for (long i = 0; i < o[0]; i++) lin_freeze%d(o[i + 2]);", ed);
+      put(dbp, " }\n");
     }
     return;
   }
@@ -5074,6 +5127,23 @@ static void gen_data_fns(Buf *dbp, int d) {
             Shape fs = FS(k, j);
             if (j == last && fs.dt == dt && fs.a == ds.a) put(dbp, " nx = o[%d];", j + !untag);
             else put(dbp, " lin_share%d(o[%d]);", drop_fn(fs), j + !untag);
+          }
+          if (!untag) put(dbp, " break; }");
+        }
+        put(dbp, " } v = nx; } }\n");
+        /* ...and FROZEN: never counted again, freed with the unit (what concurrent tasks all read: no count of it
+           is ever written, so no core waits on another's) */
+        put(dbp, "static void lin_freeze%d(long v) { if (lin_mt) return; while (!(v & 1)) { long *o = (long *)v; long nx = 1; if (o[-1] <= 0) return; o[-1] = 0;%s", d, untag ? " {" : " switch (o[0]) {");
+        for (long k = 1; (c = lin_ctor_info(k)); k++) {
+          if (c->dt != dt || c->k == 0) continue;
+          if (!untag) put(dbp, " case %d: {", c->i);
+          int last = -1;
+          for (int j = 0; j < c->k; j++) if (FDROP(k, j)) last = j;
+          for (int j = 0; j < c->k; j++) {
+            if (!FDROP(k, j)) continue;
+            Shape fs = FS(k, j);
+            if (j == last && fs.dt == dt && fs.a == ds.a) put(dbp, " nx = o[%d];", j + !untag);
+            else put(dbp, " lin_freeze%d(o[%d]);", drop_fn(fs), j + !untag);
           }
           if (!untag) put(dbp, " break; }");
         }
@@ -5228,7 +5298,7 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
               Buf fu = nbuf(64); fv_params(&fu, i, 0, 0); if (nfv[i]) put(&fb, "%s%s", c ? ", " : "", fu.s); free(fu.s); if (!np) put(&fb, "0"); }
             put(&fb, "}, 0, 0 };\n    if (k < T - 1) { for (long j = n / T; j > 0; j--) q = ((long *)q)[%d]; x.stop = q; }\n    s[k] = x;\n  }\n", tf);
             if (rc_on()) {                             /* (counted: the list split among the threads, and what they all read, marked shared) */
-              Buf sh = nbuf(64); rc_share_params(&sh, i, NULL, NULL, NULL);
+              Buf sh = nbuf(64); rc_mark = "share"; rc_share_params(&sh, i, NULL, NULL, NULL); rc_mark = "freeze";
               for (int q = 0; q < nfv[i]; q++) { const FV *v = &fvs[i][q];
                 int sf = v->h >= 0 && v->h < nfun && funs[v->h].pnode && funs[v->h].pnode[v->k] ? rc_share_fn(shape_of(funs[v->h].pnode[v->k])) : (rc_mt = 1, -1);
                 if (sf >= 0) put(&sh, "lin_share%d(l%d_%ld); ", sf, v->h + 1, v->k); }
@@ -5310,7 +5380,7 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
           Buf pr = nbuf(256);
           for (int d = 0; d < ndrop; d++)   /* (an immediate is no block: tested where it is dropped, not in a call) */
             put(&pr, "static void lin_drop%d_(long v);\nstatic inline void lin_drop%d(long v) { if (!(v & 1)) lin_drop%d_(v); }\nstatic long lin_copy%d(long v);\n", d, d, d, d);
-          for (int d = 0; rc_on() && d < ndrop; d++) put(&pr, "static void lin_share%d(long v);\n", d);
+          for (int d = 0; rc_on() && d < ndrop; d++) put(&pr, "static void lin_share%d(long v);\nstatic void lin_freeze%d(long v);\n", d, d);
           Buf nb = nbuf(b.len + pr.len + 1);
           put(&nb, "%.*s%s%s", (int)proto_at, b.s, pr.s, b.s + proto_at);
           free(b.s); free(pr.s); b = nb;
