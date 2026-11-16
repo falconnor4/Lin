@@ -1168,10 +1168,10 @@ static void captures(const Expr *e, unsigned char *seen, const Expr ***out, int 
 /* (counted) WHAT A THREAD IS HANDED is marked shared first (see gen_data_fns): the function that marks a value of
    shape s, or -1 -- a number needs none, and a value whose shape is not known cannot be marked, so its unit counts
    atomically instead (rc_mt) */
-static int rc_mt;
+static int rc_mt; static int rc_is_pure(int g, int k);
 static int rc_on(void); static int drop_fn(Shape sh); static Shape shape_of(const Expr *e);
 static int rc_share_fn(Shape s) {
-  if (!rc_on() || s.k == 1 || s.k == 3) return -1;
+  if (!rc_on() || s.k == 0 || s.k == 1 || s.k == 3) return -1;   /* (k 0: nothing is known of it -- no count is taken of it anywhere) */
   if (s.k == 5 && s.dt) return drop_fn(s);
   rc_mt = 1; return -1;
 }
@@ -1189,7 +1189,7 @@ static int reads_p(const Expr *e, int f, long k) { unsigned char *seen = calloc(
 static void rc_share_params(Buf *b, int f, const Expr *x, const char *arr, const char *idx) {
   if (!rc_on() || f < 0 || f >= nfun || !funs[f].pnode) return;
   for (int k = 0; k < funs[f].arity; k++) {
-    if (!funs[f].pnode[k] || (x && !reads_p(x, f, k))) continue;
+    if (!funs[f].pnode[k] || (x && !reads_p(x, f, k)) || rc_is_pure(f, k)) continue;   /* (no count of it is ever taken) */
     int sf = rc_share_fn(shape_of(funs[f].pnode[k])); if (sf < 0) continue;
     if (arr) put(b, "lin_share%d(%s[%s%d]); ", sf, arr, idx, k); else put(b, "lin_share%d(p%d); ", sf, k);
   }
@@ -1579,6 +1579,7 @@ static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per 
   /* every G at once: the threads and this one take states in turn */
   put(&w, "  long *g = malloc(sizeof(long) * (size_t)(n + 1));\n");
   put(&w, "  PL%d s = { st, g, n, 0, d }; int T = lin_threads_ > 0 ? lin_threads_ : 1; pthread_t t[T]; int nt = 0;\n", f);
+  if (rc_on() && f < lifted && nfv[f]) rc_mt = 1;   /* (counted: what its lifted parameters hold, the threads read too) */
   if (rc_on()) {                                     /* (counted: the states every thread reads, marked shared) */
     Buf sh = nbuf(64), ix = nbuf(32); put(&ix, "i * %d + ", ar);
     rc_share_params(&sh, f, NULL, "st", ix.s);
@@ -3019,7 +3020,7 @@ static int lent_only(const Expr *e, const Expr *p, unsigned char *seen) {   /* p
     return lent_only(e->a, p, seen) && lent_only(e->b, p, seen);
   }
   if (e->op == E_CALL) {
-    if (fun_reads((int)e->k)) return 0;
+    if (fun_reads((int)e->k) && !rc_on()) return 0;   /* (counted: a callee reading p as a lifted parameter borrows it) */
     for (int i = 0; i < e->nargs; i++) {
       if (e->args[i] == p) { if (!borrows(e, i) && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !(rc_on() && rc_borrowed((int)e->k, i))) return 0; }
       else if (!lent_only(e->args[i], p, seen)) return 0;
@@ -3032,11 +3033,12 @@ static int lent_only(const Expr *e, const Expr *p, unsigned char *seen) {   /* p
 }
 static int lent(const Expr *e, const Expr *p) { unsigned char *seen = calloc((size_t)eid + 1, 1); int r = lent_only(e, p, seen); free(seen); return r; }
 static int rc_on(void);
+static int drop_after;                               /* (counted) the drops run after the value, never before a call it is */
 static void drop_at(Expr **slot, const Expr *p, int fn) {   /* this path's end, as a node of its own, drops p */
   Expr *e = *slot, *c;
   /* A path end the body ALSO uses elsewhere is one value: a copy of it would be computed again (exponentially, down
      a recursion -- `(let ((c (cmp xs ys))) (if (eq c 0) .. c))`).  The drops go on a node that only refers to it. */
-  if (rc_on() && e->op != E_PARAM && e->op != E_CONST && e->op != E_FIELD && e->id < nrefs_cap && nrefs[e->id] > 1) {
+  if (rc_on() && e->op != E_PARAM && e->op != E_CONST && e->op != E_FIELD && ((e->id < nrefs_cap && nrefs[e->id] > 1) || drop_after)) {
     Expr *one = A(sizeof *one); memset(one, 0, sizeof *one); one->op = E_CONST; one->kind = 3; one->k = 1; one->id = eid++; one->var = -1;
     c = A(sizeof *c); *c = *e; c->op = E_IF; c->a = one; c->b = e; c->c = e; c->nargs = 0; c->args = NULL; c->id = eid++; c->var = -1;
     c->drops = NULL; c->fre = NULL; c->rcdup = 0; c->rctail = e->rctail;
@@ -3067,6 +3069,11 @@ static void drop_paths(Expr **slot, const Expr *p, int fn, int seen) {
     return;
   }
   if (e->op == E_MATCH) return;                      /* (p taken apart: what becomes of it is the match's business) */
+  if (e->op == E_CALL && fun_reads((int)e->k) && rc_on()) {   /* (counted: it reads p as a lifted parameter -- p goes once it returns) */
+    for (int i = 0; i < e->nargs; i++) if (e->args[i] == p && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !rc_borrowed((int)e->k, i)) return;
+    if (!lent(e, p)) return;
+    drop_after = 1; drop_at(slot, p, fn); drop_after = 0; return;
+  }
   if (e->op == E_CALL) { if (fun_reads((int)e->k)) return; for (int i = 0; i < e->nargs; i++) if (e->args[i] == p && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !(rc_on() && rc_borrowed((int)e->k, i))) return; }
   if (!lent(e, p)) return;
   if (seen || contains(e, p, 0)) drop_at(slot, p, fn);
@@ -3367,6 +3374,41 @@ static void rcb_tails(const Expr *e, int f) {        /* the calls f's paths end 
     for (int i = 0; i < e->nargs && i < funs[e->k].arity; i++)
       if (rc_borrowed((int)e->k, i) && !rc_held(e->args[i], f) && !rc_imm(e->args[i])) rcb_own((int)e->k, i);
 }
+/* READ ALL THE WAY DOWN: a borrowed parameter of which nothing -- neither it nor any part of it -- is ever given a
+   count: only taken apart, its fields read, and lent on to a parameter read the same way.  A thread handed such a
+   value touches no count of it, so it need not be marked shared (rc_share_params). */
+static unsigned char **rc_pure;
+static int rc_is_pure(int g, int k) { return rc_pure && g >= 0 && g < nfun && k >= 0 && k < funs[g].arity && rc_pure[g][k]; }
+static int rcp_root(const Expr *e) {                 /* the parameter (index) a data value is a part of, or -1 */
+  for (;;) {
+    if (!e) return -1;
+    if (e->op == E_PARAM) return (int)e->k + 1;     /* (+1: 0 is "none") */
+    if (e->op == E_FIELD) { e = e->a; continue; }
+    const Expr *K, *S; long off;
+    if (e->op == E_IF && indexed_pick(e, &K, &S, &off)) { e = S; continue; }
+    return 0;
+  }
+}
+static void rcp_walk(const Expr *e, int f, int ok_here, unsigned char *seen) {   /* ok_here: e is used where a read is all */
+  if (!e) return;
+  int r = rcp_root(e);
+  if (r > 0 && e->op == E_PARAM && e->nargs != f) r = 0;   /* (a captured value: its own function's) */
+  if (r > 0 && !ok_here && shape_of(e).k != 1 && shape_of(e).k != 3 && rc_is_pure(f, r - 1)) { rc_pure[f][r - 1] = 0; rcb_changed = 1; }
+  if (e->op == E_PARAM || e->op == E_CONST) return;
+  if (e->id < rc_seen_cap) { int bit = ok_here ? 1 : 2; if (seen[e->id] & bit) return; seen[e->id] |= bit; }
+  if (e->op == E_FIELD) { rcp_walk(e->a, f, 1, seen); return; }
+  { const Expr *K, *S; long off; if (e->op == E_IF && indexed_pick(e, &K, &S, &off)) { rcp_walk(K, f, 1, seen); rcp_walk(S, f, 1, seen); return; } }
+  switch (e->op) {
+  case E_MATCH: rcp_walk(e->a, f, 1, seen); for (int i = 0; i < e->nargs; i++) rcp_walk(e->args[i], f, ok_here, seen); return;
+  case E_IF: rcp_walk(e->a, f, 1, seen); rcp_walk(e->b, f, ok_here, seen); rcp_walk(e->c, f, ok_here, seen); return;
+  case E_BIN: rcp_walk(e->a, f, 1, seen); rcp_walk(e->b, f, 1, seen); return;
+  case E_CALL: for (int i = 0; i < e->nargs; i++) rcp_walk(e->args[i], f, e->k >= 0 && e->k < nfun && rc_is_pure((int)e->k, i), seen); return;
+  default:
+    if (e->op == E_CTOR && e->c) rcp_walk(e->c, f, 0, seen);
+    rcp_walk(e->a, f, 0, seen); rcp_walk(e->b, f, 0, seen); if (e->op != E_CTOR) rcp_walk(e->c, f, 0, seen);
+    for (int i = 0; i < e->nargs && e->args; i++) rcp_walk(e->args[i], f, 0, seen);
+  }
+}
 static void rc_borrow(Expr *entry) {
   rc_bor = A(sizeof *rc_bor * (size_t)(nfun ? nfun : 1));
   for (int g = 0; g < nfun; g++) {
@@ -3386,6 +3428,17 @@ static void rc_borrow(Expr *entry) {
       if (g >= 0) rcb_tails(b, g);
     }
   } while (rcb_changed);
+  rc_pure = A(sizeof *rc_pure * (size_t)(nfun ? nfun : 1));
+  for (int g = 0; g < nfun; g++) { int a = funs[g].arity ? funs[g].arity : 1; rc_pure[g] = A((size_t)a); memcpy(rc_pure[g], rc_bor[g], (size_t)a); }
+  do {
+    rcb_changed = 0;
+    for (int g = 0; g < nfun; g++) {
+      if (!funs[g].body) continue;
+      unsigned char *seen = calloc((size_t)eid + 1, 1); rcp_walk(funs[g].body, g, 0, seen); free(seen);
+    }
+  } while (rcb_changed);
+  for (int g = 0; g < nfun; g++) for (int k = 0; k < funs[g].arity; k++)
+    if (rc_pure[g][k] && dbg > 1) DBG("[counted: f%d's parameter %d is read all the way down]\n", g, k);
   /* (a parameter another function captured is that function's to read as long as it runs: owned here) */
   for (int g = 0; g < nfun; g++) for (int k = 0; k < funs[g].arity; k++)
     if (rc_bor[g][k] && dbg > 1) DBG("[counted: f%d's parameter %d is borrowed]\n", g, k);
@@ -4090,14 +4143,18 @@ static const char *DATA_RT =
   "#ifdef LIN_STATS\nstatic long lin_na[9], lin_nf[9];\n#define LIN_NA(n) lin_na[(n) < 8 ? (n) : 8]++\n#define LIN_NF(n) lin_nf[(n) < 8 ? (n) : 8]++\n#else\n#define LIN_NA(n)\n#define LIN_NF(n)\n#endif\n"
   "static inline long *lin_alloc(long n) { LIN_NA(n); long *f = lin_fl[n & 7]; if (n < 8 && f) { lin_fl[n] = (long *)f[0]; f[-1] = 1; return f; }\n"
   "  if (__builtin_expect(lin_hp + n + 1 > lin_he, 0)) lin_refill(n + 1); long *r = lin_hp + 1; r[-1] = 1; lin_hp += n + 1; return r; }\n"
-  /* (a count is touched only by the thread that can see the block: what is handed to another thread is first
-     marked SHARED -- count 0, see gen_data_fns -- and a shared block is never counted, rebuilt in, or freed before
-     the unit ends.  Only a unit that hands a thread something it cannot mark counts atomically: lin_mt) */
+  /* (a count is positive while one thread alone can see the block, and is then plain arithmetic; what is handed to
+     another thread is first marked SHARED -- its count negated, see gen_data_fns -- and a shared count is atomic.
+     A shared block held by one reference is that holder's alone: made local again, and rebuilt in.  Only a unit
+     that hands a thread something it cannot mark counts everything atomically: lin_mt) */
   "static int lin_mt;\n"
-  "static inline long lin_dup(long v) { if (!(v & 1)) { long *p = (long *)v; if (!p[-1]) return v; if (lin_mt) __atomic_fetch_add(&p[-1], 1, __ATOMIC_RELAXED); else p[-1]++; } return v; }\n"
+  "static inline long lin_dup(long v) { if (!(v & 1)) { long *p = (long *)v; long c = __atomic_load_n(&p[-1], __ATOMIC_RELAXED);\n"
+  "  if (c > 0 && !lin_mt) p[-1] = c + 1; else if (c > 0) __atomic_fetch_add(&p[-1], 1, __ATOMIC_RELAXED); else __atomic_fetch_sub(&p[-1], 1, __ATOMIC_RELAXED); } return v; }\n"
   "static inline long lin_take(int *m, long v) { if (*m == 1) { *m = 2; return v; } return lin_dup(v); }\n"
-  "static inline int lin_uniq(long *p) { return (lin_mt ? __atomic_load_n(&p[-1], __ATOMIC_ACQUIRE) : p[-1]) == 1; }\n"
-  "static inline int lin_dec(long *p) { if (!p[-1]) return 0; if (lin_mt) return __atomic_sub_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0; return --p[-1] == 0; }\n"
+  "static inline int lin_uniq(long *p) { long c = __atomic_load_n(&p[-1], __ATOMIC_ACQUIRE); if (c == 1) return 1; if (c == -1) { p[-1] = 1; return 1; } return 0; }\n"
+  "static inline int lin_dec(long *p) { long c = __atomic_load_n(&p[-1], __ATOMIC_RELAXED);\n"
+  "  if (c > 0 && !lin_mt) { p[-1] = c - 1; return c == 1; } if (c > 0) return __atomic_sub_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0;\n"
+  "  return __atomic_add_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0; }\n"
   /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
   "#ifdef LIN_POISON\n"   /* (LIN_FN_POISON: a freed block's words become an address nothing is at -- read after its free, it faults) */
   "static inline void lin_free(long *p, long n) { if (p[-1] > 1) { fprintf(stderr, \"lin: a block freed while %ld references hold it\\n\", p[-1]); abort(); } for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
@@ -4619,8 +4676,8 @@ static void fuse_lists(Expr **entry) {
   }
 }
 /* A DATATYPE SHAPE's functions: its drop, its copy, and (counted) its SHARE -- a structure handed to another thread
-   is marked as held by more than one (count 0): never counted again, never rebuilt in place, never freed before the
-   unit ends -- so a count is only ever touched by the one thread that can see it, and is never atomic. */
+   is marked as visible to more than one (its counts negated, and from then on atomic), all the way down to what is
+   already shared -- so a positive count is only ever touched by the one thread that can see the block. */
 static void gen_data_fns(Buf *dbp, int d) {
 #define db (*dbp)
         Shape ds = drop_sh[d]; const char *dt = ds.dt; int box = -1, untag = dt_boxed(dt, &box) == 1; const LinCtor *c;
@@ -4662,7 +4719,7 @@ static void gen_data_fns(Buf *dbp, int d) {
         put(dbp, " } if (!t) return r; dst = t; v = nx; } *dst = v; return r; }\n");
       }
       if (rc_on()) {
-        put(dbp, "static void lin_share%d(long v) { while (!(v & 1)) { long *o = (long *)v; long nx = 1; if (!o[-1]) return; o[-1] = 0;%s", d, untag ? " {" : " switch (o[0]) {");
+        put(dbp, "static void lin_share%d(long v) { if (lin_mt) return; while (!(v & 1)) { long *o = (long *)v; long nx = 1; if (o[-1] < 0) return; o[-1] = -o[-1];%s", d, untag ? " {" : " switch (o[0]) {");
         for (long k = 1; (c = lin_ctor_info(k)); k++) {
           if (c->dt != dt || c->k == 0) continue;
           if (!untag) put(dbp, " case %d: {", c->i);
@@ -4683,7 +4740,7 @@ static void gen_data_fns(Buf *dbp, int d) {
 #undef db
 }
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum) {
-  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0; rcf_n = 0; mv_n = 0; rc_bor = NULL; rc_mt = 0;
+  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0; rcf_n = 0; mv_n = 0; rc_bor = NULL; rc_pure = NULL; rc_mt = 0;
   free(vorig); free(vdeep); free(vrdo); vorig = NULL; vdeep = NULL; vrdo = NULL; vdeep_n = 0; vcap = 0;   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
   Compiled *r = NULL;
@@ -4812,7 +4869,14 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
             { int c = 0; for (int j = 0; j < funs[i].arity; j++) put(&fb, j == K ? "%sq" : "%sp%d", c++ ? ", " : "", j);
               Buf fu = nbuf(64); fv_params(&fu, i, 0, 0); if (nfv[i]) put(&fb, "%s%s", c ? ", " : "", fu.s); free(fu.s); if (!np) put(&fb, "0"); }
             put(&fb, "}, 0, 0 };\n    if (k < T - 1) { for (long j = n / T; j > 0; j--) q = ((long *)q)[%d]; x.stop = q; }\n    s[k] = x;\n  }\n", tf);
-            if (rc_on()) rc_mt = 1;                    /* (counted: a list split among threads -- its elements may be shared between the parts) */
+            if (rc_on()) {                             /* (counted: the list split among the threads, and what they all read, marked shared) */
+              Buf sh = nbuf(64); rc_share_params(&sh, i, NULL, NULL, NULL);
+              for (int q = 0; q < nfv[i]; q++) { const FV *v = &fvs[i][q];
+                int sf = v->h >= 0 && v->h < nfun && funs[v->h].pnode && funs[v->h].pnode[v->k] ? rc_share_fn(shape_of(funs[v->h].pnode[v->k])) : (rc_mt = 1, -1);
+                if (sf >= 0) put(&sh, "lin_share%d(l%d_%ld); ", sf, v->h + 1, v->k); }
+              if (sh.len) put(&fb, "  %s\n", sh.s);
+              free(sh.s);
+            }
             put(&fb, "  for (int k = 0; k < T; k++) { if (pthread_create(&t[k], &ra, pmrun%d, &s[k])) break; started++; }\n", i);
             put(&fb, "  for (int k = 0; k < started; k++) pthread_join(t[k], 0);\n  pthread_attr_destroy(&ra);\n");
             put(&fb, "  if (started < T) lin_fn_aborted = 1;\n  lin_pm_busy = 0;\n  (void)LIN_JOINED;\n");
