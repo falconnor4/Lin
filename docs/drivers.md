@@ -130,8 +130,8 @@ kinds:
 
 Measured with the compiler off, against the combinator alone, on a counting loop:
 the net stays at about 2,500 nodes however many calls are made (the combinator's
-grows to 3.4 million after 12,800 calls), and 12,800 calls take 4.7 s instead of
-98 s. The steps are the combinator's: the fan does the same copying, lazily. A
+grows to 3.4 million after 12,800 calls), and 12,800 calls take 2.1 s instead of
+98 s, with the time growing in proportion to the calls. The steps are the combinator's: the fan does the same copying, lazily. A
 loop whose accumulator is never forced keeps every call's world alive, because
 the unevaluated sums are still needed; that is the cost of laziness, not of the
 rewrite. `LIN_Y_OFF=1` turns the rewrite off.
