@@ -171,6 +171,71 @@ structure, which shows exactly where a value is shared:
 - **Unread fields are not computed.** A constructor field that no part of the
   program reads is never evaluated or stored, matching lazy semantics.
 
+### Reference counting (`LIN_FN_RC=1`, opt-in)
+
+What the ownership analysis cannot prove unshared it leaves to the arena, which
+is released when the call returns: fannkuch built 12.2M blocks and freed 0.6M
+of them. With `LIN_FN_RC=1` every block carries a count instead, in the word
+before it, and compiled code keeps it exact, in the manner of Perceus:
+
+- **Every value has an owner.** A call or constructor given something its giver
+  still needs (a parameter used again, a field of a block that stays, a value
+  used twice) is given a new reference; every owned parameter is released where
+  its paths end; a block is freed when its last reference goes.
+- **Borrowing.** A parameter a function only reads (takes apart without
+  rebuilding in it, reads the fields of, lends on) is borrowed: the caller takes
+  no count for the call and the callee releases nothing. This is a fixpoint over
+  the unit. A tail call that hands an owned value to a parameter keeps that
+  parameter owned, so loops stay loops.
+- **Moves.** The last use of a parameter takes its reference. A field consumed
+  once by what is stored back in its own slot of a block rebuilt in place is
+  moved, decided at run time, so nested updates do not copy every level. A
+  branch that takes apart a block it owns and rebuilds it in place on every path
+  moves out the fields it uses once (checked in the order the code evaluates), so
+  a balanced-tree insertion rebuilds its whole path in place.
+- **In place by count.** A rebuild in place first checks that the block's count
+  is one, and copies it otherwise. Both forms of destination passing work.
+- **Threads.** A count is plain arithmetic while one thread alone can see the
+  block. A structure handed to another thread (a task's parameters and captured
+  locals, a parallel loop's states, a split list) is first marked shared: its
+  count is negated, and from then on it is atomic. A shared block held by a
+  single reference becomes local again. A parameter that is read all the way down
+  (no part of it is ever given a count) is handed to threads unmarked. Only a unit
+  that gives a thread a value whose shape it cannot mark counts atomically
+  everywhere.
+
+Blocks built and freed on one thread, without and with counting:
+
+| Benchmark | Built | Freed (ownership only) | Freed (counted) |
+|-----------|------:|-------------:|-------:|
+| fannkuch | 12.2M | 0.6M | 10.0M |
+| words | 1.9M | 1.0M | 1.9M |
+| omap | 518K | 0 | 518K |
+| knucleotide | 695K | 81K | 445K |
+| regexredux | 1.1M | 234 | 87K |
+
+Counting is opt-in because some programs are still slower with it. These are run
+times in ms, best of five, ownership only / counted. The single-thread runs are
+`-t 1`, the four-thread runs `-t 4`:
+
+| Benchmark | `-t 1` | `-t 4` |
+|-----------|--------|--------|
+| fannkuch | 94 / 104 | 27 / 31 |
+| binarytrees | 18 / 16 | 12 / 10 |
+| omap | 137 / 136 | 84 / 77 |
+| nbody | 17 / 18 | 17 / 18 |
+| array | 32 / 29 | 27 / 26 |
+| bst | 24 / 24 | 21 / 29 |
+| words | 10 / 16 | 10 / 15 |
+| knucleotide | 48 / 80 | 41 / 59 |
+| regexredux | 54 / 89 | 40 / 129 |
+| pidigits | 1121 / 1338 | 1198 / 1256 |
+
+The remaining gaps are mostly counts taken where a value is used twice in one
+expression and released after it. A liveness that follows each value through
+the region the emitter binds it in would remove most of them. Counting becomes
+the default once these programs match.
+
 ### Loops
 
 - **Tail calls** are loops.
@@ -260,6 +325,8 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
 | `LIN_Y_OFF=1` | Leave declined recursive calls to the Y combinator's own copying (for comparison) |
 | `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance. The whole test suite and every benchmark pass under it |
+| `LIN_FN_RC=1` | Reference counting in compiled code (see above). The whole test suite and the differential fuzzer pass under it, poisoned |
+| `LIN_FN_STATS=1` | Report the blocks each unit built and freed, per size |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
 | `LIN_NATIVE_CACHE` | The cache directory |
 | `LIN_NO_CACHE=1` | Do not use the program cache |
