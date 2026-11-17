@@ -1429,7 +1429,7 @@ static int full_run_env(void) {
   /* (a diagnostic setting, or one that changes how a program is run, asks for the run in full) */
   static const char *const full_run[] = { "LIN_FN_", "LIN_NO_", "LIN_DUMP_", "LIN_GPU_", "LIN_AOT_", "LIN_NATIVE_DEBUG=", "LIN_TRACE=", "LIN_STEPS=",
     "LIN_LEAKCHECK=", "LIN_WAVE_STATS=", "LIN_PASSES=", "LIN_EGRULES=", "LIN_PRECOMPILE=", "LIN_READBACK=", "LIN_EAGER_STD=" };
-  for (char **e = environ; e && *e; e++) if (!strncmp(*e, "LIN_", 4) && strncmp(*e, "LIN_FN_RC=", 10))   /* (a mode, not a diagnostic: in the key) */
+  for (char **e = environ; e && *e; e++) if (!strncmp(*e, "LIN_", 4))
     for (int k = 0; k < N_OF(full_run); k++) if (!strncmp(*e, full_run[k], strlen(full_run[k]))) return 1;
   return 0;
 }

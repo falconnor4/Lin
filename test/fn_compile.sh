@@ -14,6 +14,8 @@ lin_test_env "${1:-}" "${2:-}" || exit 1
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 export LIN_NATIVE_CACHE="$TMP/cache"
 pass=0; fail=0
+# left <file> -> how many blocks a run left unfreed (LIN_FN_STATS: what the compiled units built less what they freed)
+left() { LIN_FN_STATS=1 timeout 300 "$LIN_BIN" -t 1 "$1" 2>&1 >/dev/null | sed -n 's/^lin: blocks of [0-9]* words: \([0-9]*\) built, \([0-9]*\) freed/\1 \2/p' | awk '{b+=$1; f+=$2} END {print b-f}'; }
 prog() {   # name, program text, expected
   printf '%s\n' "$2" > "$TMP/$1.lin"
   a=$(timeout 300 "$LIN_BIN" "$TMP/$1.lin" 2>/dev/null)
@@ -180,15 +182,10 @@ dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep 
 sed 's/(run 200000 /(run 1000 /' "$ROOT/bench/nbody.lin" > "$TMP/cap.lin"
 cap=$(timeout 120 "$LIN_BIN" "$TMP/cap.lin" 2>/dev/null)
 [ "$cap" = "=> -169301064" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a captured list was taken apart: n-body after 1,000 steps is '$cap'"; }
-# The same program states three more things the compiler must do, each named in its report: the fold over the
-# bodies starts from a COPY of a body and rebuilds in it; the list a step was computed from is DROPPED once the
-# step is built (the eraser, in compiled code); and the simulation the energy is read from is computed ONCE,
-# though the energy's inner loop names it at every body.
-# (the ownership analysis's own reports: it is what LIN_FN_RC=0 runs on its own; counting builds on it)
-LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/cap.lin" >/dev/null 2>"$TMP/cap.err"
-for what in "is given a copy" "is dropped after its call" "is computed once"; do
-  grep -q "$what" "$TMP/cap.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL n-body: no parameter '$what'"; }
-done
+# ...and the list each step was computed from is released once the step is built (the eraser, in compiled code):
+# a thousand steps leave what the last one holds, five bodies in a list.
+cl=$(left "$TMP/cap.lin")
+[ -n "$cl" ] && [ "$cl" -le 20 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL n-body: $cl blocks left unfreed"; }
 # ...and dropping keeps a long run in a few blocks: thirty million steps of a two-body state allocate what one
 # step does (kept, they would be gigabytes; the unit's memory guard must not fire).
 printf '%s\n' '(datatype P (p (x num) (v num)))' \
@@ -247,8 +244,8 @@ printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_smal
 bm=$(timeout 120 "$LIN_BIN" "$TMP/bm.lin" 2>/dev/null)
 [ "$bm" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL big_mul: '$bm'"; }
 sed 's/(digits 0 2000 1/(digits 0 600 1/' "$ROOT/bench/pidigits.lin" > "$TMP/pd.lin"
-pd=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>"$TMP/pd.err")
-[ "$pd" = "=> 127083" ] && grep -q "dropped where its paths end" "$TMP/pd.err" && ! grep -q "guard fired" "$TMP/pd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600: '$pd'"; }
+pd=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pd.lin" 2>"$TMP/pd.err"); pdl=$(left "$TMP/pd.lin")
+[ "$pd" = "=> 127083" ] && ! grep -q "guard fired" "$TMP/pd.err" && [ -n "$pdl" ] && [ "$pdl" -le 1000 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL pidigits 600: '$pd', $pdl blocks left unfreed"; }
 # REGULAR EXPRESSIONS compiled: a pattern built in the net is read in -- its Seqs of pieces and of ranges by
 # the types it was declared at, as no single shape of `scons` can say -- and the matching loop runs as C.
 # (A recursive predicate's result is a condition; a parameter-typed field may be taken apart as any datatype.)
@@ -322,13 +319,13 @@ pd2=$(timeout 120 "$LIN_BIN" "$TMP/pd2.lin" 2>/dev/null); pd2n=$(LIN_FN_OFF=1 ti
 # starting number they share must survive the first (it was freed under the second).
 printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \
   '(let ((x (big_of 1))) (big_to_string (big_mul (fact 20 x) (fact 25 x))))' > "$TMP/sh2.lin"
-sh2=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>"$TMP/sh2.err")
-[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && grep -q "the second is given a copy" "$TMP/sh2.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
+sh2=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/sh2.lin" 2>/dev/null)
+[ "$sh2" = '=> "37737254063669622951147441236213760000000000"' ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL one value given to two owning calls: '$sh2'"; }
 # A TEMPORARY -- a number built only to be read by one call -- is dropped when the call returns.
 printf '%s\n' '(define go (\i (\a (\n (if (eq i 0) n (go (sub i 1) a (if (gt (big_cmp (big_mul_small a 3) (big_mul_small a 2)) 0) (add n 1) n)))))))' \
   '(go 20000 (big_of 123456789123456789) 0)' > "$TMP/td.lin"
-td=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/td.lin" 2>"$TMP/td.err"); td1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/td.lin" 2>/dev/null)
-[ "$td" = "=> 20000" ] && [ "$td1" = "$td" ] && grep -q "temporary given to" "$TMP/td.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a temporary dropped: '$td' '$td1'"; }
+td=$(timeout 120 "$LIN_BIN" "$TMP/td.lin" 2>/dev/null); td1=$(timeout 120 "$LIN_BIN" -t 1 "$TMP/td.lin" 2>/dev/null); tdl=$(left "$TMP/td.lin")
+[ "$td" = "=> 20000" ] && [ "$td1" = "$td" ] && [ -n "$tdl" ] && [ "$tdl" -le 10 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a temporary dropped: '$td' '$td1', $tdl blocks left unfreed"; }
 # A FIELD of a consumed record, lent and then dead, is dropped where its paths end -- and a LOCAL likewise.
 printf '%s\n' '(datatype R (r (k num) (l Seq num)))' \
   '(define up (\n (\a (if (eq n 0) a (up (sub n 1) (scons n a))))))' \
@@ -336,12 +333,8 @@ printf '%s\n' '(datatype R (r (k num) (l Seq num)))' \
   '(define mk (\i (\n (if (eq n 0) (r i (up (add (mod i 7) 3) snil)) (mk i (sub n 1))))))' \
   '(define go (\i (\acc (if (eq i 0) acc (match (mk i 2) ((r k l) (go (sub i 1) (add acc (add k (tot l 0))))))))))' \
   '(go 3000 0)' > "$TMP/fd.lin"
-fd=$(LIN_FN_RC=0 LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/fd.lin" 2>"$TMP/fd.err")
-[ "$fd" = "=> 4570482" ] && grep -q "field 1 of a consumed r is dropped" "$TMP/fd.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field dropped: '$fd'"; }
-# COUNTED (the default), the same program frees every block it builds: what it holds when it ends is nothing.
-fdc=$(LIN_FN_STATS=1 timeout 120 "$LIN_BIN" -t 1 "$TMP/fd.lin" 2>"$TMP/fdc.err")
-fdb=$(sed -n 's/^lin: blocks of [0-9]* words: \([0-9]*\) built, \([0-9]*\) freed/\1 \2/p' "$TMP/fdc.err" | awk '{b+=$1; f+=$2} END {print b+0, f+0}')
-[ "$fdc" = "=> 4570482" ] && [ "${fdb% *}" -gt 0 ] && [ "${fdb% *}" = "${fdb#* }" ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL counted, every block freed: '$fdc' built/freed '$fdb'"; }
+fd=$(timeout 120 "$LIN_BIN" "$TMP/fd.lin" 2>/dev/null); fdl=$(left "$TMP/fd.lin")
+[ "$fd" = "=> 4570482" ] && [ "$fdl" = 0 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field dropped: '$fd', $fdl blocks left unfreed"; }
 # THE SAME PROGRAMS WITH FREED BLOCKS POISONED (LIN_FN_POISON): a block read after it is freed reads an address
 # nothing is at, so a drop made too early fails here rather than by luck.
 for f in fd sh2 td pa bm; do
@@ -368,14 +361,15 @@ rm1=$(timeout 120 "$LIN_BIN" "$TMP/rm.lin" 2>/dev/null); rmp=$(LIN_FN_POISON=1 t
 LIN_FN_DEBUG=1 timeout 300 "$LIN_BIN" "$ROOT/test/array.lin" >/dev/null 2>"$TMP/af.err"
 ! grep -q "error:" "$TMP/af.err" && grep -q "folded a call" "$TMP/af.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL test/array.lin's units: a generated unit did not compile"; }
 # OWNED ALL THE WAY DOWN: `keep` stores a shared list as a list's rest, so no list's rest is owned by
-# constructor -- but the list `go` rebuilds at every step is built fresh and used once, and the version of
-# `bump` it calls rebuilds it in place.
+# constructor -- but the list `go` rebuilds at every step is built fresh and used once, so its count is one and
+# `bump` rebuilds it in place: 3,000 steps over 200 cells build the 200 once, not 600,000.
 printf '%s\n' '(define bump (\s (match s (snil snil) ((scons h t) (scons (add h 1) (bump t))))))' \
   '(define go (\k (\s (if (eq k 0) s (go (sub k 1) (bump s))))))' \
   '(define tot (\s (\a (match s (snil a) ((scons h t) (tot t (add a h)))))))' \
   '(define keep (\x (\s (scons x s))))' \
   '(let ((b (srange 0 3))) (add (tot (keep 7 b) 0) (add (tot b 0) (tot (go 3000 (srange 0 200)) 0))))' > "$TMP/pv.lin"
-pv=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pv.lin" 2>"$TMP/pv.err"); pvp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/pv.lin" 2>/dev/null)
-[ "$pv" = "=> 619913" ] && [ "$pvp" = "$pv" ] && grep -q "own what they are given all the way down" "$TMP/pv.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL owned all the way down: '$pv' poisoned '$pvp'"; }
+pv=$(timeout 120 "$LIN_BIN" "$TMP/pv.lin" 2>/dev/null); pvp=$(LIN_FN_POISON=1 timeout 120 "$LIN_BIN" "$TMP/pv.lin" 2>/dev/null)
+pvb=$(LIN_FN_STATS=1 timeout 120 "$LIN_BIN" -t 1 "$TMP/pv.lin" 2>&1 >/dev/null | sed -n 's/^lin: blocks of [0-9]* words: \([0-9]*\) built.*/\1/p' | awk '{b+=$1} END {print b+0}')
+[ "$pv" = "=> 619913" ] && [ "$pvp" = "$pv" ] && [ "$pvb" -lt 1000 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL owned all the way down: '$pv' poisoned '$pvp', $pvb blocks built"; }
 if [ "$fail" -eq 0 ]; then echo "fn_compile: OK ($pass checks: programs compiled from their nets equal the net's own answers, at every thread count)"; else echo "fn_compile: $fail of $((pass+fail)) failed"; fi
 exit $fail

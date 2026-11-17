@@ -138,56 +138,29 @@ rewrite. `LIN_Y_OFF=1` turns the rewrite off.
 
 ### Memory in compiled code
 
-Compiled code allocates from an arena that is released when the call returns.
-There is no collector. The driver analyses ownership from the function's own
-structure, which shows exactly where a value is shared:
-
-- **In-place update.** A `match` on a value nothing else holds may build its
-  result in the block it took apart. Inserting into a tree, mapping over a list
-  and setting an array element all update in place when the old value is not used
-  again, and copy when it is.
-- **Reuse along every path.** A path that consumes a block either rebuilds in it
-  or returns it to a free list, so a loop that builds and consumes cells runs in
-  constant memory.
-- **Dropping.** A value a function owns, and only lends to the call that last
-  uses it, is freed when that call returns, provided the call's result holds
-  none of it. This is the net's eraser in compiled code: a loop that computes
-  each state from the last keeps one state, not all of them.
-- **Copying to own.** A small flat value given to an accumulating loop is given
-  as a copy, so the loop owns it and updates it in place at every step. One value
-  given to two calls that would each own it is given to the second as a copy, so
-  both can free what they were given.
-- **Owned all the way down.** Whether a field is owned is decided per
-  constructor, so one place that stores a shared list as a list's rest would
-  stop every list's rest being owned. A value built fresh and used once, from
-  parts that are themselves so, is owned all the way down wherever it goes: the
-  functions it is given get a version in which its fields are owned, so loops
-  over such values rebuild them in place even when other code in the unit
-  shares lists.
-- **Temporaries, locals and fields.** A value built only to be the argument of
-  one call that just reads it is freed when that call returns. A value a function
-  builds and only lends, and a field of a value it takes apart, are freed where
-  each of their paths ends.
-- **Unread fields are not computed.** A constructor field that no part of the
-  program reads is never evaluated or stored, matching lazy semantics.
-
-### Reference counting
-
-What the ownership analysis alone cannot prove unshared it leaves to the arena,
-which is released when the call returns: fannkuch built 12.2M blocks and freed
-0.6M of them. So every block carries a count, in the word before it, and compiled
-code keeps it exact, in the manner of Perceus. `LIN_FN_RC=0` turns counting off
-and leaves the ownership analysis alone.
+Compiled code has one memory system: every block carries a count, in the word
+before it, and compiled code keeps the count exact, in the manner of Perceus.
+There is no collector, and nothing is left to the arena the unit releases when
+it returns except what the threads were handed (see below). What the compiler
+works out from a function's structure is only where counts can be skipped; whether
+a block is shared is the count's question, asked at run time.
 
 - **Every value has an owner.** A call or constructor given something its giver
   still needs (a parameter used again, a field of a block that stays, a value
-  used twice) is given a new reference. Every owned parameter is released where
-  its paths end, and a block is freed when its last reference goes.
+  used twice, a value the callee also reads as a captured variable) is given a
+  new reference. Every owned parameter is released where its paths end, and a
+  block is freed when its last reference goes.
 - **Borrowing.** A parameter a function only reads (takes apart without
   rebuilding in it, reads the fields of, lends on) is borrowed: the caller takes
   no count for the call and the callee releases nothing. This is a fixpoint over
   the unit. A tail call that hands an owned value to a parameter keeps that
   parameter owned, so loops stay loops.
+- **Traversed parameters stay borrowed.** A parameter the function recurses on
+  through its parts (`(_addc xs ys 0)` passes a field of `b` to `b`) is borrowed
+  even if one path hands it on whole to an owner, or hands it a fresh value in a
+  tail call. Owned, every step would take a count of the rest and release the
+  cell whenever the caller still holds the number. Borrowed, the one path that
+  hands it on takes one count, once.
 - **Moves.** The last use of a parameter takes its reference. Liveness follows
   the order the emitted code evaluates, including the values each region binds,
   where the emitter binds them. A field consumed once by what is stored back in
@@ -196,10 +169,25 @@ and leaves the ownership analysis alone.
   owns moves out the fields it uses once, if on every path it then rebuilds that
   block in place or drops it. A balanced-tree insertion then rebuilds its whole
   path in place. A block dropped after its fields moved out is simply freed.
-- **In place by count.** A rebuild in place first checks that the block's count
-  is one, and copies it otherwise. Both forms of destination passing work, and
-  drops on a path that ends in a cell with a hole run before the call that fills
-  the hole, so the loop stays a loop.
+- **In place by count.** A `match` on a value it consumes (an owned parameter no
+  other function reads, or a call's result used once) builds its result in the
+  block it took apart: inserting into a tree, mapping over a list and setting an
+  array element. The rebuild first checks that the block's count is one, and
+  copies it otherwise, so a value built fresh and used once is updated in place
+  all the way down while one that is still shared is copied. A copy copies only
+  the fields the rebuild keeps. Both forms of
+  destination passing work, and drops on a path that ends in a cell with a hole
+  run before the call that fills the hole, so the loop stays a loop.
+- **Temporaries, locals and fields.** A value built only to be the argument of
+  one call that just reads it is freed when that call returns. A value a function
+  builds and only lends, and a field of a value it takes apart, are freed where
+  each of their paths ends: a loop that computes each state from the last keeps
+  one state, not all of them.
+- **Free lists by size class.** A freed block goes on a list for its size: one
+  list per size under 8 words, and one per power of two above that, so the block
+  a freed vector leaves serves the next of its class.
+- **Unread fields are not computed.** A constructor field that no part of the
+  program reads is never evaluated or stored, matching lazy semantics.
 - **Threads.** A count is plain arithmetic while one thread alone can see the
   block. What forked tasks, parallel loops and reductions are handed is frozen
   first: never counted again and freed with the unit, so threads reading one
@@ -227,36 +215,41 @@ Elements that are data are counted like fields. A unit whose vector crosses
 between the net and compiled code, as an argument or a result, is compiled again
 with the operations as their meaning, the trie.
 
-Blocks built and freed on one thread, by ownership alone and counted:
+Blocks built and freed on one thread. What is not freed is what threads were
+handed, frozen, and goes with the unit:
 
-| Benchmark | Built | Freed (ownership) | Freed (counted) |
-|-----------|------:|-------------:|-------:|
-| fannkuch | 12.2M | 0.6M | 10.0M |
-| words | 1.9M | 1.0M | 1.9M |
-| omap | 518K | 0 | 518K |
-| knucleotide | 695K | 81K | 445K |
+| Benchmark | Built | Freed |
+|-----------|------:|------:|
+| fannkuch | 12.2M | 12.2M |
+| words | 1.9M | 1.9M |
+| omap | 518K | 518K |
+| knucleotide | 695K | 445K |
+| pidigits | 58.9M | 58.9M |
 
-Wall-clock times in ms (`bench/run.sh`, best of three, cached), ownership
-alone (`LIN_FN_RC=0`) / counted, in one session on a shared 4-core machine
-(expect ±20%):
+Wall-clock run times in ms (best of five, cached), with the static ownership
+analysis this replaced and with counts alone, in one session on a shared
+4-core machine (expect ±20%):
 
 | Benchmark | Lin | Lin `-t 1` |
 |-----------|-----|------------|
-| array | 43 / 11 | 42 / 12 |
-| fannkuch | 35 / 28 | 101 / 75 |
-| mandel | 31 / 26 | 109 / 88 |
-| omap | 96 / 101 | 139 / 121 |
-| nqueens | 157 / 163 | 202 / 164 |
-| pidigits | 1147 / 1334 | 1238 / 1211 |
-| knucleotide | 58 / 90 | 63 / 67 |
-| regexredux | 37 / 64 | 59 / 82 |
-| bst | 29 / 37 | 29 / 39 |
-| words | 13 / 18 | 14 / 22 |
+| array | 8 / 9 | 9 / 10 |
+| fannkuch | 25 / 23 | 75 / 68 |
+| omap | 84 / 103 | 124 / 119 |
+| pidigits | 1313 / 1385 | 1305 / 1339 |
+| knucleotide | 63 / 76 | 78 / 81 |
+| regexredux | 67 / 81 | 83 / 112 |
+| bst | 31 / 31 | 28 / 30 |
+| words | 16 / 17 | 16 / 16 |
+| revcomp | 20 / 19 | 19 / 19 |
+| nbody | 21 / 26 | 23 / 24 |
+| fasta | 14 / 14 | 15 / 14 |
+| binarytrees | 15 / 12 | 22 / 20 |
+| spectralnorm | 27 / 34 | 76 / 63 |
 
-What the counted programs still pay for is counts: the regex matcher returns the
-rest of its input, so it cannot borrow it, and every step takes and releases a
-count of the string; `words` and `bst` pay for the count word itself, which makes
-a two-word cell three.
+What the counted programs still pay for is counts. The regex matcher's pattern
+reaches it with a shape the compiler knows only as "data", so it is owned, and
+every step takes and releases a count of a piece. `words` and `bst` pay for the
+count word itself, which makes a two-word cell three.
 
 ### Loops
 
@@ -347,7 +340,6 @@ answer with a single number or boolean. A run with a diagnostic setting
 | `LIN_FN_NOFUSE=1` | Do not fuse loops (for comparison) |
 | `LIN_Y_OFF=1` | Leave declined recursive calls to the Y combinator's own copying (for comparison) |
 | `LIN_FN_POISON=1` | Fill freed blocks with an invalid address, so that memory read after it is freed fails instead of working by chance. The whole test suite and every benchmark pass under it |
-| `LIN_FN_RC=0` | No reference counting: the ownership analysis alone, and vectors kept as their trie (see above) |
 | `LIN_FN_STATS=1` | Report the blocks each unit built and freed, per size |
 | `LIN_FN_LEAKS=1` | Number every allocation site and report, when a unit ends, the sites whose blocks are still held, printing the code around each |
 | `LIN_NATIVE_CC` | The C compiler to invoke (default `cc`) |
