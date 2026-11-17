@@ -51,7 +51,7 @@
 __thread __attribute__((tls_model("initial-exec"))) jmp_buf lin_jb;
 __thread __attribute__((tls_model("initial-exec"))) char *lin_stack_lo;
 __thread __attribute__((tls_model("initial-exec"))) long *lin_hp, *lin_he;
-__thread __attribute__((tls_model("initial-exec"))) long *lin_fl[8];   /* freed blocks by size (words), for reuse */
+__thread __attribute__((tls_model("initial-exec"))) long *lin_fl[8 + 8 * sizeof(long)];   /* freed blocks by size class, for reuse: see lin_cls */
 static int dbg = -1;
 #include <time.h>
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
@@ -2773,7 +2773,12 @@ static unsigned occ_r(const Expr *e) {               /* how often occ_x is MOVED
     r = m; break; }
   case E_BIN: r = occ_r(e->a) + occ_r(e->b); break;
   case E_CTOR: for (int i = 0; i < e->nargs; i++) if (!e->ci || field_live(e->ci, i)) r += occ_r(e->args[i]); break;   /* (a field nobody reads is not computed: nothing moves into it) */
-  case E_CALL: case E_FOP: case E_VOP: for (int i = 0; i < e->nargs; i++) r += occ_r(e->args[i]); break;
+  case E_CALL: case E_FOP: case E_VOP: {
+    /* (a call handed x whole, and reading x's length or an element in another argument -- `(_mulc m k 0 (alen m) 0)`
+       -- reads it before the call runs: one move, not two) */
+    int whole = 0; if (e->op == E_CALL) for (int i = 0; i < e->nargs; i++) if (e->args[i] == occ_x) whole = 1;
+    for (int i = 0; i < e->nargs; i++) if (!(whole && vop_read(e->args[i]) && e->args[i]->args[0] == occ_x)) r += occ_r(e->args[i]);
+    break; }
   default: break;
   }
   if (r > 2) r = 2;
@@ -2788,7 +2793,11 @@ static int ot_r(const Expr *e) {
   for (int i = 0; i < ot_nev; i++) if (ot_ev[i] == e) return -1;   /* (evaluated already on this path) */
   if (e == ot_node) {                                /* the node itself: what it moves */
     int r = 0; occ_reads = 0;
-    for (int i = 0; i < e->nargs && e->args; i++) { ot_fresh(); r += (int)occ_r(e->args[i]); }
+    int whole = 0; if (e->op == E_CALL) for (int i = 0; i < e->nargs && e->args; i++) if (e->args[i] == occ_x) whole = 1;
+    for (int i = 0; i < e->nargs && e->args; i++) {
+      if (whole && vop_read(e->args[i]) && e->args[i]->args[0] == occ_x) continue;   /* (read before the call: see occ_r) */
+      ot_fresh(); r += (int)occ_r(e->args[i]);
+    }
     if (e->a) { ot_fresh(); r += (int)occ_r(e->a); }
     return r;
   }
@@ -3117,9 +3126,13 @@ static void temp_uses(const Expr *e, const Expr *a, TSite **v, int *nc, int *oth
   seen[e->id] = 1;
   const Expr *kids[3] = { e->a, e->b, e->op != E_CTOR ? e->c : NULL };
   for (int q = 0; q < 3; q++) if (kids[q] == a) (*other)++;
+  int here = 0;
   for (int i = 0; i < e->nargs && e->args; i++) if (e->args[i] == a) {
-    if (e->op == E_CALL) { *v = realloc(*v, sizeof **v * (size_t)(*nc + 1)); (*v)[(*nc)++] = (TSite){ e, i }; } else (*other)++;
+    if (e->op == E_CALL) { *v = realloc(*v, sizeof **v * (size_t)(*nc + 1)); (*v)[(*nc)++] = (TSite){ e, i }; here = 1; } else (*other)++;
   }
+  /* (a vector's length or element read in another argument of the same call -- `(_tonum m (alen m) 0)` -- is read
+     before the call runs, so before the value is dropped when it returns: not a use of its own) */
+  if (here) for (int i = 0; i < e->nargs; i++) if (e->args[i] != a && vop_read(e->args[i]) && e->args[i]->args[0] == a) seen[e->args[i]->id] = 1;
   for (int q = 0; q < 3; q++) temp_uses(kids[q], a, v, nc, other, seen);
   for (int i = 0; i < e->nargs && e->args; i++) temp_uses(e->args[i], a, v, nc, other, seen);
 }
@@ -4139,7 +4152,11 @@ static const char *DATA_RT =
   "  pthread_mutex_lock(&lin_chm);\n"
   "  if (lin_nch >= lin_cch) { lin_cch = lin_cch ? lin_cch * 2 : 64; lin_ch = realloc(lin_ch, (size_t)lin_cch * sizeof *lin_ch); }\n"
   "  lin_ch[lin_nch++] = c; lin_used += sz; pthread_mutex_unlock(&lin_chm); lin_hp = c; lin_he = c + sz; }\n"
-  "extern LIN_TLS long *lin_fl[8];\n"
+  "extern LIN_TLS long *lin_fl[8 + 8 * sizeof(long)];\n"
+  /* (SIZE CLASSES: a block under 8 words has a list of its own size; a larger one is rounded up to a power of two,
+     one list per power -- so the block a freed vector leaves serves the next of its class, and memory stays the
+     live data however large the blocks are) */
+  "static inline int lin_cls(long n) { return n < 8 ? (int)n : 8 + (int)(8 * sizeof(long)) - __builtin_clzl((unsigned long)(n - 1)); }\n"
   /* EVERY BLOCK CARRIES A COUNT, in the word before it (so a field's offset is the same with or without it): how
      many references hold it.  A new block has one. */
   "#ifdef LIN_STATS\nstatic long lin_na[9], lin_nf[9];\n#define LIN_NA(n) lin_na[(n) < 8 ? (n) : 8]++\n#define LIN_NF(n) lin_nf[(n) < 8 ? (n) : 8]++\n#else\n#define LIN_NA(n)\n#define LIN_NF(n)\n#endif\n"
@@ -4153,7 +4170,8 @@ static const char *DATA_RT =
   "  long *cnt = calloc((size_t)mx + 1, sizeof *cnt); for (long i = 0; i < lk_c; i++) if (lk_p[i] > 1) cnt[lk_s[i]]++;\n"
   "  for (int s = 0; s <= mx; s++) if (cnt[s]) fprintf(stderr, \"lin: site %d holds %ld blocks\\n\", s, cnt[s]); free(cnt); }\n"
   "#define LIN_LF(p) lin_leak_forget(p)\n#else\n#define LIN_LF(p)\n#define lin_leak_report()\n#endif\n"
-  "static inline long *lin_alloc(long n) { LIN_NA(n); long *f = lin_fl[n & 7]; if (n < 8 && f) { lin_fl[n] = (long *)f[0]; f[-1] = 1; return f; }\n"
+  "static inline long *lin_alloc(long n) { LIN_NA(n); int c = lin_cls(n); long *f = lin_fl[c]; if (f) { lin_fl[c] = (long *)f[0]; f[-1] = 1; return f; }\n"
+  "  if (n >= 8) n = 1L << (c - 8);\n"
   "  if (__builtin_expect(lin_hp + n + 1 > lin_he, 0)) lin_refill(n + 1); long *r = lin_hp + 1; r[-1] = 1; lin_hp += n + 1; return r; }\n"
   /* (a count is positive while one thread alone can see the block, and is then plain arithmetic; what is handed to
      another thread is first marked SHARED -- its count negated, see gen_data_fns -- and a shared count is atomic.
@@ -4171,13 +4189,13 @@ static const char *DATA_RT =
   "  return c && __atomic_add_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0; }\n"
   /* a block a match consumed and nothing else holds: back on its size's list (memory is the live data, as in C) */
   "#ifdef LIN_POISON\n"   /* (LIN_FN_POISON: a freed block's words become an address nothing is at -- read after its free, it faults) */
-  "static inline void lin_free(long *p, long n) { LIN_LF(p); LIN_NF(n); if (p[-1] > 1) { fprintf(stderr, \"lin: a block freed while %ld references hold it\\n\", p[-1]); abort(); } for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
+  "static inline void lin_free(long *p, long n) { LIN_LF(p); LIN_NF(n); if (p[-1] > 1) { fprintf(stderr, \"lin: a block freed while %ld references hold it\\n\", p[-1]); abort(); } for (long i = 1; i < n; i++) p[i] = 0x5eadbeefde00L; int c = lin_cls(n); p[0] = (long)lin_fl[c]; lin_fl[c] = p; }\n"
   "#else\n"
-  "static inline void lin_free(long *p, long n) { LIN_LF(p); LIN_NF(n); if (n < 8) { p[0] = (long)lin_fl[n]; lin_fl[n] = p; } }\n"
+  "static inline void lin_free(long *p, long n) { LIN_LF(p); LIN_NF(n); int c = lin_cls(n); p[0] = (long)lin_fl[c]; lin_fl[c] = p; }\n"
   "#ifdef LIN_LEAKS\n#define LIN_ALLOC_RAW lin_alloc\nstatic inline long *lin_alloc_at(int site, long n) { long *p = LIN_ALLOC_RAW(n); lin_leak_note(p, site); return p; }\n#endif\n"
   "#endif\n"
   "#ifdef LIN_STATS\nstatic void lin_stats(void) { for (int i = 0; i < 9; i++) if (lin_na[i]) fprintf(stderr, \"lin: blocks of %d words: %ld built, %ld freed\\n\", i, lin_na[i], lin_nf[i]); }\n#else\n#define lin_stats()\n#endif\n"
-  "static void lin_free_all(void) { lin_stats(); lin_leak_report(); for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; for (int i = 0; i < 8; i++) lin_fl[i] = 0; }\n"
+  "static void lin_free_all(void) { lin_stats(); lin_leak_report(); for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; for (size_t i = 0; i < sizeof lin_fl / sizeof *lin_fl; i++) lin_fl[i] = 0; }\n"
   /* The guard lives where an infinite STRUCTURE must go -- the arena's refill, once per chunk -- and checks memory and
      the stack there; a compiled function carries nothing (measured: a per-call check doubled a tree insert).  A call
      whose runaway recursion builds nothing is not caught -- the exposure numeric units have always had.  A task on
