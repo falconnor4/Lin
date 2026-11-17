@@ -182,7 +182,14 @@ a block is shared is the count's question, asked at run time.
   one call that just reads it is freed when that call returns. A value a function
   builds and only lends, and a field of a value it takes apart, are freed where
   each of their paths ends: a loop that computes each state from the last keeps
-  one state, not all of them.
+  one state, not all of them. A value computed inside one operand (a call's
+  argument, an arm of a choice) is dropped inside it. One whose path ends where
+  it is not in hand is kept in a variable of the function's frame, set wherever
+  it is computed, so the drop can still name it.
+- **Reads before a move.** A call handed a vector whole that also reads its
+  length or an element in another argument moves it once: the reads happen
+  before the call runs. A node a path has already evaluated is the same value
+  wherever else that path names it.
 - **Free lists by size class.** A freed block goes on a list for its size: one
   list per size under 8 words, and one per power of two above that, so the block
   a freed vector leaves serves the next of its class.
@@ -211,9 +218,12 @@ one flat block, `{length, capacity, elements}`:
   persistent, but the copy is paid only when the old array is actually used again.
 - `apush` grows the capacity by doubling.
 
-Elements that are data are counted like fields. A unit whose vector crosses
-between the net and compiled code, as an argument or a result, is compiled again
-with the operations as their meaning, the trie.
+Elements that are data are counted like fields. A vector that crosses between
+the net and compiled code, as an argument, a result or a field of either, is
+converted at the edge. Coming in, the trie it is on the net is walked into one
+flat block. Going out, the block is built back as the trie, with `array`'s
+depth and its slots past the length holding 0 (the operations never read them).
+The unit keeps its flat vectors either way.
 
 Blocks built and freed on one thread. What is not freed is what threads were
 handed, frozen, and goes with the unit:

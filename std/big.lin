@@ -1,10 +1,12 @@
 ; ==============================================================================
 ; Lin Standard Library: Big -- arbitrary-precision natural numbers
 ; ==============================================================================
-; A natural number of any size, as a sequence of limbs in base 10^9, least
-; significant first, with no zero limbs at the top (zero is the empty sequence).
-; Everything is a Seq and `match`, so it is typed and compiled; arithmetic on a
-; number nothing else holds is done in place.
+; A natural number of any size, as a vector of limbs in base 10^9, least
+; significant first.  Limbs at the top may be zero (a vector does not shrink):
+; the number's length is up to its highest limb that is not, and zero is a
+; vector of no such limb.  Compiled, a vector is one flat block, and arithmetic
+; on a number nothing else holds writes its limbs in place -- what a C bignum
+; does, with no mutation in the language.
 ;
 ;   (big_of n)            from a (non-negative) machine integer
 ;   (big_add a b)  (big_sub a b)  -- a - b requires a >= b
@@ -25,71 +27,83 @@
 (load "num.lin")
 (load "seq.lin")
 (load "string.lin")
+(load "array.lin")
 
 (namespace big)
 
 (define _base 1000000000)
-
 (datatype (QR s) (qr (q s) (r num)))
 
-(define big_zero snil)
-(define big_is_zero (\a (match a (snil true) ((scons h t) false))))
-(define big_of (\n (if (eq n 0) snil (scons (mod n _base) (big_of (div n _base))))))
+(define big_zero aempty)
+; the length up to the highest limb that is not zero
+(define _len (\a (\n (if (eq n 0) 0 (if (eq (aget a (sub n 1)) 0) (_len a (sub n 1)) n)))))
+(define big_is_zero (\a (eq (_len a (alen a)) 0)))
+(define _of (\n (\a (if (eq n 0) a (_of (div n _base) (apush a (mod n _base)))))))
+(define big_of (\n (_of n aempty)))
 
-; a copy of the limbs: every result is a number of its own, sharing no cells with what it was made from -- so
-; compiled code can free each one as soon as nothing reads it
-(define _copy (\a (match a (snil snil) ((scons h t) (scons h (_copy t))))))
-; a limb with its carry, and the rest
-(define _addc (\a (\b (\c (match a
-  (snil (if (eq c 0) (_copy b) (_addc b (scons c snil) 0)))
-  ((scons x xs) (match b
-    (snil (let ((s (add x c))) (if (lt s _base) (scons s (_copy xs)) (scons (sub s _base) (_addc xs snil 1)))))
-    ((scons y ys) (let ((s (add (add x y) c)))
-      (if (lt s _base) (scons s (_addc xs ys 0)) (scons (sub s _base) (_addc xs ys 1))))))))))))
-(define big_add (\a (\b (_addc a b 0))))
+; a + b, written into a (n limbs; b has m): limb i on, carry c.  Where b is the longer, its rest is appended to a:
+; nothing here asks which argument is longer -- a call given as one is computed once
+(define _addt (\a (\b (\i (\m (\c   ; (past a's limbs: b's, pushed)
+  (if (lt i m)
+    (let ((s (add (aget b i) c))) (if (lt s _base) (_addt (apush a s) b (add i 1) m 0) (_addt (apush a (sub s _base)) b (add i 1) m 1)))
+    (if (eq c 0) a (apush a 1)))))))))
+(define _add (\a (\b (\i (\n (\m (\c
+  (if (lt i n)
+    (if (lt i m)
+      (let ((s (add (add (aget a i) (aget b i)) c)))
+        (if (lt s _base) (_add (aset a i s) b (add i 1) n m 0) (_add (aset a i (sub s _base)) b (add i 1) n m 1)))
+      (if (eq c 0) a
+        (let ((s (add (aget a i) 1))) (if (lt s _base) (aset a i s) (_add (aset a i 0) b (add i 1) n m 1)))))
+    (_addt a b i m c)))))))))
+(define big_add (\a (\b (_add a b 0 (alen a) (alen b) 0))))
 
-; (a limb that became zero at the top is dropped: no number has zero limbs there)
-(define _cons0 (\h (\t (if (eq h 0) (match t (snil snil) ((scons x xs) (scons h t))) (scons h t)))))
-(define _subb (\a (\b (\c (match a
-  (snil snil)
-  ((scons x xs) (let ((y (match b (snil 0) ((scons y ys) y))) (rest (match b (snil snil) ((scons y ys) ys))))
-    (let ((d (sub (sub x y) c)))
-      (if (lt d 0) (_cons0 (add d _base) (_subb xs rest 1)) (_cons0 d (_subb xs rest 0)))))))))))
-(define big_sub (\a (\b (_subb a b 0))))
+; a - b, written into a (b has m limbs that count: a >= b, so b's limbs past a's are zero): limb i on, borrow c
+(define _sub (\a (\b (\i (\m (\c
+  (if (lt i m)
+    (let ((d (sub (sub (aget a i) (aget b i)) c)))
+      (if (lt d 0) (_sub (aset a i (add d _base)) b (add i 1) m 1) (_sub (aset a i d) b (add i 1) m 0)))
+    (if (eq c 0) a
+      (let ((d (sub (aget a i) 1))) (if (lt d 0) (_sub (aset a i (add d _base)) b (add i 1) m 1) (aset a i d)))))))))))
+(define big_sub (\a (\b (_sub a b 0 (min (alen a) (alen b)) 0))))
 
-(define _mulc (\a (\k (\c (match a
-  (snil (if (eq c 0) snil (scons (mod c _base) (_mulc snil k (div c _base)))))
-  ((scons x xs) (let ((p (add (mul x k) c))) (scons (mod p _base) (_mulc xs k (div p _base))))))))))
-(define big_mul_small (\a (\k (if (eq k 0) snil (_mulc a k 0)))))
-(define _shift (\a (match a (snil snil) ((scons h t) (scons 0 (scons h t))))))
-(define big_mul (\a (\b (match b
-  (snil snil)
-  ((scons h t) (big_add (big_mul_small a h) (_shift (big_mul a t))))))))
+; a * k, written into a: limb i of n, carry c (under the base: k is)
+(define _mulc (\a (\k (\i (\n (\c
+  (if (lt i n)
+    (let ((p (add (mul (aget a i) k) c))) (_mulc (aset a i (mod p _base)) k (add i 1) n (div p _base)))
+    (if (eq c 0) a (apush a c)))))))))
+(define big_mul_small (\a (\k (_mulc a k 0 (alen a) 0))))   ; (by zero: limbs of zero, which a number may have at the top)
 
-; most significant limb first: a quotient built up, and the remainder carried down
-(define _divs (\hi (\k (\q (\r (match hi
-  (snil (qr q r))
-  ((scons x xs) (let ((v (add (mul r _base) x))) (_divs xs k (_cons0 (div v k) q) (mod v k))))))))))
-(define big_divmod_small (\a (\k (_divs (sreverse a) k snil 0))))
+; r += a * y at limb i: limb j of a's n, carry c
+(define _mrow (\r (\a (\y (\i (\j (\n (\c
+  (if (lt j n)
+    (let ((p (add (add (aget r (add i j)) (mul (aget a j) y)) c)))
+      (_mrow (aset r (add i j) (mod p _base)) a y i (add j 1) n (div p _base)))
+    (aset r (add i j) c))))))))))   ; (no row before reached limb i + n)
+(define _mrows (\r (\a (\b (\i (\m (\n (if (lt i m) (_mrows (_mrow r a (aget b i) i 0 n 0) a b (add i 1) m n) r))))))))
+(define big_mul (\a (\b (let ((n (alen a)) (m (alen b))) (_mrows (array (add n m) 0) a b 0 m n)))))
+
+; most significant limb first: the quotient written over a, the remainder carried down
+(define _divs (\a (\k (\i (\r (if (eq i 0) (qr a r)
+  (let ((v (add (mul r _base) (aget a (sub i 1))))) (_divs (aset a (sub i 1) (div v k)) k (sub i 1) (mod v k)))))))))
+(define big_divmod_small (\a (\k (_divs a k (alen a) 0))))
 (define big_div_small (\a (\k (match (big_divmod_small a k) ((qr q r) q)))))
 (define big_mod_small (\a (\k (match (big_divmod_small a k) ((qr q r) r)))))
 
-(define big_cmp (\a (\b (match a
-  (snil (match b (snil 0) ((scons y ys) -1)))
-  ((scons x xs) (match b
-    (snil 1)
-    ((scons y ys) (let ((c (big_cmp xs ys))) (if (eq c 0) (if (lt x y) -1 (if (gt x y) 1 0)) c)))))))))
+(define _cmpd (\a (\b (\i (if (eq i 0) 0
+  (let ((x (aget a (sub i 1))) (y (aget b (sub i 1)))) (if (lt x y) -1 (if (gt x y) 1 (_cmpd a b (sub i 1))))))))))
+(define big_cmp (\a (\b (let ((n (_len a (alen a))) (m (_len b (alen b)))) (if (lt n m) -1 (if (gt n m) 1 (_cmpd a b n)))))))
 
-(define big_to_num (\a (match a (snil 0) ((scons h t) (add h (mul _base (big_to_num t)))))))
+(define _tonum (\a (\i (\acc (if (eq i 0) acc (_tonum a (sub i 1) (add (mul acc _base) (aget a (sub i 1)))))))))
+(define big_to_num (\a (_tonum a (alen a) 0)))
 
 ; nine digits, zeros in front
 (define _pad (\s (\k (if (geq (str_length s) k) s (_pad (str_concat "0" s) k)))))
-(define _digits (\hi (\acc (match hi (snil acc) ((scons x xs) (_digits xs (str_concat acc (_pad (str_of_num x) 9))))))))
-(define big_to_string (\a (match (sreverse a) (snil "0") ((scons x xs) (_digits xs (str_of_num x))))))
+(define _digits (\a (\i (\acc (if (eq i 0) acc (_digits a (sub i 1) (str_concat acc (_pad (str_of_num (aget a (sub i 1))) 9))))))))
+(define big_to_string (\a (let ((n (_len a (alen a)))) (if (eq n 0) "0" (_digits a (sub n 1) (str_of_num (aget a (sub n 1))))))))
 
 ; ---- signed: a sign and a magnitude (zero is never negative) ----
-(datatype BigInt (bigint (neg num) (mag Seq num)))   ; neg: 1 below zero, else 0
-(define _mk (\neg (\mag (if (big_is_zero mag) (bigint 0 snil) (bigint neg mag)))))
+(datatype BigInt (bigint (neg num) (mag vec num)))   ; neg: 1 below zero, else 0
+(define _mk (\neg (\mag (if (big_is_zero mag) (bigint 0 big_zero) (bigint neg mag)))))
 (define bigint_of (\n (if (lt n 0) (bigint 1 (big_of (sub 0 n))) (bigint 0 (big_of n)))))
 (define bigint_of_big (\a (bigint 0 a)))
 (define bigint_neg (\a (match a ((bigint n m) (_mk (sub 1 n) m)))))
