@@ -49,8 +49,8 @@ definitions, at reduced sizes, and generate their own input so each is a single 
 | revcomp | 16 ms | 23 ms | 23 ms | 0.70× | Benchmarks Game *reverse-complement*: 1,000,000 letters reversed and complemented |
 | nbody | 16 ms | 27 ms | 26 ms | 0.59× | Benchmarks Game *n-body*: five bodies, 200,000 steps, in floats |
 | fannkuch | 16 ms | 28 ms | 75 ms | 0.57× | Benchmarks Game *fannkuch-redux*, n = 9: every permutation, by prefix reversals |
+| pidigits | 493 ms | 873 ms | 863 ms | 0.56× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
 | knucleotide | 41 ms | 90 ms | 67 ms | 0.46× | Benchmarks Game *k-nucleotide*: fragment counts in 250,000 letters, with `std/hmap.lin` |
-| pidigits | 493 ms | 1334 ms | 1211 ms | 0.37× | Benchmarks Game *pidigits*: 2,000 digits of pi on `std/big.lin` |
 | words | 4 ms | 18 ms | 22 ms | 0.22× | Text: a 1M-character string built and its words counted |
 
 The machine these were measured on is shared and noisy; expect variation of
@@ -83,10 +83,12 @@ different values would measure allocation instead, as `bst` and `omap` do.
 
 ## Where Lin is behind
 
-- **`pidigits` (about 2.5×).** Arbitrary-precision numbers are lists of limbs in
-  `std/big.lin`; the C updates arrays in place, and the step is sequential. With
-  reference counting every block it builds is freed again (130.7M built, 130.7M
-  freed): what remains is the compute on lists of limbs, and their counts.
+- **`pidigits` (about 1.8×).** Arbitrary-precision numbers are vectors of limbs
+  in `std/big.lin`, written in place where nothing else holds them, as the C's
+  arrays are; the step is sequential. Every vector it builds is freed again
+  (177K built, 177K freed). What remains is a copy wherever a number is still
+  shared when it is rewritten (`nu2`, `de2` are each read several times), and
+  the loop of the spigot itself.
 - **`words` (about 4×), `knucleotide` (about 2×).** A list of characters, and a
   hash trie, against flat C memory: each cell carries a count word, and each
   step takes and releases counts. `words` is also short enough (4 ms) that

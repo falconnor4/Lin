@@ -230,8 +230,10 @@ Use `omap` when keys must come out in order, `hmap` otherwise.
 
 ### big
 
-`std/big.lin`. Arbitrary-precision natural numbers, as sequences of base-10⁹
-limbs, and signed integers built on them.
+`std/big.lin`. Arbitrary-precision natural numbers, as vectors of base-10⁹
+limbs (least significant first; zero limbs may stand at the top), and signed
+integers built on them. Compiled, a number nothing else holds is updated in
+place, limb by limb.
 
 ```scheme
 (big_to_string (big_mul (big_of 123456789012) (big_of 987654321098)))
