@@ -1691,12 +1691,16 @@ static const LinCtor *rc_old_ci(const Expr *e, Shape *os) {
   if (e->rtag > 0 && os->k == 5 && os->dt) { const LinCtor *c; for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == os->dt && c->i == e->rtag - 1) return c; }
   *os = shape_of(e); return e->ci;
 }
-static void rc_own_copy(Buf *b, const Expr *e, int words) {   /* after `long *_o = <the block e rebuilds in>;` */
-  /* (shared: a copy, each data field of it a reference of its own, and the block released -- then every store below
-     releases what it replaces, the same whether the block was copied or not) */
+static void rc_own_copy(Buf *b, const Expr *e, int words, unsigned written) {   /* after `long *_o = <the block e rebuilds in>;` */
+  /* (shared: a copy, each data field it keeps a reference of its own, and the block released.  A field the rebuild
+     writes is not copied: its slot holds an immediate, so the store below that releases what the slot held releases
+     nothing -- the old block still holds the old value.  Every store is then the same whether the block was copied) */
   put(b, "if (!lin_uniq(_o)) { long *_n = lin_alloc(%d); __builtin_memcpy(_n, _o, %d * 8); ", words, words);
   Shape vs; const LinCtor *oc = rc_old_ci(e, &vs);
-  for (int j = 0; oc && j < oc->k; j++) if (rc_fdrop(oc, j, vs) >= 0) put(b, "lin_dup(_n[%d]); ", j + !e->untag);
+  for (int j = 0; oc && j < oc->k; j++) {
+    if (j < CLONE_BITS && ((written >> j) & 1u)) { put(b, "_n[%d] = 1; ", j + !e->untag); continue; }
+    if (rc_fdrop(oc, j, vs) >= 0) put(b, "lin_dup(_n[%d]); ", j + !e->untag);
+  }
   put(b, "lin_drop%d((long)_o); _o = _n; } ", drop_fn(shape_of(e->c)));
 }
 /* MOVED OUT OF AN ARM (counted).  A branch of a match that takes apart a block it owns, and ends -- on every path --
@@ -1895,7 +1899,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         put(b, "({ long v%d = ", kv); if (!emitx(b, pre, K2, par, budget - 1)) return 0;
         put(b, "; long *v%d = (long *)(", pv); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
         put(b, "); ");
-        { put(b, "{ long *_o = v%d; ", pv); rc_own_copy(b, e, e->nargs + !e->untag); put(b, "v%d = _o; } ", pv); }
+        { put(b, "{ long *_o = v%d; ", pv); rc_own_copy(b, e, e->nargs + !e->untag, 0); put(b, "v%d = _o; } ", pv); }
         put(b, "long v%d = v%d[v%d + %ld]; ", ov, pv, kv, off2);
         int mvv = -1;   /* (counted: the slot's value is moved into the call, which writes the slot -- see rc_dp_moves) */
         { mvv = nvar++; put(b, "int _m%d = 1; ", mvv); mv_push(f0, NULL, 0, mvv); }
@@ -1994,7 +1998,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         int kv = nvar++, ov = nvar++;
         put(b, "({ long v%d = ", kv); if (!emitx(b, pre, K, par, budget - 1)) return 0;
         put(b, "; long *_o = (long *)("); if (!emitx(b, pre, e->c, par, budget - 1)) return 0;
-        put(b, "); "); rc_own_copy(b, e, e->nargs + !e->untag);
+        put(b, "); "); rc_own_copy(b, e, e->nargs + !e->untag, 0);
         put(b, "long v%d = _o[v%d + %ld]; ", ov, kv, off);
         Expr *fx = (Expr *)f0; int sv = fx->var, ss = fx->vscope; fx->var = ov; fx->vscope = fscope;   /* field 0 stands for field K */
         Expr *kx = (Expr *)K; int skv = kx->var, sks = kx->vscope; kx->var = kv; kx->vscope = fscope;
@@ -2056,7 +2060,10 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       }
       mv_n = mv0;
       put(b, "long *_o = (long *)("); if (!emitx(b, pre, e->c, par, budget - 1)) return 0; put(b, "); ");
-      rc_own_copy(b, e, e->nargs + !e->untag);
+      { unsigned wr = 0;   /* (the fields every path writes: not the old one, nor `cond ? new : old`) */
+        for (int i = 0; i < e->nargs && i < CLONE_BITS; i++) { const Expr *a = e->args[i];
+          if (a == dp_hole || (!SAMEF(a) && !(a->op == E_IF && (SAMEF(a->c) || SAMEF(a->b))))) wr |= 1u << i; }
+        rc_own_copy(b, e, e->nargs + !e->untag, wr); }
       if (!e->untag && e->rtag - 1 != e->k) put(b, "_o[0] = %ldL; ", e->k);
       for (int i = 0; i < e->nargs; i++) {
         const Expr *a = e->args[i];
@@ -3435,11 +3442,33 @@ static int rc_held(const Expr *a, int f) {           /* a value f holds without 
   return 0;
 }
 static int rcb_changed;
-static void rcb_own(int g, int k) { if (rc_borrowed(g, k)) { rc_bor[g][k] = 0; rcb_changed = 1; } }
+/* A TRAVERSED PARAMETER -- one the function recurses on through its parts, `(_addc xs ys 0)` passing a field of b to
+   b -- stays borrowed though some path hands it on whole to an owner: owned, every step of the traversal would take a
+   count of the rest and release the cell whenever the caller still holds it; borrowed, the path that hands it on
+   takes one count, once. */
+static int trav_base(const Expr *e, int f, long k) {
+  if (!e || e->op != E_FIELD) return 0;
+  while (e && e->op == E_FIELD) e = e->a;
+  return e && e->op == E_PARAM && e->nargs == f && e->k == k;
+}
+static int trav_r(const Expr *e, int f, long k, unsigned char *seen) {
+  if (!e || (e->id < rc_seen_cap && seen[e->id])) return 0;
+  if (e->id < rc_seen_cap) seen[e->id] = 1;
+  if (e->op == E_CALL && e->k == f && k < e->nargs && trav_base(e->args[k], f, k)) return 1;
+  if (trav_r(e->a, f, k, seen) || trav_r(e->b, f, k, seen) || (e->op != E_CTOR && trav_r(e->c, f, k, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (trav_r(e->args[i], f, k, seen)) return 1;
+  return 0;
+}
+static int traversed(int f, long k) {
+  if (f < 0 || f >= nfun || !funs[f].body) return 0;
+  unsigned char *seen = calloc((size_t)rc_seen_cap + 1, 1); int r = trav_r(funs[f].body, f, k, seen); free(seen); return r;
+}
+static const char *rcb_why; static int rcb_in;
+static void rcb_own(int g, int k) { if (rc_borrowed(g, k)) { if (dbg > 2) DBG("[counted: f%d's parameter %d is owned: %s in f%d]\n", g, k, rcb_why, rcb_in); rc_bor[g][k] = 0; rcb_changed = 1; } }
 /* the uses of f's parameters in e that need them owned (parent: how e is used -- 1: read, 0: handed on) */
 static void rcb_walk(const Expr *e, int f, int read, unsigned char *seen) {
   if (!e) return;
-  if (e->op == E_PARAM) { if (!read && e->nargs >= 0 && e->nargs < nfun) rcb_own(e->nargs, (int)e->k); return; }
+  if (e->op == E_PARAM) { if (!read && e->nargs >= 0 && e->nargs < nfun) { rcb_why = "handed on whole"; rcb_in = f; rcb_own(e->nargs, (int)e->k); } return; }
   if (e->op == E_CONST) return;
   if (e->id < rc_seen_cap) { int bit = read ? 1 : 2; if (seen[e->id] & bit) return; seen[e->id] |= bit; }
   switch (e->op) {
@@ -3452,7 +3481,12 @@ static void rcb_walk(const Expr *e, int f, int read, unsigned char *seen) {
   case E_BIN: rcb_walk(e->a, f, 1, seen); rcb_walk(e->b, f, 1, seen); return;
   case E_VOP: for (int i = 0; i < e->nargs; i++) rcb_walk(e->args[i], f, !vop_takes(e, i), seen); return;
   case E_CALL:
-    for (int i = 0; i < e->nargs; i++) rcb_walk(e->args[i], f, e->k >= 0 && e->k < nfun && rc_borrowed((int)e->k, i), seen);
+    for (int i = 0; i < e->nargs; i++) {
+      const Expr *a = e->args[i];
+      int rd = e->k >= 0 && e->k < nfun && rc_borrowed((int)e->k, i);
+      if (!rd && a->op == E_PARAM && a->nargs == f && traversed(f, a->k)) rd = 1;   /* (see A TRAVERSED PARAMETER) */
+      rcb_walk(a, f, rd, seen);
+    }
     return;
   case E_CTOR: if (e->c) rcb_walk(e->c, f, 0, seen); for (int i = 0; i < e->nargs; i++) rcb_walk(e->args[i], f, 0, seen); return;
   default:
@@ -3467,7 +3501,9 @@ static void rcb_tails(const Expr *e, int f) {        /* the calls f's paths end 
   if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) rcb_tails(e->args[i], f); return; }
   if (e->op == E_CALL && e->k >= 0 && e->k < nfun)
     for (int i = 0; i < e->nargs && i < funs[e->k].arity; i++)
-      if (rc_borrowed((int)e->k, i) && !rc_held(e->args[i], f) && !rc_imm(e->args[i])) rcb_own((int)e->k, i);
+      if (rc_borrowed((int)e->k, i) && !rc_held(e->args[i], f) && !rc_imm(e->args[i])
+          && !traversed((int)e->k, i))   /* (one handed a fresh value on a path stays borrowed: that call is not a tail call, its traversal's are) */
+        { rcb_why = "given a fresh value by a tail call"; rcb_in = f; rcb_own((int)e->k, i); }
 }
 /* READ ALL THE WAY DOWN: a borrowed parameter of which nothing -- neither it nor any part of it -- is ever given a
    count: only taken apart, its fields read, and lent on to a parameter read the same way.  A thread handed such a
