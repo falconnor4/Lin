@@ -5,7 +5,7 @@
 ; the quotient tmp / de, which is a digit: counted up
 (define quot (\tmp (\de (\q (\acc (let ((nx (big_add acc de))) (if (gt (big_cmp nx tmp) 0) q (quot tmp de (add q 1) nx))))))))
 ; a signed number: its sign and magnitude
-(datatype SM (sm (s num) (m Seq num)))
+(datatype SM (sm (s num) (m vec num)))
 ; x - y for naturals, signed
 (define minus (\x (\y (if (lt (big_cmp x y) 0) (sm 1 (big_sub y x)) (sm 0 (big_sub x y))))))
 ; (sign s, magnitude a) + t, for a natural t

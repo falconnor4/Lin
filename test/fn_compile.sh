@@ -232,11 +232,12 @@ printf '%s\n' '(datatype B (bb (n bool) (m num)))' \
   '(match (h 5 (bb true 0)) ((bb n m) (if n m 7)))' > "$TMP/bf.lin"
 bf=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/bf.lin" 2>"$TMP/bf.err")
 [ "$bf" = "=> 7" ] && ! grep -q declined "$TMP/bf.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a bool field: '$bf'"; }
-# A FIELD ONLY PASSED ALONG has the shape its declared type says, so the value it holds can be read in.
+# A FIELD ONLY PASSED ALONG has the shape its declared type says, so the value it holds can be read in -- a BigInt's
+# magnitude a vector, read from the trie it is on the net into the block it is compiled.
 printf '%s\n' '(datatype W (w (ac BigInt)))' \
   '(define t1 (\i (\st (if (eq i 0) 0 (t1 (sub i 1) (match st ((w ac) (w ac))))))))' '(t1 5 (w (bigint_of 3)))' > "$TMP/pa.lin"
 pa=$(LIN_FN_DEBUG=1 timeout 120 "$LIN_BIN" "$TMP/pa.lin" 2>"$TMP/pa.err")
-[ "$pa" = "=> 0" ] && ! grep -q declined "$TMP/pa.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field passed along: '$pa'"; }
+[ "$pa" = "=> 0" ] && ! grep -q "could not be read in\|crosses the unit" "$TMP/pa.err" && grep -q "read in [0-9.]* ms" "$TMP/pa.err" && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL a field passed along: '$pa'"; }
 # A PARAMETER ONLY LENT is dropped where its path ends -- and one handed to a function that owns it is not (it is
 # that function's to free: big_mul hands its `a` to itself, and dropping it too freed it twice).
 printf '%s\n' '(define fact (\n (\a (if (eq n 0) a (fact (sub n 1) (big_mul_small a n))))))' \

@@ -271,6 +271,7 @@ static long op_peek(Lz *list) {
    the net, or gives back, is the net's trie: such a unit is compiled again with the operations as their meaning. */
 static int vop_off, vop_used;
 static int vop_ok(void) { return !vop_off; }
+static int vt_find(void);   /* (the trie a vector is on the net: A VECTOR AT THE EDGE) */
 static const char VEC_DT[] = "vec";                  /* (a vector's shape: a datatype of one parameter, its elements) */
 static int vop_read(const Expr *a); static int vop_makes(const Expr *a); static int vop_takes(const Expr *e, int i);
 static int sh_has_vec(Shape s) {                     /* a vector anywhere in what a value of shape s holds */
@@ -1828,9 +1829,34 @@ static int rc_arm_field(const Expr *m, int i, const LinCtor *ac, int j, Shape ss
   free(hz_t); free(hz_done); free(hz_seen); hz_t = hz_done = NULL; hz_seen = NULL;
   return !hz_bad && hz_any;
 }
+/* A LOCAL DROPPED WHERE IT IS NOT IN HAND.  A path's end drops a local the path computed -- but computed inside an
+   operand (a call's argument, an arm of a choice), it is not a name there.  Such locals are kept in a variable of
+   the function's frame, set wherever they are computed: the drop reads it, and on a path that never computed the
+   local it is still nothing.  (A tail call is a new frame: the variable starts empty again.) */
+static const Expr **spill, *spill_cur; static int nspill;
+static int spill_ix(const Expr *x) { for (int i = 0; i < nspill; i++) if (spill[i] == x) return i; return -1; }
+static void spill_collect(const Expr *e, unsigned char *seen) {
+  if (!e || (e->id < eid && seen[e->id])) return;
+  if (e->id < eid) seen[e->id] = 1;
+  for (const struct Drop *d = e->drops; d; d = d->next)
+    if (d->p->op != E_PARAM && spill_ix(d->p) < 0) { spill = realloc(spill, sizeof *spill * (size_t)(nspill + 1)); spill[nspill++] = d->p; }
+  spill_collect(e->a, seen); spill_collect(e->b, seen); if (e->op != E_CTOR) spill_collect(e->c, seen);
+  for (int i = 0; i < e->nargs && e->args; i++) spill_collect(e->args[i], seen);
+}
+static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+static int emit_fn_body(Buf *fb, Buf *pre, const Expr *body) {   /* `return <body>;`, the frame's spill variables before it */
+  nspill = 0; unsigned char *seen = calloc((size_t)eid + 1, 1); spill_collect(body, seen); free(seen);
+  Buf bb = nbuf(4096); int ok = emit_region(&bb, pre, body, 0, 4096);
+  for (int i = 0; i < nspill; i++) put(fb, "long s%d = 1; ", i);   /* (an immediate: dropping it is nothing) */
+  put(fb, "return %s", bb.s); free(bb.s); nspill = 0;
+  return ok;
+}
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
+  { int si = !tp && !par && e != spill_cur && !bound(e) ? spill_ix(e) : -1;   /* (see A LOCAL DROPPED WHERE IT IS NOT IN HAND) */
+    if (si >= 0) { put(b, "(s%d = (", si); const Expr *sc = spill_cur; spill_cur = e;
+      int ok = emitx(b, pre, e, par, budget); spill_cur = sc; put(b, "))"); return ok; } }
   if (e->rcself && !e->drops) {                      /* (counted: a held value handed on -- see rc_leaves) */
     Expr t = *e; t.rcself = 0; uses_data = 1;
     if (tp) put(b, "LIN_SET(dst, "); put_dup(b, e); int ok = emitx(b, pre, &t, par, budget - 1); put(b, tp ? "))" : ")"); return ok;
@@ -1851,7 +1877,11 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       unsigned char *skipq = A((size_t)(nfd ? nfd : 1));   /* (counted: a local not bound here was not computed for this drop -- rc_fresh_here) */
       { int q = 0; for (struct Drop *d = e->drops; d; d = d->next) if (MINE(d) && LOCAL(d)) {
           skipq[q] = !bound(d->p) && rc_fresh_here(d->p);
-          if (skipq[q]) { put(b, "long v%d = 0; ", f0 + q); held[q] = NULL; q++; continue; }   /* (and not named: its uses compute it) */
+          if (skipq[q]) {
+            int si = spill_ix(d->p);
+            if (si >= 0) { put(b, "long v%d = s%d; s%d = 1; ", f0 + q, si, si); skipq[q] = 0; held[q] = NULL; q++; continue; }   /* (computed in an operand: its frame variable) */
+            if (dbg > 2) DBG("[a drop of a local skipped: f%ld's value is not computed where its path ends]\n", d->p->op == E_CALL ? d->p->k : -1L);
+            put(b, "long v%d = 0; ", f0 + q); held[q] = NULL; q++; continue; }   /* (and not named: its uses compute it) */
           put(b, "long v%d = ", f0 + q); if (!emitx(b, pre, d->p, par, budget - 1)) return 0; put(b, "; ");
           Expr *x = (Expr *)d->p; held[q] = x; hv[2 * q] = x->var; hv[2 * q + 1] = x->vscope; x->var = f0 + q; x->vscope = fscope; q++; } }
 #define DROPS() do { int q_ = 0; for (struct Drop *d = e->drops; d; d = d->next) if (MINE(d)) { \
@@ -2814,9 +2844,11 @@ static int ot_r(const Expr *e) {
     ot_ev[ot_nev++] = sc;                            /* in the branches, the scrutinee is a value in hand */
     unsigned bmax = 0;
     int nb = e->op == E_IF ? 2 : e->nargs;
+    /* (a path that evaluated the node in the scrutinee has it in hand in the branches: naming it there is the one value) */
+    if (ts >= 0) { if (ot_nev >= ot_cev) ot_ev = realloc(ot_ev, sizeof *ot_ev * (size_t)(ot_cev = ot_cev ? ot_cev * 2 : 16)); ot_ev[ot_nev++] = ot_node; }
     for (int i = 0; i < nb; i++) { const Expr *br = e->op == E_IF ? (i ? e->c : e->b) : e->args[i]; ot_fresh(); unsigned u = occ_r(br); if (u > bmax) bmax = u; }
-    if (ts >= 0) best = ts + (int)bmax;
-    for (int i = 0; i < nb; i++) {
+    if (ts >= 0) { ot_nev--; best = ts + (int)bmax; }
+    for (int i = 0; i < nb && ts < 0; i++) {   /* (a scrutinee that evaluates the node: its paths are counted above) */
       const Expr *br = e->op == E_IF ? (i ? e->c : e->b) : e->args[i]; int t = ot_r_dbg(br);
       int s_i = (e->op == E_MATCH && sc == occ_x && read_then_move(e, i)) ? 0 : sa;   /* (see READ, THEN MOVE) */
       if (t >= 0 && s_i + t > best) best = s_i + t;
@@ -2834,7 +2866,10 @@ static int ot_r(const Expr *e) {
     for (int i = 0; i < nk; i++) { ot_fresh(); any[i] = (int)occ_r(kid[i]); }
     for (int i = 0; i < nk; i++) {
       int t = ot_r_dbg(kid[i]); if (t < 0) continue;
-      int sum = t; for (int j = 0; j < nk; j++) if (j != i) sum += any[j];
+      /* (the siblings' moves, kid i already evaluated: a sibling naming kid i itself -- `(_tonum x (alen x) 0)` --
+         names the one value the path has computed, and moves nothing more) */
+      int sum = t;
+      for (int j = 0; j < nk; j++) if (j != i) { ot_fresh(); mm_put(MM_OCC, kid[i], 0); mm_put(MM_OCC, ot_node, 0); sum += kid[j] == kid[i] || kid[j] == ot_node ? 0 : (int)occ_r(kid[j]); }
       if (sum > best) best = sum;
     }
     return best;
@@ -3071,6 +3106,7 @@ static int lent_only(const Expr *e, const Expr *p, unsigned char *seen) {   /* p
 }
 static int lent(const Expr *e, const Expr *p) { unsigned char *seen = calloc((size_t)eid + 1, 1); int r = lent_only(e, p, seen); free(seen); return r; }
 static int drop_after;                               /* (counted) the drops run after the value, never before a call it is */
+static int rc_owned_val(const Expr *e);
 static void drop_at(Expr **slot, const Expr *p, int fn) {   /* this path's end, as a node of its own, drops p */
   Expr *e = *slot, *c;
   /* A path end the body ALSO uses elsewhere is one value: a copy of it would be computed again (exponentially, down
@@ -3112,6 +3148,22 @@ static void drop_paths(Expr **slot, const Expr *p, int fn, int seen) {
     drop_after = 1; drop_at(slot, p, fn); drop_after = 0; return;
   }
   if (e->op == E_CALL) { if (fun_reads((int)e->k)) return; for (int i = 0; i < e->nargs; i++) if (PEQ(e->args[i], p) && !(i < CLONE_BITS && ((e->rcdup >> i) & 1u)) && !(rc_borrowed((int)e->k, i))) return; }
+  /* A LOCAL COMPUTED INSIDE ONE OPERAND -- `(f0 .. (add acc (let ((m (mul_small d 10))) (cmp x m))))` -- has its
+     paths end inside that operand: it is dropped there, where it is in hand (at the call it is not computed, and
+     the drop could only be skipped) */
+  if (p->op != E_PARAM && (e->op == E_CALL || e->op == E_BIN || e->op == E_FOP || e->op == E_VOP || e->op == E_CTOR)
+      && !(e->id < nrefs_cap && nrefs[e->id] > 1)) {   /* (a node named elsewhere too is one value: no private copy of it) */
+    int nk = 0, in = -1, direct = 0; Expr **kids[3] = { &e->a, &e->b, e->op != E_CTOR ? &e->c : NULL };
+    for (int q = 0; q < 3; q++) if (kids[q] && *kids[q]) { if (PEQ(*kids[q], p)) direct = 1; else if (pcontains(*kids[q], p)) { nk++; in = q; } }
+    for (int i = 0; i < e->nargs && e->args; i++) { if (PEQ(e->args[i], p)) direct = 1; else if (pcontains(e->args[i], p)) { nk++; in = 3 + i; } }
+    const Expr *into = nk == 1 ? (in < 3 ? *kids[in] : e->args[in - 3]) : NULL;
+    if (!direct && nk == 1 && !rc_owned_val(into)) {   /* (an operand that is a value of its own -- a local, perhaps -- is one node: not copied) */
+      Expr *c2 = A(sizeof *c2); *c2 = *e; c2->id = eid++; c2->var = -1; *slot = c2;
+      if (in < 3) { Expr **k2 = in == 0 ? &c2->a : in == 1 ? &c2->b : &c2->c; drop_paths(k2, p, fn, seen); return; }
+      c2->args = A(sizeof(Expr *) * (size_t)e->nargs); memcpy(c2->args, e->args, sizeof(Expr *) * (size_t)e->nargs);
+      drop_paths(&c2->args[in - 3], p, fn, seen); return;
+    }
+  }
   if (!lent(e, p)) return;
   if (seen || pcontains(e, p)) drop_at(slot, p, fn);
 }
@@ -4118,6 +4170,7 @@ static Shape shape_versions(Expr **entry, Shape res) {
 static int shape_closed(Shape s, int depth) {   /* depth: datatypes on the walk (each one checked once) */
   if (s.k == 1 || s.k == 3) return 1;
   if (s.k != 5 || !s.dt || depth > sh_nctor) return 0;
+  if (s.dt == VEC_DT) return s.a && s.a->n == 1 && shape_closed(s.a->s[0], depth + 1);   /* (a vector: its elements) */
   for (long k = 1; k <= sh_nctor; k++) {
     const LinCtor *c = lin_ctor_info(k);
     if (c->dt != s.dt || !sh_built[k]) continue;
@@ -4897,7 +4950,7 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
       for (int k = 0; k < nesh; k++) cross |= sh_has_vec(esh[k]);
       if (!cross && (!numeric || esh_data))
         for (long c = 1; c <= sh_nctor && !cross; c++) { const LinCtor *ci = lin_ctor_info(c); for (int j = 0; ci && j < ci->k; j++) cross |= sh_has_vec(sh_fld[c][j]); }
-      if (cross) { safe = 0; DBG("declined: a vector crosses the unit's edge (compiled again with the operations as their meaning)\n"); }
+      if (cross && !vt_find()) { safe = 0; DBG("declined: a vector crosses the unit's edge, and the trie it is on the net is not loaded\n"); }
     }
     fld_live = NULL;
     if (safe) fields_live(entry, !numeric);
@@ -4929,11 +4982,11 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
             for (int j = 0; j < funs[i].arity; j++) { put(&pt, ", long p%d", j); put(&pu, ", p%d", j); }
             fv_params(&pt, i, 1, 1); fv_params(&pu, i, 0, 1);
             put(&fb, "static long f%d_ds(long *dst%s);\nstatic long f%d_dp(long *dst%s, long stop);\n", i, pt.s, i, pt.s);
-            put(&fb, "static long f%d_ds(long *dst%s) { LIN_ENTER; return ", i, pt.s);
-            dp_self = 1; tailpos = 1; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+            put(&fb, "static long f%d_ds(long *dst%s) { LIN_ENTER; ", i, pt.s);
+            dp_self = 1; tailpos = 1; ok = emit_fn_body(&fb, &pre, funs[i].body); tailpos = 0; put(&fb, "; }\n");
             fscope++;
-            put(&fb, "static long f%d_dp(long *dst%s, long stop) { LIN_ENTER; if (p%d == stop) return (long)dst; return ", i, pt.s, K);
-            dp_self = 2; tailpos = 1; ok = ok && emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+            put(&fb, "static long f%d_dp(long *dst%s, long stop) { LIN_ENTER; if (p%d == stop) return (long)dst; ", i, pt.s, K);
+            dp_self = 2; tailpos = 1; ok = ok && emit_fn_body(&fb, &pre, funs[i].body); tailpos = 0; put(&fb, "; }\n");
             dp_self = 0;
             put(&fb, "typedef struct { long *dst; long p[%d]; long stop, r; } PM%d;\n", np ? np : 1, i);
             put(&fb, "static void *pmrun%d(void *v) { PM%d *s = v; LIN_TASK_START((size_t)256 << 20); s->r = f%d_dp(s->dst", i, i, i);
@@ -4966,10 +5019,10 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
             free(pt.s); free(pu.s);
             if (dbg) DBG("f%d maps its list in parallel\n", i);
           } else {
-          put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ") { LIN_ENTER; return ");
-          tailpos = 1; ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); tailpos = 0; put(&fb, "; }\n");
+          put(&fb, "static long f%d_d(long *dst", i); for (int j = 0; j < funs[i].arity; j++) put(&fb, ", long p%d", j); fv_params(&fb, i, 1, 1); put(&fb, ") { LIN_ENTER; ");
+          tailpos = 1; ok = emit_fn_body(&fb, &pre, funs[i].body); tailpos = 0; put(&fb, "; }\n");
           }
-        } else { put(&fb, ") { LIN_ENTER; return "); ok = emit_region(&fb, &pre, funs[i].body, 0, 4096); put(&fb, "; }\n"); }
+        } else { put(&fb, ") { LIN_ENTER; "); ok = emit_fn_body(&fb, &pre, funs[i].body); put(&fb, "; }\n"); }
       }
       Buf eb = nbuf(1024);                             /* the entry's call, as an expression of its parameters */
       emitting = -1; fscope++; ok = ok && emit_region(&eb, &pre, entry, 0, 4096);
@@ -5162,6 +5215,24 @@ static RBlk *rb_get(Reif *R, long ptr, int make) {
     if (!R->tab[h].ptr) { if (!make) return NULL; R->tab[h].ptr = ptr; R->cnt++; return &R->tab[h]; }
   }
 }
+/* A VECTOR AT THE EDGE.  On the net a vector is its meaning, std/array.lin's `(arr len depth root)` over a 32-way
+   trie whose bottom nodes hold 32 elements; compiled it is one block {length, capacity, elements}.  A vector a unit
+   is given is read in by walking the trie into the block, and one it returns is built back as the trie: the
+   operations need not fall back to their meaning for the whole unit because a vector crosses. */
+static const LinCtor *vt_arr, *vt_empty, *vt_vals, *vt_node;
+static int vt_find(void) {                          /* the trie's constructors, by their shape (one each) */
+  if (vt_arr && vt_vals) return 1;
+  const LinCtor *c;
+  for (long k = 1; (c = lin_ctor_info(k)); k++) {
+    const char *nm = c->name, *dot = nm ? strrchr(nm, '.') : NULL; if (dot) nm = dot + 1;
+    if (!nm) continue;
+    if (!strcmp(nm, "arr") && c->k == 3 && c->m == 1) vt_arr = c;
+    else if (!strcmp(nm, "tempty") && c->k == 0) vt_empty = c;
+    else if (!strcmp(nm, "tvals")) vt_vals = c;
+    else if (!strcmp(nm, "tnode")) vt_node = c;
+  }
+  return vt_arr && vt_empty && vt_vals && vt_node && vt_vals->k == vt_node->k && vt_vals->dt == vt_node->dt;
+}
 static const LinCtor *dt_ctor(const char *dt, int i) {
   const LinCtor *c; for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == dt && c->i == i) return c; return NULL;
 }
@@ -5182,6 +5253,18 @@ static void rf_count(Reif *R, long w0, Shape s0) {
   st[sp++] = (RTodo){ w0, s0 };
   while (sp && !R->bad) {
     RTodo t = st[--sp];
+    if (t.s.dt == VEC_DT) {                          /* (a vector: its block once, then its data elements) */
+      if (t.w & 1) { R->bad = 1; break; }
+      RBlk *b = rb_get(R, t.w, 1); if (b->refs++) continue;
+      Shape es = t.s.a && t.s.a->n ? t.s.a->s[0] : (Shape){ 0, NULL, NULL };
+      if (!vt_find() || es.k == 0) { R->bad = 1; break; }
+      const long *v = (const long *)t.w;
+      if (es.k == 5) for (long i = 0; i < v[0]; i++) {
+        if (sp >= sc) st = realloc(st, sizeof *st * (size_t)(sc *= 2));
+        st[sp++] = (RTodo){ v[i + 2], es };
+      }
+      continue;
+    }
     const long *f; const LinCtor *ci = rd_word(t.s.dt, t.w, &f);
     if (!ci) { R->bad = 1; break; }
     if (!(t.w & 1)) { RBlk *b = rb_get(R, t.w, 1); if (b->refs++) continue; }
@@ -5235,21 +5318,51 @@ static Port rf_ctor(Reif *R, const LinCtor *ci, const Port *fields) {
   free(lam);
   return v;
 }
+static Port rf_build(Reif *R, long w, Shape s);
+static Port rf_share(Reif *R, RBlk *b, Port v);
+/* a vector's elements lo.. as a trie node of depth d (std/array.lin's _tfill: past the length, nothing) */
+static Port rf_trie(Reif *R, const long *v, Shape es, long lo, long d) {
+  int k = vt_vals->k; long len = v[0];
+  Port *fp = malloc(sizeof *fp * (size_t)k);
+  const LinCtor *ci;
+  if (lo >= len) ci = vt_empty;
+  else if (d == 0) {
+    ci = vt_vals;
+    for (int j = 0; j < k && !R->bad; j++) fp[j] = lo + j < len ? rf_build(R, v[lo + j + 2], es) : net_alloc_scott(R->n, 0);   /* (a slot past the length is never read) */
+  } else {
+    ci = vt_node; long w = 1; for (long q = 0; q < d; q++) w *= k;
+    for (int j = 0; j < k && !R->bad; j++) fp[j] = rf_trie(R, v, es, lo + j * w, d - 1);
+  }
+  Port r = R->bad ? NONE : rf_ctor(R, ci, fp);
+  free(fp); return r;
+}
+static Port rf_vec(Reif *R, long w, Shape s) {
+  const long *v = (const long *)w; Shape es = s.a->s[0];
+  long d = 0, span = vt_vals->k; while (v[0] > span) { span *= vt_vals->k; d++; }   /* (_depth_for) */
+  Port t = rf_trie(R, v, es, 0, d);
+  if (R->bad) return NONE;
+  Port fp[3] = { net_alloc_scott(R->n, v[0]), net_alloc_scott(R->n, d), t };
+  return rf_ctor(R, vt_arr, fp);
+}
 /* pass 2: build (recursively, on the large stack rf_thread gives it) */
 static Port rf_build(Reif *R, long w, Shape s) {
   if (R->bad) return NONE;
   if (s.k == 1) return net_alloc_scott(R->n, w);
   if (s.k == 3) return net_alloc_bool(R->n, w != 0);
-  const long *f; const LinCtor *ci = rd_word(s.dt, w, &f);
-  if (!ci) { R->bad = 1; return NONE; }
   RBlk *b = (w & 1) ? NULL : rb_get(R, w, 0);
   if (b && b->outs) return b->outs[b->used++];
+  if (s.dt == VEC_DT) { Port v = rf_vec(R, w, s); return R->bad ? NONE : rf_share(R, b, v); }
+  const long *f; const LinCtor *ci = rd_word(s.dt, w, &f);
+  if (!ci) { R->bad = 1; return NONE; }
   long id = cid_of(ci);
   Port *fp = malloc(sizeof *fp * (size_t)(ci->k + 1));
   for (int j = 0; j < ci->k && !R->bad; j++) fp[j] = rf_build(R, f[j], field_shape(R->c->fld, R->c->nctor, ci, id, j, s));
   Port v = R->bad ? NONE : rf_ctor(R, ci, fp);
   free(fp);
-  if (R->bad || !b || b->refs < 2) return v;
+  return R->bad ? NONE : rf_share(R, b, v);
+}
+static Port rf_share(Reif *R, RBlk *b, Port v) {     /* a block reached more than once: one value, fanned out */
+  if (!b || b->refs < 2) return v;
   b->outs = malloc(sizeof *b->outs * (size_t)b->refs); b->used = 0;
   Scope lb = fresh_label(R); Port cur = v;
   for (int r = 0; r < b->refs - 1; r++) {
@@ -5337,6 +5450,11 @@ static Shape td_shape(const char *d, Shape dflt) {   /* what a descriptor says t
   if (!d || !*d) return dflt;
   if (*d == 'N' || *d == 'F') return (Shape){ 1, NULL };
   if (*d == 'B') return (Shape){ 3, NULL };
+  if (*d == 'D' && !strncmp(d + 1, VEC_DT, strlen(VEC_DT)) && d[1 + strlen(VEC_DT)] == '(') {   /* (a vector: of what its argument says) */
+    const char *ta[1]; Shape es = { 0, NULL, NULL };
+    if (td_args(d, ta, 1) == 1) { Shape ed = (dflt.k == 5 && dflt.dt == VEC_DT && dflt.a && dflt.a->n) ? dflt.a->s[0] : es; es = td_shape(ta[0], ed); }
+    return es.k ? sh_mk(VEC_DT, 1, &es) : dflt;
+  }
   if (*d == 'D') { const char *dt = td_dt(d); if (dt) return (Shape){ 5, dt }; }
   return dflt;
 }
@@ -5354,6 +5472,35 @@ static long *ms_seen(Marsh *M, int node, int make) {   /* a value reached twice 
     if (M->mp[h].node <= 0) { if (!make) return NULL; M->mp[h].node = node; M->mk[h] = 0; M->mcnt++; return &M->mk[h]; }
   }
 }
+/* a trie node of depth d covering elements lo.. read into the vector's block (see A VECTOR AT THE EDGE) */
+static void ms_trie(Marsh *M, Port p, long *v, Shape es, long lo, long d, int depth) {
+  int k = vt_vals->k, i = -1; long len = v[0];
+  if (M->bad || lo >= len) return;
+  Port *fp = malloc(sizeof *fp * (size_t)k);
+  int got = net_read_scott(M->n, p, vt_vals->m, &i, fp, k);
+  if (got == 0 && i == vt_empty->i) {}                /* (nothing stored there) */
+  else if (got == k && i == vt_vals->i && d == 0) { for (int j = 0; j < k && lo + j < len && !M->bad; j++) v[lo + j + 2] = ms_value(M, fp[j], es, depth + 1); }
+  else if (got == k && i == vt_node->i && d > 0) {
+    long w = 1; for (long q = 0; q < d; q++) w *= k;
+    for (int j = 0; j < k && !M->bad; j++) ms_trie(M, fp[j], v, es, lo + j * w, d - 1, depth + 1);
+  } else { if (dbg > 1) DBG("[a vector's trie not read in: %d fields, constructor %d, depth %ld]\n", got, i, d); M->bad = 1; }
+  free(fp);
+}
+static long ms_vec(Marsh *M, Port p, Shape s, int depth) {
+  if (!vt_find() || !s.a || s.a->n != 1) { if (dbg > 1) DBG("[a vector not read in: its element's shape is not known]\n"); M->bad = 1; return 0; }
+  Port v0 = net_dhop(M->n, net_force_val(M->n, p));
+  long *seen = v0.node > 0 ? ms_seen(M, v0.node, 0) : NULL;
+  if (seen && *seen) return *seen;
+  Port fp[3]; int i = -1; long len = 0, d = 0;
+  int got = net_read_scott(M->n, p, vt_arr->m, &i, fp, 3);
+  if (got != 3 || i != vt_arr->i || !net_read_i64(M->n, fp[0], &len) || !net_read_i64(M->n, fp[1], &d) || len < 0 || d < 0) { if (dbg > 1) DBG("[a vector not read in: %d fields, constructor %d]\n", got, i); M->bad = 1; return 0; }
+  long cap = len < 4 ? 4 : len;
+  long *v = ms_alloc(M, cap + 2); if (!v) return 0;
+  v[0] = len; v[1] = cap; for (long j = 0; j < cap; j++) v[j + 2] = 1;   /* (an immediate until read: a drop of it is nothing) */
+  ms_trie(M, fp[2], v, s.a->s[0], 0, d, depth + 1);
+  if (!M->bad && v0.node > 0) { long *slot = ms_seen(M, v0.node, 1); if (slot) *slot = (long)v; }
+  return (long)v;
+}
 static long ms_value(Marsh *M, Port p, Shape s, int depth) {
   Net *n = M->n;
   const char *desc = ms_desc; ms_desc = NULL;
@@ -5363,11 +5510,13 @@ static long ms_value(Marsh *M, Port p, Shape s, int depth) {
   if (s.k == 0) {                                    /* a field the analysis saw no use of: what the value IS decides */
     long x; if (net_read_i64(n, p, &x)) return x;
     long b = net_read_int(n, p, LIN_ENC_BOOL); if (b >= 0) return b;
+    if (dbg > 1) DBG("[not read in: a value of no known shape that is not a number (declared %s)]\n", desc ? desc : "-");
     M->bad = 1; return 0;
   }
   if (s.k == 1) { long x; if (!net_read_i64(n, p, &x)) M->bad = 1; return x; }
   if (s.k == 3) { long b = net_read_int(n, p, LIN_ENC_BOOL); if (b < 0) M->bad = 1; return b; }
-  if (s.k != 5 || !s.dt) { M->bad = 1; return 0; }   /* (a block of some datatype, not known which: not read in) */
+  if (s.k != 5 || !s.dt) { if (dbg > 1) DBG("[not read in: a block of a datatype not known (shape %d, declared %s)]\n", s.k, desc ? desc : "-"); M->bad = 1; return 0; }   /* (a block of some datatype, not known which: not read in) */
+  if (s.dt == VEC_DT) return ms_vec(M, p, s, depth);
   int box = 0, untag = dt_boxed(s.dt, &box) == 1;
   if (cells_dt && s.dt == cells_dt) {               /* a list: its spine read in a loop */
     long first = 0, *link = &first;
