@@ -109,11 +109,13 @@ static int y_fix(const Net *n, Port p1, Port p2, int *h, int *appy) {
 
 /* ---- the evaluator --------------------------------------------------------------------------- */
 enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FROW[k]) over args */
-       E_CTOR, E_MATCH, E_FIELD, E_VOP };   /* E_VOP: a vector operation (LIN_VOP_*, k) over args: OWNED VECTORS */   /* data: constructor k (its index) of args; match on a over args (one result per
+       E_CTOR, E_MATCH, E_FIELD, E_VOP,
+       E_LET, E_VAR,
+       E_DUP, E_DROP, E_AFTER };   /* (MEMORY) E_DUP: a, with a reference of its own; E_DROP: the drops, then b; E_AFTER: a, then the drops */   /* E_LET: a (the value) bound for b (the body); E_VAR: that value, by name (bind: its E_LET) -- see EXPLICIT BINDING */   /* E_VOP: a vector operation (LIN_VOP_*, k) over args: OWNED VECTORS */   /* data: constructor k (its index) of args; match on a over args (one result per
                                         constructor, in order); field k of a */
 struct Drop { const struct Expr *p; int fn; struct Drop *next; };   /* a parameter dropped at a path's end (drop_paths) */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
-                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Drop *drops; unsigned tdrop; int *tdropfn; unsigned rcdup; unsigned char rctail, rcself; } Expr;   /* rcself: (counted) this leaf hands on a new reference of itself */   /* tdrop: arguments built for this call alone, which it only reads: dropped (lin_drop<tdropfn[i]>) once it returns */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 */   /* id: a dense index; var: the local it is bound to while emitting */
+                      int id, var, vscope, rtag, untag, box; const LinCtor *ci; unsigned char *freeb; struct Drop *drops; unsigned tdrop; int *tdropfn; unsigned rcdup; unsigned char rctail, rcself; struct Expr *bind; unsigned char **mspec; } Expr;   /* mspec: (MEMORY) per arm of a match, NULL or the fields it takes (see MATCH ON A DYING VALUE) */   /* rcself: (counted) this leaf hands on a new reference of itself */   /* tdrop: arguments built for this call alone, which it only reads: dropped (lin_drop<tdropfn[i]>) once it returns */   /* ci: the constructor (E_CTOR, E_FIELD) or one of the datatype's (E_MATCH) */   /* untag: the datatype's blocks carry no tag (box: its one boxed constructor) */   /* rtag: a reused block's constructor + 1 */   /* id: a dense index; var: the local it is bound to while emitting */
 enum { V_CLO, V_SYM, V_C1, V_COND, V_SELF, V_FIX, V_MCONS, V_MCONS1, V_MCELL, V_MNIL, V_MATCH };   /* V_FIX: a recursive function met, its arguments being collected */   /* V_MATCH: data applied to branches */
 struct Lz;
 typedef struct ShArgs ShArgs;
@@ -893,6 +895,9 @@ static int has_self(const Expr *e) {
   case E_FOP: case E_VOP: case E_CTOR: for (int i = 0; i < e->nargs && !r; i++) r = has_self(e->args[i]); break;
   case E_FIELD: r = has_self(e->a); break;
   case E_MATCH: r = has_self(e->a); for (int i = 0; i < e->nargs && !r; i++) r = has_self(e->args[i]); break;
+  case E_LET: r = has_self(e->a) || has_self(e->b); break;
+  case E_DUP: case E_AFTER: r = has_self(e->a); break;
+  case E_DROP: r = has_self(e->b); break;
   default: break;
   }
   return (int)mm_put(MM_SELF, e, (unsigned)r);
@@ -907,6 +912,9 @@ static int has_call(const Expr *e) {
   case E_FOP: case E_VOP: case E_CTOR: for (int i = 0; i < e->nargs && !r; i++) r = has_call(e->args[i]); break;
   case E_FIELD: r = has_call(e->a); break;
   case E_MATCH: r = has_call(e->a); for (int i = 0; i < e->nargs && !r; i++) r = has_call(e->args[i]); break;
+  case E_LET: r = has_call(e->a) || has_call(e->b); break;
+  case E_DUP: case E_AFTER: r = has_call(e->a); break;
+  case E_DROP: r = has_call(e->b); break;
   default: break;
   }
   return (int)mm_put(MM_CALL, e, (unsigned)r);
@@ -953,6 +961,9 @@ static void count_uses(const Expr *e) {           /* every reference inside the 
   case E_CALL: case E_FOP: case E_VOP: case E_CTOR: for (int i = 0; i < e->nargs; i++) count_uses(e->args[i]); break;
   case E_FIELD: count_uses(e->a); break;
   case E_MATCH: count_uses(e->a); for (int i = 0; i < e->nargs; i++) count_uses(e->args[i]); break;
+  case E_LET: count_uses(e->a); count_uses(e->b); break;
+  case E_DUP: case E_AFTER: count_uses(e->a); break;
+  case E_DROP: count_uses(e->b); break;
   }
   /* (a local a path's end drops is used there too: so the region binds it, and the drop names what was computed --
      computed again, it would be another reference, and the first never released) */
@@ -1000,6 +1011,9 @@ static ISet cert(const Expr *e) {
   case E_BIN: r = iset_union(cert(e->a), cert(e->b), e->id); break;
   case E_IF: { ISet i = iset_inter(cert(e->b), cert(e->c)); r = iset_union(cert(e->a), i, e->id); free(i.v); break; }
   case E_FIELD: r = iset_union(cert(e->a), (ISet){ NULL, 0 }, e->id); break;
+  case E_LET: r = iset_union(cert(e->a), cert(e->b), e->id); break;
+  case E_DUP: case E_AFTER: r = iset_union(cert(e->a), (ISet){ NULL, 0 }, e->id); break;
+  case E_DROP: r = iset_union(cert(e->b), (ISet){ NULL, 0 }, e->id); break;
   case E_MATCH: {                                   /* the scrutinee, and what EVERY branch evaluates */
     ISet i = { NULL, 0 }; int first = 1;
     for (int k = 0; k < e->nargs; k++) {
@@ -1032,6 +1046,9 @@ static void certain(const Expr *e, ISet c, const Expr ***out, int *n, int *cap) 
   case E_CALL: case E_FOP: case E_VOP: case E_CTOR: for (int i = 0; i < e->nargs; i++) certain(e->args[i], c, out, n, cap); break;
   case E_FIELD: certain(e->a, c, out, n, cap); break;
   case E_MATCH: certain(e->a, c, out, n, cap); for (int i = 0; i < e->nargs; i++) certain(e->args[i], c, out, n, cap); break;
+  case E_LET: certain(e->a, c, out, n, cap); certain(e->b, c, out, n, cap); break;
+  case E_DUP: case E_AFTER: certain(e->a, c, out, n, cap); break;
+  case E_DROP: certain(e->b, c, out, n, cap); break;
   }
   if (!in_set(c, e->id)) return;
   if (*n >= *cap) *out = realloc(*out, (size_t)(*cap = *cap ? *cap * 2 : 16) * sizeof **out);
@@ -1077,6 +1094,7 @@ static void region_forks(const Expr *e, const Expr **cand, int nc, const Expr **
 }
 static void tail_uses(const Expr *e, unsigned *n) {   /* how often each node is reached where a region ends */
   if (!e) return;
+  if (e->op == E_LET || e->op == E_DROP) { tail_uses(e->b, n); return; }
   if (e->op == E_IF) { tail_uses(e->b, n); tail_uses(e->c, n); return; }
   if (e->op == E_MATCH) { for (int i = 0; i < e->nargs; i++) tail_uses(e->args[i], n); return; }
   if (e->op == E_CTOR) {                             /* (a call in two fields of one cell is two uses on one path) */
@@ -1104,7 +1122,7 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   for (int i = 0; i < nc; i++) {                   /* choose first: emitting a binding runs nested regions' passes */
     const Expr *x = cand[i];
     if (tails && x->op == E_CALL && tails[x->id] >= st_uses[x->id]) continue;
-    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD) cand[nk++] = x;   /* (a field read is one load: not worth a local) */
+    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD && x->op != E_VAR) cand[nk++] = x;   /* (a field read is one load: not worth a local; a name is one already) */
   }
   free(tails);
   nc = nk;
@@ -1144,6 +1162,96 @@ static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   free(cand);
   return ok;
 }
+/* EXPLICIT BINDING.  The memory pass needs every value to have ONE name: a node of the DAG reached from two
+   places is one value, and whether a use moves it or takes a count depends on what else uses it, on that path.
+   So before it runs, each body is made a TREE whose shared values are bound by E_LET and named by E_VAR -- bound
+   exactly where emit_region would bind them (a region binds what it certainly evaluates and uses twice or more:
+   see above), so the tree's evaluation is the emitter's.  A match's scrutinee is always a name (its fields are
+   read from it), and every other node is a copy of its own: a node the DAG shares between two exclusive arms is
+   two nodes, one per arm, each with the decisions of its own path. */
+static int indexed_pick(const Expr *e, const Expr **K, const Expr **S, long *off);
+static int anf_n;                                    /* the unit's names: w0, w1, ... */
+static Expr *anf_tree(const Expr *e);
+static Expr *anf_copy(const Expr *e) { Expr *c = A(sizeof *c); *c = *e; c->id = eid++; c->var = -1; c->bind = NULL; c->drops = NULL; c->rcdup = 0; c->tdrop = 0; c->rcself = 0; return c; }
+/* (a let's name is ONE node, shared by its uses: emitting the let binds it -- var, vscope -- so every use, and
+   everything that asks bound(), sees the value in hand.  let->bind is the name, the name's bind its let) */
+static Expr *anf_var(const Expr *let) { return let->bind; }
+static Expr *anf_let(const Expr *x) {                /* a name for x's value (its body is set by the caller) */
+  Expr *l = mke(E_LET, x->kind); l->k = anf_n++;
+  Expr *v = mke(E_VAR, x->kind); v->k = l->k; v->bind = l; l->bind = v; return l;
+}
+#define ANF_MARK (1 << 29)                           /* (x->var while x is bound to a name: bound() sees it) */
+static Expr *anf_region(const Expr *e, int tails_ok) {
+  st_grow(); stamp += 2;
+  count_uses(e);
+  const Expr **cand = NULL; int nc = 0, cc = 0, nk = 0;
+  certain(e, cert(e), &cand, &nc, &cc);
+  unsigned *tails = NULL;
+  if (tails_ok) { tails = calloc((size_t)eid + 1, sizeof *tails); tail_uses(e, tails); }
+  for (int i = 0; i < nc; i++) {
+    const Expr *x = cand[i];
+    if (tails && x->op == E_CALL && tails[x->id] >= st_uses[x->id]) continue;
+    if (x != e && st_uses[x->id] >= 2 && x->op != E_CONST && x->op != E_PARAM && x->op != E_FIELD) cand[nk++] = x;
+  }
+  free(tails);
+  Expr **lets = nk ? A(sizeof *lets * (size_t)nk) : NULL;
+  for (int i = 0; i < nk; i++) {                     /* each value, then its name (the next ones may read it) */
+    Expr *x = (Expr *)cand[i];
+    lets[i] = anf_let(x); lets[i]->a = anf_tree(x);
+    x->var = ANF_MARK | i; x->vscope = fscope; x->bind = lets[i];
+  }
+  Expr *body = anf_tree(e);
+  for (int i = nk - 1; i >= 0; i--) { lets[i]->b = body; body = lets[i]; }
+  for (int i = 0; i < nk; i++) { Expr *x = (Expr *)cand[i]; x->var = -1; x->bind = NULL; }
+  free(cand);
+  return body;
+}
+static Expr *anf_tree(const Expr *e) {
+  if (!e) return NULL;
+  if (bound(e) && e->bind && e->bind->op == E_LET) return anf_var(e->bind);
+  Expr *c;
+  switch (e->op) {
+  case E_IF:
+    c = anf_copy(e); c->a = anf_tree(e->a);
+    { const Expr *K, *S; long off; if (indexed_pick(e, &K, &S, &off)) { c->b = anf_tree(e->b); c->c = anf_tree(e->c); return c; } }
+    c->b = anf_region(e->b, 1); c->c = anf_region(e->c, 1); return c;
+  case E_MATCH: {
+    Expr *sc = (Expr *)e->a, *l = NULL;
+    c = anf_copy(e);
+    if (sc->op == E_PARAM || sc->op == E_CONST || bound(sc)) c->a = anf_tree(sc);
+    else {                                           /* (the scrutinee named, for the arms' fields) */
+      l = anf_let(sc); l->a = anf_tree(sc);
+      sc->var = ANF_MARK; sc->vscope = fscope; sc->bind = l;
+      c->a = anf_var(l);
+    }
+    c->args = A(sizeof(Expr *) * (size_t)(e->nargs ? e->nargs : 1));
+    for (int i = 0; i < e->nargs; i++) c->args[i] = anf_region(e->args[i], 1);
+    if (l) { sc->var = -1; sc->bind = NULL; l->b = c; return l; }
+    return c; }
+  default:
+    c = anf_copy(e);
+    c->a = anf_tree(e->a); c->b = anf_tree(e->b);
+    if (e->op != E_CTOR) c->c = anf_tree(e->c); else c->c = NULL;
+    if (e->nargs && e->args) { c->args = A(sizeof(Expr *) * (size_t)e->nargs); for (int i = 0; i < e->nargs; i++) c->args[i] = anf_tree(e->args[i]); }
+    return c;
+  }
+}
+static void ex_dump(const Expr *e, int d) {         /* (LIN_FN_DEBUG=4: a tree, for reading) */
+  static const char *nm[] = { "CONST","PARAM","BIN","IF","CALL","FOP","CTOR","MATCH","FIELD","VOP","LET","VAR","DUP","DROP","AFTER" };
+  if (!e) { fprintf(stderr, "%*s-\n", d * 2, ""); return; }
+  fprintf(stderr, "%*s%s k%ld", d * 2, "", e->op >= 0 && e->op <= E_AFTER ? nm[e->op] : "?", e->k);
+  if (e->op == E_PARAM) fprintf(stderr, " f%d", e->nargs);
+  if (e->op == E_CTOR && e->ci) fprintf(stderr, " %s", e->ci->name);
+  if (e->op == E_DROP || e->op == E_AFTER) { fprintf(stderr, " ["); for (const struct Drop *q = e->drops; q; q = q->next) fprintf(stderr, " %s%ld", q->p->op == E_PARAM ? "p" : q->p->op == E_VAR ? "w" : "fld", q->p->k); fprintf(stderr, " ]"); }
+  if (e->op == E_MATCH && e->mspec) { fprintf(stderr, " spec:"); for (int i = 0; i < e->nargs; i++) fprintf(stderr, "%c", e->mspec[i] ? 'T' : '-'); }
+  fprintf(stderr, "\n");
+  if (e->op == E_VAR) return;
+  if (e->a) ex_dump(e->a, d + 1);
+  if (e->b) ex_dump(e->b, d + 1);
+  if (e->c && e->op != E_CTOR) ex_dump(e->c, d + 1);
+  for (int i = 0; i < e->nargs && e->args; i++) ex_dump(e->args[i], d + 1);
+}
+static int mem_new(void) { static int v = -1; if (v < 0) { const char *m = getenv("LIN_FN_MEM"); v = m && atoi(m) == 2; } return v; }
 static void plistn(Buf *b, int typed, int n) { for (int i = 0; i < n; i++) put(b, typed ? "%slong p%d" : "%sp%d", i ? ", " : "", i); }
 static void plist(Buf *b, int typed) { plistn(b, typed, arity); }
 static int emit_op(Buf *b, long k, const char *x, const char *y) {
@@ -1834,6 +1942,10 @@ static int rc_arm_field(const Expr *m, int i, const LinCtor *ac, int j, Shape ss
    the function's frame, set wherever they are computed: the drop reads it, and on a path that never computed the
    local it is still nothing.  (A tail call is a new frame: the variable starts empty again.) */
 static const Expr **spill, *spill_cur; static int nspill;
+typedef struct { const Expr *base; long k; int v; } EmFB;   /* (MEMORY) the fields an arm took apart, by local */
+static EmFB *em_fb; static int em_nfb, em_cfb;
+static int mr_same_base(const Expr *x, const Expr *y);
+static int mem_new(void);
 static int spill_ix(const Expr *x) { for (int i = 0; i < nspill; i++) if (spill[i] == x) return i; return -1; }
 static void spill_collect(const Expr *e, unsigned char *seen) {
   if (!e || (e->id < eid && seen[e->id])) return;
@@ -1845,7 +1957,7 @@ static void spill_collect(const Expr *e, unsigned char *seen) {
 }
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 static int emit_fn_body(Buf *fb, Buf *pre, const Expr *body) {   /* `return <body>;`, the frame's spill variables before it */
-  nspill = 0; unsigned char *seen = calloc((size_t)eid + 1, 1); spill_collect(body, seen); free(seen);
+  nspill = 0; unsigned char *seen = calloc((size_t)eid + 1, 1); if (!mem_new()) spill_collect(body, seen); free(seen);
   Buf bb = nbuf(4096); int ok = emit_region(&bb, pre, body, 0, 4096);
   for (int i = 0; i < nspill; i++) put(fb, "long s%d = 1; ", i);   /* (an immediate: dropping it is nothing) */
   put(fb, "return %s", bb.s); free(bb.s); nspill = 0;
@@ -1854,6 +1966,26 @@ static int emit_fn_body(Buf *fb, Buf *pre, const Expr *body) {   /* `return <bod
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
+  if (e->op == E_LET) {                              /* (see EXPLICIT BINDING) the value, its name, the body */
+    int k = nvar++; Expr *v = e->bind;
+    put(b, "({ long v%d = ", k); if (!emitx(b, pre, e->a, par, budget - 1)) return 0; put(b, "; ");
+    v->var = k; v->vscope = fscope;
+    tailpos = tp; int ok = emitx(b, pre, e->b, par, budget - 1); tailpos = 0;
+    v->var = -1; put(b, "; })"); return ok;
+  }
+  if (e->op == E_VAR && !bound(e)) { DBG("declined: a name (w%ld) out of its let's scope (writing f%d%s)\n", e->k, emitting, par ? ", in parallel" : ""); return 0; }   /* (never written: see EXPLICIT BINDING) */
+  if (e->op == E_DUP) {                              /* (see MEMORY) */
+    uses_data = 1; put(b, tp ? "LIN_SET(dst, lin_dup(" : "lin_dup("); if (!emitx(b, pre, e->a, par, budget - 1)) return 0; put(b, tp ? "))" : ")"); return 1;
+  }
+  if (e->op == E_DROP || e->op == E_AFTER) {
+    uses_data = 1; put(b, "({ ");
+    if (e->op == E_AFTER) { put(b, "long r_ = "); if (!emitx(b, pre, e->a, par, budget - 1)) return 0; put(b, "; "); }
+    for (const struct Drop *d = e->drops; d; d = d->next) { put(b, "lin_drop%d(", d->fn); if (!emitx(b, pre, d->p, par, budget - 1)) return 0; put(b, "); "); }
+    if (e->op == E_AFTER) { put(b, tp ? "LIN_SET(dst, r_); })" : "r_; })"); return 1; }
+    tailpos = tp; int ok = emitx(b, pre, e->b, par, budget - 1); tailpos = 0; put(b, "; })"); return ok;
+  }
+  if (e->op == E_FIELD && em_nfb) for (int i = em_nfb - 1; i >= 0; i--)   /* (a field an arm took: its local) */
+    if (em_fb[i].k == e->k && mr_same_base(em_fb[i].base, e->a)) { put(b, tp ? "LIN_SET(dst, v%d)" : "v%d", em_fb[i].v); return 1; }
   { int si = !tp && !par && e != spill_cur && !bound(e) ? spill_ix(e) : -1;   /* (see A LOCAL DROPPED WHERE IT IS NOT IN HAND) */
     if (si >= 0) { put(b, "(s%d = (", si); const Expr *sc = spill_cur; spill_cur = e;
       int ok = emitx(b, pre, e, par, budget); spill_cur = sc; put(b, "))"); return ok; } }
@@ -2162,7 +2294,24 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         put(b, "; })");
         for (int j = 0; j < nfx; j++) fx[j]->var = -1;
         if (!ok) return 0;
-      } else if (read_then_move(e, i)) {          /* (see READ, THEN MOVE) the numbers it reads, before x goes */
+      } else if (e->mspec && e->mspec[i]) {          /* (see MATCH ON A DYING VALUE) */
+        const LinCtor *ac = rc_arm_ci(e, i); Shape ss = shape_of(e->a); int nk = ac ? ac->k : 0, fb0 = em_nfb;
+        uses_data = 1; put(b, "({ ");
+        for (int j = 0; j < nk; j++) if (e->mspec[i][j]) {
+          int k = nvar++; put(b, "long v%d = ((long *)_s)[%d]; ", k, j + !e->untag);
+          if (em_nfb == em_cfb) em_fb = realloc(em_fb, sizeof *em_fb * (size_t)(em_cfb = em_cfb ? em_cfb * 2 : 16));
+          em_fb[em_nfb++] = (EmFB){ e->a, j, k };
+        }
+        put(b, "if (lin_uniq((long *)_s)) { ");
+        for (int j = 0; j < nk; j++) if (!e->mspec[i][j]) { int fd = rc_fdrop(ac, j, ss); if (fd >= 0) put(b, "lin_drop%d(((long *)_s)[%d]); ", fd, j + !e->untag); }
+        put(b, "lin_free((long *)_s, %d); } else { ", nk + !e->untag);
+        for (int q = fb0; q < em_nfb; q++) { int fd = rc_fdrop(ac, (int)em_fb[q].k, ss); if (fd >= 0) put(b, "lin_dup(v%d); ", em_fb[q].v); }
+        put(b, "lin_drop%d(_s); } ", drop_fn(ss));
+        tailpos = tp;
+        int ok = emit_region(b, pre, e->args[i], par, budget - 1);
+        put(b, "; })"); em_nfb = fb0;
+        if (!ok) return 0;
+      } else if (!mem_new() && read_then_move(e, i)) {          /* (see READ, THEN MOVE) the numbers it reads, before x goes */
         Expr **fl = NULL; int nfl = 0, cfl = 0;
         mm_new(MM_SITE); fre_fields(e->args[i], e->a, &fl, &nfl, &cfl);
         put(b, "({ ");
@@ -2177,7 +2326,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
         for (int j = 0; j < nfl; j++) if (fl[j]) fl[j]->var = -1;
         free(fl);
         if (!ok) return 0;
-      } else if (!par && rc_arm_moves(e, i)) {   /* (counted: see MOVED OUT OF AN ARM) */
+      } else if (!mem_new() && !par && rc_arm_moves(e, i)) {   /* (counted: see MOVED OUT OF AN ARM) */
         const LinCtor *ac = rc_arm_ci(e, i); Shape ss = shape_of(e->a); int uv = nvar++, mv0 = mv_n;
         put(b, "({ int _u%d = lin_uniq((long *)_s); ", uv);
         if (arm_n == arm_c) arm = realloc(arm, sizeof *arm * (size_t)(arm_c = arm_c ? arm_c * 2 : 8));
@@ -2255,7 +2404,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); if (!emit_arg(b, pre, e, i, 0, budget - 1)) return 0; }
       put(b, ", %s)", emitting == -1 ? "d" : "d + 1"); nsite++; return 1;
     }
-    if (!e->drops && e->k >= 0 && e->k < nfun) {   /* (counted: a value computed here, lent: dropped when the call returns -- rc_fresh_here) */
+    if (!mem_new() && !e->drops && e->k >= 0 && e->k < nfun) {   /* (counted: a value computed here, lent: dropped when the call returns -- rc_fresh_here) */
       unsigned extra = 0;
       for (int i = 0; i < e->nargs && i < CLONE_BITS; i++)
         if (!((e->tdrop >> i) & 1u) && rc_borrowed((int)e->k, i) && rc_fresh_here(e->args[i])) extra |= 1u << i;
@@ -2330,6 +2479,8 @@ static int pm_tail(const Expr *e, int f) {
   case E_MATCH: if (ho_info(e->a) & 4u) return 0;
     for (int i = 0; i < e->nargs; i++) if (!pm_tail(e->args[i], f)) return 0;
     return 1;
+  case E_LET: return !(ho_info(e->a) & 4u) && pm_tail(e->b, f);
+  case E_DROP: return pm_tail(e->b, f);
   case E_CALL: if (e->k == f) return pm_self(e, f);
     return !(ho_info(e) & 4u);
   case E_CTOR: {
@@ -2343,8 +2494,9 @@ static int pm_tail(const Expr *e, int f) {
   }
 }
 static int pm_cand(int f) {
-  if (!funs[f].body || funs[f].body->op != E_MATCH || !funs[f].body->untag) return 0;
-  const Expr *sc = funs[f].body->a;
+  const Expr *mb = funs[f].body; while (mb && (mb->op == E_LET || mb->op == E_DROP)) mb = mb->b;   /* (values bound before it: see EXPLICIT BINDING) */
+  if (!mb || mb->op != E_MATCH || !mb->untag) return 0;
+  const Expr *sc = mb->a;
   if (sc->op != E_PARAM || sc->nargs != f) return 0;
   pm_k = pm_tf = -1; pm_heavy = pm_holes = 0; ho_f = f; mm_new(MM_SSTR);
   free(fr_memo); fr_memo = calloc((size_t)nfun + 1, 1);
@@ -2355,6 +2507,7 @@ static int dp_scan(const Expr *e, int f, unsigned char *hd) {
   switch (e->op) {
   case E_IF: if (indexed_pick(e, &K, &S, &off)) return 0; return dp_scan(e->b, f, hd) | dp_scan(e->c, f, hd);
   case E_MATCH: { int r = 0; for (int i = 0; i < e->nargs; i++) r |= dp_scan(e->args[i], f, hd); return r; }
+  case E_LET: case E_DROP: return dp_scan(e->b, f, hd);
   case E_CTOR:
     { const Expr *K2, *f0, *x0; long off2;
       if (e->nargs && e->c && (e->untag || e->rtag - 1 == e->k) && indexed_update(e, &K2, &off2, &f0, &x0) && x0->op == E_CALL && x0->k == f && !hd[f]) { hd[f] = 1; return 1; } }
@@ -3716,6 +3869,268 @@ static int reads_outer(int f) {                    /* f reads another's paramete
 }
 static Shape unit_shapes(const Expr *entry);
 static Shape unit_shapes(const Expr *entry);
+/* MEMORY.  One rule set, over the tree EXPLICIT BINDING makes (Perceus: Reinking, Xie, de Moura, Leijen 2021).
+   Every value a block word holds is a reference, and every reference has one owner.
+   - A NAME is a parameter, a let, or (in an arm that takes its scrutinee apart: below) a field.  A borrowed
+     parameter (rc_borrowed) is the caller's; every other name is owned by the code that binds it.
+   - Every expression that is not a name yields a reference of its own.  Where its value is only read -- a
+     borrowed parameter, a vector read, a match -- it is named first (a let around the reader), so that what
+     is read is always a name.
+   - Liveness is computed backwards.  A name used where its value is taken over (a let, a constructor's field,
+     an owned parameter, a vector operation that consumes it, the function's result) MOVES there if nothing
+     after uses it, and is DUPLICATED there otherwise.  Operands are evaluated in no fixed order, so a name
+     used by two operands of one operation is live across each -- except a name handed WHOLE to a call or a
+     constructor, which takes it only once every operand is computed, while the others only read numbers
+     from it (`(_mulc m k 0 (alen m) 0)`).
+   - A name an operation only reads, and nothing after it uses, is DROPPED when the operation is done
+     (E_AFTER).  A name a branch does not use, though the conditional's other branches do, is dropped where
+     that branch begins (E_DROP); a let nothing uses, where its body begins; an owned parameter nothing uses,
+     where the function begins.
+   - MATCH ON A DYING VALUE: an arm of a match on an owned name that the arm does not use whole, and nothing
+     after uses, loads the fields it uses and then, if the block is unique, frees it and drops the fields it
+     does not use (the loaded ones are now the arm's own), and otherwise takes a count of each loaded field and
+     releases the block.  In that arm the fields are owned names. */
+static int mr_f, mr_par, mr_nv, mr_cap;
+static unsigned char *mr_own; static int *mr_dfn; static Expr **mr_atom; static int *mr_letv, mr_letcap;
+typedef struct { const Expr *base; long k; int id; } MrFB;
+static MrFB *mr_fb; static int mr_nfb, mr_cfb;
+static int mr_newvar(int own, int dfn, Expr *atom) {
+  if (mr_nv >= mr_cap) { int c = mr_cap ? mr_cap * 2 : 64;
+    mr_own = realloc(mr_own, (size_t)c); mr_dfn = realloc(mr_dfn, sizeof *mr_dfn * (size_t)c); mr_atom = realloc(mr_atom, sizeof *mr_atom * (size_t)c); mr_cap = c; }
+  mr_own[mr_nv] = (unsigned char)(own && dfn >= 0); mr_dfn[mr_nv] = dfn; mr_atom[mr_nv] = atom; return mr_nv++;
+}
+static int mr_same_base(const Expr *x, const Expr *y) {   /* one name: the same let's name, or the same parameter */
+  if (x == y) return 1;
+  return x && y && x->op == E_PARAM && y->op == E_PARAM && x->nargs == y->nargs && x->k == y->k;
+}
+static int mr_letid(const Expr *let) { return let && let->k >= 0 && let->k < mr_letcap ? mr_letv[let->k] : -1; }
+static int mr_fid(const Expr *e) {                   /* a field of an arm's own: its name */
+  for (int i = mr_nfb - 1; i >= 0; i--) if (mr_fb[i].k == e->k && mr_same_base(mr_fb[i].base, e->a)) return mr_fb[i].id;
+  return -1;
+}
+static int mr_id(const Expr *e) {
+  if (!e) return -1;
+  if (e->op == E_PARAM) return e->nargs == mr_f && e->k < mr_par ? (int)e->k : -1;
+  if (e->op == E_VAR) return mr_letid(e->bind);
+  if (e->op == E_FIELD) return mr_fid(e);
+  return -1;
+}
+static int mr_atomic(const Expr *e) { return e->op == E_PARAM || e->op == E_VAR || e->op == E_CONST || e->op == E_FIELD; }
+static int mr_dfn_of(const Expr *e) { Shape s = shape_of(e); return s.k == 5 && s.dt ? drop_fn(s) : -1; }
+static int mr_data(const Expr *e) { return mr_dfn_of(e) >= 0; }
+static unsigned char *mr_set(void) { return calloc((size_t)mr_cap + 1, 1); }
+static unsigned char *mr_grow(unsigned char *x, int had) { unsigned char *y = calloc((size_t)mr_cap + 1, 1); memcpy(y, x, (size_t)had); free(x); return y; }
+static void mr_uses(const Expr *e, unsigned char *u) {   /* the names e reads (its tree) */
+  if (!e) return;
+  int id = mr_id(e);
+  if (id >= 0) { u[id] = 1; return; }
+  if (e->op == E_FIELD) { mr_uses(e->a, u); return; }
+  if (e->op == E_CALL && e->k >= 0 && e->k < lifted) for (int i = 0; i < nfv[e->k]; i++) if (fvs[e->k][i].h == mr_f && fvs[e->k][i].k < mr_par) u[fvs[e->k][i].k] = 1;
+  if (e->op == E_DROP) for (const struct Drop *d = e->drops; d; d = d->next) mr_uses(d->p, u);
+  mr_uses(e->a, u); mr_uses(e->b, u); if (e->op != E_CTOR) mr_uses(e->c, u);
+  for (int i = 0; i < e->nargs && e->args; i++) mr_uses(e->args[i], u);
+}
+static Expr *mr_wrap(int op, Expr *inner, const unsigned char *ids, int n) {   /* E_DROP (ids; inner) or E_AFTER (inner; ids) */
+  struct Drop *dl = NULL;
+  for (int x = 0; x < n; x++) if (ids[x]) { struct Drop *d = A(sizeof *d); d->p = mr_atom[x]; d->fn = mr_dfn[x]; d->next = dl; dl = d; }
+  if (!dl) return inner;
+  Expr *w = mke(op, inner->kind); w->drops = dl;
+  if (op == E_DROP) w->b = inner; else w->a = inner;
+  return w;
+}
+static int mr_whole(const Expr *e, const Expr *s) {  /* s used other than as the block its fields are read from */
+  if (!e) return 0;
+  if (e->op == E_FIELD) return e->a != s && !mr_same_base(e->a, s) ? mr_whole(e->a, s) : 0;
+  if (mr_same_base(e, s)) return 1;
+  if (e->op == E_CALL && s->op == E_PARAM && e->k >= 0 && e->k < lifted && fv_has((int)e->k, s->nargs, s->k)) return 1;
+  if (e->op == E_DROP) for (const struct Drop *d = e->drops; d; d = d->next) if (mr_whole(d->p, s)) return 1;
+  if (mr_whole(e->a, s) || mr_whole(e->b, s) || (e->op != E_CTOR && mr_whole(e->c, s))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (mr_whole(e->args[i], s)) return 1;
+  return 0;
+}
+static void mr_fields(const Expr *e, const Expr *s, unsigned char *ks, int nk) {   /* the fields of s an arm reads */
+  if (!e) return;
+  if (e->op == E_FIELD && mr_same_base(e->a, s) && e->k >= 0 && e->k < nk) ks[e->k] = 1;
+  mr_fields(e->a, s, ks, nk); mr_fields(e->b, s, ks, nk); if (e->op != E_CTOR) mr_fields(e->c, s, ks, nk);
+  for (int i = 0; i < e->nargs && e->args; i++) mr_fields(e->args[i], s, ks, nk);
+}
+static int mr_reads_only(const Expr *e, int x, const Expr *parent) {   /* every use of x in e reads a number from it */
+  if (!e) return 1;
+  if (mr_id(e) == x) return parent && ((vop_read(parent) && parent->args[0] == e) || (parent->op == E_FIELD && parent->a == e)) && !mr_data(parent);
+  if (e->op == E_FIELD && mr_id(e->a) == x) return !mr_data(e);
+  if (e->op == E_CALL && e->k >= 0 && e->k < lifted && x < mr_par) for (int i = 0; i < nfv[e->k]; i++) if (fvs[e->k][i].h == mr_f && fvs[e->k][i].k == x) return 0;
+  if (!mr_reads_only(e->a, x, e) || !mr_reads_only(e->b, x, e) || (e->op != E_CTOR && !mr_reads_only(e->c, x, e))) return 0;
+  for (int i = 0; i < e->nargs && e->args; i++) if (!mr_reads_only(e->args[i], x, e)) return 0;
+  return 1;
+}
+static int mr_argown(const Expr *e, int i) {        /* does this operand's value go to e (else e only reads it) */
+  if (e->op == E_CALL) return !(e->k >= 0 && e->k < nfun && rc_borrowed((int)e->k, i));
+  if (e->op == E_CTOR) return 1;
+  if (e->op == E_VOP) return vop_takes(e, i);
+  return 0;
+}
+static Expr *mr(Expr *e, int octx, const unsigned char *A, unsigned char *B);
+static Expr *mr_ops(Expr *e, int octx, const unsigned char *A, unsigned char *B) {   /* an operation over operands */
+  /* operands: (slot, owned?) -- BIN: a, b; others: args (a constructor's dead fields are never computed) */
+  int no = e->op == E_BIN ? 2 : e->nargs;
+  Expr **slot[no ? no : 1]; int own[no ? no : 1], n = 0;
+  if (e->op == E_BIN) { slot[n] = &e->a; own[n++] = 0; slot[n] = &e->b; own[n++] = 0; }
+  else for (int i = 0; i < e->nargs; i++) { if (e->op == E_CTOR && e->ci && !field_live(e->ci, i)) continue; slot[n] = &e->args[i]; own[n++] = mr_argown(e, i); }
+  /* a value only read that is not a name: named first (see MEMORY) */
+  for (int i = 0; i < n; i++) {
+    Expr *a = *slot[i];
+    if (own[i] || mr_atomic(a) || !mr_data(a)) continue;
+    Expr *l = anf_let(a); l->a = a; *slot[i] = anf_var(l); l->b = e;
+    if (l->k >= mr_letcap) { int c = l->k * 2 + 64; mr_letv = realloc(mr_letv, sizeof *mr_letv * (size_t)c); for (int j = mr_letcap; j < c; j++) mr_letv[j] = -1; mr_letcap = c; }
+    return mr(l, octx, A, B);
+  }
+  unsigned char **U = malloc(sizeof *U * (size_t)(n + 1));
+  for (int i = 0; i <= n; i++) U[i] = mr_set();
+  for (int i = 0; i < n; i++) mr_uses(*slot[i], U[i]);
+  if (e->op == E_CALL && e->k >= 0 && e->k < lifted)   /* (a callee reading a parameter lifted: read for the call) */
+    for (int q = 0; q < nfv[e->k]; q++) if (fvs[e->k][q].h == mr_f && fvs[e->k][q].k < mr_par) U[n][fvs[e->k][q].k] = 1;
+  int nv0 = mr_nv;
+  int *mvbr = calloc((size_t)mr_cap + 1, sizeof *mvbr);   /* (the operand a name handed whole moves into, + 1) */
+  for (int x = 0; x < nv0; x++) {                    /* (see MEMORY: handed whole, read beside) */
+    int c = 0, whole = -1; for (int i = 0; i <= n; i++) if (U[i][x]) c++;
+    if (c < 2 || !mr_own[x] || A[x] || !(e->op == E_CALL || e->op == E_CTOR) || U[n][x]) continue;
+    for (int i = 0; i < n; i++) if (own[i] && mr_id(*slot[i]) == x) whole = i;   /* (the last: the others take counts) */
+    if (whole < 0) continue;
+    int ok = 1; for (int i = 0; i < n && ok; i++) if (i != whole && U[i][x]) ok = (own[i] && mr_id(*slot[i]) == x) || mr_reads_only(*slot[i], x, NULL);
+    if (ok) mvbr[x] = whole + 1;
+  }
+  unsigned char *Bacc = mr_set(); memcpy(Bacc, A, (size_t)nv0);
+  for (int i = 0; i < n; i++) {
+    unsigned char *Ai = mr_set(); memcpy(Ai, A, (size_t)nv0);
+    for (int j = 0; j <= n; j++) if (j != i) for (int x = 0; x < nv0; x++) if (U[j][x]) Ai[x] = 1;
+    if (mr_id(*slot[i]) >= 0 && mvbr[mr_id(*slot[i])] == i + 1) Ai[mr_id(*slot[i])] = 0;   /* (it moves here) */
+    unsigned char *Bi = mr_set();
+    *slot[i] = mr(*slot[i], own[i], Ai, Bi);
+    if (mr_nv > nv0) { Bacc = mr_grow(Bacc, nv0 + 0); }
+    for (int x = 0; x < mr_nv && x < mr_cap; x++) if (Bi[x]) Bacc[x] = 1;
+    free(Ai); free(Bi);
+  }
+  for (int x = 0; x < nv0; x++) if (U[n][x]) Bacc[x] = 1;
+  /* the names that die HERE: read by this operation (or by two operands), and not used after it */
+  unsigned char *D = mr_set();
+  for (int x = 0; x < nv0; x++) {
+    if (!mr_own[x] || A[x] || mvbr[x]) continue;
+    int c = 0, at = -1; for (int i = 0; i <= n; i++) if (U[i][x]) { c++; at = i; }
+    if (!c) continue;
+    if (c >= 2) { D[x] = 1; continue; }
+    if (at == n) { D[x] = 1; continue; }         /* (read by the callee, lifted) */
+    const Expr *a = *slot[at];
+    while (a->op == E_DUP) a = a->a;
+    if (mr_id(a) == x && !own[at]) D[x] = 1;       /* (read here) */
+    else if (a->op == E_FIELD && mr_id(a) != x && mr_id(a->a) == x) D[x] = 1;   /* (a field of it read here) */
+  }
+  memcpy(B, Bacc, (size_t)mr_cap);
+  Expr *r = mr_wrap(E_AFTER, e, D, nv0);
+  for (int i = 0; i <= n; i++) free(U[i]); free(U); free(mvbr); free(Bacc); free(D);
+  return r;
+}
+static Expr *mr(Expr *e, int octx, const unsigned char *A, unsigned char *B) {
+  if (!e) { memcpy(B, A, (size_t)mr_cap); return e; }
+  switch (e->op) {
+  case E_PARAM: case E_VAR: case E_CONST: case E_FIELD: {
+    memcpy(B, A, (size_t)mr_cap);
+    int id = mr_id(e);
+    if (id >= 0) B[id] = 1;
+    else if (e->op == E_FIELD) { int bid = mr_id(e->a); if (bid >= 0) B[bid] = 1; }
+    if (octx && mr_data(e) && !(id >= 0 && mr_own[id] && !A[id])) { Expr *d = mke(E_DUP, e->kind); d->a = e; return d; }
+    return e; }
+  case E_LET: {
+    int x = mr_newvar(1, mr_dfn_of(e->a), e->bind);
+    if (e->k >= mr_letcap) { int c = (int)e->k * 2 + 64; mr_letv = realloc(mr_letv, sizeof *mr_letv * (size_t)c); for (int j = mr_letcap; j < c; j++) mr_letv[j] = -1; mr_letcap = c; }
+    mr_letv[e->k] = x;
+    unsigned char *Bb = mr_set();
+    Expr *body = mr(e->b, octx, A, Bb);
+    if (mr_own[x] && !Bb[x]) { unsigned char *one = mr_set(); one[x] = 1; body = mr_wrap(E_DROP, body, one, mr_nv); free(one); }
+    Bb[x] = 0;
+    unsigned char *Bv = mr_set();
+    e->a = mr(e->a, 1, Bb, Bv); e->b = body;
+    for (int i = 0; i < mr_cap; i++) B[i] = Bv[i] | Bb[i];
+    free(Bb); free(Bv);
+    return e; }
+  case E_IF: {
+    unsigned char *Bb = mr_set(), *Bc = mr_set();
+    Expr *tb = mr(e->b, octx, A, Bb), *tc = mr(e->c, octx, A, Bc);
+    unsigned char *Lin = mr_set(), *db = mr_set(), *dc = mr_set();
+    for (int x = 0; x < mr_nv; x++) { Lin[x] = Bb[x] | Bc[x]; db[x] = mr_own[x] && Lin[x] && !Bb[x]; dc[x] = mr_own[x] && Lin[x] && !Bc[x]; }
+    e->b = mr_wrap(E_DROP, tb, db, mr_nv); e->c = mr_wrap(E_DROP, tc, dc, mr_nv);
+    e->a = mr(e->a, 0, Lin, B);
+    free(Bb); free(Bc); free(Lin); free(db); free(dc);
+    return e; }
+  case E_MATCH: {
+    const Expr *sc = e->a; int sid = mr_id(sc), na = e->nargs;
+    unsigned char **Bi = malloc(sizeof *Bi * (size_t)(na + 1)); unsigned char *spec = calloc((size_t)na + 1, 1);
+    for (int i = 0; i < na; i++) {
+      const LinCtor *ac = rc_arm_ci(e, i);
+      int nk = ac ? ac->k : 0;
+      spec[i] = sid >= 0 && mr_own[sid] && !A[sid] && nk > 0 && !mr_whole(e->args[i], sc);
+      Bi[i] = mr_set();
+      if (!spec[i]) { e->args[i] = mr(e->args[i], octx, A, Bi[i]); continue; }
+      unsigned char *ks = calloc((size_t)nk + 1, 1); mr_fields(e->args[i], sc, ks, nk);
+      int fb0 = mr_nfb, *fid = malloc(sizeof *fid * (size_t)(nk + 1));
+      Shape ss = shape_of(sc);
+      for (int k = 0; k < nk; k++) {
+        fid[k] = -1; if (!ks[k]) continue;
+        Expr *fa = mke(E_FIELD, 1); fa->a = (Expr *)sc; fa->k = k; fa->ci = ac; fa->untag = e->untag;
+        fid[k] = mr_newvar(1, rc_fdrop(ac, k, ss), fa);
+        if (mr_nfb == mr_cfb) mr_fb = realloc(mr_fb, sizeof *mr_fb * (size_t)(mr_cfb = mr_cfb ? mr_cfb * 2 : 16));
+        mr_fb[mr_nfb++] = (MrFB){ sc, k, fid[k] };
+      }
+      Bi[i] = mr_grow(Bi[i], 0);
+      e->args[i] = mr(e->args[i], octx, A, Bi[i]);
+      if (!e->mspec) e->mspec = calloc((size_t)(na ? na : 1), sizeof *e->mspec);   /* (the parameter A is the live set here) */
+      e->mspec[i] = calloc((size_t)nk + 1, 1);
+      e->mspec[i][nk] = 1;                          /* (taken apart, though it reads no field) */
+      for (int k = 0; k < nk; k++) if (fid[k] >= 0) { if (Bi[i][fid[k]]) e->mspec[i][k] = 1; Bi[i][fid[k]] = 0; }
+      mr_nfb = fb0; free(ks); free(fid);
+    }
+    unsigned char *Lin = mr_set();
+    for (int i = 0; i < na; i++) for (int x = 0; x < mr_nv; x++) Lin[x] |= Bi[i][x];
+    for (int i = 0; i < na; i++) {
+      unsigned char *d = mr_set();
+      for (int x = 0; x < mr_nv; x++) d[x] = mr_own[x] && Lin[x] && !Bi[i][x] && !(spec[i] && x == sid);
+      e->args[i] = mr_wrap(E_DROP, e->args[i], d, mr_nv); free(d);
+    }
+    memcpy(B, Lin, (size_t)mr_cap);
+    if (sid >= 0) B[sid] = 1;
+    else if (sc->op == E_FIELD) { int bid = mr_id(sc->a); if (bid >= 0) B[bid] = 1; }
+    for (int i = 0; i < na; i++) free(Bi[i]); free(Bi); free(spec); free(Lin);
+    return e; }
+  case E_CALL: case E_CTOR: case E_VOP: case E_BIN: case E_FOP:
+    if (e->op == E_CTOR && !e->nargs) { memcpy(B, A, (size_t)mr_cap); return e; }
+    return mr_ops(e, octx, A, B);
+  default: memcpy(B, A, (size_t)mr_cap); return e;
+  }
+}
+static int mr_count(const Expr *e) { if (!e) return 0; int n = 1 + mr_count(e->a) + mr_count(e->b) + (e->op != E_CTOR ? mr_count(e->c) : 0); for (int i = 0; i < e->nargs && e->args; i++) n += mr_count(e->args[i]); return n; }
+static Expr *mem_rc_body(Expr *body, int f, int arity) {   /* one function's body (f -1: the entry) */
+  mr_f = f; mr_par = arity; mr_nv = 0; mr_nfb = 0;
+  int want = arity + anf_n + 2 * mr_count(body) + 64;
+  if (want > mr_cap) { mr_own = realloc(mr_own, (size_t)want); mr_dfn = realloc(mr_dfn, sizeof *mr_dfn * (size_t)want); mr_atom = realloc(mr_atom, sizeof *mr_atom * (size_t)want); mr_cap = want; }
+  if (anf_n + 64 > mr_letcap) { int c = anf_n * 2 + 64; mr_letv = realloc(mr_letv, sizeof *mr_letv * (size_t)c); mr_letcap = c; }
+  for (int j = 0; j < mr_letcap; j++) mr_letv[j] = -1;
+  for (int k = 0; k < arity; k++) {
+    Expr *pa = mke(E_PARAM, 1); pa->nargs = f; pa->k = k;
+    const Expr *pn = f >= 0 && funs[f].pnode ? funs[f].pnode[k] : NULL;
+    int dfn = pn ? mr_dfn_of(pn) : -1;
+    mr_newvar(f >= 0 && !rc_borrowed(f, k), dfn, pa);
+  }
+  unsigned char *A0 = mr_set(), *B0 = mr_set();
+  body = mr(body, 1, A0, B0);
+  unsigned char *d = mr_set(); for (int k = 0; k < arity; k++) d[k] = mr_own[k] && !B0[k];
+  body = mr_wrap(E_DROP, body, d, arity);
+  free(A0); free(B0); free(d);
+  return body;
+}
+static void mem_rc(Expr **entry) {
+  rc_borrow(*entry);
+  for (int i = 0; i < nfun; i++) if (funs[i].body) funs[i].body = mem_rc_body(funs[i].body, i, funs[i].arity);
+  *entry = mem_rc_body(*entry, -1, 0);
+}
 static void ownership(Expr *entry) {
   /* WHICH PARAMETERS A FUNCTION MAY REBUILD IN: one no other function reads (a captured variable is held by the
      function reading it for as long as it runs), and used once on any path (a block rebuilt while a later use still
@@ -3913,6 +4328,10 @@ static Shape shape_of(const Expr *e) {
   if (e->id < sh_cap && sh_gen[e->id] == sh_g) return sh_memo[e->id];
   Shape r = { 0, NULL };
   switch (e->op) {
+  case E_LET: shape_of(e->a); r = shape_of(e->b); break;
+  case E_VAR: r = shape_of(e->bind->a); break;     /* (a name has its value's shape) */
+  case E_DUP: case E_AFTER: r = shape_of(e->a); break;
+  case E_DROP: r = shape_of(e->b); break;
   case E_CONST: if (e->box) break;                 /* the cells' end answering true: every shape takes it */
     r.k = e->kind == 3 ? 3 : 1; break;
   case E_BIN: case E_FOP:                            /* an operation's operands are numbers: what they were read from too */
@@ -4959,7 +5378,14 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
     }
     if (!safe) {}
     else {
-      { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) ownership(entry); }
+      if (mem_new()) {                                 /* (see EXPLICIT BINDING, and MEMORY) */
+        anf_n = 0;
+        for (int i = 0; i < nfun; i++) if (funs[i].body) { fscope++; emitting = i; funs[i].body = anf_region(funs[i].body, 1); }
+        fscope++; emitting = -1; entry = anf_region(entry, 0);
+        fscope++;
+        lift(); mem_rc(&entry);
+        if (dbg > 3) { for (int i = 0; i < nfun; i++) { DBG("[f%d:]\n", i); ex_dump(funs[i].body, 1); } DBG("[entry:]\n"); ex_dump(entry, 1); }
+      } else { mm_new(MM_NUM); int d = has_data(entry); for (int i = 0; !d && i < nfun; i++) d = has_data(funs[i].body); if (d) ownership(entry); }
       Buf b = nbuf(4096), fb = nbuf(4096), pre = nbuf(1024), pb = nbuf(1024);
       lift();
       for (int i = 0; i < nfun; i++) { put(&fb, "static long f%d(", i); plistn(&fb, 1, funs[i].arity); fv_params(&fb, i, 1, funs[i].arity > 0); put(&fb, ");\n"); }
