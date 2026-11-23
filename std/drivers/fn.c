@@ -4126,8 +4126,13 @@ static Expr *mem_rc_body(Expr *body, int f, int arity) {   /* one function's bod
   free(A0); free(B0); free(d);
   return body;
 }
+static int pm_cand(int f); static int pm_k;
 static void mem_rc(Expr **entry) {
   rc_borrow(*entry);
+  /* (a list a parallel map walks is split among threads, each walking a stretch: it is the caller's, never
+     consumed along the way -- the cell that ends one stretch holds the head of the next.  Borrowing is always
+     safe: a borrowed name used where its value is taken over takes a count) */
+  for (int i = 0; i < nfun; i++) if (funs[i].body && pm_cand(i) && pm_k >= 0 && pm_k < funs[i].arity && rc_bor && rc_bor[i]) rc_bor[i][pm_k] = 1;
   for (int i = 0; i < nfun; i++) if (funs[i].body) funs[i].body = mem_rc_body(funs[i].body, i, funs[i].arity);
   *entry = mem_rc_body(*entry, -1, 0);
 }
@@ -4611,13 +4616,13 @@ static const char *DATA_RT =
   "#include <setjmp.h>\n#include <stdlib.h>\n#include <stdio.h>\n"
   "#define LIN_TLS __thread __attribute__((tls_model(\"initial-exec\")))\n"
   "extern LIN_TLS jmp_buf lin_jb; extern LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
-  "extern LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch;\n"
+  "extern LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch; static LIN_TLS int lin_tch;\n"
   "static pthread_mutex_t lin_chm = PTHREAD_MUTEX_INITIALIZER;\n"
   "#ifdef __linux__\nextern int madvise(void *, unsigned long, int);\n#define LIN_HUGE(p, n) madvise((p), (n), 14)\n#else\n#define LIN_HUGE(p, n) ((void)0)\n#endif\n"
   "static __attribute__((noinline, cold)) void lin_refill(long n) {\n"
   "  /* (the arena grows by doubling chunks; a large one is asked for in huge pages, where the OS has them: a fresh\n"
   "     page is the dearest thing a list costs, and a 2 MB page is one fault where 4 KB pages are 512) */\n"
-  "  long g = lin_nch < 6 ? lin_nch : 6, sz = 65536L << g; if (sz < n) sz = n; long *c;\n"
+  "  long g = lin_tch < 6 ? lin_tch : 6, sz = 65536L << g; if (sz < n) sz = n; long *c; lin_tch++;\n"   /* (grown with what THIS thread has needed: a short-lived thread of a parallel map takes a small one) */
   "  if (sz >= (1L << 18) && !(sz & ((1L << 18) - 1))) { c = aligned_alloc((size_t)1 << 21, (size_t)sz * 8); if (c) LIN_HUGE(c, (size_t)sz * 8); }\n"
   "  else c = malloc((size_t)sz * 8);\n"
   "  if (!c || lin_fn_aborted || lin_used > (1L << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) { free(c); lin_fn_aborted = 1; longjmp(lin_jb, 1); }\n"
