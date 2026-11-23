@@ -113,7 +113,7 @@ enum { E_CONST, E_PARAM, E_BIN, E_IF, E_CALL, E_FOP,   /* E_FOP: a float row (FR
        E_LET, E_VAR,
        E_DUP, E_DROP, E_AFTER, E_SPEC };   /* E_SPEC: a (a block of constructor ci) taken apart, then b -- see MATCH ON A DYING VALUE */   /* (MEMORY) E_DUP: a, with a reference of its own; E_DROP: the drops, then b; E_AFTER: a, then the drops */   /* E_LET: a (the value) bound for b (the body); E_VAR: that value, by name (bind: its E_LET) -- see EXPLICIT BINDING */   /* E_VOP: a vector operation (LIN_VOP_*, k) over args: OWNED VECTORS */   /* data: constructor k (its index) of args; match on a over args (one result per
                                         constructor, in order); field k of a */
-struct Drop { const struct Expr *p; int fn; struct Drop *next; };   /* a parameter dropped at a path's end (drop_paths) */
+struct Drop { const struct Expr *p; int fn; struct Drop *next; };   /* a name released (E_DROP, E_AFTER: see MEMORY); fn <= -2 frees reuse token -2 - fn */
 typedef struct Expr { int op; long k; struct Expr *a, *b, *c; struct Expr **args; int nargs, kind;   /* kind 1 int, 3 bool */
                       int id, var, vscope, untag, box; const LinCtor *ci; struct Drop *drops; struct Expr *bind; unsigned char **mspec; int tok; } Expr;
    /* id: a dense index; var: the local it is bound to while emitting.  ci: the constructor (E_CTOR, E_FIELD) or one of
@@ -1081,6 +1081,7 @@ static void rf_pick(const Expr *y, ISet c, const int *ci, unsigned char *seen, c
   if (y->op == E_CALL && st_uses[y->id] == 1 && !y->drops) { *fx = realloc(*fx, sizeof **fx * (size_t)(*nf + 1)); (*fx)[(*nf)++] = y; return; }
   rf_pick(y->a, c, ci, seen, fx, nf);
   if (y->op == E_IF || y->op == E_MATCH) return;     /* (only what is certainly evaluated) */
+  if (y->op == E_LET) return;                        /* (its body reads a name not yet bound where a fork starts) */
   rf_pick(y->b, c, ci, seen, fx, nf); if (y->op != E_CTOR) rf_pick(y->c, c, ci, seen, fx, nf);
   for (int i = 0; i < y->nargs && y->args; i++) rf_pick(y->args[i], c, ci, seen, fx, nf);
 }
@@ -1225,7 +1226,8 @@ static Expr *anf_tree(const Expr *e) {
   case E_MATCH: {
     Expr *sc = (Expr *)e->a, *l = NULL;
     c = anf_copy(e);
-    if (sc->op == E_PARAM || sc->op == E_CONST || bound(sc)) c->a = anf_tree(sc);
+    if (sc->op == E_PARAM || sc->op == E_CONST || bound(sc) || (sc->op == E_FIELD && (sc->a->op == E_PARAM || bound(sc->a))))
+      c->a = anf_tree(sc);                           /* (a field read is a name already: borrowed, or the arm's own) */
     else {                                           /* (the scrutinee named, for the arms' fields) */
       l = anf_let(sc); l->a = anf_tree(sc);
       sc->var = 0; sc->vscope = fscope; sc->bind = l;
@@ -1468,6 +1470,7 @@ static void fv_params(Buf *b, int f, int typed, int lead) {   /* a function's ex
    so its range is known), that is ONE indexed load; and a constructor whose every field j is
    `k == j+off ? f(field j) : field j`, with f the same for all j, is ONE indexed read-modify-write. */
 static int key_hi(const Expr *k, long *hi) {
+  while (k->op == E_VAR && k->bind && k->bind->a) k = k->bind->a;   /* (a named key: its value) */
   if (k->op != E_BIN || k->k != LIN_OP_BAND) return 0;
   const Expr *m = k->b->op == E_CONST ? k->b : k->a->op == E_CONST ? k->a : NULL;
   long most = 0; const LinCtor *c;                  /* (no constructor has more slots than the widest declared) */
@@ -1510,6 +1513,57 @@ static int indexed_pick(const Expr *e, const Expr **K, const Expr **S, long *off
   if (!ci || hi + o >= ci->k) return 0;
   *K = k; *S = base; *off = o + !untag; return 1;
 }
+static int mr_same_base(const Expr *x, const Expr *y); static const Expr **mr_tokb;
+/* a[field 0 of base] == b[field j of base]: the same expression of a different slot */
+static int eq_ix(const Expr *a, const Expr *b, const Expr *base, long j, int depth) {
+  if (a->op == E_FIELD && a->k == 0 && mr_same_base(a->a, base)) return b->op == E_FIELD && b->k == j && mr_same_base(b->a, base);
+  if (b->op == E_FIELD && b->k == j && mr_same_base(b->a, base)) return 0;
+  if (a->op == E_VAR || b->op == E_VAR) return a->op == b->op && a->bind == b->bind;
+  if (depth > eid || a->op != b->op || a->k != b->k || a->kind != b->kind || a->nargs != b->nargs || a->ci != b->ci || a->untag != b->untag || a->tok != b->tok) return 0;
+  if (a->op == E_LET || a->op == E_SPEC || a->op == E_DROP || a->op == E_AFTER || a->drops || b->drops) return 0;   /* (names and counts of their own: not one shape) */
+  if (!a->a != !b->a || !a->b != !b->b || !a->c != !b->c || !a->args != !b->args) return 0;
+  if (a->a && !eq_ix(a->a, b->a, base, j, depth + 1)) return 0;
+  if (a->b && !eq_ix(a->b, b->b, base, j, depth + 1)) return 0;
+  if (a->c && a->op != E_CTOR && !eq_ix(a->c, b->c, base, j, depth + 1)) return 0;
+  for (int i = 0; a->args && i < a->nargs; i++) if (!eq_ix(a->args[i], b->args[i], base, j, depth + 1)) return 0;
+  return 1;
+}
+/* A block rebuilt in the block an arm took apart (REUSE), every field j `k == j ? f(field j) : field j` with one
+   f: the update of ONE slot.  Writes k and f's instance at slot 0 (whose field 0 stands for slot k). */
+static int ix_update(const Expr *e, const Expr **K, const Expr **x0) {
+  if (e->op != E_CTOR || !e->tok || e->nargs < 2 || !e->args) return 0;
+  const Expr *base = mr_tokb[e->tok - 1], *k = NULL;
+  for (int j = 0; j < e->nargs; j++) {
+    const Expr *a = e->args[j];
+    if (a->op != E_IF || a->a->op != E_BIN || a->a->k != LIN_OP_EQ) return 0;
+    const Expr *kk = a->a->b->op == E_CONST ? a->a->a : a->a->a->op == E_CONST ? a->a->b : NULL;
+    long cv = a->a->b->op == E_CONST ? a->a->b->k : a->a->a->k;
+    if (!kk || cv != j || (j && kk != k)) return 0;
+    k = kk;
+    if (a->c->op != E_FIELD || a->c->k != j || !mr_same_base(a->c->a, base)) return 0;
+    if (j && !eq_ix(e->args[0]->b, a->b, base, j, 0)) return 0;
+  }
+  long hi; if (!key_hi(k, &hi) || hi != e->nargs - 1) return 0;
+  *K = k; *x0 = e->args[0]->b; return 1;
+}
+static int refs_field(const Expr *e, const Expr *base, int but0) {   /* reads a field of base (but0: other than 0)? */
+  if (!e) return 0;
+  if (e->op == E_FIELD && mr_same_base(e->a, base) && !(but0 && e->k == 0)) return 1;
+  if (refs_field(e->a, base, but0) || refs_field(e->b, base, but0) || (e->op != E_CTOR && refs_field(e->c, base, but0))) return 1;
+  for (int i = 0; e->args && i < e->nargs; i++) if (refs_field(e->args[i], base, but0)) return 1;
+  for (const struct Drop *d = e->drops; d; d = d->next) if (d->fn > -2 && refs_field(d->p, base, but0)) return 1;
+  return 0;
+}
+/* An arm whose whole work is ONE slot update of the block it takes apart (ix_update): it needs no field but that
+   slot, so the block is kept -- or, shared, copied -- and only the slot is read. */
+static int spec_ix_only(const Expr *sp) {
+  const Expr *x = sp->b, *K, *x0, *base = sp->a;
+  for (; x->op == E_LET || x->op == E_DROP; x = x->b) {   /* (names and drops before it that need no field) */
+    if (x->op == E_LET && refs_field(x->a, base, 0)) return 0;
+    for (const struct Drop *d = x->op == E_DROP ? x->drops : NULL; d; d = d->next) if (d->fn <= -2 || refs_field(d->p, base, 0)) return 0;
+  }
+  return ix_update(x, &K, &x0) && x->tok - 1 == sp->k && !refs_field(x0, base, 1) && !refs_field(K, base, 0);
+}
 static unsigned *ct_gen, ct_g; static unsigned char *ct_val; static int ct_cap;   /* one answer per node per question */
 static int contains_r(const Expr *e, const Expr *x) {
   if (e == x) return 1;
@@ -1538,11 +1592,6 @@ static int call_fv(Buf *b, long k) {                 /* the callee's lifted para
 }
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 static int drop_fn(Shape sh);
-/* COUNTED MOVES: a field of a block being rebuilt in place, consumed once by what is stored in its own slot, is
-   MOVED -- no count taken for it, and the store does not release what it replaces.  Whether it moved is decided as
-   the program runs (`lin_take`: a flag the store reads), so a path that only reads it, or never reaches it, still
-   releases it at the store; a block that is shared took counts for all its fields (rc_own_copy) and moves nothing. */
-/* (the arms whose block is tested as they begin: a drop of that block there is specialised -- see rc_spec_drop) */
 static int rc_fdrop(const LinCtor *ci, int j, Shape vs);
 /* occurrences in e's TREE (capped at 2) of: x itself (tc_mode 0), the field tc_k of tc_base (1), or tc_base other
    than as the block a field is read from (2) */
@@ -1557,7 +1606,7 @@ static int emit_arg(Buf *b, Buf *pre, const Expr *call, int i, int par, int budg
    the states first (the loop's own cheap part), computes every G on worker threads, and folds them into acc
    IN ORDER -- the same fold the loop makes, so the answer is the loop's whatever A is.  It is used where the
    caller is itself running in parallel (the entry, a parallel copy), with the depth `d` bounding the nesting. */
-typedef struct { int acc, base_then; const Expr *cond, *step, *G, *Gname; } PL;   /* Gname: G's name, when a let binds it (EXPLICIT BINDING) */
+typedef struct { int acc, base_then; const Expr *cond, *step, *G, *Gname, *base; const Expr **chain; int nchain; } PL;   /* Gname: G's name, when a let binds it (EXPLICIT BINDING) */
 static PL *plinfo; static unsigned char *pl_done; static int plpar, pl_unit;   /* pl_unit: writing a data unit (its runtime has the threads) */
 static int pl_ment(const Expr *e, int f, int k, unsigned char *seen) {   /* does e read parameter k of f? */
   if (!e || seen[e->id]) return 0;
@@ -1592,87 +1641,155 @@ static int pl_split(const Expr *e, int f, int acc, const Expr **G, unsigned char
   for (int i = 0; i < e->nargs && e->args; i++) if (!pl_split(e->args[i], f, acc, G, seen)) return 0;
   return 1;
 }
+static int pl_has(const Expr *e, const Expr *x, unsigned char *seen) {   /* is x in e (a name, a node)? */
+  if (!e || seen[e->id]) return 0;
+  seen[e->id] = 1;
+  if (e == x || (e->op == E_VAR && x->op == E_VAR && e->bind == x->bind)) return 1;
+  if (pl_has(e->a, x, seen) || pl_has(e->b, x, seen) || (e->op != E_CTOR && pl_has(e->c, x, seen))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (pl_has(e->args[i], x, seen)) return 1;
+  for (const struct Drop *d = e->drops; d; d = d->next) if (d->fn > -2 && pl_has(d->p, x, seen)) return 1;
+  return 0;
+}
+static int pl_in(const Expr *e, const Expr *x, const Expr *skip) {
+  unsigned char *seen = calloc((size_t)eid + 1, 1); if (skip) seen[skip->id] = 1;
+  int r = pl_has(e, x, seen); free(seen); return r;
+}
+static int pl_mskip(const Expr *e, int f, int k, const Expr *skip) {   /* pl_m, not looking inside skip */
+  unsigned char *seen = calloc((size_t)eid + 1, 1); if (skip) seen[skip->id] = 1;
+  int r = pl_ment(e, f, k, seen); free(seen); return r;
+}
+/* (with names and counts made explicit: the recursive side is a chain of lets and drops ending in the step; G is
+   one let's call, or the one call in A; the base is acc after the drops of the rest of the state.  The loop that
+   walks the states evaluates the chain IN ORDER and keeps G's ARGUMENTS -- with whatever counts they took --
+   so what the threads run is exactly the calls the loop would have made) */
 static int pl_ok(int f) {
   if (!plinfo || f < 0 || f >= nfun || (hasd && hasd[f]) || nfv[f] || !funs[f].body) return 0;
   if (plinfo[f].acc >= 0) return plinfo[f].acc > 0 || plinfo[f].G;   /* (decided: acc 0 with G set is acc 0) */
   plinfo[f].acc = 0; plinfo[f].G = NULL;
   const Expr *B = funs[f].body;
   if (B->op != E_IF) return 0;
-  /* (the step may name G first: `let x = (G ..) in (f .. (A acc x))`) */
-  const Expr *Gl = NULL, *sb = B->b, *sc = B->c;
-  if (sc->op == E_LET && sc->b->op == E_CALL && sc->b->k == f && sc->a->op == E_CALL && sc->a->k != f) { Gl = sc; sc = sc->b; }
-  else if (sb->op == E_LET && sb->b->op == E_CALL && sb->b->k == f && sb->a->op == E_CALL && sb->a->k != f) { Gl = sb; sb = sb->b; }
-  int then_base = B->b->op == E_PARAM && B->b->nargs == f && sc->op == E_CALL && sc->k == f;
-  int else_base = B->c->op == E_PARAM && B->c->nargs == f && sb->op == E_CALL && sb->k == f;
-  if (!then_base && !else_base) return 0;
-  const Expr *base = then_base ? B->b : B->c, *step = then_base ? sc : sb;
-  int acc = (int)base->k;
-  if (step->nargs != funs[f].arity || pl_m(B->a, f, acc)) return 0;
-  for (int k = 0; k < step->nargs; k++) if (k != acc && pl_m(step->args[k], f, acc)) return 0;
-  const Expr *G = NULL; unsigned char *seen = calloc((size_t)eid + 1, 1);
-  int ok = pl_split(step->args[acc], f, acc, &G, seen); free(seen);
-  if (Gl) { if (G || pl_m(Gl->a, f, acc)) return 0; G = Gl->a; }   /* (G is the let's value; the fold reads its name) */
-  if (!ok || !G) return 0;
-  plinfo[f].acc = acc; plinfo[f].base_then = then_base; plinfo[f].cond = B->a; plinfo[f].step = step; plinfo[f].G = G; plinfo[f].Gname = Gl ? Gl->bind : NULL;
-  if (dbg) DBG("f%d folds independent steps: its calls of f%ld run in parallel\n", f, G->k);
-  return 1;
+  for (int side = 0; side < 2; side++) {
+    const Expr *base = side ? B->c : B->b, *rec = side ? B->b : B->c, *bp = base;
+    int bad = 0;
+    for (; bp->op == E_DROP; bp = bp->b) for (const struct Drop *d = bp->drops; d; d = d->next) if (d->fn <= -2) bad = 1;
+    if (bad || bp->op != E_PARAM || bp->nargs != f) continue;
+    int acc = (int)bp->k, nc = 0;
+    const Expr **chain = malloc(sizeof *chain * 8); int cap = 8;
+    const Expr *x = rec;
+    for (; x->op == E_LET || x->op == E_DROP; x = x->b) {
+      if (x->op == E_DROP) for (const struct Drop *d = x->drops; d; d = d->next) if (d->fn <= -2) bad = 1;
+      if (nc == cap) chain = realloc(chain, sizeof *chain * (size_t)(cap *= 2));
+      chain[nc++] = x;
+    }
+    const Expr *step = x;
+    if (bad || step->op != E_CALL || step->k != f || step->nargs != funs[f].arity || pl_m(B->a, f, acc)) { free(chain); continue; }
+    for (const struct Drop *d = base->op == E_DROP ? base->drops : NULL; d; d = d->next) if (pl_m(d->p, f, acc)) bad = 1;
+    const Expr *A = step->args[acc], *G = NULL, *Gname = NULL;
+    for (int i = 0; i < nc && !G; i++)                /* G named by a let, read by A */
+      if (chain[i]->op == E_LET && chain[i]->a->op == E_CALL && chain[i]->a->k != f && pl_in(A, chain[i]->bind, NULL)) { G = chain[i]->a; Gname = chain[i]->bind; }
+    if (!G) { unsigned char *seen = calloc((size_t)eid + 1, 1); if (!pl_split(A, f, acc, &G, seen)) G = NULL; free(seen); }
+    if (!G || G->op != E_CALL || G->k < 0 || G->k >= nfun || G->k == f || (G->k < lifted && nfv[G->k]) || pl_m(G, f, acc) || (Gname && pl_in(G, Gname, NULL))) bad = 1;
+    int after = 0;
+    for (int i = 0; i < nc && !bad; i++) {           /* the chain: no acc; after G, not G's value */
+      const Expr *c = chain[i];
+      if (c->op == E_LET && c->bind == Gname) { after = 1; continue; }
+      for (const struct Drop *d = c->op == E_DROP ? c->drops : NULL; d; d = d->next) if (pl_m(d->p, f, acc)) bad = 1;
+      if (c->op == E_LET && pl_m(c->a, f, acc)) bad = 1;
+      if (after && Gname && c->op == E_LET && pl_in(c->a, Gname, NULL)) bad = 1;
+      if (c->op == E_LET && pl_in(A, c->bind, G)) bad = 1;   /* (A, folded later, reads only acc and G) */
+    }
+    for (int k = 0; k < step->nargs && !bad; k++) {
+      if (k == acc) continue;
+      if (pl_m(step->args[k], f, acc) || (Gname && pl_in(step->args[k], Gname, NULL)) || pl_in(step->args[k], G, NULL)) bad = 1;
+      if (pl_mskip(A, f, k, G)) bad = 1;
+    }
+    if (bad) { free(chain); continue; }
+    PL *L = &plinfo[f];
+    L->acc = acc; L->base_then = !side; L->cond = B->a; L->step = step; L->G = G; L->Gname = Gname; L->base = base; L->chain = chain; L->nchain = nc;
+    if (dbg) DBG("f%d folds independent steps: its calls of f%ld run in parallel\n", f, G->k);
+    return 1;
+  }
+  return 0;
 }
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per unit into `pre` */
   if (pl_done[f]) return 1;
   pl_done[f] = 1;
   const PL *L = &plinfo[f]; int ar = funs[f].arity, ok = 1, se = emitting; emitting = f;
+  const Expr *G = L->G; int na = G->nargs;
   Buf g = nbuf(1024), w = nbuf(2048);
-  /* G, as a function of the state */
-  put(&g, "static long f%d_g(", f); plistn(&g, 1, ar); put(&g, ", int d) { return ", f);
-  fscope++; ok = emit_region(&g, pre, L->G, 1, budget - 1); put(&g, "; }\n");
+  /* G, as a function of its arguments (their nodes stand for them while it is written) */
+  put(&g, "static long f%d_g(", f); for (int i = 0; i < na; i++) put(&g, "long a%d, ", i); put(&g, "int d) { return ");
+  fscope++;
+  { int a0 = nvar; nvar += na; int *sv = malloc(sizeof *sv * (size_t)(2 * na + 1));
+    for (int i = 0; i < na; i++) { Expr *a = (Expr *)G->args[i]; sv[2 * i] = a->var; sv[2 * i + 1] = a->vscope; a->var = a0 + i; a->vscope = fscope; }
+    put(&g, "({ "); for (int i = 0; i < na; i++) put(&g, "long v%d = a%d; ", a0 + i, i);
+    ok = emitx(&g, pre, G, 1, budget - 1); put(&g, "; })");
+    for (int i = 0; i < na; i++) { Expr *a = (Expr *)G->args[i]; a->var = sv[2 * i]; a->vscope = sv[2 * i + 1]; }
+    free(sv); }
+  put(&g, "; }\n");
   put(&g, "typedef struct { const long *st; long *g; long n, next; int d; } PL%d;\n", f);
   put(&g, "static void *plrun%d(void *v) { PL%d *s = v; LIN_TASK_START((size_t)256 << 20);\n", f, f);
   put(&g, "  for (long i; (i = __sync_fetch_and_add(&s->next, 1)) < s->n; ) s->g[i] = f%d_g(", f);
-  for (int k = 0; k < ar; k++) put(&g, "%ss->st[i * %d + %d]", k ? ", " : "", ar, k);
-  put(&g, ", s->d + 1);\n  return 0; }\n");
+  for (int k = 0; k < na; k++) put(&g, "s->st[i * %d + %d], ", na ? na : 1, k);
+  put(&g, "s->d + 1);\n  return 0; }\n");
   put(pre, "%s", g.s); free(g.s);
+  int NA = na ? na : 1;
   put(&w, "static int lin_threads_; static int lin_live;\n");
   put(&w, "static long f%d_pl(", f); plistn(&w, 1, ar); put(&w, ", int d) {\n");
   put(&w, "  if (d >= dmax) return f%d(", f); plistn(&w, 0, ar); put(&w, ");\n");
-  put(&w, "  long cap = 16, n = 0; long *st = malloc(sizeof(long) * (size_t)cap * %d);\n", ar);
+  put(&w, "  long cap = 16, n = 0; long *st = malloc(sizeof(long) * (size_t)cap * %d);\n", NA);
   put(&w, "  { long "); for (int k = 0; k < ar; k++) put(&w, "%sq%d = p%d", k ? ", " : "", k, k); put(&w, ";\n    for (;;) {\n      long ");
   for (int k = 0; k < ar; k++) put(&w, "%sp%d = q%d", k ? ", " : "", k, k); put(&w, ";\n      if (%s(", L->base_then ? "" : "!");
-  fscope++; ok = ok && emit_region(&w, pre, L->cond, 0, budget - 1); put(&w, ")) break;\n");
-  put(&w, "      if (n == cap) st = realloc(st, sizeof(long) * (size_t)(cap *= 2) * %d);\n      ", ar);
-  for (int k = 0; k < ar; k++) put(&w, "st[n * %d + %d] = p%d; ", ar, k, k);
-  put(&w, "n++;\n");
+  fscope++; ok = ok && emit_region(&w, pre, L->cond, 0, budget - 1); put(&w, ")) { ");
+  for (const Expr *x = L->base; ok && x->op == E_DROP; x = x->b)   /* (the end: the rest of the state goes) */
+    for (const struct Drop *d = x->drops; ok && d; d = d->next) { put(&w, "lin_drop%d(", d->fn); ok = emitx(&w, pre, d->p, 0, budget - 1); put(&w, "); "); }
+  put(&w, "break; }\n");
+  put(&w, "      if (n == cap) st = realloc(st, sizeof(long) * (size_t)(cap *= 2) * %d);\n", NA);
+  int *bound_v = malloc(sizeof *bound_v * (size_t)(L->nchain + 1)), gdone = 0;
+  #define PL_GARGS() do { for (int i = 0; ok && i < na; i++) { put(&w, "      st[n * %d + %d] = ", NA, i); ok = emit_region(&w, pre, G->args[i], 0, budget - 1); put(&w, ";\n"); } gdone = 1; } while (0)
+  for (int i = 0; ok && i < L->nchain; i++) {
+    const Expr *c = L->chain[i];
+    if (c->op == E_DROP) {
+      for (const struct Drop *d = c->drops; ok && d; d = d->next) { put(&w, "      lin_drop%d(", d->fn); ok = emitx(&w, pre, d->p, 0, budget - 1); put(&w, ");\n"); }
+      continue;
+    }
+    if (c->bind == L->Gname) { PL_GARGS(); continue; }
+    int v = nvar++; put(&w, "      long v%d = ", v); ok = ok && emitx(&w, pre, c->a, 0, budget - 1); put(&w, ";\n");
+    c->bind->var = v; c->bind->vscope = fscope;
+  }
+  if (!gdone) PL_GARGS();
+  #undef PL_GARGS
+  put(&w, "      n++;\n");
   for (int k = 0; k < ar && ok; k++) {
     if (k == L->acc) continue;
-    put(&w, "      long n%d = ", k); fscope++; ok = emit_region(&w, pre, L->step->args[k], 0, budget - 1); put(&w, ";\n");
+    put(&w, "      long n%d = ", k); ok = emitx(&w, pre, L->step->args[k], 0, budget - 1); put(&w, ";\n");
   }
+  for (int i = 0; i < L->nchain; i++) if (L->chain[i]->op == E_LET) L->chain[i]->bind->var = -1;
+  free(bound_v);
   put(&w, "      "); for (int k = 0; k < ar; k++) if (k != L->acc) put(&w, "q%d = n%d; ", k, k);
   put(&w, "\n    } }\n");
   /* every G at once: the threads and this one take states in turn */
   put(&w, "  long *g = malloc(sizeof(long) * (size_t)(n + 1));\n");
   put(&w, "  PL%d s = { st, g, n, 0, d }; int T = lin_threads_ > 0 ? lin_threads_ : 1; pthread_t t[T]; int nt = 0;\n", f);
-  if (f < lifted && nfv[f]) rc_mt = 1;   /* (counted: what its lifted parameters hold, the threads read too) */
-  {                                     /* (counted: the states every thread reads, marked shared) */
-    Buf sh = nbuf(64), ix = nbuf(32); put(&ix, "i * %d + ", ar);
-    rc_share_params(&sh, f, NULL, "st", ix.s);
+  {                                     /* (counted: what the threads are given, frozen -- they may share blocks, and no count of them is taken again) */
+    Buf sh = nbuf(64);
+    for (int i = 0; i < na; i++) { const Expr *ga = G->args[i]; while (ga->op == E_DUP || ga->op == E_AFTER) ga = ga->a; int sf = rc_share_fn(shape_of(ga)); if (sf >= 0) { put(&sh, "lin_%s%d(st[i * %d + %d]); ", rc_mark, sf, NA, i); } }
     if (sh.len) put(&w, "  if (T > 1 && n > 1) for (long i = 0; i < n; i++) { %s}\n", sh.s);
-    free(sh.s); free(ix.s);
+    free(sh.s);
   }
   put(&w, "  for (int k = 1; k < T && k < n; k++) { if (__sync_add_and_fetch(&lin_live, 1) > 2 * T) { __sync_sub_and_fetch(&lin_live, 1); break; }\n");
   put(&w, "    if (pthread_create(&t[nt], &attr, plrun%d, &s)) { __sync_sub_and_fetch(&lin_live, 1); break; } nt++; }\n", f);
   put(&w, "  for (long i; (i = __sync_fetch_and_add(&s.next, 1)) < n; ) g[i] = f%d_g(", f);
-  for (int k = 0; k < ar; k++) put(&w, "%sst[i * %d + %d]", k ? ", " : "", ar, k);
-  put(&w, ", d + 1);\n  for (int k = 0; k < nt; k++) { pthread_join(t[k], 0); __sync_sub_and_fetch(&lin_live, 1); }\n  (void)LIN_JOINED;\n");
-  /* the fold, in order */
+  for (int k = 0; k < na; k++) put(&w, "st[i * %d + %d], ", NA, k);
+  put(&w, "d + 1);\n  for (int k = 0; k < nt; k++) { pthread_join(t[k], 0); __sync_sub_and_fetch(&lin_live, 1); }\n  (void)LIN_JOINED;\n");
+  /* the fold, in order (A reads only acc and G) */
   int gv = nvar++;
-  put(&w, "  long acc = p%d;\n  for (long i = 0; i < n; i++) {\n    long ", L->acc);
-  for (int k = 0; k < ar; k++) { if (k == L->acc) put(&w, "%sp%d = acc", k ? ", " : "", k); else put(&w, "%sp%d = st[i * %d + %d]", k ? ", " : "", k, ar, k); }
-  put(&w, ";\n    ");
-  put(&w, "long v%d = g[i];\n    acc = ", gv);
-  fscope++; Expr *G = (Expr *)L->G; int sv = G->var, ss = G->vscope; G->var = gv; G->vscope = fscope;
+  put(&w, "  long acc = p%d;\n  for (long i = 0; i < n; i++) {\n    long p%d = acc; long v%d = g[i];\n    acc = ", L->acc, L->acc, gv);
+  fscope++; Expr *Gx = (Expr *)G; int sv = Gx->var, ss = Gx->vscope; Gx->var = gv; Gx->vscope = fscope;
   if (L->Gname) { ((Expr *)L->Gname)->var = gv; ((Expr *)L->Gname)->vscope = fscope; }
   ok = ok && emit_region(&w, pre, L->step->args[L->acc], 0, budget - 1);
-  G->var = sv; G->vscope = ss; if (L->Gname) ((Expr *)L->Gname)->var = -1;
+  Gx->var = sv; Gx->vscope = ss; if (L->Gname) ((Expr *)L->Gname)->var = -1;
   put(&w, ";\n  }\n  free(st); free(g);\n  return acc;\n}\n");
   put(pre, "%s", w.s); free(w.s);
   emitting = se;
@@ -1689,35 +1806,54 @@ static int rc_fdrop(const LinCtor *ci, int j, Shape vs) {
   Shape fs = field_shape(sh_fld, sh_nctor, ci, k, j, vs);
   return fs.k == 5 && fs.dt ? drop_fn(fs) : -1;
 }
-/* MOVED OUT OF AN ARM (counted).  A branch of a match that takes apart a block it owns, and ends -- on every path --
-   by rebuilding that block in place, never otherwise using the block whole: a data field of it used at most once on
-   any path is MOVED to that use when the block is unique (tested as the branch begins: nothing in it can take a
-   count of the block), and the rebuild does not release what that slot held.  `(_bal c (_ins cmp k v l) mk mv r)`
-   then hands the child down without a count, and the insertion rebuilds the whole path in place. */
-static const LinCtor *rc_arm_ci(const Expr *m, int i) {
+static const LinCtor *rc_arm_ci(const Expr *m, int i) {   /* the constructor of a match's arm i */
   if (!m->ci) return NULL;
   const LinCtor *c; for (long k = 1; (c = lin_ctor_info(k)); k++) if (c->dt == m->ci->dt && c->i == i) return c;
   return NULL;
 }
 static int rc_borrowed(int g, int k);
-/* (the order the emitted code evaluates an arm in, followed path by path: a value used twice is bound where its
-   region begins; a constructor's fields in order; a call's or an operator's operands in no order.  The field may be
-   used any number of times before it is handed on (consumed) on a path, and not at all after) */
-/* A LOCAL DROPPED WHERE IT IS NOT IN HAND.  A path's end drops a local the path computed -- but computed inside an
-   operand (a call's argument, an arm of a choice), it is not a name there.  Such locals are kept in a variable of
-   the function's frame, set wherever they are computed: the drop reads it, and on a path that never computed the
-   local it is still nothing.  (A tail call is a new frame: the variable starts empty again.) */
 static int let_chain;   /* (the entry's let chain being written: its inner lets are plain) */
 static void rf_pick(const Expr *y, ISet c, const int *ci, unsigned char *seen, const Expr ***fx, int *nf); static int rf_dep(const Expr *x, const int *ci, unsigned char *seen);
 typedef struct { const Expr *base; long k; int v; } EmFB;   /* (MEMORY) the fields an arm took apart, by local */
 static int *mr_tokw; static const Expr **mr_tokb; static const Expr *dp_hole;
-static EmFB *em_fb; static int em_nfb, em_cfb;
+static EmFB *em_fb; static int em_nfb, em_cfb; static int ixu_always = -1;   /* (a token that is always there: spec_ix_only) */
 static int mr_same_base(const Expr *x, const Expr *y);
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget);
+/* (see ix_update) slot k of the reused block, given f(slot k): the rest stays where it is.  In tail position with
+   f a call that takes a destination, the call writes the slot itself -- the loop of a trie update. */
+static int emit_ixu(Buf *b, Buf *pre, const Expr *e, const Expr *K, const Expr *x0, int par, int budget, int tp) {
+  int t = e->tok - 1, W = e->nargs + !e->untag, kv = nvar++, ov = nvar++, off = !e->untag;
+  put(b, "({ long v%d = ", kv); if (!emitx(b, pre, K, par, budget - 1)) return 0;
+  if (t == ixu_always) put(b, "; long *_o = t%d; int _r = 1; t%d = 0; ", t, t);   /* (see spec_ix_only) */
+  else {
+    put(b, "; long *_o; int _r = t%d != 0; if (_r) { _o = t%d; t%d = 0; } else { _o = lin_alloc(%d); ", t, t, t, W);
+    if (!e->untag) put(b, "_o[0] = %ldL; ", e->k);
+    for (int i = 0; i < e->nargs; i++) { put(b, "_o[%d] = ", i + off); if (!emitx(b, pre, e->args[i]->c, par, budget - 1)) return 0; put(b, "; "); }
+    put(b, "} ");
+  }
+  put(b, "long v%d = _o[v%d + %d]; ", ov, kv, off);
+  if (em_nfb == em_cfb) em_fb = realloc(em_fb, sizeof *em_fb * (size_t)(em_cfb = em_cfb ? em_cfb * 2 : 16));
+  em_fb[em_nfb++] = (EmFB){ e->args[0]->c->a, 0, ov };   /* (field 0 stands for slot k) */
+  int ok = 1;
+  if (tp && x0->op == E_CALL && hasd[x0->k] && !bound(x0)) {
+    int a0 = nvar; nvar += x0->nargs;
+    for (int i = 0; ok && i < x0->nargs; i++) { put(b, "long v%d = ", a0 + i); ok = emit_arg(b, pre, x0, i, par, budget - 1); put(b, "; "); }
+    em_nfb--;
+    if (!ok) return 0;
+    put(b, "LIN_PUT(dst, (long)_o); f%ld%s(&_o[v%d + %d]", x0->k, dp_name(x0->k), kv, off);
+    for (int i = 0; i < x0->nargs; i++) put(b, ", v%d", a0 + i);
+    if (!call_fv(b, x0->k)) return 0;
+    put(b, "%s); })", dp_stop(x0->k)); return 1;
+  }
+  put(b, "long _n = "); ok = emitx(b, pre, x0, par, budget - 1); em_nfb--;
+  if (!ok) return 0;
+  put(b, "; if (!_r || _n != v%d) _o[v%d + %d] = _n; %s(long)_o%s; })", ov, kv, off, tp ? "LIN_PUT(dst, " : "", tp ? ")" : ""); return 1;
+}
 static int emit_fn_body(Buf *fb, Buf *pre, const Expr *body) { put(fb, "return "); return emit_region(fb, pre, body, 0, 4096); }
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
+  if ((e->op == E_DUP || e->op == E_AFTER || e->op == E_DROP) && bound(e)) { put(b, tp ? "LIN_SET(dst, v%d)" : "v%d", e->var); return 1; }   /* (a value standing for itself: pl_emit) */
   if (e->op == E_LET && par && emitting == -1 && !let_chain) {   /* (the entry's bindings: THE ENTRY'S LOOPS, STARTED EARLY) */
     int n = 0; const Expr *body = e;
     int cap = 8; const Expr **lets = malloc(sizeof *lets * (size_t)cap);
@@ -1774,17 +1910,33 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   if (e->op == E_SPEC) {                             /* (see MATCH ON A DYING VALUE, and REUSE) */
     const LinCtor *ac = e->ci; Shape ss = shape_of(e->a); int nk = ac->k, fb0 = em_nfb, tk = (int)e->k, q = nvar++;
     uses_data = 1; put(b, "({ long *_q%d = (long *)(", q); if (!emitx(b, pre, e->a, par, budget - 1)) return 0; put(b, "); ");
+    if (tk >= 0 && spec_ix_only(e)) {                /* (one slot updated: the block itself, or a copy of it if shared) */
+      int W = nk + !e->untag;
+      put(b, "long *t%d = _q%d; if (!lin_uniq(_q%d)) { t%d = lin_alloc(%d); __builtin_memcpy(t%d, _q%d, %d * 8); ", tk, q, q, tk, W, tk, q, W);
+      for (int j = 0; j < nk; j++) { int fd = rc_fdrop(ac, j, ss); if (fd >= 0) put(b, "lin_dup(t%d[%d]); ", tk, j + !e->untag); }
+      put(b, "lin_drop%d((long)_q%d); } ", drop_fn(ss), q);
+      int sa = ixu_always; ixu_always = tk;
+      tailpos = tp; int ok = emitx(b, pre, e->b, par, budget - 1); tailpos = 0; ixu_always = sa;
+      put(b, "; })"); return ok;
+    }
     for (int j = 0; j < nk; j++) if (e->mspec[0][j]) {
-      int k = nvar++; put(b, "long v%d = _q%d[%d]; ", k, q, j + !e->untag);
+      int k = nvar++;
       if (em_nfb == em_cfb) em_fb = realloc(em_fb, sizeof *em_fb * (size_t)(em_cfb = em_cfb ? em_cfb * 2 : 16));
       em_fb[em_nfb++] = (EmFB){ e->a, j, k };
     }
-    if (tk >= 0) put(b, "long *t%d = 0; ", tk);
-    put(b, "if (lin_uniq(_q%d)) { ", q);
+    /* (shared: the fields it keeps get counts first; then they are read; then the block is let go.  The reads come
+       after the test, in one place: read before it, or in each branch, a walk down a tree measured 1.5x slower) */
+    put(b, "int _u%d = lin_uniq(_q%d); ", q, q);
+    if (tk >= 0) put(b, "long *t%d = _u%d ? _q%d : 0; ", tk, q, q);
+    { Buf d = nbuf(64);
+      for (int i = fb0; i < em_nfb; i++) { int fd = rc_fdrop(ac, (int)em_fb[i].k, ss); if (fd >= 0) put(&d, "lin_dup(_q%d[%ld]); ", q, em_fb[i].k + !e->untag); }
+      if (d.len) put(b, "if (!_u%d) { %s} ", q, d.s);
+      free(d.s); }
+    for (int i = fb0; i < em_nfb; i++) put(b, "long v%d = _q%d[%ld]; ", em_fb[i].v, q, em_fb[i].k + !e->untag);
+    put(b, "if (_u%d) { ", q);
     for (int j = 0; j < nk; j++) if (!e->mspec[0][j]) { int fd = rc_fdrop(ac, j, ss); if (fd >= 0) put(b, "lin_drop%d(_q%d[%d]); ", fd, q, j + !e->untag); }
-    if (tk >= 0) put(b, "t%d = _q%d; } else { ", tk, q); else put(b, "lin_free(_q%d, %d); } else { ", q, nk + !e->untag);
-    for (int i = fb0; i < em_nfb; i++) { int fd = rc_fdrop(ac, (int)em_fb[i].k, ss); if (fd >= 0) put(b, "lin_dup(v%d); ", em_fb[i].v); }
-    put(b, "lin_drop%d((long)_q%d); } ", drop_fn(ss), q);
+    if (tk < 0) put(b, "lin_free(_q%d, %d); ", q, nk + !e->untag);
+    put(b, "} else lin_drop%d((long)_q%d); ", drop_fn(ss), q);
     tailpos = tp; int ok = emitx(b, pre, e->b, par, budget - 1); tailpos = 0;
     put(b, "; })"); em_nfb = fb0; return ok;
   }
@@ -1799,6 +1951,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       if (!call_fv(b, e->k)) return 0;
       put(b, "%s)", dp_stop(e->k)); return 1;
     }
+    { const Expr *K2, *x0; if (ix_update(e, &K2, &x0)) return emit_ixu(b, pre, e, K2, x0, par, budget, 1); }
     int hole = -1;
     if (e->op == E_CTOR && e->nargs)
       for (int i = 0; i < e->nargs && hole < 0; i++)
@@ -1863,6 +2016,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   case E_CTOR:
     uses_data = 1;
     if (!e->nargs) { put(b, "(%ldL)", e->k * 2 + 1); return 1; }
+    { const Expr *K2, *x0; if (ix_update(e, &K2, &x0)) return emit_ixu(b, pre, e, K2, x0, par, budget, 0); }
     if (e->tok) {                                    /* (see REUSE) built in the block an arm took apart, when it was unique */
       int t = e->tok - 1, W = e->nargs + !e->untag;
       put(b, "({ long *_o; int _r = t%d != 0; if (_r) { _o = t%d; t%d = 0; } else _o = lin_alloc(%d); ", t, t, t, W);
@@ -2034,6 +2188,7 @@ static int dp_scan(const Expr *e, int f, unsigned char *hd) {
   case E_MATCH: { int r = 0; for (int i = 0; i < e->nargs; i++) r |= dp_scan(e->args[i], f, hd); return r; }
   case E_LET: case E_DROP: case E_SPEC: return dp_scan(e->b, f, hd);
   case E_CTOR:
+    { const Expr *K2, *x0; if (ix_update(e, &K2, &x0)) { if (x0->op == E_CALL && x0->k == f && !hd[f]) { hd[f] = 1; return 1; } return 0; } }
     for (int i = 0; i < e->nargs; i++)
       if (e->args[i]->op == E_CALL && e->args[i]->k == f && (!e->ci || field_live(e->ci, i)) && !hd[f]) { hd[f] = 1; return 1; }
     return 0;
@@ -2420,35 +2575,11 @@ static void num_walk(const Expr *e) {                 /* demote what this expres
   if (e->c) num_walk(e->c);
   for (int i = 0; i < e->nargs && e->args; i++) num_walk(e->args[i]);
 }
-/* OWNERSHIP, AND REUSE IN PLACE.  The unit's DAG shows sharing exactly (hash-consing: one value, one node -- the
-   C image of the net's fans), so whether a block has ONE owner is a static question.  A value is FRESH if it
-   was just built (a constructor, or a call returning fresh data); a data parameter is UNIQUE if every call
-   passes it something fresh that nothing else on that path uses, and the function itself uses it at most once
-   on any path (reading its fields does not count).  Then a match on a unique parameter can build the branch's
-   constructor of the same size IN THE BLOCK IT JUST TOOK APART -- its fields are all computed before anything
-   is written -- which is what a functional insert into a tree costs in C: the path is updated, not copied. */
-/* READ, THEN MOVE: a branch of a match on x that reads only NUMBERS from x and then hands x on whole -- `(match s
-   ((scons h t) ... (revp h s snil)))` reads the head and gives the list away -- has moved x once, not used it
-   twice: the numbers are loaded at the match (rtm_fields), so nothing reads the block once it has gone. */
 static Shape shape_of(const Expr *e);
-/* PATH-SENSITIVE: the most moves of occ_x on a path that evaluates node `through` (-1: no path does). */
 static int contains(const Expr *e, const Expr *x, int depth);
-/* A FIELD IS OWNED only if every constructor that writes it is given something fresh that nothing else holds:
-   `(node t t)` stores ONE block in two fields, and taking either apart in place would corrupt the other. */
 static long ctor_id(const LinCtor *ci);
 static Shape shape_of(const Expr *e);
-/* how many places name each value (over the whole unit): one named once is given to its one call once, on every
-   path -- no need to walk the paths for it */
 static Shape *sh_memo; static unsigned *sh_gen, sh_g; static int sh_cap;
-/* THE ERASER, IN COMPILED CODE.  In the net a value nothing uses is erased where it stops being used.  A unit
-   had two ways to give a block back -- rebuild in it, or free it where a match took it apart -- and so a value
-   that was only READ and then abandoned stayed until the unit returned: `(run (sub n 1) (step bs))` kept every
-   `bs` it had ever stepped from.  A parameter is now DROPPED after the call that last uses it, when
-     - the function owns it (every caller hands over something fresh),
-     - on the path through that call it appears nowhere but as the call's arguments,
-     - the callee does not take it apart itself (then it would already be gone), and
-     - the call's result holds none of it: fresh, and every field of its datatypes owned.
-   Dropping walks what the value owns and frees each block. */
 /* One drop (and copy) function per SHAPE of data dropped -- a list of numbers frees its cells; a list of lists
    frees its cells and the lists in them -- not per datatype. */
 static Shape *drop_sh; static int ndrop, drop_cap;
@@ -2458,32 +2589,14 @@ static int drop_fn(Shape sh) {
   if (ndrop >= drop_cap) drop_sh = realloc(drop_sh, sizeof *drop_sh * (size_t)(drop_cap = drop_cap ? drop_cap * 2 : 8));
   drop_sh[ndrop] = sh; return ndrop++;
 }
-typedef struct { const Expr *call; int i; } OwnSite;
 static void tail_uses(const Expr *e, unsigned *n);
-/* ...and a parameter only LENT on the way to a path's end -- to calls that read it and hand back nothing of it
-   (`(digits ... (big_mul_small nu k) ...)` lends `nu` twice, and keeps neither) -- is dropped at that end: before
-   the tail call, its arguments evaluated, or after the value a path ends with. */
 static int fun_reads(int h);
 static int rc_borrowed(int g, int k); static unsigned char **rc_bor; static int rc_held(const Expr *a, int f);
-/* (the value a drop is for: the same node, or -- a parameter -- the same parameter of the same function, whatever
-   node names it there) */
-#define PEQ(x, p) ((x) == (p) || ((x) && (p)->op == E_PARAM && (x)->op == E_PARAM && (x)->nargs == (p)->nargs && (x)->k == (p)->k))
 static int contains(const Expr *e, const Expr *x, int depth);
 static int ho_f;
-/* A TEMPORARY: a value built to be an argument of one call, named nowhere else, which that call only reads (it
-   does not own the parameter and hands back none of it).  Nothing frees it -- the callee does not own it, and
-   nobody else holds it -- so it is dropped when the call returns.  `(big_add (big_mul_small nu 3) ac)` built
-   a number every step and kept them all. */
-/* where a value is used in a body: as call arguments (*nc) or otherwise (*other) */
-typedef struct { const Expr *call; int i; } TSite;
-/* REFERENCE COUNTING.  Static ownership frees what it proves nobody else holds; a value it cannot
-   prove that about had no owner at all, and was kept until the unit ended (measured: fannkuch freed 0.6M of the
-   12.2M blocks it built, and ran 40% in page faults).  With a count in every block (see lin_alloc) every value has
-   owners: a call or a constructor handed something it is not the only holder of -- a parameter still used, a field
-   of a block that stays, a value used twice -- is handed a new reference (rcdup), every parameter is owned and
-   released where its paths end, and a block is freed when its last reference goes.  Uniqueness is decided as
-   before and alone licenses rebuilding in place: a value it calls unique is never given a second reference, so its
-   count is one wherever a block is rebuilt in it. */
+/* REFERENCE COUNTING.  Every block carries a count (see lin_alloc); who takes, moves and releases references is
+   decided by ONE pass over explicit names (MEMORY), and uniqueness, tested as the program runs, alone licenses
+   rebuilding in place (REUSE).  What follows decides which parameters are only lent (BORROWED PARAMETERS). */
 static int rc_imm(const Expr *a) { return a->op == E_CONST || (a->op == E_CTOR && !a->nargs); }
 /* (vectors) an element read from a vector is held by it, as a field is by its block; the operations that make a
    vector hand back a reference of their own; and which operands an operation consumes (the rest it reads) */
@@ -2493,21 +2606,7 @@ static int vop_takes(const Expr *e, int i) {
   switch (e->k) { case LIN_VOP_NEW: return i == 1; case LIN_VOP_SET: return i == 0 || i == 2; case LIN_VOP_PUSH: return 1; }
   return 0;
 }
-/* THE LAST USE MOVES.  A parameter handed to a call or a constructor that nothing evaluated after it uses is handed
-   on -- its reference moves -- though it was used before (lent, or given a count of its own): `(f72 ps (rest)
-   (f123 .. s ..) s)` hands s to the next step instead of a new reference and a release.  Liveness is followed
-   backwards in the order the emitted code evaluates: a constructor's fields in order, a call's operands in no
-   order (the call itself comes after all of them), the arms of a choice after its test -- and a region's
-   bindings exactly where the emitter puts them (emit_region's own choice: lu_region), names after that.  A value
-   the walk does not know to be bound is followed at every place it is used, which can only say more is live. */
-static int rc_seen_cap;                              /* (the nodes the walk's `seen` covers: rc_leaves makes more as it goes) */
-/* A VALUE A PATH ENDS WITH is handed to the caller, and the path's drops run after it is computed: a field of a
-   block a drop may free must be given a reference of its own first -- unless the block is one this branch took
-   apart, whose fields are moved.  (A tail is marked on its node; the emitter's drops see the mark: emitx, drops.) */
-/* A VALUE HANDED ON THROUGH A CHOICE -- `(if (str_is_empty acc) x (str_concat acc x))` given to the next step --
-   is a new reference on the arms that end in something held elsewhere (a field: its block keeps it; a captured
-   variable: its function does), and moves on the arms that end in something built.  The arms are made private
-   copies down to such a leaf, and the leaf is marked to be handed on with a reference of its own (rcself). */
+static int rc_seen_cap;                              /* (the nodes the walk's `seen` covers) */
 static int indexed_pick(const Expr *e, const Expr **K, const Expr **S, long *off);
 /* BORROWED PARAMETERS.  A function that only READS a parameter -- takes it apart without rebuilding in it, reads
    its fields, lends it on to a parameter that is itself borrowed -- need not own it: its caller lends it, with no
@@ -2567,7 +2666,7 @@ static void rcb_walk(const Expr *e, int f, int read, unsigned char *seen) {
     rcb_walk(e->a, f, 1, seen); for (int i = 0; i < e->nargs; i++) rcb_walk(e->args[i], f, read, seen); return;
   case E_IF: {
     const Expr *K, *S; long off;
-    if (indexed_pick(e, &K, &S, &off)) { rcb_walk(K, f, 1, seen); rcb_walk(S, f, 1, seen); return; }   /* (a field read: see rc_leaves) */
+    if (indexed_pick(e, &K, &S, &off)) { rcb_walk(K, f, 1, seen); rcb_walk(S, f, 1, seen); return; }   /* (a field read) */
     rcb_walk(e->a, f, 1, seen); rcb_walk(e->b, f, read, seen); rcb_walk(e->c, f, read, seen); return; }
   case E_BIN: rcb_walk(e->a, f, 1, seen); rcb_walk(e->b, f, 1, seen); return;
   case E_VOP: for (int i = 0; i < e->nargs; i++) rcb_walk(e->args[i], f, !vop_takes(e, i), seen); return;
@@ -2721,9 +2820,11 @@ static Shape unit_shapes(const Expr *entry);
      that branch begins (E_DROP); a let nothing uses, where its body begins; an owned parameter nothing uses,
      where the function begins.
    - MATCH ON A DYING VALUE: an arm of a match on an owned name that the arm does not use whole, and nothing
-     after uses, loads the fields it uses and then, if the block is unique, frees it and drops the fields it
-     does not use (the loaded ones are now the arm's own), and otherwise takes a count of each loaded field and
-     releases the block.  In that arm the fields are owned names. */
+     after uses, tests the block: shared, it takes a count of each field it uses; it loads those fields; then,
+     unique, it frees the block (or keeps it: REUSE) and drops the fields it does not use, and shared, it
+     releases the block.  In that arm the fields are owned names -- and a field read is itself a name, so a
+     match on a field of such an arm (a nested pattern) takes that block apart the same way.  A name for a field
+     of a block nobody in the arm owns is an ALIAS: no reference of its own, its block kept while it is used. */
 static int mr_f, mr_par, mr_nv, mr_cap;
 static unsigned char *mr_own; static int *mr_dfn, *mr_alias; static Expr **mr_atom; static int *mr_letv, mr_letcap;   /* mr_alias: a borrowed name's block (-1: none) */
 typedef struct { const Expr *base; long k; int id; } MrFB;
@@ -2735,6 +2836,7 @@ static int mr_newvar(int own, int dfn, Expr *atom) {
 }
 static int mr_same_base(const Expr *x, const Expr *y) {   /* one name: the same let's name, or the same parameter */
   if (x == y) return 1;
+  if (x && y && x->op == E_FIELD && y->op == E_FIELD) return x->k == y->k && mr_same_base(x->a, y->a);   /* (a field of one block: a name too) */
   return x && y && x->op == E_PARAM && y->op == E_PARAM && x->nargs == y->nargs && x->k == y->k;
 }
 static int mr_letid(const Expr *let) { return let && let->k >= 0 && let->k < mr_letcap ? mr_letv[let->k] : -1; }
@@ -2779,8 +2881,8 @@ static Expr *mr_wrap(int op, Expr *inner, const unsigned char *ids, int n) {   /
 }
 static int mr_whole(const Expr *e, const Expr *s) {  /* s used other than as the block its fields are read from */
   if (!e) return 0;
+  if (mr_same_base(e, s)) return 1;                  /* (s itself, a name -- or a field read, when s is one) */
   if (e->op == E_FIELD) return e->a != s && !mr_same_base(e->a, s) ? mr_whole(e->a, s) : 0;
-  if (mr_same_base(e, s)) return 1;
   if (e->op == E_CALL && s->op == E_PARAM && e->k >= 0 && e->k < lifted && fv_has((int)e->k, s->nargs, s->k)) return 1;
   if (e->op == E_DROP) for (const struct Drop *d = e->drops; d; d = d->next) if (mr_whole(d->p, s)) return 1;
   if (mr_whole(e->a, s) || mr_whole(e->b, s) || (e->op != E_CTOR && mr_whole(e->c, s))) return 1;
@@ -3523,13 +3625,22 @@ static const char *DATA_RT =
   "#include <setjmp.h>\n#include <stdlib.h>\n#include <stdio.h>\n"
   "#define LIN_TLS __thread __attribute__((tls_model(\"initial-exec\")))\n"
   "extern LIN_TLS jmp_buf lin_jb; extern LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
-  "extern LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch; static LIN_TLS int lin_tch;\n"
+  "extern LIN_TLS long *lin_hp, *lin_he; static long lin_used; static void **lin_ch; static int lin_nch, lin_cch; \n"
   "static pthread_mutex_t lin_chm = PTHREAD_MUTEX_INITIALIZER;\n"
+  /* A CHUNK POOL.  A task's thread ends with most of its chunk unused; the rest is put here for the next thread, so
+     tasks started over and over (a parallel map in a loop) take the same memory again instead of new chunks */
+  "typedef struct { long *p, *e; } LinRest; static LinRest *lin_pool; static int lin_npool, lin_cpool;\n"
+  "static void lin_task_end(void) { if (lin_he - lin_hp >= 4096) { pthread_mutex_lock(&lin_chm);\n"
+  "  if (lin_npool == lin_cpool) lin_pool = realloc(lin_pool, sizeof *lin_pool * (size_t)(lin_cpool = lin_cpool ? lin_cpool * 2 : 16));\n"
+  "  lin_pool[lin_npool++] = (LinRest){ lin_hp, lin_he }; pthread_mutex_unlock(&lin_chm); } lin_hp = lin_he = 0; }\n"
   "#ifdef __linux__\nextern int madvise(void *, unsigned long, int);\n#define LIN_HUGE(p, n) madvise((p), (n), 14)\n#else\n#define LIN_HUGE(p, n) ((void)0)\n#endif\n"
   "static __attribute__((noinline, cold)) void lin_refill(long n) {\n"
   "  /* (the arena grows by doubling chunks; a large one is asked for in huge pages, where the OS has them: a fresh\n"
   "     page is the dearest thing a list costs, and a 2 MB page is one fault where 4 KB pages are 512) */\n"
-  "  long g = lin_tch < 6 ? lin_tch : 6, sz = 65536L << g; if (sz < n) sz = n; long *c; lin_tch++;\n"   /* (grown with what THIS thread has needed: a short-lived thread of a parallel map takes a small one) */
+  "  pthread_mutex_lock(&lin_chm);\n"   /* (first what a finished thread left: see lin_task_end) */
+  "  for (int i = lin_npool - 1; i >= 0; i--) if (lin_pool[i].e - lin_pool[i].p >= n) { lin_hp = lin_pool[i].p; lin_he = lin_pool[i].e; lin_pool[i] = lin_pool[--lin_npool]; pthread_mutex_unlock(&lin_chm); return; }\n"
+  "  pthread_mutex_unlock(&lin_chm);\n"
+  "  long g = lin_nch < 6 ? lin_nch : 6, sz = 65536L << g; if (sz < n) sz = n; long *c;\n"
   "  if (sz >= (1L << 18) && !(sz & ((1L << 18) - 1))) { c = aligned_alloc((size_t)1 << 21, (size_t)sz * 8); if (c) LIN_HUGE(c, (size_t)sz * 8); }\n"
   "  else c = malloc((size_t)sz * 8);\n"
   "  if (!c || lin_fn_aborted || lin_used > (1L << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) { free(c); lin_fn_aborted = 1; longjmp(lin_jb, 1); }\n"
@@ -3566,7 +3677,6 @@ static const char *DATA_RT =
   "  if (c > 0 && !lin_mt) p[-1] = c + 1; else if (c > 0) __atomic_fetch_add(&p[-1], 1, __ATOMIC_RELAXED); else if (c) __atomic_fetch_sub(&p[-1], 1, __ATOMIC_RELAXED); } return v; }\n"
   "static inline void lin_dupn(long v, long k) { if (!(v & 1) && k > 0) { long *p = (long *)v; long c = __atomic_load_n(&p[-1], __ATOMIC_RELAXED);\n"
   "  if (c > 0 && !lin_mt) p[-1] = c + k; else if (c > 0) __atomic_fetch_add(&p[-1], k, __ATOMIC_RELAXED); else if (c) __atomic_fetch_sub(&p[-1], k, __ATOMIC_RELAXED); } }\n"
-  "static inline long lin_take(int *m, long v) { if (*m == 1) { *m = 2; return v; } return lin_dup(v); }\n"
   "static inline int lin_uniq(long *p) { long c = __atomic_load_n(&p[-1], __ATOMIC_ACQUIRE); if (c == 1) return 1; if (c == -1) { p[-1] = 1; return 1; } return 0; }\n"
   "static inline int lin_dec(long *p) { long c = __atomic_load_n(&p[-1], __ATOMIC_RELAXED);\n"
   "  if (c > 0 && !lin_mt) { p[-1] = c - 1; return c == 1; } if (c > 0) return __atomic_sub_fetch(&p[-1], 1, __ATOMIC_ACQ_REL) == 0;\n"
@@ -3579,14 +3689,16 @@ static const char *DATA_RT =
   "#ifdef LIN_LEAKS\n#define LIN_ALLOC_RAW lin_alloc\nstatic inline long *lin_alloc_at(int site, long n) { long *p = LIN_ALLOC_RAW(n); lin_leak_note(p, site); return p; }\n#endif\n"
   "#endif\n"
   "#ifdef LIN_STATS\nstatic void lin_stats(void) { for (int i = 0; i < 9; i++) if (lin_na[i]) fprintf(stderr, \"lin: blocks of %d words: %ld built, %ld freed\\n\", i, lin_na[i], lin_nf[i]); }\n#else\n#define lin_stats()\n#endif\n"
-  "static void lin_free_all(void) { lin_stats(); lin_leak_report(); for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_hp = lin_he = 0; lin_used = 0; for (size_t i = 0; i < sizeof lin_fl / sizeof *lin_fl; i++) lin_fl[i] = 0; }\n"
+  "static void lin_free_all(void) { lin_stats(); lin_leak_report(); for (int i = 0; i < lin_nch; i++) free(lin_ch[i]); lin_nch = 0; lin_npool = 0; lin_hp = lin_he = 0; lin_used = 0; for (size_t i = 0; i < sizeof lin_fl / sizeof *lin_fl; i++) lin_fl[i] = 0; }\n"
   /* The guard lives where an infinite STRUCTURE must go -- the arena's refill, once per chunk -- and checks memory and
      the stack there; a compiled function carries nothing (measured: a per-call check doubled a tree insert).  A call
      whose runaway recursion builds nothing is not caught -- the exposure numeric units have always had.  A task on
      another thread has its own buffer and bound; abandoning anywhere marks the call, and a join that finds it marked
      abandons the joiner too, so a half-computed value is never used. */
   "#define LIN_ENTER\n#define LIN_LEAVE\n"
-  "#define LIN_TASK_START(ss) if (setjmp(lin_jb)) { lin_fn_aborted = 1; return 0; } lin_stack_lo = (char *)__builtin_frame_address(0) - (ss) + ((size_t)1 << 24)\n"
+  "static pthread_key_t lin_tkey; static pthread_once_t lin_tonce = PTHREAD_ONCE_INIT;\n"   /* (a task's end, however it returns: lin_task_end) */
+  "static void lin_tend(void *u) { (void)u; lin_task_end(); }\nstatic void lin_tkinit(void) { pthread_key_create(&lin_tkey, lin_tend); }\n"
+  "#define LIN_TASK_START(ss) pthread_once(&lin_tonce, lin_tkinit); pthread_setspecific(lin_tkey, (void *)1); if (setjmp(lin_jb)) { lin_fn_aborted = 1; return 0; } lin_stack_lo = (char *)__builtin_frame_address(0) - (ss) + ((size_t)1 << 24)\n"
   "#define LIN_JOINED (lin_fn_aborted ? (longjmp(lin_jb, 1), 0) : 0)\n"
   /* a result through its destination: LIN_PUT stores it only if it is not there already (a block rebuilt in place
      is, and storing it again would hold up the next load of that slot); LIN_SET is for a value that is new */
@@ -4389,13 +4501,25 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
         put(&b, "static const long *lin_args; static long lin_res; static int lin_threads_;\n");
         /* a loop folding an associative operation over a range, its other parameters only READ: split among the
            threads, as for numbers -- what a step builds is its thread's own, what the loop shares nobody writes */
-        Red red; int has_red = numeric && !nfv[0] && entry->op == E_CALL && entry->k == 0 && find_reduction(&red);
-        Buf rq = nbuf(256);
+        /* (the entry may name what it computes first, and drop it after: `let m = (build ..) in (f0 .. m ..)`) */
+        const Expr *ec = entry, *eaft = NULL; while (ec->op == E_LET) ec = ec->b;
+        if (ec->op == E_AFTER) { eaft = ec; ec = ec->a; }
+        Red red; int has_red = numeric && !nfv[0] && ec->op == E_CALL && ec->k == 0 && find_reduction(&red);
+        Buf rq = nbuf(256), rd = nbuf(64);
         if (has_red) {
           emitting = 0; fscope++;
           has_red = red_defs(&b, &pre, &red, 1);
           emitting = -1; fscope++;
-          for (int i = 0; has_red && i < arity; i++) { put(&rq, "  long q%d = ", i); has_red = emit_region(&rq, &pre, entry->args[i], 0, 4096); put(&rq, ";\n"); }
+          for (const Expr *x = entry; has_red && x->op == E_LET; x = x->b) {
+            int v = nvar++; put(&rq, "  long v%d = ", v); has_red = emitx(&rq, &pre, x->a, 0, 4096); put(&rq, ";\n");
+            x->bind->var = v; x->bind->vscope = fscope;
+          }
+          for (int i = 0; has_red && i < arity; i++) { put(&rq, "  long q%d = ", i); has_red = emit_region(&rq, &pre, ec->args[i], 0, 4096); put(&rq, ";\n"); }
+          for (const struct Drop *d = eaft ? eaft->drops : NULL; has_red && d; d = d->next) {
+            if (d->fn <= -2) { has_red = 0; break; }
+            put(&rd, "lin_drop%d(", d->fn); has_red = emitx(&rd, &pre, d->p, 0, 4096); put(&rd, "); ");
+          }
+          for (const Expr *x = entry; x->op == E_LET; x = x->b) x->bind->var = -1;
           if (has_red) DBG("parallel reduction over p%d (%s), accumulator p%d, in a data unit\n", red.iv, red.up ? "up" : "down", red.acc);
         }
         put(&b, "static void *lin_run(void *u) { (void)u; const long *a = lin_args; LIN_TASK_START((size_t)1 << 30);\n");
@@ -4403,10 +4527,11 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
         if (has_red) {
           put(&b, "  if (lin_threads_ > 1) {\n%s  {\n", rq.s);
           for (int i = 0; i < arity; i++) put(&b, "  long p%d = q%d;\n", i, i);
-          red_run(&b, &red, 1, "lin_threads_", "lin_res = acc; (void)LIN_JOINED; return 0;");
-          put(&b, "  lin_res = f0("); plist(&b, 0); put(&b, "); return 0; } }\n");
+          Buf rr = nbuf(128); put(&rr, "lin_res = acc; (void)LIN_JOINED; %sreturn 0;", rd.s);
+          red_run(&b, &red, 1, "lin_threads_", rr.s); free(rr.s);
+          put(&b, "  lin_res = f0("); plist(&b, 0); put(&b, "); %sreturn 0; } }\n", rd.s);
         }
-        free(rq.s);
+        free(rq.s); free(rd.s);
         if (pok && nsite) {
           put(&b, "  if (lin_threads_ > 1) { int lg = 0; while ((1 << lg) < lin_threads_) lg++; dmax = lg + 2;\n");
           put(&b, "    pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, (size_t)256 << 20); int d = -1; lin_res = %s; return 0; }\n", ebp.s);
