@@ -139,62 +139,64 @@ rewrite. `LIN_Y_OFF=1` turns the rewrite off.
 ### Memory in compiled code
 
 Compiled code has one memory system: every block carries a count, in the word
-before it, and compiled code keeps the count exact, in the manner of Perceus.
-There is no collector, and nothing is left to the arena the unit releases when
-it returns except what the threads were handed (see below). What the compiler
-works out from a function's structure is only where counts can be skipped; whether
+before it, and compiled code keeps the count exact, in the manner of Perceus
+(Reinking, Xie, de Moura and Leijen, 2021). There is no collector, and nothing is
+left to the arena the unit releases when it returns except what the threads were
+handed (see below). One pass decides every count, from one set of rules; whether
 a block is shared is the count's question, asked at run time.
 
-- **Every value has an owner.** A call or constructor given something its giver
-  still needs (a parameter used again, a field of a block that stays, a value
-  used twice, a value the callee also reads as a captured variable) is given a
-  new reference. Every owned parameter is released where its paths end, and a
-  block is freed when its last reference goes.
-- **Borrowing.** A parameter a function only reads (takes apart without
+- **Explicit names.** Before counting, each function body is rewritten so that
+  every value used more than once has one name (a `let`), placed exactly where
+  the emitter computes it: a region binds what it certainly evaluates and uses
+  twice. The pass then reasons about names only.
+- **Owned and borrowed.** A name is a parameter, a `let`, or a field of a block an
+  arm has taken apart. A parameter a function only reads (takes apart without
   rebuilding in it, reads the fields of, lends on) is borrowed: the caller takes
   no count for the call and the callee releases nothing. This is a fixpoint over
-  the unit. A tail call that hands an owned value to a parameter keeps that
-  parameter owned, so loops stay loops.
-- **Traversed parameters stay borrowed.** A parameter the function recurses on
-  through its parts (`(_addc xs ys 0)` passes a field of `b` to `b`) is borrowed
-  even if one path hands it on whole to an owner, or hands it a fresh value in a
-  tail call. Owned, every step would take a count of the rest and release the
-  cell whenever the caller still holds the number. Borrowed, the one path that
-  hands it on takes one count, once.
-- **Moves.** The last use of a parameter takes its reference. Liveness follows
-  the order the emitted code evaluates, including the values each region binds,
-  where the emitter binds them. A field consumed once by what is stored back in
-  its own slot of a block rebuilt in place is moved, decided at run time, so
-  nested updates do not copy every level. A branch that takes apart a block it
-  owns moves out the fields it uses once, if on every path it then rebuilds that
-  block in place or drops it. A balanced-tree insertion then rebuilds its whole
-  path in place. A block dropped after its fields moved out is simply freed.
-- **In place by count.** A `match` on a value it consumes (an owned parameter no
-  other function reads, or a call's result used once) builds its result in the
-  block it took apart: inserting into a tree, mapping over a list and setting an
-  array element. The rebuild first checks that the block's count is one, and
-  copies it otherwise, so a value built fresh and used once is updated in place
-  all the way down while one that is still shared is copied. A copy copies only
-  the fields the rebuild keeps. Both forms of
-  destination passing work, and drops on a path that ends in a cell with a hole
-  run before the call that fills the hole, so the loop stays a loop.
-- **Temporaries, locals and fields.** A value built only to be the argument of
-  one call that just reads it is freed when that call returns. A value a function
-  builds and only lends, and a field of a value it takes apart, are freed where
-  each of their paths ends: a loop that computes each state from the last keeps
-  one state, not all of them. A value computed inside one operand (a call's
-  argument, an arm of a choice) is dropped inside it. One whose path ends where
-  it is not in hand is kept in a variable of the function's frame, set wherever
-  it is computed, so the drop can still name it.
+  the unit; a tail call that hands an owned value to a parameter keeps that
+  parameter owned, so loops stay loops, and a parameter the function recurses on
+  through its parts stays borrowed. Every other name is owned by the code that
+  binds it.
+- **Moves and duplicates.** Liveness is computed backwards. A name used where its
+  value is taken over (a `let`, a constructor field, an owned parameter, a
+  vector operation that consumes it, the result) moves there if nothing after
+  uses it, and is given a new reference otherwise. Operands are evaluated in no
+  fixed order, so a name read by two operands of one operation is live across
+  both, except that a call or constructor handed a name whole takes it after
+  every operand has read its numbers.
+- **Drops.** A name an operation only reads, and nothing after uses, is released
+  when the operation is done. A name one branch does not use, though another
+  does, is released where that branch begins; an unused `let` or owned
+  parameter, where its body begins.
+- **Taking a block apart.** An arm of a `match` on an owned name that the arm
+  does not use whole, and nothing after uses, tests the block. Unique, it frees
+  it (or keeps it, below) and drops the fields the arm does not use; shared, it
+  takes a count of each field the arm uses and releases the block. The fields
+  are then the arm's own names, and a `match` on one of them (a nested pattern)
+  takes that block apart the same way. A name for a field of a block the arm
+  does not own is an alias: no count of its own, and the block is kept while
+  it is used.
+- **Reuse.** A block an arm took apart while it was unique is kept as a token.
+  A constructor of the same size that the arm ends in is built in it, and a
+  field moved back into its own slot is not stored again, so inserting into a
+  tree or mapping over a list rebuilds the path in place. A path that builds no
+  such constructor frees the token. When every field of the rebuilt block is
+  `k == j ? f(field j) : field j` (a trie node of std/array.lin, the hash map's
+  32-way nodes), only slot `k` is read and written, and the update of a shared
+  node copies the node first. Destination passing works through all of this,
+  so a recursive rebuild down one path is a loop.
 - **Reads before a move.** A call handed a vector whole that also reads its
   length or an element in another argument moves it once: the reads happen
-  before the call runs. A node a path has already evaluated is the same value
-  wherever else that path names it.
+  before the call runs. An element read from a vector is held by the vector,
+  as a field is by its block.
 - **Free lists by size class.** A freed block goes on a list for its size: one
   list per size under 8 words, and one per power of two above that, so the block
   a freed vector leaves serves the next of its class.
 - **Unread fields are not computed.** A constructor field that no part of the
   program reads is never evaluated or stored, matching lazy semantics.
+- **Arena chunks.** Each thread allocates from chunks of its own. A task's thread
+  that ends hands the rest of its chunk to the next thread that starts, so tasks
+  started over and over take the same memory again.
 - **Threads.** A count is plain arithmetic while one thread alone can see the
   block. What forked tasks, parallel loops and reductions are handed is frozen
   first: never counted again and freed with the unit, so threads reading one
@@ -311,8 +313,11 @@ Compiled code computes a shared value once, as the net does.
 - **Independent steps.** A loop that folds into an accumulator the result of
   another loop that reads only the step's own state, such as
   `fannkuch`'s fold over the permutations under each rotation, computes every
-  step's inner loop on worker threads and folds the results in order. The fold
-  is the loop's own, so no associativity is assumed.
+  step's inner loop on worker threads and folds the results in order. The loop
+  that walks the states evaluates each step in its own order and keeps the inner
+  call's arguments, with the counts they took, so the threads run exactly the
+  calls the loop would have made. The fold is the loop's own, so no
+  associativity is assumed.
 
 All are checked to give the same answer at every thread count
 (`test/fn_compile.sh`).
