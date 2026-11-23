@@ -1185,7 +1185,6 @@ static Expr *anf_let(const Expr *x) {                /* a name for x's value (it
   Expr *l = mke(E_LET, x->kind); l->k = anf_n++;
   Expr *v = mke(E_VAR, x->kind); v->k = l->k; v->bind = l; l->bind = v; return l;
 }
-#define ANF_MARK (1 << 29)                           /* (x->var while x is bound to a name: bound() sees it) */
 static Expr *anf_region(const Expr *e, int tails_ok) {
   st_grow(); stamp += 2;
   count_uses(e);
@@ -1203,7 +1202,7 @@ static Expr *anf_region(const Expr *e, int tails_ok) {
   for (int i = 0; i < nk; i++) {                     /* each value, then its name (the next ones may read it) */
     Expr *x = (Expr *)cand[i];
     lets[i] = anf_let(x); lets[i]->a = anf_tree(x);
-    x->var = ANF_MARK | i; x->vscope = fscope; x->bind = lets[i];
+    x->var = i; x->vscope = fscope; x->bind = lets[i];   /* (bound: bound() sees it, and bind names its let) */
   }
   Expr *body = anf_tree(e);
   for (int i = nk - 1; i >= 0; i--) { lets[i]->b = body; body = lets[i]; }
@@ -1226,7 +1225,7 @@ static Expr *anf_tree(const Expr *e) {
     if (sc->op == E_PARAM || sc->op == E_CONST || bound(sc)) c->a = anf_tree(sc);
     else {                                           /* (the scrutinee named, for the arms' fields) */
       l = anf_let(sc); l->a = anf_tree(sc);
-      sc->var = ANF_MARK; sc->vscope = fscope; sc->bind = l;
+      sc->var = 0; sc->vscope = fscope; sc->bind = l;
       c->a = anf_var(l);
     }
     c->args = A(sizeof(Expr *) * (size_t)(e->nargs ? e->nargs : 1));
@@ -1672,7 +1671,7 @@ static int emit_arg(Buf *b, Buf *pre, const Expr *call, int i, int par, int budg
    the states first (the loop's own cheap part), computes every G on worker threads, and folds them into acc
    IN ORDER -- the same fold the loop makes, so the answer is the loop's whatever A is.  It is used where the
    caller is itself running in parallel (the entry, a parallel copy), with the depth `d` bounding the nesting. */
-typedef struct { int acc, base_then; const Expr *cond, *step, *G; } PL;
+typedef struct { int acc, base_then; const Expr *cond, *step, *G, *Gname; } PL;   /* Gname: G's name, when a let binds it (EXPLICIT BINDING) */
 static PL *plinfo; static unsigned char *pl_done; static int plpar, pl_unit;   /* pl_unit: writing a data unit (its runtime has the threads) */
 static int pl_ment(const Expr *e, int f, int k, unsigned char *seen) {   /* does e read parameter k of f? */
   if (!e || seen[e->id]) return 0;
@@ -1713,17 +1712,22 @@ static int pl_ok(int f) {
   plinfo[f].acc = 0; plinfo[f].G = NULL;
   const Expr *B = funs[f].body;
   if (B->op != E_IF) return 0;
-  int then_base = B->b->op == E_PARAM && B->b->nargs == f && B->c->op == E_CALL && B->c->k == f;
-  int else_base = B->c->op == E_PARAM && B->c->nargs == f && B->b->op == E_CALL && B->b->k == f;
+  /* (the step may name G first: `let x = (G ..) in (f .. (A acc x))`) */
+  const Expr *Gl = NULL, *sb = B->b, *sc = B->c;
+  if (sc->op == E_LET && sc->b->op == E_CALL && sc->b->k == f && sc->a->op == E_CALL && sc->a->k != f) { Gl = sc; sc = sc->b; }
+  else if (sb->op == E_LET && sb->b->op == E_CALL && sb->b->k == f && sb->a->op == E_CALL && sb->a->k != f) { Gl = sb; sb = sb->b; }
+  int then_base = B->b->op == E_PARAM && B->b->nargs == f && sc->op == E_CALL && sc->k == f;
+  int else_base = B->c->op == E_PARAM && B->c->nargs == f && sb->op == E_CALL && sb->k == f;
   if (!then_base && !else_base) return 0;
-  const Expr *base = then_base ? B->b : B->c, *step = then_base ? B->c : B->b;
+  const Expr *base = then_base ? B->b : B->c, *step = then_base ? sc : sb;
   int acc = (int)base->k;
   if (step->nargs != funs[f].arity || pl_m(B->a, f, acc)) return 0;
   for (int k = 0; k < step->nargs; k++) if (k != acc && pl_m(step->args[k], f, acc)) return 0;
   const Expr *G = NULL; unsigned char *seen = calloc((size_t)eid + 1, 1);
   int ok = pl_split(step->args[acc], f, acc, &G, seen); free(seen);
+  if (Gl) { if (G || pl_m(Gl->a, f, acc)) return 0; G = Gl->a; }   /* (G is the let's value; the fold reads its name) */
   if (!ok || !G) return 0;
-  plinfo[f].acc = acc; plinfo[f].base_then = then_base; plinfo[f].cond = B->a; plinfo[f].step = step; plinfo[f].G = G;
+  plinfo[f].acc = acc; plinfo[f].base_then = then_base; plinfo[f].cond = B->a; plinfo[f].step = step; plinfo[f].G = G; plinfo[f].Gname = Gl ? Gl->bind : NULL;
   if (dbg) DBG("f%d folds independent steps: its calls of f%ld run in parallel\n", f, G->k);
   return 1;
 }
@@ -1780,8 +1784,9 @@ static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per 
   put(&w, ";\n    ");
   put(&w, "long v%d = g[i];\n    acc = ", gv);
   fscope++; Expr *G = (Expr *)L->G; int sv = G->var, ss = G->vscope; G->var = gv; G->vscope = fscope;
+  if (L->Gname) { ((Expr *)L->Gname)->var = gv; ((Expr *)L->Gname)->vscope = fscope; }
   ok = ok && emit_region(&w, pre, L->step->args[L->acc], 0, budget - 1);
-  G->var = sv; G->vscope = ss;
+  G->var = sv; G->vscope = ss; if (L->Gname) ((Expr *)L->Gname)->var = -1;
   put(&w, ";\n  }\n  free(st); free(g);\n  return acc;\n}\n");
   put(pre, "%s", w.s); free(w.s);
   emitting = se;
@@ -1948,6 +1953,8 @@ static int rc_arm_field(const Expr *m, int i, const LinCtor *ac, int j, Shape ss
    the function's frame, set wherever they are computed: the drop reads it, and on a path that never computed the
    local it is still nothing.  (A tail call is a new frame: the variable starts empty again.) */
 static const Expr **spill, *spill_cur; static int nspill;
+static int let_chain;   /* (the entry's let chain being written: its inner lets are plain) */
+static void rf_pick(const Expr *y, ISet c, const int *ci, unsigned char *seen, const Expr ***fx, int *nf); static int rf_dep(const Expr *x, const int *ci, unsigned char *seen);
 typedef struct { const Expr *base; long k; int v; } EmFB;   /* (MEMORY) the fields an arm took apart, by local */
 static int *mr_tokw; static const Expr **mr_tokb; static const Expr *dp_hole;
 static EmFB *em_fb; static int em_nfb, em_cfb;
@@ -1973,6 +1980,39 @@ static int emit_fn_body(Buf *fb, Buf *pre, const Expr *body) {   /* `return <bod
 static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   int tp = tailpos; tailpos = 0;
   if (budget <= 0) return 0;
+  if (e->op == E_LET && par && emitting == -1 && !let_chain) {   /* (the entry's bindings: THE ENTRY'S LOOPS, STARTED EARLY) */
+    int n = 0; const Expr *body = e;
+    int cap = 8; const Expr **lets = malloc(sizeof *lets * (size_t)cap);
+    while (body->op == E_LET) { if (n == cap) lets = realloc(lets, sizeof *lets * (size_t)(cap *= 2)); lets[n++] = body; body = body->b; }
+    st_grow(); stamp += 2; count_uses(body);
+    int *ci = malloc(sizeof *ci * (size_t)(eid + 1)); for (int i = 0; i <= eid; i++) ci[i] = -1;
+    for (int i = 0; i < n; i++) ci[lets[i]->bind->id] = i;
+    int lastheavy = -1; for (int i = 0; i < n; i++) if (has_call(lets[i]->a)) lastheavy = i;
+    unsigned char *seen = calloc((size_t)eid + 1, 1); const Expr **fx = NULL; int na = 0;
+    rf_pick(body, cert(body), ci, seen, &fx, &na);
+    int *fpos = malloc(sizeof *fpos * (size_t)(na + 1)), nf = 0;
+    for (int i = 0; i < na; i++) { memset(seen, 0, (size_t)eid + 1); int at = rf_dep(fx[i], ci, seen) + 1; if (at <= lastheavy) { fx[nf] = fx[i]; fpos[nf++] = at; } }
+    free(seen); free(ci);
+    int *fsite = calloc((size_t)(nf ? nf : 1), sizeof *fsite), ok = 1; Buf *fcall = calloc((size_t)(nf ? nf : 1), sizeof *fcall);
+    put(b, "({ ");
+    for (int i = 0; i <= n && ok; i++) {
+      for (int f = 0; f < nf && ok; f++) if (fpos[f] == i) { fcall[f] = nbuf(64); fsite[f] = fork_open(b, pre, fx[f], budget, &fcall[f], &ok); }
+      if (i == n) break;
+      int k = nvar++; put(b, "long v%d = ", k); ok = ok && emitx(b, pre, lets[i]->a, par, budget - 1); put(b, "; ");
+      lets[i]->bind->var = k; lets[i]->bind->vscope = fscope;
+    }
+    for (int f = 0; f < nf && ok; f++) {
+      int k = fsite[f], v = nvar++;
+      put(b, "long v%d = sp%d_ ? (pthread_join(t%d_, 0), LIN_JOINED, s%d_.r) : %s; ", v, k, k, k, fcall[f].s);
+      ((Expr *)fx[f])->var = v; ((Expr *)fx[f])->vscope = fscope;
+    }
+    let_chain = 1; tailpos = tp; ok = ok && emitx(b, pre, body, par, budget - 1); tailpos = 0; let_chain = 0;
+    put(b, "; })");
+    for (int i = 0; i < n; i++) lets[i]->bind->var = -1;
+    for (int f = 0; f < nf; f++) { ((Expr *)fx[f])->var = -1; free(fcall[f].s); }
+    free(lets); free(fx); free(fpos); free(fsite); free(fcall);
+    return ok;
+  }
   if (e->op == E_LET) {                              /* (see EXPLICIT BINDING) the value, its name, the body */
     int k = nvar++; Expr *v = e->bind;
     put(b, "({ long v%d = ", k); if (!emitx(b, pre, e->a, par, budget - 1)) return 0; put(b, "; ");
@@ -3966,6 +4006,11 @@ static int mr_id(const Expr *e) {
   return -1;
 }
 static int mr_atomic(const Expr *e) { return e->op == E_PARAM || e->op == E_VAR || e->op == E_CONST || e->op == E_FIELD; }
+static int mr_data(const Expr *e);
+/* (a vector's element read is what a field read is: a reference the VECTOR holds, not one of its own) */
+static int mr_elemread(const Expr *e) {           /* (of a NAMED vector: one computed for the read dies at it, and its element is taken first) */
+  return e->op == E_VOP && e->k == LIN_VOP_GET && mr_data(e) && e->nargs && mr_atomic(e->args[0]);
+}
 static int mr_dfn_of(const Expr *e) { Shape s = shape_of(e); return s.k == 5 && s.dt ? drop_fn(s) : -1; }
 static int mr_data(const Expr *e) { return mr_dfn_of(e) >= 0; }
 static unsigned char *mr_set(void) { return calloc((size_t)mr_cap + 1, 1); }
@@ -4030,7 +4075,7 @@ static Expr *mr_ops(Expr *e, int octx, const unsigned char *A, unsigned char *B)
   /* a value only read that is not a name: named first (see MEMORY) */
   for (int i = 0; i < n; i++) {
     Expr *a = *slot[i];
-    if (own[i] || mr_atomic(a) || !mr_data(a)) continue;
+    if (own[i] || mr_atomic(a) || mr_elemread(a) || !mr_data(a)) continue;
     Expr *l = anf_let(a); l->a = a; *slot[i] = anf_var(l); l->b = e;
     if (l->k >= mr_letcap) { int c = l->k * 2 + 64; mr_letv = realloc(mr_letv, sizeof *mr_letv * (size_t)c); for (int j = mr_letcap; j < c; j++) mr_letv[j] = -1; mr_letcap = c; }
     return mr(l, octx, A, B);
@@ -4142,6 +4187,8 @@ static Expr *mr(Expr *e, int octx, const unsigned char *A, unsigned char *B) {
       alias = 1;
       if (vid >= 0) ablock = mr_alias[vid] >= 0 ? mr_alias[vid] : vid;
       else if (e->a->op == E_FIELD) ablock = mr_id(e->a->a);
+    } else if (mr_elemread(e->a) && mr_atomic(e->a->args[0]) && mr_id(e->a->args[0]) >= 0) {   /* (an element: an alias of its vector) */
+      int vv = mr_id(e->a->args[0]); alias = 1; ablock = mr_alias[vv] >= 0 ? mr_alias[vv] : vv;
     }
     int x = mr_newvar(!alias, mr_dfn_of(e->a), e->bind);
     if (alias) mr_alias[x] = ablock;
@@ -4197,6 +4244,13 @@ static Expr *mr(Expr *e, int octx, const unsigned char *A, unsigned char *B) {
     return e; }
   case E_CALL: case E_CTOR: case E_VOP: case E_BIN: case E_FOP:
     if (e->op == E_CTOR && !e->nargs) { memcpy(B, A, (size_t)mr_cap); return e; }
+    if (mr_elemread(e)) {                            /* (taken over: a count of its own; read: the vector's) */
+      Expr *r = mr_ops(e, 0, A, B);
+      if (octx) {                                    /* (the count taken before the vector, dying here, goes) */
+        Expr **at = r->op == E_AFTER ? &r->a : &r; Expr *d = mke(E_DUP, e->kind); d->a = *at; *at = d;
+      }
+      return r;
+    }
     return mr_ops(e, octx, A, B);
   default: memcpy(B, A, (size_t)mr_cap); return e;
   }
@@ -5509,7 +5563,9 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
     }
     if (!safe) {}
     else {
-      if (mem_new()) {                                 /* (see EXPLICIT BINDING, and MEMORY) */
+      int unit_data; { mm_new(MM_NUM); unit_data = has_data(entry); for (int i = 0; !unit_data && i < nfun; i++) unit_data = has_data(funs[i].body); }
+      if (mem_new() && !unit_data) {}                /* (numbers alone: nothing is counted, nothing need be named) */
+      else if (mem_new()) {                            /* (see EXPLICIT BINDING, and MEMORY) */
         anf_n = 0;
         for (int i = 0; i < nfun; i++) if (funs[i].body) { fscope++; emitting = i; funs[i].body = anf_region(funs[i].body, 1); }
         fscope++; emitting = -1; entry = anf_region(entry, 0);
