@@ -606,7 +606,10 @@ static int term_impure(const Term *t) {              /* an effect or a foreign c
   }
   return 0;
 }
-static void run_and_report(Net *net, int domain) {
+/* A program whose effects gave the host its turn (lin.h, lin_io_yield): the net IS the program's state, so it is
+   kept here, and no later form runs before it ends -- forms run in order, and this one has not finished. */
+static Net *io_suspended;
+static int run_and_report(Net *net, int domain) {
   struct timespec t0, t1;
   { const char *dp = getenv("LIN_DUMP_NET"); if (dp) net_save_line(net, dp); }   /* test/netdump.py reads the dump */
   if (!bench_measured) {                 /* nobody reduced this net yet: do it here */
@@ -620,7 +623,9 @@ static void run_and_report(Net *net, int domain) {
     }
   }
   clock_gettime(CLOCK_MONOTONIC, &t0);
-  int no_io = !net_run_io(net, STEP_LIMIT);
+  int64_t io = net_run_io(net, STEP_LIMIT);
+  if (io == LIN_IO_SUSPENDED) { fflush(stdout); return 1; }
+  int no_io = !io;
   clock_gettime(CLOCK_MONOTONIC, &t1);
   /* net_print is what OBSERVES the value -- FFI dispatch (and so a prelude's `(set_driver ...)`)
      happens there -- so it always runs; only the `=> ` line is suppressed for the prelude. */
@@ -645,9 +650,22 @@ static void run_and_report(Net *net, int domain) {
     }
     bench_measured = 0;
   }
+  return 0;
 }
 
 /* (recursion builders: term_fix in parse.c; the Y-knot needs no bound and no widening pass) */
+
+/* The host's call when it has had its turn: run the suspended program's effects on.  1 while it is still
+   running (it gave way again), 0 once it has ended -- or when nothing was suspended. */
+int lin_resume(void) {
+  if (!io_suspended) return 0;
+  int64_t io = net_run_io(io_suspended, STEP_LIMIT);
+  fflush(stdout);
+  if (io == LIN_IO_SUSPENDED) return 1;
+  net_free(io_suspended); free(io_suspended); io_suspended = NULL;
+  fflush(stdout); fflush(stderr);
+  return 0;
+}
 
 void eval_form(Term *t) {
   char err[512]; Scheme sch;
@@ -655,25 +673,30 @@ void eval_form(Term *t) {
   int track = lin_form_key && !form_nest && !quiet_forms;
   if (track) { form_count++; lin_form_idx = -1; }
   if (!type_check(t, &sch, err, sizeof err)) { char tmp[300]; printf("error: %s (at %s)\n", err, lin_where(tmp, sizeof tmp, lin_form_line)); if (track) form_bad = 1; return; }
-  Term *ex = expand_defs(t); Net net; net_init(&net, 1 << 10);
-  if (!compile(ex, &net, err, sizeof err)) { printf("error: %s\n", err); net_free(&net); term_free(ex); if (track) form_bad = 1; return; }
+  Term *ex = expand_defs(t); Net *np = malloc(sizeof *np); net_init(np, 1 << 10);   /* (on the heap: a suspended program keeps it, at this address) */
+  if (!compile(ex, np, err, sizeof err)) { printf("error: %s\n", err); net_free(np); free(np); term_free(ex); if (track) form_bad = 1; return; }
   if (track) {
     int dom = type_domain(sch.t);
     if (form_bad || term_impure(ex) || !(dom == DT_NUM || dom == DT_BOOL || dom == DT_FLOAT)) form_bad = 1;
-    else { lin_form_idx = form_count - 1; lin_form_domain = dom; lin_form_net = &net; }
+    else { lin_form_idx = form_count - 1; lin_form_domain = dom; lin_form_net = np; }
   }
   struct timespec b0, b1;
   bench_measured = bench_mode;
-  if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
-  int64_t steps = net_reduce(&net, STEP_LIMIT);
-  if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
+  if (bench_mode) { bench_goi0 = goi_det(np); clock_gettime(CLOCK_MONOTONIC, &b0); }
+  int64_t steps = net_reduce(np, STEP_LIMIT);
+  if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(np); bench_ms = ms_since(b0, b1); }
   /* `steps >= STEP_LIMIT` means the reduction stopped because it ran out of budget, not because it
      reached a value.  Printing the net regardless is how a *partial* graph becomes the answer with
      exit status 0: measured, `(fib 12)` printed 0 where the answer is 144. */
   if (steps >= STEP_LIMIT) printf("error: no value within %" PRId64 " reduction steps\n", STEP_LIMIT);
-  else run_and_report(&net, type_domain(sch.t));
+  else if (run_and_report(np, type_domain(sch.t))) {   /* suspended: the net lives on until lin_resume ends it */
+    io_suspended = np;
+    if (track) form_bad = 1;
+    if (track) { lin_form_idx = -1; lin_form_net = NULL; }
+    term_free(ex); return;
+  }
   if (track) { lin_form_idx = -1; lin_form_net = NULL; }
-  net_free(&net); term_free(ex);
+  net_free(np); free(np); term_free(ex);
 }
 
 static const char *qualify_self;   /* the definition being read: its own name is bound by its fixpoint */
@@ -1034,6 +1057,7 @@ static void export_namespace(const char *name);   /* (export <ns>) re-export */
 static int parse_std;                              /* the file being read is the standard library's (load_file) */
 static void form_cb(Term *t, const char *perr, void *ud) {
   (void)ud;
+  if (io_suspended) { term_free(t); return; }   /* (a suspended form has not finished: nothing after it runs yet) */
   if (perr) { build_read_err = 1; printf("error: %s\n", perr); return; }
   build_read_err = 0;
   if (t->type == TDEF || t->type == TDEFX || (t->type != TLOAD && t->type != TNS && t->type != TOPEN && t->type != TEXPORT && t->type != TDATATYPE))

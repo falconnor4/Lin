@@ -62,8 +62,34 @@ static inline Port W(const Net *n, Port p) { return n->wire[p.node * 3 + p.port]
 static inline int live(const Net *n, Port p) { return IN(n, p.node) && !n->dead[p.node]; }
 static inline int is(const Net *n, Port p, int tag, int port) { return live(n, p) && n->tag[p.node] == tag && (int)p.port == port; }
 /* The value a port carries: arriving at a fan's copy port means the value comes from its principal side. */
+/* WHICH COPY A READ STANDS FOR.  A recursive call the unit declined is rewritten with ONE fan on the function, labelled
+   with a label of its own (y_expand: net_fresh_label), and every fan the copying makes carries that label.  So while
+   a unit is read (xing_on), each FRESH-labelled fan crossed at a copy port is remembered, and a fan-in met later with
+   that label -- the function's body still shared between this call's copy and the copy kept for the next call -- is
+   read at the copy the path in crossed: the pairing the two fans' annihilation will give.  Only fresh labels: an
+   ordinary label is a level, which two unrelated fans can share (measured: reading by level gave a wrong answer).
+   A label crossed at both copy ports is not decided, and the read declines as it always did. */
+typedef struct { Scope l; int port; } Xing;
+static Xing *xing; static int nxing, cxing, xing_on;
+static int xing_fresh(const Net *n, Scope l) { return l > 0 && (int)l <= n->nlv && n->lv_parent[l] == 0 && n->lv_bit[l] == 3; }
+static void xing_note(const Net *n, Port p) {
+  Scope l = n->scope[p.node];
+  if (!xing_fresh(n, l)) return;
+  for (int i = 0; i < nxing; i++) if (xing[i].l == l) { if (xing[i].port != (int)p.port) xing[i].port = -1; return; }
+  if (nxing >= cxing) xing = realloc(xing, sizeof *xing * (size_t)(cxing = cxing ? cxing * 2 : 64));
+  xing[nxing++] = (Xing){ l, (int)p.port };
+}
+static int xing_port(const Net *n, int fan) {
+  Scope l = n->scope[fan];
+  if (!xing_fresh(n, l)) return -1;
+  for (int i = 0; i < nxing; i++) if (xing[i].l == l) return xing[i].port;
+  return -1;
+}
 static Port dhop(const Net *n, Port p) {
-  for (int k = 0; k < n->nn && live(n, p) && n->tag[p.node] == DUP && p.port != 0; k++) p = W(n, (Port){p.node, 0});
+  for (int k = 0; k < n->nn && live(n, p) && n->tag[p.node] == DUP && p.port != 0; k++) {
+    if (xing_on) xing_note(n, p);
+    p = W(n, (Port){p.node, 0});
+  }
   return p;
 }
 
@@ -551,6 +577,14 @@ static V *eval_at(Port p, Env *env) {
     fail("a variable bound outside the function"); return NULL;
   }
   if (t == APP && p.port == 1) return apply(eval(W(N, (Port){p.node, 0}), env), lzp(W(N, (Port){p.node, 2}), env));
+  /* A VARIABLE OF A COPY.  A function the net is still copying (the step of a loop that runs through effects,
+     whose turns each get a copy) has its body shared between the copies, so a read inside it can meet a fan-in:
+     its two inputs are the two copies'.  Which copy this evaluation stands for is the copy it entered the body
+     by: the fresh-labelled fans the walk to the callee crossed (WHICH COPY A READ STANDS FOR, above). */
+  if (t == DUP && p.port == 0) {
+    int k = xing_port(N, p.node);
+    if (k == 1 || k == 2) return eval(W(N, (Port){p.node, k}), env);
+  }
   { static const char *const tn[] = {"lambda", "application", "fan", "eraser", "root"};   /* (which, so the coverage report can say) */
     static char why[96]; snprintf(why, sizeof why, "a node the evaluator does not read (%s, port %d)", t >= 0 && t < 5 ? tn[t] : "?", p.port);
     fail(why); }
@@ -732,7 +766,7 @@ static Expr *to_expr_v(V *v) {
     if (!ok) { failed = sf; fuel = sfu; fun_rollback(snf); }
     if (ok) { Expr *e = mke(E_CONST, 3); e->k = bk; return hc(e); }
     if (inp_on && !v->env && numeral_shape(N, (Port){v->lam, 0}) && !list_end(N, (Port){v->lam, 0})) {   /* a list already built: read in at call time */
-      if (small_data(N, (Port){v->lam, 0}, SMALL_CONST_NODES)) {   /* (a short one of pure data is a constant of the unit) */
+      if (!lin_io_looping && small_data(N, (Port){v->lam, 0}, SMALL_CONST_NODES)) {   /* (a short one of pure data is a constant of the unit; not a loop's state: lin.h) */
         int sf = failed, snf = nfun; int64_t sfu = fuel;
         fail_quiet++; Expr *cl = const_cells(v); if (failed) cl = NULL; fail_quiet--;
         if (cl && const_tree(cl, 0)) return cl;
@@ -4345,7 +4379,7 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
   return r;
 }
 static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *anum) {
-  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; hc_reset(); uses_data = 0; rc_bor = NULL; rc_pure = NULL; rc_mt = 0;
+  N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; mr_ntok = 0; hc_reset(); uses_data = 0; rc_bor = NULL; rc_pure = NULL; rc_mt = 0;
   /* a one-time compile: the budget only stops an evaluation that does not end */
   DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
   Compiled *r = NULL;
@@ -4370,7 +4404,13 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
       if (anum[k] && !(known && known[k])) { rt_of[k] = nesh; esh[nesh++] = anum[k] == 2 ? (Shape){ 0, NULL } : (Shape){ 1, NULL }; esh_data |= anum[k] == 2; }
     }
   }
-  if (compile_body_spec(F, NULL, known) == 0 && !failed) {
+  /* (the copy choices are the CALLEE's: its body is what the unit replaces nothing of.  The arguments and the context
+     are the call site's, which may itself be shared between copies -- a value read there for one copy and folded
+     into the shared call would be every copy's -- so they are read without them.) */
+  xing_on = 1;
+  int body_ok = compile_body_spec(F, NULL, known) == 0;
+  xing_on = 0;
+  if (body_ok && !failed) {
     arity = funs[0].arity;
     /* THE ENTRY: f0 applied to the call's arguments -- the entry's own parameters, or expressions */
     int nnum = 0;
@@ -5118,10 +5158,17 @@ static int numeral_shape(const Net *n, Port p) {
    whole program on the next run (a unit that reads data in is computed afresh every time).  How small: the
    value's own structure (below its root, through sharing) within a bound, so a long list built at run time is
    still read in. */
+/* (`seen` is a stamp per node, kept between calls: the walk visits at most `limit` nodes, and clearing a table the
+   net's size for each one made the call cost the whole net -- measured, a game whose net had grown to a million
+   slots spent a tenth of every frame in memset here.) */
+static unsigned *sd_seen; static size_t sd_cap; static unsigned sd_gen;
 static int small_data(const Net *n, Port p, int limit) {
   int *stk = malloc(sizeof *stk * (size_t)(limit + 8)), sp = 0, cnt = 0;
-  unsigned char *seen = calloc((size_t)n->nn, 1);
-  Port q = dhop(n, p); stk[sp++] = q.node; seen[q.node] = 1;
+  if (sd_cap < (size_t)n->nn || ++sd_gen == 0) {
+    size_t c = (size_t)n->nn * 2 + 64; free(sd_seen); sd_seen = calloc(c, sizeof *sd_seen); sd_cap = c; sd_gen = 1;
+  }
+  unsigned *seen = sd_seen; const unsigned g = sd_gen;
+  Port q = dhop(n, p); stk[sp++] = q.node; seen[q.node] = g;
   while (sp > 0 && cnt <= limit) {
     int a = stk[--sp]; cnt++;
     int t = n->tag[a], ks[2], nk = 0;
@@ -5130,13 +5177,13 @@ static int small_data(const Net *n, Port p, int limit) {
     else if (t == DUP) ks[nk++] = 0;
     for (int i = 0; i < nk; i++) {
       Port w = W(n, (Port){a, ks[i]});
-      if (!live(n, w) || seen[w.node]) continue;
+      if (!live(n, w) || seen[w.node] == g) continue;
       int tw = n->tag[w.node];
       if (tw == ROOT) { cnt = limit + 1; break; }
-      seen[w.node] = 1; if (sp < limit + 4) stk[sp++] = w.node;
+      seen[w.node] = g; if (sp < limit + 4) stk[sp++] = w.node;
     }
   }
-  free(stk); free(seen);
+  free(stk);
   return cnt <= limit;
 }
 static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anum);
@@ -5161,7 +5208,7 @@ static int const_data(Net *n, Port p) {             /* does this value read as p
    the arguments the unit that compiled takes. */
 static Compiled *compile_pref(Net *n, int F, const Port *ap, int *an, int car) {
   int an2[8], diff = 0;
-  for (int k = 0; k < car; k++) { an2[k] = an[k]; if (an[k] == 2 && small_data(n, ap[k], SMALL_CONST_NODES) && const_data(n, ap[k])) { an2[k] = 0; diff = 1; } }
+  for (int k = 0; k < car; k++) { an2[k] = an[k]; if (an[k] == 2 && !lin_io_looping && small_data(n, ap[k], SMALL_CONST_NODES) && const_data(n, ap[k])) { an2[k] = 0; diff = 1; } }
   if (diff) {
     int sc = cx_n; Port *sp = NULL; int *sk = NULL;
     if (sc) { sp = malloc(sizeof *sp * (size_t)sc); sk = malloc(sizeof *sk * (size_t)sc); memcpy(sp, cx_port, sizeof *sp * (size_t)sc); memcpy(sk, cx_kind, sizeof *sk * (size_t)sc); }
@@ -5242,23 +5289,90 @@ static int y_expand(Net *n, int h, int appy) {
   net_link(n, (Port){a2.node, 0}, (Port){Yc, 0}, 1);   /* a redex, queued: fired when the self argument is demanded */
   return 1;
 }
+/* A CALL SHARED BY TWO COPIES, SPLIT.  A function the net is still copying (y_expand's one fan, with its own label L)
+   shares its body between the copy being run and the copy kept for the next call, and a call in that body then
+   has an argument that is a SUPERPOSITION -- {a1 a2}_L, the two copies' values -- which no unit can be given: the
+   call stands for two calls.  So it is made two, by the rule an application to a superposition has,
+
+       (Y F) .. {a1 a2}_L ..   ->   { ((Y1 F1) .. a1 ..)  ((Y2 F2) .. a2 ..) }_L      F, and every other argument, shared by fans labelled L
+
+   -- the result a superposition with the same label, so the consumer's copying fan (label L) meets it and each copy
+   receives its own call.  Each is an ordinary call (a fresh combinator applied to F through the L fan), which the
+   unit takes like any other; the copy it reached F by is the one it reads F's body at (WHICH COPY). */
+static int y_split(Net *n, int h, int appy, int F, int car) {
+  (void)F;
+  int c[car], ks = -1;   /* (the spine's own length: one slot per argument) */
+  int cl = appy;
+  for (int k = 0; k < car; k++) {
+    Port nx = W(n, (Port){cl, 1});
+    if (!is(n, nx, APP, 0)) return 0;
+    cl = c[k] = nx.node;
+    Port a = W(n, (Port){cl, 2});
+    if (ks < 0 && is(n, a, DUP, 0) && xing_fresh(n, n->scope[a.node])) ks = k;
+  }
+  if (ks < 0) return 0;
+  int S = W(n, (Port){c[ks], 2}).node;
+  Scope L = n->scope[S];
+  int Y1 = y_copy(n, h); if (Y1 < 0) return 0;
+  int Y2 = y_copy(n, h); if (Y2 < 0) { net_drop(n, Y1); return 0; }
+  Port out = W(n, (Port){c[car - 1], 1}), fv = W(n, (Port){appy, 2});
+  Port Df = net_alloc(n, DUP, L), A1 = net_alloc(n, APP, n->scope[appy]), A2 = net_alloc(n, APP, n->scope[appy]);
+  net_link(n, (Port){Df.node, 0}, fv, 1);
+  net_link(n, (Port){A1.node, 2}, (Port){Df.node, 1}, 0);
+  net_link(n, (Port){A2.node, 2}, (Port){Df.node, 2}, 0);
+  Port f1 = (Port){A1.node, 1}, f2 = (Port){A2.node, 1};
+  for (int k = 0; k < car; k++) {
+    Port B1 = net_alloc(n, APP, n->scope[c[k]]), B2 = net_alloc(n, APP, n->scope[c[k]]);
+    net_link(n, (Port){B1.node, 0}, f1, 1); net_link(n, (Port){B2.node, 0}, f2, 1);
+    if (k == ks) {
+      net_link(n, (Port){B1.node, 2}, W(n, (Port){S, 1}), 1);
+      net_link(n, (Port){B2.node, 2}, W(n, (Port){S, 2}), 1);
+    } else {
+      Port D = net_alloc(n, DUP, L);
+      net_link(n, (Port){D.node, 0}, W(n, (Port){c[k], 2}), 1);
+      net_link(n, (Port){B1.node, 2}, (Port){D.node, 1}, 0);
+      net_link(n, (Port){B2.node, 2}, (Port){D.node, 2}, 0);
+    }
+    f1 = (Port){B1.node, 1}; f2 = (Port){B2.node, 1};
+  }
+  Port R = net_alloc(n, DUP, L);
+  net_link(n, (Port){R.node, 0}, out, 1);
+  net_link(n, (Port){R.node, 1}, f1, 0);
+  net_link(n, (Port){R.node, 2}, f2, 0);
+  for (int k = 0; k < 3; k++) n->wire[S * 3 + k] = NONE;   /* (its copies have moved to the two calls) */
+  net_drop(n, S);
+  for (int k = car - 1; k >= 0; k--) net_drop(n, c[k]);   /* (wires all moved: nothing is erased) */
+  net_drop(n, appy);                                 /* (its function, the old combinator, gets the eraser; F has moved) */
+  net_link(n, (Port){A1.node, 0}, (Port){Y1, 0}, 1);   /* the two calls: redexes, queued */
+  net_link(n, (Port){A2.node, 0}, (Port){Y2, 0}, 1);
+  DBG("split a call shared by two copies (argument %d)\n", ks);
+  return 1;
+}
 /* a call the unit declines: the cheap rewrite above, else the net's own beta */
 static void y_decline(Net *n, Port p1, Port p2, int *changed) {
   int h, appy;
   if (y_fix(n, p1, p2, &h, &appy) && y_expand(n, h, appy)) { (*changed)++; n->steps++; return; }
   if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
 }
+static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *changed);
 static int fn_reduce(Net *n, Port *rx, int nred, int64_t limit, int *changed) {
+  int r = fn_reduce_body(n, rx, nred, limit, changed);
+  xing_on = 0; nxing = 0;
+  return r;
+}
+static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *changed) {
   (void)limit;
   int folded = 0;
   for (int i = 0; i < nred; i++) {
     Port p1 = rx[2 * i], p2 = rx[2 * i + 1];
     if (fn_off) { y_decline(n, p1, p2, changed); continue; }
     int h, appy, F;
+    xing_on = 0; nxing = 0;
     if (!y_call(n, p1, p2, &h, &appy, &F)) {           /* an earlier fold in this wave took it */
       y_decline(n, p1, p2, changed);
       continue;
     }
+    xing_on = 1; (void)dhop(n, W(n, (Port){appy, 2})); xing_on = 0;   /* (the copy of F this call reached: WHICH COPY) */
     /* (the call WITH its arguments first, when some are not numbers yet: that unit is the one that runs, and a
        function of data or of functions compiles no other way -- the function alone is the fallback) */
     Compiled *c = NULL;
@@ -5267,6 +5381,7 @@ static int fn_reduce(Net *n, Port *rx, int nred, int64_t limit, int *changed) {
     /* ARGUMENTS THAT ARE NOT VALUES YET -- `(check (make 7))` -- are compiled into the unit as expressions, rather
        than built by the net first (which is the slow part); a number already there is passed as one.  A function
        taking a FUNCTION compiles only with its arguments (it is specialised to them). */
+    if (car > 0 && !root_mode && y_split(n, h, appy, F, car)) { (*changed)++; n->steps++; continue; }
     if (car > 0 && car <= 8) {
       Port ap[8]; int an[8], cl = appy, nexpr = 0, shape = 1;
       for (int k = 0; k < car; k++) {

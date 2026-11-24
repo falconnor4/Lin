@@ -166,6 +166,8 @@ int64_t net_force(Net *n, Port p);
 /* Force `p` to WHNF and return a port that still names the value: what readback needs, and the reason
    the core owns it (the caller would otherwise hold a port the rule it fired consumed). */
 Port net_force_val(Net *n, Port p);
+/* Free what no ROOT and no demand root reaches (net.c: WHAT NOTHING CAN REACH).  A safepoint operation. */
+int64_t net_sweep(Net *n);
 /* Register an extra demand root: a port whose weak head normal form the caller is about to observe. */
 void lin_demand(Net *n, Port p);
 Net *net_copy(const Net *n); Scope scope_nil(void);
@@ -428,7 +430,18 @@ int  net_read_string_arena(Net *n, Port p, int pay_enc, const char **out); /* ce
    check a payload, a driver to read an operand list). */
 int  net_read_cell(Net *n, Port p, Port *head, Port *tail);
 int  net_read_float(Net *n, Port p, double *out);    /* the DT_FLOAT provider's table, via its index */
-int64_t net_run_io(Net *n, int64_t limit);
+int64_t net_run_io(Net *n, int64_t limit);   /* 0 no effect, 1 effects ran, LIN_IO_SUSPENDED (below) */
+/* THE HOST'S TURN.  A host that cannot block -- a browser page, whose own loop must run for anything to be
+   shown or any key to arrive -- needs the program's effect loop to give way between two effects.  A call made
+   from an effect (an FFI provider: a game engine's frame) sets `lin_io_yield`; the runner then stops after
+   that effect, with the continuation already applied, and answers LIN_IO_SUSPENDED.  The net is the whole
+   state, so the host resumes by running the same net's effects again (src/main.c, lin_resume). */
+extern int lin_io_yield;
+#define LIN_IO_SUSPENDED 2
+/* A LOOP IS RUNNING (`io_loop`).  Its state is new every turn, so a driver must not fold the state's values
+   into what it caches by content -- a native unit with the data compiled in is a new unit, compiled, each
+   turn (measured: one `cc` per frame).  Set by the effects runner while a loop's turns run. */
+extern int lin_io_looping;
 /* Write the observed result.  `domain` is what the program's TYPE says the result means (a DT_*,
    or -1 when the type is unknown), so readback decodes with the meaning the compiler computed
    instead of guessing one off a node. */

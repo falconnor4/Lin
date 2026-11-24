@@ -29,6 +29,11 @@ void lin_domains_init(void) {
   nominal_register("float", 0);
   nominal_register("list", 1);
   nominal_register("vec", 1);    /* (std/array.lin: a vector's type, whatever stores it) */
+  /* An EFFECT's type (std/io.lin).  Its encoding applies the effect's own binder to a continuation that is
+     itself an effect, so as a structural type it is infinite and a program that loops through effects could
+     not be typed at all ("infinite type").  Named, it is one type: what `io_wait`, `io_print`, `io_loop` and
+     `io_done` build. */
+  nominal_register("io", 0);
 }
 
 /* ---------------- fan walks ----------------  Fan chains: `dup_hop` is the crossing walk, `skip_dup` the plain one.  A CHAIN MAY CYCLE and the bound
@@ -89,7 +94,9 @@ static inline Port fan_walk(Net *n, Port p, int cross) {
   Port a = p, b = p; int64_t lim = (int64_t)n->nn, st = 0, L = 1; int chase = 1;
   for (; st < lim && live(n, a) && n->tag[a.node] == DUP; st++) {
     a = FSTEP(a);
-    if (!live(n, a) || n->tag[a.node] != DUP || !chase) break;
+    if (!live(n, a) || n->tag[a.node] != DUP) break;
+    if (!chase) continue;          /* (the chaser left the fans: no cycle, and the walk goes on to the end alone --
+                                      measured: a walk across four fans stopped ON the second, a fan, not a value) */
     if (!live(n, b) || n->tag[b.node] != DUP) { chase = 0; continue; }
     b = FSTEP(b);
     if (!live(n, b) || n->tag[b.node] != DUP) { chase = 0; continue; }
@@ -744,6 +751,8 @@ int net_print(Net *n, int domain) {
   return d ? d->print(n, lin_driver_state(n, d), domain) : 0;
 }
 
+int lin_io_yield;
+int lin_io_looping;
 int64_t net_run_io(Net *n, int64_t limit) {
   LinDriver *d = readback_driver();
   return d ? d->run_io(n, lin_driver_state(n, d), limit) : 0;
