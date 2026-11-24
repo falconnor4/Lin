@@ -3942,6 +3942,7 @@ static Expr *one_match(Expr *e) {
    function whose value is known (kind 1).  fn_reduce collects them, outermost last; the unit's value is theirs. */
 static Port *cx_port; static int *cx_kind, cx_n, cx_cap;
 static int root_mode;   /* fn_match: the unit is the whole expression the program observes, or nothing */
+static Port root_rp;      /* root_mode: the expression's own port */
 static void cx_push(int kind, Port p) {
   if (cx_n >= cx_cap) { cx_cap = cx_cap ? cx_cap * 2 : 8; cx_port = realloc(cx_port, sizeof *cx_port * (size_t)cx_cap); cx_kind = realloc(cx_kind, sizeof *cx_kind * (size_t)cx_cap); }
   cx_port[cx_n] = p; cx_kind[cx_n] = kind; cx_n++;
@@ -4993,7 +4994,13 @@ static Shape td_shape(const char *d, Shape dflt) {   /* what a descriptor says t
     if (td_args(d, ta, 1) == 1) { Shape ed = (dflt.k == 5 && dflt.dt == VEC_DT && dflt.a && dflt.a->n) ? dflt.a->s[0] : es; es = td_shape(ta[0], ed); }
     return es.k ? sh_mk(VEC_DT, 1, &es) : dflt;
   }
-  if (*d == 'D') { const char *dt = td_dt(d); if (dt) return (Shape){ 5, dt }; }
+  if (*d == 'D') {
+    const char *dt = td_dt(d);
+    /* (the analysis's shape of the same datatype says what its parameters hold where the declaration may not:
+       a field declared `list` is a list of SOMETHING, and the unit knows what -- list(Leaf)) */
+    if (dt && dflt.k == 5 && dflt.dt == dt && dflt.a) return dflt;
+    if (dt) return (Shape){ 5, dt };
+  }
   return dflt;
 }
 static const char *ms_desc;                          /* the declared type of the value ms_value is about to read */
@@ -5046,10 +5053,22 @@ static int64_t ms_value(Marsh *M, Port p, Shape s, int depth) {
   if (M->bad || depth > n->nn) { M->bad = 1; return 0; }
   if (n->steps - M->steps0 > (int64_t)n->nn) { M->bad = 1; return 0; }   /* (a value in hand needs no reduction to read) */
   if (s.k == 0) {                                    /* a field the analysis saw no use of: what the value IS decides */
-    int64_t x; if (net_read_i64(n, p, &x)) return x;
-    int64_t b = net_read_int(n, p, LIN_ENC_BOOL); if (b >= 0) return b;
-    if (dbg > 1) DBG("[not read in: a value of no known shape that is not a number (declared %s)]\n", desc ? desc : "-");
-    M->bad = 1; return 0;
+    /* a constructor's value names its own datatype, `\d0..\d(m-1). ((\_c (d_i f1..fk)) ID)` -- an element of a
+       list passed in whole, whose parameter the unit's own shapes do not say (a game's state, read in afresh each
+       frame).  Looked for FIRST, without reducing under the binders: reading a number would fire the marker. */
+    const LinCtor *ci = NULL;
+    { Port q = net_dhop(n, net_force_val(n, p)); Net *sn = N; N = n;
+      for (int i = 0; i < n->nn && is(n, q, LAM, 0); i++) q = dhop(n, W(n, (Port){q.node, 2}));
+      Port mb, idp; int ml; int64_t id;
+      if (marker_app(q, &mb, &ml, &idp) && net_read_i64(n, idp, &id)) ci = lin_ctor_info(id);
+      N = sn; }
+    if (ci) s = (Shape){ 5, ci->dt, NULL };
+    else {
+      int64_t x; if (net_read_i64(n, p, &x)) return x;
+      int64_t b = net_read_int(n, p, LIN_ENC_BOOL); if (b >= 0) return b;
+      if (dbg > 1) DBG("[not read in: a value of no known shape that is not a number (declared %s)]\n", desc ? desc : "-");
+      M->bad = 1; return 0;
+    }
   }
   if (s.k == 1) { int64_t x; if (!net_read_i64(n, p, &x)) M->bad = 1; return x; }
   if (s.k == 3) { int64_t b = net_read_int(n, p, LIN_ENC_BOOL); if (b < 0) M->bad = 1; return b; }
@@ -5355,6 +5374,84 @@ static void y_decline(Net *n, Port p1, Port p2, int *changed) {
   if (live(n, p1) && live(n, p2) && W(n, p1).node == p2.node && net_interact(n, p1, p2)) { (*changed)++; n->steps++; }
 }
 static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *changed);
+
+/* DECLINES, REMEMBERED.  A call the compiler declined is tried again wherever the same function is called the same
+   way -- in a loop, every turn: a game's frame copies its step afresh (readback's copy_closed), so no node of it is
+   the last turn's, and each of its recursive calls was worked through and declined again, measured ~1.6 ms each,
+   most of a frame.  So a decline is remembered by what the call IS: the function's term and its arguments', hashed
+   by their structure (a variable by its binder's place, a shared value through its fan), numbers and data passed
+   in by their kind only -- what the unit would read at run time.  The key is lossy, and that is safe one way only:
+   a hit skips a compile, never runs one, so the worst a collision does is leave a call to the net. */
+static uint64_t *dk_tab; static int64_t dk_cap, dk_cnt;
+static unsigned *dk_gen_of; static int *dk_idx; static int64_t dk_ncap; static unsigned dk_gen;
+static Port *dk_q; static int64_t dk_qcap;
+static uint64_t dk_mix(uint64_t h, uint64_t v) { return (h ^ (v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2))) * 0xff51afd7ed558ccdULL; }
+static int dk_mark(const Net *n, int node, int *idx, int *next) {   /* 1: first visit (idx assigned) */
+  (void)n;
+  if (dk_gen_of[node] == dk_gen) { *idx = dk_idx[node]; return 0; }
+  dk_gen_of[node] = dk_gen; *idx = dk_idx[node] = (*next)++; return 1;
+}
+static uint64_t dk_term(const Net *n, Port t, uint64_t h, int *next, int64_t *budget) {
+  int64_t qh = 0, qt = 0;
+#define DKQ(x) do { if (qt == dk_qcap) dk_q = realloc(dk_q, sizeof *dk_q * (size_t)(dk_qcap = dk_qcap ? dk_qcap * 2 : 256)); dk_q[qt++] = (x); } while (0)
+  DKQ(t);
+  while (qh < qt) {
+    Port p = dk_q[qh++];
+    if (--*budget < 0) return 0;
+    if (p.node < 0 || !live(n, p)) { h = dk_mix(h, 0xdead); continue; }
+    int tg = n->tag[p.node], ix;
+    if (tg == LAM && p.port == 1) {                  /* a variable: its binder's place, or bound outside */
+      h = dk_mix(h, dk_gen_of[p.node] == dk_gen ? 0x100 + (uint64_t)dk_idx[p.node] : 0x7);
+      continue;
+    }
+    if (tg == LAM && p.port == 0 && numeral_shape(n, p)) { h = dk_mix(h, 0x9); continue; }   /* (a number: which one decides nothing) */
+    int fresh = dk_mark(n, p.node, &ix, next);
+    h = dk_mix(h, ((uint64_t)tg << 4 | (uint64_t)p.port) ^ ((uint64_t)ix << 8));
+    if (!fresh) continue;                            /* (reached again: shared, its place says which) */
+    if (tg == LAM && p.port == 0) {
+      Port v = W(n, (Port){p.node, 1});
+      h = dk_mix(h, v.node >= 0 && live(n, v) && n->tag[v.node] == ERA);
+      DKQ(W(n, (Port){p.node, 2}));
+    } else if (tg == APP && p.port == 1) { DKQ(W(n, (Port){p.node, 0})); DKQ(W(n, (Port){p.node, 2})); }
+    else if (tg == DUP && p.port != 0) DKQ(W(n, (Port){p.node, 0}));
+  }
+#undef DKQ
+  return h;
+}
+static uint64_t dk_key(Net *n, int F, int appy, int car) {
+  if (dk_ncap < n->nn) {
+    free(dk_gen_of); free(dk_idx); dk_ncap = (int64_t)n->nn * 2 + 64;
+    dk_gen_of = calloc((size_t)dk_ncap, sizeof *dk_gen_of); dk_idx = malloc(sizeof *dk_idx * (size_t)dk_ncap); dk_gen = 0;
+  }
+  if (++dk_gen == 0) { memset(dk_gen_of, 0, sizeof *dk_gen_of * (size_t)dk_ncap); dk_gen = 1; }
+  int next = 0; int64_t budget = 1 << 14;
+  uint64_t h = dk_term(n, (Port){F, 0}, 0x51ed, &next, &budget);
+  if (!h) return 0;
+  h = dk_mix(h, (uint64_t)car);
+  for (int k = 0, cl = appy; k < car && car <= 8; k++) {
+    Port nx = W(n, (Port){cl, 1});
+    if (!is(n, nx, APP, 0)) return 0;
+    cl = nx.node; Port a = W(n, (Port){cl, 2});
+    int64_t x;
+    if (numeral_shape(n, a) && net_read_i64(n, a, &x)) h = dk_mix(h, 0x11);   /* (a number: passed at run time) */
+    else if (data_value(n, a)) h = dk_mix(h, list_end(n, a) ? 0x12 : 0x13);   /* (data: read in at run time) */
+    else if (!(h = dk_term(n, a, dk_mix(h, 0x14), &next, &budget))) return 0;
+  }
+  return h ? h : 1;
+}
+static int dk_has(uint64_t k) {
+  if (!k || !dk_cap) return 0;
+  for (int64_t i = (int64_t)(k & (uint64_t)(dk_cap - 1));; i = (i + 1) & (dk_cap - 1)) { if (dk_tab[i] == k) return 1; if (!dk_tab[i]) return 0; }
+}
+static void dk_add(uint64_t k) {
+  if (!k || dk_has(k)) return;
+  if ((dk_cnt + 1) * 2 > dk_cap) {
+    uint64_t *o = dk_tab; int64_t oc = dk_cap; dk_cap = dk_cap ? dk_cap * 2 : 256; dk_tab = calloc((size_t)dk_cap, sizeof *dk_tab); dk_cnt = 0;
+    for (int64_t i = 0; i < oc; i++) if (o[i]) dk_add(o[i]);
+    free(o);
+  }
+  for (int64_t i = (int64_t)(k & (uint64_t)(dk_cap - 1));; i = (i + 1) & (dk_cap - 1)) if (!dk_tab[i]) { dk_tab[i] = k; dk_cnt++; return; }
+}
 static int fn_reduce(Net *n, Port *rx, int nred, int64_t limit, int *changed) {
   int r = fn_reduce_body(n, rx, nred, limit, changed);
   xing_on = 0; nxing = 0;
@@ -5373,6 +5470,11 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
       continue;
     }
     xing_on = 1; (void)dhop(n, W(n, (Port){appy, 2})); xing_on = 0;   /* (the copy of F this call reached: WHICH COPY) */
+    uint64_t dkey = 0;                                 /* (see DECLINES, REMEMBERED) */
+    if (!root_mode && !lin_precompile_depth) {
+      N = n; dkey = dk_key(n, F, appy, fun_arity(F));
+      if (dk_has(dkey)) { DBG("declined before: the call is the net's\n"); y_decline(n, p1, p2, changed); continue; }
+    }
     /* (the call WITH its arguments first, when some are not numbers yet: that unit is the one that runs, and a
        function of data or of functions compiles no other way -- the function alone is the fallback) */
     Compiled *c = NULL;
@@ -5393,7 +5495,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
         if (dbg > 1) { int64_t x = 0; int ns = numeral_shape(n, ap[k]); int ok = ns && net_read_i64(n, ap[k], &x); DBG("[arg %d: shape %d read %d (%" PRId64 ") -> %d]\n", k, ns, ok, x, an[k]); }
         nexpr += an[k] != 1;
       }
-      if (root_mode && (!shape || W(n, (Port){0, 0}).node == cl)) return folded;   /* (the call IS the expression: the ordinary way) */
+      if (root_mode && (!shape || root_rp.node == cl)) return folded;   /* (the call IS the expression: the ordinary way) */
       if (shape && (nexpr || root_mode)) {
         /* the context first (see cx_push): the widest that compiles, else the call alone */
         int top = cl; cx_n = 0;
@@ -5409,7 +5511,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
         { int t = cl; tops[0] = cl;
           for (int i = 0; i < all; i++) { Port o = W(n, (Port){t, 1}); t = o.node; tops[i + 1] = t; } }
         if (root_mode) {                              /* (see fn_match) */
-          Port rp = W(n, (Port){0, 0});
+          Port rp = root_rp;
           cx_n = 0; cx_push(2, rp);
           c2 = compile_pref(n, F, ap, an, car);
           cx_n = 0; all = 0;
@@ -5436,7 +5538,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
               if (!c2->npsh || (pi < c2->npsh && c2->psh[pi].k == 0)) { xa[nn++] = 0; pi++; continue; }
               if (pi >= c2->npsh) { M.bad = 1; break; }
               xa[nn++] = marshal(&M, ap[k], c2->psh[pi]); pi++;
-              if (dbg > 1) DBG("[argument %d passed in as %d %s: %" PRIx64 "]\n", k, c2->psh[pi - 1].k, c2->psh[pi - 1].dt ? c2->psh[pi - 1].dt : "", (uint64_t)xa[nn - 1]);
+              if (dbg > 1) { DBG("[argument %d passed in as ", k); sh_print(c2->psh[pi - 1]); fprintf(stderr, ": %" PRIx64 "]\n", (uint64_t)xa[nn - 1]); }
             }
           }
           for (int i = 0; i < n_inp && !M.bad; i++, pi++) {   /* the inputs met inside the arguments */
@@ -5492,6 +5594,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
       if (!y_call(n, p1, p2, &h, &appy, &F)) { ok = 0; break; }   /* forcing rewrote the call itself */
     }
     if (!ok) {
+      if (!c) dk_add(dkey);                            /* (the function itself does not compile: remembered) */
       y_decline(n, p1, p2, changed);
       continue;
     }
@@ -5527,11 +5630,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
    operation reaches its operands -- so this runs from `match`, on a net no rule has fired in yet: find a
    recursive call in the expression, and try the expression as that call's unit.  Declined, nothing changed. */
 static int fn_reduce(Net *n, Port *rx, int nred, int64_t limit, int *changed);
-static int fn_match(Net *n, void *st, LinView *view, LinClaim *out) {
-  (void)st; (void)view; (void)out;
-  if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
-  if (fn_off || n->steps != 0 || lin_reduce_nested() || lin_precompile_depth || n->tag[0] != ROOT) return 0;
-  Port rp = W(n, (Port){0, 0});
+static int fn_whole(Net *n, Port rp) {
   if (!is(n, rp, APP, 1)) return 0;
   unsigned char *seen = calloc((size_t)n->nn, 1); int *stk = malloc(sizeof *stk * (size_t)n->nn), sp = 0, found = 0;
   Port rx[2];
@@ -5558,7 +5657,14 @@ static int fn_match(Net *n, void *st, LinView *view, LinClaim *out) {
   free(seen); free(stk);
   if (!found) return 0;
   int ch = 0;
-  root_mode = 1; fn_reduce(n, rx, 1, 0, &ch); root_mode = 0;
+  root_rp = rp; root_mode = 1; fn_reduce(n, rx, 1, 0, &ch); root_mode = 0;
+  return ch;
+}
+static int fn_match(Net *n, void *st, LinView *view, LinClaim *out) {
+  (void)st; (void)view; (void)out;
+  if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
+  if (fn_off || n->steps != 0 || lin_reduce_nested() || lin_precompile_depth || n->tag[0] != ROOT) return 0;
+  fn_whole(n, W(n, (Port){0, 0}));
   return 0;
 }
 LinDriver lin_fn_driver;

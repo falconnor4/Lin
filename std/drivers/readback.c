@@ -661,6 +661,18 @@ static void force_data(Net *n, Port use) {   /* use: the consumer's end of the s
     Port body;
     for (;;) {
       nchain++;
+      /* a constructor's MARKER, `((\_c (d_i f1..fk)) ID)`, is how a value says which constructor it is (the fn
+         driver reads it to take data in; printing, to name it): forcing the body would fire it, so it is stepped
+         over, to the application inside */
+      { Port m = wire((Port){lam, 2});
+        if (m.node >= 0 && !n->dead[m.node] && n->tag[m.node] == APP && m.port == 1) {
+          Port fl = wire((Port){m.node, 0});
+          if (fl.node >= 0 && n->tag[fl.node] == LAM && fl.port == 0) {
+            Port bd = wire((Port){fl.node, 1});
+            if (bd.node >= 0 && n->tag[bd.node] == ERA) { body = net_force_val(n, wire((Port){fl.node, 2})); break; }
+          }
+        }
+      }
       body = net_force_val(n, wire((Port){lam, 2}));
       if (body.node < 0 || body.node >= n->nn || n->dead[body.node] || n->tag[body.node] != LAM || body.port != 0) break;
       lam = body.node;
