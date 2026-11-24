@@ -556,6 +556,7 @@ static int eff_open(Net *n, int64_t step_limit, int *code, Port pay[3], int *npa
   return 1;
 }
 
+static int64_t swept_at;                          /* the live size after the loop's last sweep: it sweeps when that doubles */
 static int *loops, nloops, cloops;                /* the holders of the running loops' steps, innermost last */
 
 /* A TURN IS A FRESH INSTANCE OF THE STEP.  The turn is made the way a compiled call instantiates a function:
@@ -686,13 +687,15 @@ static void force_data(Net *n, Port use) {   /* use: the consumer's end of the s
 static int64_t run_io_body(Net *n, int64_t step_limit) {
   N = n;
   int did_io = 0;
+  static Net *loops_net;                             /* (the loops are this net's: a resumed run keeps them, another net starts afresh) */
+  if (loops_net != n) { loops_net = n; nloops = 0; lin_io_looping = 0; swept_at = 0; }
   for (;;) {
     Port r = net_dup_hop(n, net_force_val(n, wire((Port){0, 0})));  /* an effect is only visible once reached */
     int code; Port pay[3]; int npay;
     if (!eff_dig(n, r, &code, pay, &npay)) break;
     if (!eff_open(n, step_limit, &code, pay, &npay)) break;
 
-    if (code == EFF_DONE) { for (int i = 0; i < npay; i++) eff_erase(n, eff_pay_now(n, i)); return 1; }
+    if (code == EFF_DONE) { for (int i = 0; i < npay; i++) eff_erase(n, eff_pay_now(n, i)); nloops = 0; lin_io_looping = 0; return 1; }
     if (code == EFF_PRINT || code == EFF_WRITE) {
       FILE *out_fp = stdout;
       Port msg_p, next_p;
@@ -746,7 +749,6 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
       }
       force_data(n, (Port){eh.h[1], 0});                  /* (the state, as data: see above) */
       {                                                    /* (a safepoint: the runner holds only its holders) */
-        static int64_t swept_at;                           /* (the live size after the last sweep: sweep when it doubles) */
         int64_t live = (int64_t)n->nn - n->nfree;
         if (live > 2 * swept_at) { int pins = n->pins; n->pins = 0; net_sweep(n); n->pins = pins; swept_at = (int64_t)n->nn - n->nfree; }
       }
