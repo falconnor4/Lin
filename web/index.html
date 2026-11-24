@@ -54,7 +54,7 @@ async function run() {
   const add = (s, cls) => { const span = document.createElement('span'); if (cls) span.className = cls; span.textContent = s + '\n'; $('out').append(span); };
   try {
     // a fresh module per run: a program starts from a clean engine
-    const lin = await createLin({ print: (s) => add(s), printErr: (s) => add(s, 'err') });
+    const lin = await createLin({ locateFile: (p) => './dist/' + p, print: (s) => add(s), printErr: (s) => add(s, 'err') });
     lin.FS.writeFile('/main.lin', $('src').value);
     const t0 = performance.now();
     try { lin.callMain(['main.lin']); } catch (e) { if (!(e && e.name === 'ExitStatus')) add(String(e), 'err'); }

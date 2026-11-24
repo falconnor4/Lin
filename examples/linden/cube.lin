@@ -1,9 +1,0 @@
-; Linden - the engine as a plugin of its own, loaded BY PATH and registered.
-; load_lib dlopens it (RTLD_GLOBAL); set_driver then finds its lin_linden_driver and registers it.
-(load "std/std.lin")
-(load_lib "./linden/linden.so")
-(set_driver "linden")
-; the whole run as characters: one dispatch (entry: ... t0 dt frames)
-(define l_args (cons 64.0 (cons 32.0 (cons 8.0 (cons 12.0 (cons -1.0 (cons -1.0 (cons -1.0 (cons 1.0 (cons -1.0 (cons -1.0 (cons -1.0 (cons 1.0 (cons -1.0 (cons 1.0 (cons 1.0 (cons -1.0 (cons -1.0 (cons -1.0 (cons 1.0 (cons 1.0 (cons -1.0 (cons 1.0 (cons -1.0 (cons 1.0 (cons 1.0 (cons 1.0 (cons 1.0 (cons 1.0 (cons 0.0 (cons 1.0 (cons 0.0 (cons 2.0 (cons 1.0 (cons 3.0 (cons 2.0 (cons 3.0 (cons 4.0 (cons 5.0 (cons 4.0 (cons 6.0 (cons 5.0 (cons 7.0 (cons 6.0 (cons 7.0 (cons 0.0 (cons 4.0 (cons 1.0 (cons 5.0 (cons 2.0 (cons 6.0 (cons 3.0 (cons 7.0 (cons 0.0 (cons 0.08 (cons 48.0 nil))))))))))))))))))))))))))))))))))))))))))))))))))))))))
-
-(ccall "lin_fp_linden_frame" l_args)

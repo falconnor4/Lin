@@ -26,6 +26,15 @@ plugins: $(DRIVERS)
 # Build core + plugins (trusted working-tree path).
 all: lin plugins
 
+# Linden, the game engine (examples/linden): its plugin, loaded by path from the repository root.
+# With the X11 headers it opens a window; without them it builds headless (PPM frames, scripted keys).
+linden: lin examples/linden/linden.so
+examples/linden/linden.so: examples/linden/linden.c src/lin.h
+	@if printf '#include <X11/Xlib.h>\nint main(void){return 0;}\n' | $(CC) -x c - -o /dev/null -lX11 2>/dev/null; then \
+	  $(CC) -O2 -Wall -Wextra -std=c99 -fPIC -shared -I src -o $@ $< -lm -lX11; \
+	else echo "linden: no X11 headers, building headless"; \
+	  $(CC) -O2 -Wall -Wextra -std=c99 -fPIC -shared -I src -DLINDEN_NO_X11 -o $@ $< -lm; fi
+
 # Build ./lin from the WORKING TREE and run the full suite against it.
 # This is the trusted dev path: unlike `nix flake check`/`nix run .#test`
 # (which only see git-committed content - see note below), it observes
@@ -50,4 +59,4 @@ bench:
 clean:
 	rm -rf lin result test/line_binary.line std/drivers/*.so
 
-.PHONY: build test test-boot parity nix-test bench clean all plugins
+.PHONY: build test test-boot parity nix-test bench clean all plugins linden

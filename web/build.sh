@@ -56,10 +56,13 @@ SRCS="src/*.c std/drivers/arith.c std/drivers/readback.c std/drivers/text.c std/
 # One thread (a page has no shared memory without special headers); a deep stack (the reducer and the
 # parser recurse as deep as the program's data); memory that grows.
 emcc -O2 -std=gnu99 -DLIN_STATIC -w $SRCS ${UOBJS[@]+"${UOBJS[@]}"} -o "$OUT/lin.js" \
-  -sMODULARIZE=1 -sEXPORT_NAME=createLin -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 \
+  -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createLin -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=64MB \
   -sEXPORTED_FUNCTIONS=_main,_lin_resume,_linden_fb,_linden_w,_linden_h,_linden_input \
   -sEXPORTED_RUNTIME_METHODS=callMain,FS,ENV,HEAPU8 -sENVIRONMENT=web,node \
   --preload-file std@/std --preload-file examples/linden/linden.lin@/examples/linden/linden.lin \
   --exclude-file '*.so' --exclude-file '*.c' -lm
+# The programs themselves, for a page to run (web/linden.html lists games.txt)
+mkdir -p "$OUT/games"; : > "$OUT/games.txt"
+for p in ${PROGS[@]+"${PROGS[@]}"}; do cp "$p" "$OUT/games/$(basename "$p")"; basename "$p" >> "$OUT/games.txt"; done
 echo "web/build.sh: wrote $OUT/lin.js, lin.wasm, lin.data"

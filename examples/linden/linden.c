@@ -6,10 +6,11 @@
  * Natively that dlopens this file's shared object, whose constructor registers the calls below; in a
  * static build (the browser) the same line starts the copy linked in.  Nothing else differs.
  *
- * THE WHOLE INTERFACE IS ONE CALL A FRAME.  A game is a recursive effect loop:
+ * THE WHOLE INTERFACE IS ONE CALL A FRAME.  A game is an effect loop over its state (std/io.lin's io_loop):
  *
- *     (define loop (\s (io_wait (ccall "linden_frame" (draw s)) (\keys (loop (update s keys))))))
+ *     (io_loop start (\s (io_wait (ccall "linden_frame" (draw s)) (\keys (io_next (update s keys))))))
  *
+ * (linden.lin's `game draw update start` is that loop.)
  * `draw s` is a flat list of integers -- the frame's size, then drawing commands -- and the call
  * answers with the input held at that moment.  The game's state is an ordinary Lin value; Linden
  * keeps nothing of it.  So a frame is a pure function of the state, and the loop is the one place the

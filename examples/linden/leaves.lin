@@ -6,7 +6,8 @@
 ;
 ;   Run (from the repository root):  make linden && ./lin examples/linden/leaves.lin
 ;   Headless, for a check:           LINDEN_HEADLESS=1 LINDEN_FRAMES=600 LINDEN_PPM=leaves.ppm ./lin ...
-;   In the browser:                  web/build.sh examples/linden/leaves.lin  (see web/README.md)
+;   In the browser:                  web/build.sh examples/linden/leaves.lin, then open web/linden.html
+;                                    (see examples/linden/README.md)
 ;
 ; The whole game is the value `World` and two pure functions of it -- `step` (the
 ; next world, given the keys) and `scene` (the picture of it).  Linden draws the

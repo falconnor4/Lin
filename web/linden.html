@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linden</title>
+<style>
+  :root { --bg: #fbfaf7; --fg: #1d1d1b; --muted: #6b6a66; --line: #e3e0d8; --panel: #ffffff; --accent: #2f5d50; --err: #a3342b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #e9e7e1; --muted: #9a978f; --line: #2c2b28; --panel: #1e1e1c; --accent: #7fb8a4; --err: #e0786e; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 16px; color: var(--muted); }
+  .bar { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+  select, button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+  button.run { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; }
+  canvas { display: block; width: 100%; max-width: 800px; image-rendering: pixelated; background: #000; border-radius: 8px; border: 1px solid var(--line); touch-action: none; }
+  #status { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  pre { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--err); white-space: pre-wrap; margin: 8px 0 0; }
+  .pad { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .pad button { min-width: 56px; min-height: 44px; }
+  kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; background: var(--panel); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Linden</h1>
+  <p class="sub">A Lin game, its frames computed by the Lin engine compiled to WebAssembly. Arrows or <kbd>WASD</kbd> to move, <kbd>Space</kbd>/<kbd>Z</kbd>, <kbd>X</kbd>, <kbd>Enter</kbd>.</p>
+  <div class="bar">
+    <select id="game" aria-label="Game"></select>
+    <button class="run" id="start" disabled>Start</button>
+    <span id="status">loading…</span>
+  </div>
+  <canvas id="screen" width="160" height="120" tabindex="0" aria-label="Game screen"></canvas>
+  <div class="pad" aria-label="Touch controls">
+    <button data-k="1">◀</button><button data-k="2">▶</button><button data-k="4">▲</button><button data-k="8">▼</button>
+    <button data-k="16">A</button><button data-k="32">B</button><button data-k="64">Start</button>
+  </div>
+  <pre id="err"></pre>
+</main>
+<script type="module">
+import createLin from './dist/lin.js';
+const $ = (id) => document.getElementById(id);
+// Keys as linden.lin numbers them (key_left 1 ... key_quit 128); Linden works out what was pressed since the last frame.
+const KEYS = { ArrowLeft: 1, KeyA: 1, ArrowRight: 2, KeyD: 2, ArrowUp: 4, KeyW: 4, ArrowDown: 8, KeyS: 8,
+               Space: 16, KeyZ: 16, KeyX: 32, ShiftLeft: 32, ShiftRight: 32, Enter: 64 };
+let held = 0, touch = 0, lin = null, raf = 0, mouse = [0, 0, 0];
+addEventListener('keydown', (e) => { const k = KEYS[e.code]; if (k && lin) { held |= k; e.preventDefault(); } });
+addEventListener('keyup', (e) => { const k = KEYS[e.code]; if (k) held &= ~k; });
+addEventListener('blur', () => { held = 0; touch = 0; });
+for (const b of document.querySelectorAll('.pad button')) {
+  const k = +b.dataset.k;
+  b.addEventListener('pointerdown', (e) => { touch |= k; e.preventDefault(); });
+  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, () => { touch &= ~k; });
+}
+const cv = $('screen'), cx = cv.getContext('2d');
+cv.addEventListener('pointermove', (e) => { const r = cv.getBoundingClientRect(); mouse[0] = (e.clientX - r.left) * cv.width / r.width | 0; mouse[1] = (e.clientY - r.top) * cv.height / r.height | 0; });
+cv.addEventListener('pointerdown', () => { mouse[2] = 1; }); cv.addEventListener('pointerup', () => { mouse[2] = 0; });
+
+const games = (await (await fetch('./dist/games.txt')).text()).split('\n').filter(Boolean);
+for (const g of games) $('game').add(new Option(g.replace(/\.lin$/, ''), g));
+if (!games.length) $('status').textContent = 'no game built: run web/build.sh examples/linden/leaves.lin';
+else { $('start').disabled = false; $('status').textContent = 'ready'; }
+
+let img = null;
+function blit() {
+  const w = lin._linden_w(), h = lin._linden_h();
+  if (!w || !h) return;
+  if (cv.width !== w || cv.height !== h || !img) { cv.width = w; cv.height = h; img = cx.createImageData(w, h); }
+  const px = new Uint32Array(lin.HEAPU8.buffer, lin._linden_fb(), w * h), d = img.data;   // 0xRRGGBB
+  for (let i = 0, j = 0; i < w * h; i++, j += 4) { const p = px[i]; d[j] = p >> 16 & 255; d[j + 1] = p >> 8 & 255; d[j + 2] = p & 255; d[j + 3] = 255; }
+  cx.putImageData(img, 0, 0);
+}
+async function start() {
+  cancelAnimationFrame(raf); $('err').textContent = ''; $('start').disabled = true; $('status').textContent = 'starting…';
+  try {
+    const src = await (await fetch('./dist/games/' + $('game').value)).text();
+    lin = await createLin({ locateFile: (p) => './dist/' + p, print: () => {}, printErr: (s) => { $('err').textContent += s + '\n'; } });
+    try { lin.FS.mkdir('/examples'); } catch {} try { lin.FS.mkdir('/examples/linden'); } catch {}
+    lin.FS.writeFile('/examples/linden/game.lin', src); lin.FS.chdir('/');
+    try { lin.callMain(['examples/linden/game.lin']); } catch (e) { if (!(e && e.name === 'ExitStatus')) throw e; }
+    blit(); cv.focus();
+    // One frame of the game per animation frame: hand Linden the input of this moment, resume the program until it
+    // shows its next picture, draw that.
+    let n = 0, ms = 0, last = performance.now();
+    const tick = () => {
+      lin._linden_input(held | touch, mouse[0], mouse[1], mouse[2]);
+      const t0 = performance.now(), alive = lin._lin_resume(); ms += performance.now() - t0; n++;
+      blit();
+      if (performance.now() - last > 500) { $('status').textContent = `${(ms / n).toFixed(1)} ms of Lin per frame`; n = 0; ms = 0; last = performance.now(); }
+      if (alive) raf = requestAnimationFrame(tick); else { $('status').textContent = 'the game ended'; $('start').disabled = false; }
+    };
+    raf = requestAnimationFrame(tick);
+    $('start').textContent = 'Restart';
+  } catch (e) { $('err').textContent += String(e) + '\n'; $('status').textContent = 'failed'; }
+  $('start').disabled = false;
+}
+$('start').onclick = start;
+</script>
+</body>
+</html>
