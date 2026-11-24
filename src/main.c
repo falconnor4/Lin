@@ -26,7 +26,7 @@ static void bump_stack(void) {
 Def *defs;
 int ndefs = 0, defcap = 0;
 
-static long STEP_LIMIT = LONG_MAX;   /* no ceiling: the engine ALREADY stops when a wave fires nothing (the observed ports are in WHNF), so a budget never ended a reduction -- it only cut off the ones that needed more.  LIN_STEPS sets a watchdog; the message at the end reports it when one is set. */
+static int64_t STEP_LIMIT = INT64_MAX;   /* no ceiling: the engine ALREADY stops when a wave fires nothing (the observed ports are in WHNF), so a budget never ended a reduction -- it only cut off the ones that needed more.  LIN_STEPS sets a watchdog; the message at the end reports it when one is set. */
 /* Bounded so `lin build` cannot hang on a program that does not terminate at build
    time: the residual is then simply "what the compiler did not finish". */
 static int bench_mode = 0;
@@ -47,7 +47,7 @@ void open_namespace(const char *name) {
    latest definition, grown with the table (a prelude makes thousands of lookups; a scan per lookup was a third
    of startup). */
 static int *def_ix; static size_t def_ixcap;
-static size_t def_hash(const char *s) { size_t h = 1469598103934665603ull; for (; *s; s++) h = (h ^ (unsigned char)*s) * 1099511628211ull; return h; }
+static size_t def_hash(const char *s) { uint64_t h = 1469598103934665603ull; for (; *s; s++) h = (h ^ (unsigned char)*s) * 1099511628211ull; return (size_t)h; }
 static void def_index(int i) {
   if ((size_t)ndefs * 2 >= def_ixcap) {
     free(def_ix); def_ixcap = def_ixcap ? def_ixcap * 2 : 1024;
@@ -386,7 +386,7 @@ static Term *shrink(Term *t) {
   return t;
 }
 
-static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, int *compiled, char *err, int errsz) {
+static int64_t reduce_term(Term *t, Net *net, int optimize, int depth, int64_t limit, int *compiled, char *err, int errsz) {
   Term *ex = expand_defs(t);
   Term *opt = optimize ? egraph_optimize(ex) : ex;
   if (opt != ex && !getenv("LIN_NO_SHRINK")) { occ_walk(opt); opt = shrink(opt); }   /* what the e-graph's rewrites leave linear */
@@ -404,7 +404,7 @@ static long reduce_term(Term *t, Net *net, int optimize, int depth, long limit, 
      with the build keeping its partial evaluation: `test/runtime_ffi.lin`'s declined `getenv` shipped
      ROOT inside `arith`'s num box and the artifact printed the payload as structure for ever. */
   if (depth == DEPTH_BUILD) lin_driver_aot(net, opt, build_sch);
-  long steps = net_reduce(net, limit);
+  int64_t steps = net_reduce(net, limit);
   /* Needed order leaves a term's un-demanded thunks alone, which is exactly right at RUN time and
      useless to a build: what a build wants to bake is the VALUE, so it observes the root itself. */
   if (depth != DEPTH_RUN) net_force(net, (Port){0, 0});
@@ -426,7 +426,7 @@ static void def_precompile(Def *d) {
   d->comp_tried = 1;
   if (d->rec) return;
   char err[512]; Net src; net_init(&src, 1 << 14);
-  long full = reduce_term(d->term, &src, 0, DEPTH_PRECOMPILE, STEP_LIMIT, NULL, err, sizeof err);
+  int64_t full = reduce_term(d->term, &src, 0, DEPTH_PRECOMPILE, STEP_LIMIT, NULL, err, sizeof err);
   /* `act` is what net_reduce could NOT fire because nothing demanded it, so a non-empty list means the body
      still has unreduced work.  Under needed order that is the normal case (and `(fact 5)` bakes no value at
      all until something asks for it), so caching would store the term, not a value -- and it would ALSO hide
@@ -587,7 +587,7 @@ static int type_domain(Type *t) {
     static char *ldesc; free(ldesc); ldesc = type_desc(t); lin_result_desc = ldesc;   /* (its elements' type, for the reader) */
     return DT_STR;
   }
-  for (long id = 1; lin_ctor_info(id); id++) if (!strcmp(lin_ctor_info(id)->dt, t->name)) {
+  for (int64_t id = 1; lin_ctor_info(id); id++) if (!strcmp(lin_ctor_info(id)->dt, t->name)) {
     static char *desc; free(desc); desc = type_desc(t); lin_result_desc = desc;   /* (its type, for the reader) */
     return LIN_DOM_DATA;
   }
@@ -631,7 +631,7 @@ static void run_and_report(Net *net, int domain) {
   if (no_io && !quiet_forms && !shown) putchar('\n');
   if (!no_io && lin_form_key) form_bad = 1;
   if (bench_mode) {
-    fprintf(stderr, "[bench] %ld steps | %d nodes (%d live) | %.2f ms | GoI det: %lld -> %lld\n",
+    fprintf(stderr, "[bench] %" PRId64 " steps | %d nodes (%d live) | %.2f ms | GoI det: %lld -> %lld\n",
             net->steps, net->nn, net->nn - net->nfree, bench_ms + ms_since(t0, t1), bench_goi0, bench_goi1);
     if (getenv("LIN_LEAKCHECK")) {   /* DIAGNOSTIC ONLY: how much live structure the result still reaches */
       unsigned char *r = calloc((size_t)net->nn, 1); int *q = malloc(sizeof(int) * (size_t)net->nn), h = 0, t = 0, era = 0, dup = 0;
@@ -665,12 +665,12 @@ void eval_form(Term *t) {
   struct timespec b0, b1;
   bench_measured = bench_mode;
   if (bench_mode) { bench_goi0 = goi_det(&net); clock_gettime(CLOCK_MONOTONIC, &b0); }
-  long steps = net_reduce(&net, STEP_LIMIT);
+  int64_t steps = net_reduce(&net, STEP_LIMIT);
   if (bench_mode) { clock_gettime(CLOCK_MONOTONIC, &b1); bench_goi1 = goi_det(&net); bench_ms = ms_since(b0, b1); }
   /* `steps >= STEP_LIMIT` means the reduction stopped because it ran out of budget, not because it
      reached a value.  Printing the net regardless is how a *partial* graph becomes the answer with
      exit status 0: measured, `(fib 12)` printed 0 where the answer is 144. */
-  if (steps >= STEP_LIMIT) printf("error: no value within %ld reduction steps\n", STEP_LIMIT);
+  if (steps >= STEP_LIMIT) printf("error: no value within %" PRId64 " reduction steps\n", STEP_LIMIT);
   else run_and_report(&net, type_domain(sch.t));
   if (track) { lin_form_idx = -1; lin_form_net = NULL; }
   net_free(&net); term_free(ex);
@@ -699,14 +699,14 @@ static void qualify_free(Term *t, Guard *b) {
 
 /* (datatype Name (Ctor f...) ...): Scott-encode each constructor C_i (\f1..\fk \d0..\d_{m-1}).  Each becomes an ordinary inferred def, so it type-checks like hand-written Scott encoding */
 static void process_def(Term *t);
-static Term *scott_ctor(const char *dn, int idx, Term *fields, int m, long id) {
+static Term *scott_ctor(const char *dn, int idx, Term *fields, int m, int64_t id) {
   (void)dn;
   const char *dslot = lin_internf("_d%d", idx);
   /* curried application (d_idx f1 f2 ...) */
   Term *app = term_new(TVAR, dslot, NULL, NULL);
   for (Term *f = fields; f; f = f->r) app = term_new(TAPP, "", app, term_new(TVAR, f->name, NULL, NULL));
   /* ...stating which constructor it is: `((\_c APP) ID)` (lin.h, the constructor registry) */
-  app = term_new(TAPP, "", term_new(TLAM, "_c", app, NULL), term_new(TNUM, lin_internf("%ld", id), NULL, NULL));
+  app = term_new(TAPP, "", term_new(TLAM, "_c", app, NULL), term_new(TNUM, lin_internf("%" PRId64 "", id), NULL, NULL));
   /* dispatch binders are innermost: \f1..\fk \d0..\d_{m-1} (d_i f1..fk) */
   Term *lam = app;
   for (int i = m - 1; i >= 0; i--) { const char *dn2 = lin_internf("_d%d", i); lam = term_new(TLAM, dn2, lam, NULL); }
@@ -739,7 +739,7 @@ static void process_datatype(Term *t) {
   int idx = 0;
   for (Term *c = t->l; c; c = c->r, idx++) {
     int nfields = 0; for (Term *f = c->l; f; f = f->r) nfields++;
-    long id = lin_ctor_register(t->name, curr_ns[0] && !strchr(c->name, '.') ? lin_internf("%s.%s", curr_ns, c->name) : c->name, m, idx, nfields);
+    int64_t id = lin_ctor_register(t->name, curr_ns[0] && !strchr(c->name, '.') ? lin_internf("%s.%s", curr_ns, c->name) : c->name, m, idx, nfields);
     { char *fd = NULL; size_t fl = 0;                   /* (the declared field types, for a reader: lin.h) */
       for (Term *f = c->l; f; f = f->r) { char *d1 = type_desc(f->annot); size_t l1 = strlen(d1);
         fd = realloc(fd, fl + l1 + 1); memcpy(fd + fl, d1, l1 + 1); fl += l1; free(d1); }
@@ -806,7 +806,7 @@ static void mark_loaded(const char *canon) {
 
 static char *read_file(const char *path) {
   FILE *f = fopen(path, "rb"); if (!f) return NULL;
-  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  fseek(f, 0, SEEK_END); int64_t sz = ftell(f); fseek(f, 0, SEEK_SET);
   char *buf = malloc((size_t)sz + 1);
   if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(buf); return NULL; }
   buf[sz] = 0; fclose(f); return buf;
@@ -1144,7 +1144,7 @@ static const AotCand aot_cands[] = {
 };
 #define AOT_NCANDS ((int)(sizeof aot_cands / sizeof aot_cands[0]))
 
-typedef struct { long bytes, rsteps; int compiled, residual, aot_steps; int ok; } AotStats;
+typedef struct { int64_t bytes, rsteps; int compiled, residual, aot_steps; int ok; } AotStats;
 
 /* forget everything a previous candidate baked: a define's expansion and its precompiled net */
 static void aot_reset_defs(void) {
@@ -1185,7 +1185,7 @@ static int aot_run(const AotCand *c, Term *build_term, const char *out_f, AotSta
      with the artifact's own work falling from 106 reduce steps to 1, and test/build_observe.lin 5953 -> 193 ms with
      498739 steps -> 1. */
   lin_build_observed = 0;
-  long baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, STEP_LIMIT, &st->compiled, err, sizeof err);
+  int64_t baked = reduce_term(build_term, &net, 1, DEPTH_BUILD, STEP_LIMIT, &st->compiled, err, sizeof err);
   if (baked < 0) { fprintf(stderr, "error: %s\n", err); net_free(&net); return 0; }
   st->aot_steps = (int)baked; st->residual = net.nn;
   if (!net_save_line(&net, out_f)) { net_free(&net); return 0; }
@@ -1229,7 +1229,7 @@ static int aot_search(Term *build_term, const char *out_f) {
     AotStats st;
     if (!aot_run(c, build_term, tmp, &st)) { remove(tmp); continue; }
     if (getenv("LIN_PASSES"))
-      fprintf(stderr, "[aot]   candidate %-12s artifact=%ld B, runtime=%ld steps, compile=%d nodes\n",
+      fprintf(stderr, "[aot]   candidate %-12s artifact=%" PRId64 " B, runtime=%" PRId64 " steps, compile=%d nodes\n",
               c->name, st.bytes, st.rsteps, st.compiled);
     if (best < 0 || aot_better(&st, &best_st, bytes_first)) { best_st = st; best = i; }
     else remove(tmp);
@@ -1238,7 +1238,7 @@ static int aot_search(Term *build_term, const char *out_f) {
   snprintf(tmp, sizeof tmp, "%s.cand%d", out_f, best);
   if (rename(tmp, out_f) != 0) { fprintf(stderr, "error: cannot write '%s'\n", out_f); return 1; }
   if (getenv("LIN_PASSES") && best_st.ok)
-    fprintf(stderr, "[aot] chosen %s: artifact=%ld B, residual=%d nodes, runtime=%ld reduce steps "
+    fprintf(stderr, "[aot] chosen %s: artifact=%" PRId64 " B, residual=%d nodes, runtime=%" PRId64 " reduce steps "
                     "(effects excluded), compile=%d nodes\n",
             (nc == 1) ? aot_default_cand.name : aot_cands[best].name, best_st.bytes, best_st.residual,
             best_st.rsteps, best_st.compiled);
@@ -1411,7 +1411,7 @@ static int cache_first(const char *path, int *nprinted) {
   if (!lin_driver_load("readback") || !lin_driver_load("fn") || !form_recall) return 0;
   int idx = 0;
   for (;; idx++) {
-    long w; int kind, dom;
+    int64_t w; int kind, dom;
     int r = form_recall(key, idx, lin_threads, &w, &kind, &dom);
     if (r == 0 && idx > 0) { if (getenv("LIN_CACHE_DEBUG")) fprintf(stderr, "[cache] %d expression%s run from compiled units\n", idx, idx == 1 ? "" : "s"); return 1; }
     if (r <= 0) break;
@@ -1444,7 +1444,7 @@ static int load_main_file(const char *path) {
   uint64_t key = program_key(src); free(src);
   int idx = cache_printed;
   for (; !cache_printed; idx++) {                    /* (cache_first answered some and stopped: the rest is evaluated) */
-    long w; int kind, dom;
+    int64_t w; int kind, dom;
     int r = form_recall(key, idx, lin_threads, &w, &kind, &dom);
     if (r == 0 && idx > 0) { if (dbgc) fprintf(stderr, "[cache] %d expression%s run from compiled units\n", idx, idx == 1 ? "" : "s"); return 1; }   /* every expression ran from its compiled unit */
     if (r <= 0) break;
@@ -1468,7 +1468,7 @@ static int load_main_file(const char *path) {
    values of ONE declared datatype -- matched by `match`, typed by the checker, taken apart by the compiler as
    data like any other.  `cons` is its first constructor and `nil` its second, the order the list encoding has
    always had (a cell is `\c.\n.((c h) t)`, the end `\c.\n.n`).  The names live in the namespace `list`. */
-long lin_list_cons_id, lin_list_nil_id;
+int64_t lin_list_cons_id, lin_list_nil_id;
 static void builtin_list(void) {
   const char *sv = curr_ns; set_namespace("list"); int sq = quiet_forms; quiet_forms = 1;   /* (the language's, not the program's) */
   parse_forms("(datatype (list a) (cons (h a) (t list a)) (nil))", form_cb, NULL);
@@ -1486,7 +1486,7 @@ int main(int argc, char **argv) {
      with `(set_driver "simd")` / `(load "std/drivers/...")`.  std/std.lin activates std/drivers/
      arith.lin, which is where the shared scalar-op table comes from. */
   lin_set_self_path(argv[0]);
-  if (getenv("LIN_STEPS")) STEP_LIMIT = atol(getenv("LIN_STEPS"));
+  if (getenv("LIN_STEPS")) STEP_LIMIT = atoll(getenv("LIN_STEPS"));
   if (getenv("LIN_THREADS")) lin_threads = atoi(getenv("LIN_THREADS"));
   set_omp_th(lin_threads); if (!lin_threads && !getenv("OMP_NUM_THREADS")) set_omp_th(1);
 

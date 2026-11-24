@@ -295,9 +295,9 @@ static void act_drop(Net *n, int v) {
 void lin_enqueue(Net *n, Port a, Port b) { act_push(n, a, b); }
 
 /* Driver native-fold accounting: drivers bump this when folding natively; exposed so tests can assert folding fires. */
-static long fold_count;
+static int64_t fold_count;
 void lin_fold_bump(void) { __atomic_add_fetch(&fold_count, 1, __ATOMIC_RELAXED); }
-long lin_fold_total(void) { return fold_count; }
+int64_t lin_fold_total(void) { return fold_count; }
 
 typedef struct { Port *p; int top, cap; } ActBuf;
 typedef struct { int *v; int top, cap; } IntBuf;
@@ -522,8 +522,8 @@ static int fx_gone(const Net *n, int f, int k) {
   if (!fx_wired(n, f, k)) return 1;
   Port q = WIRE(n, ((Port){f, k})); return n->tag[q.node] == ERA && q.port == 0;
 }
-static long fx_retired;
-long net_fresh_retired(void) { return fx_retired; }
+static int64_t fx_retired;
+int64_t net_fresh_retired(void) { return fx_retired; }
 /* look at set k: drop fans that left; retire the label if one side is dead; free it if no fan is left */
 static void fx_check(Net *n, int k) {
   struct LinFresh *f = n->fx; FxSet *x = &f->set[k];
@@ -767,7 +767,7 @@ static int lvl_prefix2(Net *n, int gen, Scope a, Scope b) {
   return lvl_prefix_rec(n, gen, (int)b);
 }
 /* the four rules of the scope-gauge calculus; ERA is inert (era pairs are dropped) */
-static int lin_trace = -1; static long dump_at = -2; static const char *dump_path;   /* LIN_TRACE; LIN_DUMP_AT_STEP x LIN_DUMP_NET dumps mid-reduction */
+static int lin_trace = -1; static int64_t dump_at = -2; static const char *dump_path;   /* LIN_TRACE; LIN_DUMP_AT_STEP x LIN_DUMP_NET dumps mid-reduction */
 
 /* Driver pipeline: sorted by priority (ascending); core waves fan out to each in priority order, each
    *claiming* the redexes it handles, so drivers compose.  A driver only ever pre-empts a redex class;
@@ -778,8 +778,8 @@ int net_interact(Net *n, Port p1, Port p2) {
   int n1 = p1.node, n2 = p2.node;
   if (lin_trace < 0) lin_trace = getenv("LIN_TRACE") != NULL;
   if (lin_trace)
-    fprintf(stderr, "step %ld: %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
-  if (dump_at == -2) { dump_at = getenv("LIN_DUMP_AT_STEP") ? atol(getenv("LIN_DUMP_AT_STEP")) : -1; dump_path = getenv("LIN_DUMP_AT_PATH"); }
+    fprintf(stderr, "step %" PRId64 ": %d.%d x %d.%d\n", n->steps, t1, n1, t2, n2);
+  if (dump_at == -2) { dump_at = getenv("LIN_DUMP_AT_STEP") ? atoll(getenv("LIN_DUMP_AT_STEP")) : -1; dump_path = getenv("LIN_DUMP_AT_PATH"); }
   if (dump_at >= 0 && n->steps == dump_at && dump_path) net_save_line(n, dump_path);
 
   if (t1 == LAM && t2 == APP) {
@@ -1155,7 +1155,7 @@ static const Net *res_net; static Port res_at;
    which made each wave of a force cost the depth of the forces around it (measured: a lazy fold over 2000
    cells, 878k steps in 32 s, quadratic).  It is found from the top: inner forces' roots are gone when it runs. */
 static const Net *floor_net; static Port floor_port;
-static long walk_steps;   /* demand-walk steps, for LIN_WAVE_STATS (`walked=`): what test/net_walk.sh holds down */
+static int64_t walk_steps;   /* demand-walk steps, for LIN_WAVE_STATS (`walked=`): what test/net_walk.sh holds down */
 static void net_mark_demand(Net *n) {
   int first = -1;
   if (floor_net == n) {
@@ -1247,7 +1247,7 @@ static int walk_reaches_redex(Net *n, Port p) {
   return 1;                                          /* (a cycle the walk cannot settle: let the reducer decide) */
 }
 
-long net_force(Net *n, Port p) {
+int64_t net_force(Net *n, Port p) {
   if (p.node < 0 || p.node >= n->nn || n->dead[p.node] || port_whnf(n, p)) return n->steps;
   /* (only for a port that is not a root already: forcing an existing root walks every demand, as before) */
   { int is_root = 0; if (n->rootn[p.node]) for (int i = 0; i < n->nroot; i++) if (n->root[i].node == p.node && n->root[i].port == p.port) { is_root = 1; break; }
@@ -1261,7 +1261,7 @@ long net_force(Net *n, Port p) {
   lin_demand(n, p);
   const Net *sfn = floor_net; Port sfp = floor_port;
   if (n->nroot > save) { floor_net = n; floor_port = p; }   /* (an existing root: walk as before) */
-  long s = net_reduce(n, n->steps + (1L << 22));
+  int64_t s = net_reduce(n, n->steps + (1L << 22));
   floor_net = sfn; floor_port = sfp;
   /* Only ever TRUNCATE.  A reduction here can reclaim, which rewrites the root array and can drop
      the root this call added; restoring the old COUNT would then claim entries that no longer name
@@ -1312,7 +1312,7 @@ static void *wave_worker(void *arg) {
     if (atomic_load_explicit(&wq_gen, memory_order_acquire) == seen) {
       /* The published batch's own length is the spin budget: a big batch keeps the worker hot. */
       for (int r = 0, spin = atomic_load_explicit(&wq_n, memory_order_relaxed); r < spin; r++) {
-        __asm__ __volatile__("pause"); if (atomic_load_explicit(&wq_gen, memory_order_acquire) != seen) break; }
+        LIN_PAUSE(); if (atomic_load_explicit(&wq_gen, memory_order_acquire) != seen) break; }
       if (atomic_load_explicit(&wq_gen, memory_order_acquire) == seen) sched_yield();
       continue;
     }
@@ -1328,10 +1328,10 @@ static void wave_pool_start(int want) {
   wpool_n = want - 1; ensure_tact(); wpool = calloc((size_t)wpool_n, sizeof *wpool);
   for (int i = 0; i < wpool_n; i++) pthread_create(&wpool[i], NULL, wave_worker, (void *)(intptr_t)(i + 1));
 }
-static int lin_wstats = -1; static long wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width, wv_walked;
+static int lin_wstats = -1; static int64_t wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width, wv_walked;
 static void wv_report(void) {
   wv_walked = walk_steps;
-  fprintf(stderr, "[wave] waves=%ld fired=%ld max=%ld par_batches=%ld par_pairs=%ld width=%ld walked=%ld\n", wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width, wv_walked);
+  fprintf(stderr, "[wave] waves=%" PRId64 " fired=%" PRId64 " max=%" PRId64 " par_batches=%" PRId64 " par_pairs=%" PRId64 " width=%" PRId64 " walked=%" PRId64 "\n", wv_waves, wv_fired, wv_max, wv_batch, wv_par, wv_width, wv_walked);
 }
 
 static int *fw_tkey; static unsigned *fw_tgen; static int fw_tcap; static unsigned fw_gen;
@@ -1402,7 +1402,7 @@ void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed) {
       int chunk = wq_grain(n_int);
       batch_changed = wq_drain(n, chunk);
       for (int spin = 0; atomic_load_explicit(&wq_done, memory_order_acquire) < n_int; spin++) {
-        if (spin < wpool_n + 1) __asm__ __volatile__("pause"); else { sched_yield(); spin = 0; }
+        if (spin < wpool_n + 1) LIN_PAUSE(); else { sched_yield(); spin = 0; }
       }
       in_parallel = 0; n->steps += n_int; *changed += batch_changed + atomic_load_explicit(&wq_changed, memory_order_relaxed);
       for (int t = 0; t < nth; t++) {
@@ -1438,20 +1438,20 @@ int wave_snapshot(Net *n, Port **out, int *cap) {
   return cnt;
 }
 
-static long net_reduce_body(Net *n, long limit);
+static int64_t net_reduce_body(Net *n, int64_t limit);
 
 /* Only the OUTERMOST call may reclaim or publish: a nested call is entered from a driver's reducer
    or from net_force, and readback holds ports of its own while net_force runs. */
 
-long net_reduce(Net *n, long limit) {
+int64_t net_reduce(Net *n, int64_t limit) {
   if (reduce_depth) nested_reduce = 1;
   reduce_depth++;
-  long done = net_reduce_body(n, limit);
+  int64_t done = net_reduce_body(n, limit);
   reduce_depth--;
   return done;
 }
 
-static long net_reduce_body(Net *n, long limit) {
+static int64_t net_reduce_body(Net *n, int64_t limit) {
   res_net = NULL;   /* the net may have been rewritten since the last reduce (a driver, readback, the compiler) */
   /* Each wave re-marks demand and fires only the pairs the walk reached; one off that path never leaves
      `act`, so it is still there when something needs it.  A wave firing nothing means WHNF: stop. */

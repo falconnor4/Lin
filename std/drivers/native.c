@@ -220,14 +220,14 @@ static int spine_slots(Net *n, Port argp, Port *out, int max) {
    machine grants (RLIMIT_STACK), not a number chosen here.  `base` is the shallowest frame of the walk,
    remembered by the first call; the fraction leaves room for the frames below this driver, and labs()
    because a stack may grow either way.  __thread: each thread walks on its own stack. */
-static __thread char *walk_base; static __thread long walk_room;
+static __thread char *walk_base; static __thread int64_t walk_room;
 static int walk_deep(const void *here) {
   if (!walk_base) {
     struct rlimit rl;
     walk_base = (char *)here;
-    walk_room = getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY ? (long)(rl.rlim_cur / 4 * 3) : LONG_MAX;
+    walk_room = getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY ? (int64_t)(rl.rlim_cur / 4 * 3) : INT64_MAX;
   }
-  return labs((const char *)here - walk_base) > walk_room;
+  return llabs((const char *)here - walk_base) > walk_room;
 }
 static int emit_redex(Net *n, int app, Buf *b, int budget);
 static int emit_once(Net *n, int app, Buf *b, int budget);
@@ -310,9 +310,9 @@ static int emit_redex(Net *n, int app, Buf *b, int budget) {
    APP the pattern recognized, so nothing here re-reads the wires to find them. */
 static int emit_cone(Net *n, Port p, Buf *b, int budget) {
   if (budget <= 0 || walk_deep(&p)) { DBG("    cone: budget/stack\n"); return 0; }
-  long k;
+  int64_t k;
   LinMatch m;
-  if (lin_pat_num_nf(n, p, &k)) { put(b, "%ldL", k); return b->len >= 0; }
+  if (lin_pat_num_nf(n, p, &k)) { put(b, "%" PRId64 "L", k); return b->len >= 0; }
   if (lin_pat_match(n, p, P_CONE_RESULT, LIN_PAT_BUDGET_FOR(n), &m))
     return emit_redex(n, m.bind[1].node, b, budget - 1);
   if (lin_pat_match(n, p, P_CONE_PRINCIPAL, LIN_PAT_BUDGET_FOR(n), &m))
@@ -367,11 +367,11 @@ static int emit_once(Net *n, int app, Buf *b, int budget) {
 /* ---- the JIT: content-hashed source, compiled once, cached on disk --------- */
 
 #define FN_CACHE 256
-static struct { unsigned long h, hp; long (*fn)(void); } fns[FN_CACHE];
+static struct { uint64_t h, hp; int64_t (*fn)(void); } fns[FN_CACHE];
 static int nfns;
 
-static unsigned long fnv1a(const char *s) {
-  unsigned long h = 1469598103934665603UL;
+static uint64_t fnv1a(const char *s) {
+  uint64_t h = 1469598103934665603UL;
   for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211UL; }
   return h;
 }
@@ -415,25 +415,25 @@ static int run_cc(const char *src, const char *so) {
    "cannot compile here" -- no compiler, no cache directory, a rejected build -- and
    the caller then takes the interpreted fallback, so a machine without cc runs
    exactly the old path instead of failing. */
-static long (*compile_expr(const char *expr))(void) {
+static int64_t (*compile_expr(const char *expr))(void) {
   /* The name comes from the EXPRESSION and the file name also from the PRELUDE, so
      editing the helpers above cannot resurrect an object compiled from the old ones.
      The symbol must have external linkage (dlsym cannot see a `static` function) and
      be unique per cone, which is what lets every object be loaded RTLD_LOCAL even
      though they all export a symbol of the same shape. */
-  unsigned long he = fnv1a(expr), hp = fnv1a(PRELUDE);
+  uint64_t he = fnv1a(expr), hp = fnv1a(PRELUDE);
   for (int i = 0; i < nfns; i++)
     if (fns[i].h == he && fns[i].hp == hp) return fns[i].fn;
   char sym[64];
-  snprintf(sym, sizeof sym, "lin_cone_%016lx", he);
+  snprintf(sym, sizeof sym, "lin_cone_%016" PRIx64 "", he);
   char full[8192];
   int n = snprintf(full, sizeof full, "%s\nlong %s(void) { return %s; }\n", PRELUDE, sym, expr);
   if (n < 0 || (size_t)n >= sizeof full) return NULL;
 
   char dir[4096], so[4200], c[4200];
   cache_dir(dir, sizeof dir);
-  snprintf(so, sizeof so, "%s/%016lx-%016lx.so", dir, he, hp);
-  snprintf(c, sizeof c, "%s/%016lx-%016lx.c", dir, he, hp);
+  snprintf(so, sizeof so, "%s/%016" PRIx64 "-%016" PRIx64 ".so", dir, he, hp);
+  snprintf(c, sizeof c, "%s/%016" PRIx64 "-%016" PRIx64 ".c", dir, he, hp);
   void *hnd = dlopen(so, RTLD_NOW | RTLD_LOCAL);
   if (!hnd) {
     if (!mkdir_p(dir)) { DBG("no cache directory %s\n", dir); return NULL; }
@@ -451,7 +451,7 @@ static long (*compile_expr(const char *expr))(void) {
     hnd = dlopen(so, RTLD_NOW | RTLD_LOCAL);
     if (!hnd) { DBG("cannot dlopen %s\n", so); return NULL; }
   }
-  long (*fn)(void) = (long (*)(void))(intptr_t)dlsym(hnd, sym);
+  int64_t (*fn)(void) = (int64_t (*)(void))(intptr_t)dlsym(hnd, sym);
   if (!fn) { DBG("no symbol %s in %s\n", sym, so); return NULL; }
   if (nfns < FN_CACHE) { fns[nfns].h = he; fns[nfns].hp = hp; fns[nfns].fn = fn; nfns++; }
   return fn;
@@ -528,7 +528,7 @@ static int fold_via_table(Net *n, const char *fn, Val *v, Port argp) {
   int slots = net_spine_slots(n, argp);
   if (slots < 1) return 0;
   Val *fargs = calloc((size_t)slots, sizeof *fargs);   /* sized to the spine: an `_op` is N-ary */
-  long *c = calloc((size_t)slots, sizeof *c);
+  int64_t *c = calloc((size_t)slots, sizeof *c);
   if (!fargs || !c) { free(fargs); free(c); return 0; }
   int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
   if (argc < slots) { free(fargs); free(c); return 0; }
@@ -537,7 +537,7 @@ static int fold_via_table(Net *n, const char *fn, Val *v, Port argp) {
     c[i] = fargs[i].iv;
   }
   free(fargs);
-  long out = 0; int okind = 0;
+  int64_t out = 0; int okind = 0;
   int ok = lin_scalar_ops_run(fn, slots, c, &out, &okind);
   if (ok) { v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1); v->iv = out; }
   free(c);
@@ -583,10 +583,10 @@ static int native_claim(const Net *ncn, Port p1, Port p2) {
 /* reduce: fold every claimed pair, one way or another.  A claimed-but-unhandled pair
    would be dropped from the wave and stranded, so the three exits below are the whole
    contract: compiled, interpreted, or handed to the core's beta. */
-static int native_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
+static int native_reduce(Net *n, Port *redexes, int nred, int64_t limit, int *changed) {
   int done = 0;
   for (int i = 0; i < nred; i++) {
-    if (limit > 0 && (long)n->steps >= limit) break;
+    if (limit > 0 && (int64_t)n->steps >= limit) break;
     Port pa = redexes[2 * i], pb = redexes[2 * i + 1];
     /* Which of the two ports is the APP, whether both are live, whether the wiring is
        principal-to-principal and mutual: all of it is the pattern, so the pair that
@@ -617,7 +617,7 @@ static int native_reduce(Net *n, Port *redexes, int nred, long limit, int *chang
     if (result_shared(n, lam, app)) {
       if (lin_precompile_depth > 0) continue;
       Val sv; memset(&sv, 0, sizeof sv);
-      long amb0 = lin_fan_ambiguous;
+      int64_t amb0 = lin_fan_ambiguous;
       if (fold_via_table(n, fnp, &sv, args) && lin_fan_ambiguous == amb0) {   /* (fnp: the vocabulary's own static name) */
         fold_cone(n, lam, app, &sv);
         done++; (*changed)++; n->steps++;
@@ -644,13 +644,13 @@ static int native_reduce(Net *n, Port *redexes, int nred, long limit, int *chang
       char expr[2048];
       Buf b = { expr, sizeof expr, 0 };
       if (emit_redex(n, app, &b, LIN_PAT_BUDGET_FOR(n))) {          /* the same budget the matcher uses: read from the net, never a constant */
-        long (*f)(void) = compile_expr(expr);
-        if (f) { v.kind = 1; v.iv = f(); have = 1; DBG("compiled %s = %ld\n", expr, v.iv); }
+        int64_t (*f)(void) = compile_expr(expr);
+        if (f) { v.kind = 1; v.iv = f(); have = 1; DBG("compiled %s = %" PRId64 "\n", expr, v.iv); }
       } else {
         DBG("declined lam %d ('%s'): operand cone not readable as structure\n", lam, fn);
       }
     }
-    if (!have && fold_via_table(n, fn, &v, argp)) { have = 1; DBG("table fold %s = %ld\n", fn, v.iv); }
+    if (!have && fold_via_table(n, fn, &v, argp)) { have = 1; DBG("table fold %s = %" PRId64 "\n", fn, v.iv); }
     if (have) {
       fold_cone(n, lam, app, &v);
       done++; (*changed)++; n->steps++;
@@ -669,7 +669,7 @@ static int native_reduce(Net *n, Port *redexes, int nred, long limit, int *chang
 
 /* ---- registration --------------------------------------------------------- */
 LinDriver lin_native_driver;
-static void __attribute__((constructor)) native_load(void) {
+LIN_PLUGIN_INIT(native) {
   dbg = getenv("LIN_NATIVE_DEBUG") != NULL;
   static int registered = 0;
   if (registered) return;
