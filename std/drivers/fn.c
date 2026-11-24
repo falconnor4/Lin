@@ -2279,7 +2279,7 @@ static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
   {                                                  /* AHEAD FOR ANOTHER TARGET: the unit's source, kept for a static build */
     const char *ed = getenv("LIN_FN_EMIT_DIR");      /* (web/build.sh: its key is the one that build will look for) */
     if (ed && ed[0]) {
-      char ep[4200]; snprintf(ep, sizeof ep, "%s/fn-%016" PRIx64 ".c", ed, fnv1a(src) ^ fnv1a("wasm32"));
+      size_t en = strlen(ed) + 32; char ep[en]; snprintf(ep, en, "%s/fn-%016" PRIx64 ".c", ed, fnv1a(src) ^ fnv1a("wasm32"));   /* (sized from the directory's name) */
       FILE *ef = fopen(ep, "wb"); if (ef) { fputs(src, ef); fclose(ef); }
     }
   }
