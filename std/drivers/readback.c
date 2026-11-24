@@ -47,7 +47,9 @@
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>
+#ifndef LIN_STATIC
 #include <dlfcn.h>
+#endif
 #include <stdlib.h>
 
 static Net *N;
@@ -57,14 +59,16 @@ static void print_struct(FILE *f, Port r, int domain);
 /* Where readback's VALUE is written.  The core owns the stream: a prelude load aims it at a sink so
    the effects its top-level forms perform still run (dispatch happens HERE) without joining the
    program's own output, which a `; expect` line would then be one line off from. */
+#ifndef LIN_STATIC
 #include <ffi.h>
+#endif
 #define OUT (lin_out ? lin_out : stdout)
 static inline Port wire(Port p) { return N->wire[p.node * 3 + p.port]; }
 static inline int live(Port p) { return p.node >= 0 && p.node < N->nn && !N->dead[p.node]; }
 
 /* render one decoded value to a stream (1=int, 2=str, 3=bool, 4=float); returns 1 if rendered, else 0 */
 static int render_val(FILE *f, Val v) {
-  if (v.kind == 1) fprintf(f, "%ld", v.iv);
+  if (v.kind == 1) fprintf(f, "%" PRId64 "", v.iv);
   else if (v.kind == 2) fputs(v.sv, f);
   else if (v.kind == 3) fputs(v.iv ? "true" : "false", f);
   else if (v.kind == 4) { double d; memcpy(&d, &v.iv, 8); fprintf(f, "%g", d); }
@@ -76,9 +80,9 @@ static int render_val(FILE *f, Val v) {
    binders, each applied once -- see std/runtime/pattern.h), so it is read the same way with or
    without an expectation.  0 = not that box, and a box whose payload is not in the domain's own
    encoding is NOT a value: it declines rather than being guessed at. */
-static inline int box_num(Net *n, Port p, long *out) {
+static inline int box_num(Net *n, Port p, int64_t *out) {
   int w; Port pay;
-  long k;
+  int64_t k;
   if (!lin_pat_box(n, p, &w, &pay) || w != LIN_BOX_NUM) return 0;
   /* FORCING: the payload is the value the caller is observing, so readback may reduce to it -- and
      the core's own reader is the authority here exactly as it is for every other operand walk. */
@@ -86,9 +90,9 @@ static inline int box_num(Net *n, Port p, long *out) {
   *out = k;
   return 1;
 }
-static inline int box_bool(Net *n, Port p, long *out) {
+static inline int box_bool(Net *n, Port p, int64_t *out) {
   int w; Port pay;
-  long k;
+  int64_t k;
   if (!lin_pat_box(n, p, &w, &pay) || w != LIN_BOX_BOOL) return 0;
   if ((k = net_read_int(n, pay, LIN_ENC_BOOL)) < 0) return 0;
   *out = k;
@@ -106,8 +110,8 @@ static Val decode(Net *n, Port p, int domain) {
   /* A BOX states its own domain, so it is tried BEFORE the plain encoding: `0` and both Church
      booleans are shapes two or three domains claim, and a value a driver wrote in a box is
      unambiguous -- which is the whole reason it chose that encoding at AOT time. */
-  case DT_NUM: { long x; if (box_num(n, p, &x) || net_read_i64(n, p, &x)) { v.iv = x; v.kind = 1; } break; }
-  case DT_BOOL: { long b; if (box_bool(n, p, &b) || (b = net_read_int(n, p, LIN_ENC_BOOL)) >= 0) { v.iv = b; v.kind = 3; } break; }
+  case DT_NUM: { int64_t x; if (box_num(n, p, &x) || net_read_i64(n, p, &x)) { v.iv = x; v.kind = 1; } break; }
+  case DT_BOOL: { int64_t b; if (box_bool(n, p, &b) || (b = net_read_int(n, p, LIN_ENC_BOOL)) >= 0) { v.iv = b; v.kind = 3; } break; }
   case DT_STR: if (net_read_string_arena(n, p, LIN_ENC_NUM, &v.sv) >= 0) v.kind = 2; break;
   case DT_FLOAT: { double d; if (net_read_float(n, p, &d)) { memcpy(&v.iv, &d, 8); v.kind = 4; } break; }
   /* DT_FFI deliberately has NO case: dispatching a closure is `run_ffi`, which the callers do
@@ -128,12 +132,12 @@ static const char *str_determined(Net *n, Port p) {
   for (size_t step = 0; step < (size_t)n->nn; step++) {                   /* as in the core: a chain longer than the net has nodes has repeated itself */
     Port head, tail;
     if (!net_read_cell(n, cur, &head, &tail)) {
-      long k = net_read_int(n, cur, LIN_ENC_STR);      /* the nil terminal ends the chain */
+      int64_t k = net_read_int(n, cur, LIN_ENC_STR);      /* the nil terminal ends the chain */
       if (k != 0) break;
       if (!len) { free(buf); return NULL; }
       const char *r = lin_intern(buf, len); free(buf); return r;
     }
-    long ch = net_read_int(n, head, LIN_ENC_NUM);
+    int64_t ch = net_read_int(n, head, LIN_ENC_NUM);
     if (ch <= 0 || ch > 255) break;                    /* a bare terminal payload: ambiguous */
     if (len == cap) buf = realloc(buf, cap = cap ? cap * 2 : 64);
     buf[len++] = (char)ch;
@@ -148,12 +152,12 @@ static const char *str_determined(Net *n, Port p) {
    is the numeral zero, TRUE and the empty list at once, and the geometry cannot choose. */
 static Val value_any(Net *n, Port p) {
   Val v = {0};
-  long b;
+  int64_t b;
   /* A BOX NAMES ITS DOMAIN, which is what choosing the encoding at AOT time buys: it is the one
      reading that works with no expectation to state, and it is tried first for that reason. */
   if (box_num(n, p, &b)) { v.iv = b; v.kind = 1; return v; }
   if (box_bool(n, p, &b)) { v.iv = b; v.kind = 3; return v; }
-  long k;                                              /* (a float is a numeral: only its TYPE says float) */
+  int64_t k;                                              /* (a float is a numeral: only its TYPE says float) */
   if (net_read_i64(n, p, &k)) { v.iv = k; v.kind = 1; return v; }
   { const char *s = str_determined(n, p); if (s) { v.sv = s; v.kind = 2; return v; } }
   return v;                                            /* kind 0: the caller writes the net */
@@ -162,6 +166,9 @@ static Val value_any(Net *n, Port p) {
 /* resolve a driver: "cpu" -> base engine, else LinDriver sym / lin_<name>_driver / std/drivers plugin */
 static void *resolve_driver(const char *dn) {
   if (!strcmp(dn, "cpu")) return NULL;
+#ifdef LIN_STATIC
+  { const LinStaticPlugin *pl = lin_static_plugin(dn); return pl ? (void *)pl->driver : NULL; }   /* (linked in: see LIN_PLUGIN_INIT) */
+#else
   char sym[strlen(dn) + sizeof "lin__driver"]; snprintf(sym, sizeof sym, "lin_%s_driver", dn);
   void *s = dlsym(RTLD_DEFAULT, dn);
   if (!s) s = dlsym(RTLD_DEFAULT, sym);
@@ -169,6 +176,7 @@ static void *resolve_driver(const char *dn) {
      registers it with the core, which is why finding it here is enough to have it dispatched. */
   if (!s && lin_driver_load(dn)) s = dlsym(RTLD_DEFAULT, sym);
   return s;
+#endif
 }
 
 /* ---------------- the FFI convention ----------------
@@ -217,16 +225,17 @@ static void arg_doms(const char *fn, int doms[2], int *ndoms) {
 }
 
 /* Builtin dispatch: table rows for simple int/bool/str; side-effectors (exit) handled before the table, else dlsym. */
-#define B3(n, e) if (!strcmp(fn, n)) { v.kind = 3; v.iv = (long)(e); return v; }
+#define B3(n, e) if (!strcmp(fn, n)) { v.kind = 3; v.iv = (int64_t)(e); return v; }
 
 /* The call is DYNAMIC: libffi builds the interface from the argument KINDS, so the arity is a runtime count
    and nothing here enumerates it.  Integers and pointers both travel as 64-bit words (what every arm of the
    old ladder did), and a value of kind 4 travels as the double its bits name -- which the ladder could not
    express at all. */
-static long dyn_call(void *sym, int argc, long *c_args, const Val *fargs) {
+#ifndef LIN_STATIC
+static int64_t dyn_call(void *sym, int argc, int64_t *c_args, const Val *fargs) {
   int n = argc > 0 ? argc : 1;
   ffi_type **at = calloc((size_t)n, sizeof *at); void **av = calloc((size_t)n, sizeof *av);
-  long r = 0;
+  int64_t r = 0;
   if (!at || !av) { free(at); free(av); return 0; }
   for (int i = 0; i < argc; i++) { at[i] = fargs[i].kind == 4 ? &ffi_type_double : &ffi_type_sint64; av[i] = &c_args[i]; }
   ffi_cif cif;
@@ -234,7 +243,8 @@ static long dyn_call(void *sym, int argc, long *c_args, const Val *fargs) {
   free(at); free(av);
   return r;
 }
-static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val v);
+#endif
+static Val rb_rows(const char *fn, int argc, int64_t *c_args, const Val *fargs, Val v);
 
 static Val run_ffi(Net *n, Port p) {
   Val v = {0};
@@ -282,12 +292,12 @@ static Val run_ffi(Net *n, Port p) {
   if (slots < 0) slots = 0;                                  /* not a cons spine: only the empty arg list is concrete */
   size_t n_ = slots ? (size_t)slots : 1;
   Val *fargs = calloc(n_, sizeof *fargs);
-  long *c_args = calloc(n_, sizeof *c_args);
+  int64_t *c_args = calloc(n_, sizeof *c_args);
   if (!fargs || !c_args) { free(fargs); free(c_args); return v; }
   int argc = net_spine_args(n, argp, doms, ndoms, fargs, slots);
   if (argc < slots || (slots == 0 && argc != 0)) { free(fargs); free(c_args); return v; }
   for (int i = 0; i < argc; i++)
-    if (fargs[i].kind == 2) c_args[i] = (long)(intptr_t)fargs[i].sv;   /* sv already IS a stable C string: no copy to keep alive */
+    if (fargs[i].kind == 2) c_args[i] = (int64_t)(intptr_t)fargs[i].sv;   /* sv already IS a stable C string: no copy to keep alive */
     else c_args[i] = fargs[i].iv;
   v = rb_rows(fn, argc, c_args, fargs, v);
   free(fargs); free(c_args);
@@ -295,7 +305,7 @@ static Val run_ffi(Net *n, Port p) {
 }
 
 /* The FFI rows: the effect builtins and the symbol call, over operands the caller sized from the spine. */
-static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val v) {
+static Val rb_rows(const char *fn, int argc, int64_t *c_args, const Val *fargs, Val v) {
 
   if (!strcmp(fn, "exit")) { exit(argc > 0 ? (int)c_args[0] : 0); return v; }
   if (!strcmp(fn, "driver_get")) { LinDriver *d = lin_get_driver(); v.kind = 2; v.sv = d ? d->name : "cpu"; return v; }
@@ -313,8 +323,9 @@ static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val
      states its own PURITY where it registers: under a build marker the registry consults only the ones
      that declared a call to them a function of their operands, so this row cannot bake an observation
      either -- and the value it hands back may be folded into the artifact for exactly that reason. */
-  long out; int okind = 0;
+  int64_t out; int okind = 0;
   if (lin_scalar_ops_run(fn, argc, c_args, &out, &okind)) {
+    if (okind == 2) { v.kind = 2; v.sv = (const char *)(intptr_t)out; return v; }   /* (a string the provider keeps) */
     if (okind == 4) v.kind = 4;
     else if (okind == 3) v.kind = 3;
     else v.kind = 1;
@@ -333,17 +344,26 @@ static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val
        !strcmp(fn, "dlopen") || !strcmp(fn, "puts") || !strcmp(fn, "getenv")))
     return v;
   if (fargs[0].kind == 2) {
-    if (!strcmp(fn, "lin_parse_float") && argc > 0) { double d = strtod((char *)c_args[0], NULL); long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
+    if (!strcmp(fn, "lin_parse_float") && argc > 0) { double d = strtod((char *)c_args[0], NULL); int64_t rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
     if (!strcmp(fn, "lin_streq") && argc >= 2 && fargs[1].kind == 2) { v.kind = 3; v.iv = !strcmp((char *)c_args[0], (char *)c_args[1]); return v; }
-    if (!strcmp(fn, "dlopen") && argc > 0) { v.kind = 1; v.iv = (long)(intptr_t)dlopen((char *)c_args[0], RTLD_NOW | RTLD_GLOBAL); return v; }
+#ifdef LIN_STATIC
+    if (!strcmp(fn, "dlopen") && argc > 0) { v.kind = 1; v.iv = 0; return v; }   /* (nothing to open: what a static build has is linked in) */
+#else
+    if (!strcmp(fn, "dlopen") && argc > 0) { v.kind = 1; v.iv = (int64_t)(intptr_t)dlopen((char *)c_args[0], RTLD_NOW | RTLD_GLOBAL); return v; }
+#endif
     if (!strcmp(fn, "puts") && argc > 0) { v.kind = 1; v.iv = puts((char *)c_args[0]); return v; }
     if (!strcmp(fn, "getenv") && argc > 0) { char *ev = getenv((char *)c_args[0]); v.kind = 2; v.sv = ev ? ev : "(null)"; return v; }
   }
-  if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; long rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
+  if (!strcmp(fn, "lin_float")) { double d = (double)c_args[0]; int64_t rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
   /* A `lin_fs` call: like the `lin_f` float family above (its operands are floats), except the
      result is a STRING -- the caller's own buffer, which a bulk call needs to answer a whole
      frame/table/scan in ONE dispatch instead of a fold per element.  The name states the
      signature, exactly as `lin_f` does; nothing here knows what the call means. */
+#ifdef LIN_STATIC
+  /* (a static build calls only what a provider registered by name -- lin_scalar_ops_add -- and the rows above) */
+  fprintf(stderr, "ffi: '%s' is not provided in this build\n", fn);
+  return v;
+#else
   if (!strncmp(fn, "lin_fs", 6)) {
     void *bsym = dlsym(RTLD_DEFAULT, fn);
     if (!bsym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
@@ -354,6 +374,7 @@ static Val rb_rows(const char *fn, int argc, long *c_args, const Val *fargs, Val
   if (!sym) { fprintf(stderr, "ffi: symbol '%s' not found\n", fn); return v; }
   v.kind = 1; v.iv = dyn_call(sym, argc, c_args, fargs);
   return v;
+#endif
 }
 
 static int net_try_ffi(Net *n, Port p) {
@@ -393,7 +414,7 @@ static int eff_dig(Net *n, Port p, int *code, Port pay[3], int *npay) {
         n->tag[cur.node] != APP) return 0;
     Port fn = net_dhop(n, wire((Port){cur.node, 0}));
     if (fn.node == l.node && fn.port == 1) {           /* the tag's own binder: the code is here */
-      long c = net_read_int(n, wire((Port){cur.node, 2}), LIN_ENC_NUM);
+      int64_t c = net_read_int(n, wire((Port){cur.node, 2}), LIN_ENC_NUM);
       if (c < 0 || c >= EFF_N || np != eff_pay[c]) return 0;
       for (int i = 0; i < np; i++) pay[i] = tmp[np - 1 - i];
       if (npay) *npay = np;
@@ -427,7 +448,7 @@ static int eff_shape(Net *n, Port p) {
 static Port net_alloc_string(Net *n, const char *s) {
   Scope sc = scope_nil();
   Port cur = net_alloc_list_nil(n);
-  for (long i = (long)strlen(s) - 1; i >= 0; i--) {
+  for (int64_t i = (int64_t)strlen(s) - 1; i >= 0; i--) {
     Port ch = net_alloc_scott(n, (unsigned char)s[i]);
     Port c_lam = net_alloc(n, LAM, sc), n_lam = net_alloc(n, LAM, sc);
     Port a1 = net_alloc(n, APP, sc), a2 = net_alloc(n, APP, sc);
@@ -468,7 +489,7 @@ static void eff_apply(Net *n, Port fn, Port arg) {
   net_link(n, (Port){0, 0}, (Port){app.node, 1}, 1);
 }
 
-static long run_io_body(Net *n, long step_limit) {
+static int64_t run_io_body(Net *n, int64_t step_limit) {
   N = n;
   int did_io = 0;
   for (;;) {
@@ -480,7 +501,7 @@ static long run_io_body(Net *n, long step_limit) {
       FILE *out_fp = stdout;
       Port msg_p, next_p;
       if (code == EFF_WRITE) {                          /* `io_write_to dst msg next`: dst 2 = stderr */
-        long dst = net_read_int(n, pay[0], LIN_ENC_NUM);
+        int64_t dst = net_read_int(n, pay[0], LIN_ENC_NUM);
         if (dst == 2) out_fp = stderr;
         msg_p = pay[1]; next_p = pay[2];
       } else { msg_p = pay[0]; next_p = pay[1]; }
@@ -511,7 +532,7 @@ static long run_io_body(Net *n, long step_limit) {
     {
       Port src_p = pay[0], cb = pay[1];
       InBuf ib = { NULL, 0, 0 }; ib_add(&ib, "", 0);
-      long res_int = -1; int is_int = 0;
+      int64_t res_int = -1; int is_int = 0;
       /* the runner OBSERVES the source, so it forces it: under needed order nothing else had a reason to */
       if (src_p.node >= 0) src_p = net_force_val(n, src_p);
       Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0};
@@ -520,7 +541,7 @@ static long run_io_body(Net *n, long step_limit) {
       else if (fv.kind == 2) ib_add(&ib, fv.sv, strlen(fv.sv));
       else if (src_p.node < 0) read_stdin(&ib);
       else {
-        long fd = net_read_int(n, src_p, LIN_ENC_NUM);
+        int64_t fd = net_read_int(n, src_p, LIN_ENC_NUM);
         if (fd == 0) read_stdin(&ib);
         else if (fd > 0) {                           /* what the descriptor has now (a short read ends it) */
           char chunk[BUFSIZ]; ssize_t nr;   /* (the stdio buffer's own size: a chunk, not a limit) */
@@ -533,14 +554,14 @@ static long run_io_body(Net *n, long step_limit) {
             if (!strcmp(src, "stdin") || !strcmp(src, "0")) read_stdin(&ib);
             else if (!strcmp(src, "stdin:all")) read_stream(stdin, &ib, 2);   /* (all of it; stdin stays open) */
             else if (src[0] == '!' || !strncmp(src, "cmd:", 4)) read_stream(popen(src[0] == '!' ? src + 1 : src + 4, "r"), &ib, 1);
-            else if (!strncmp(src, "sleep:", 6)) { res_int = strtol(src + 6, NULL, 10); if (res_int > 0) usleep((useconds_t)(res_int * 1000)); is_int = 1; }
+            else if (!strncmp(src, "sleep:", 6)) { res_int = strtoll(src + 6, NULL, 10); if (res_int > 0) usleep((useconds_t)(res_int * 1000)); is_int = 1; }
             else read_stream(fopen(!strncmp(src, "file:", 5) ? src + 5 : src, "r"), &ib, 0);
           }
         }
       }
       char *in_buf = ib.s;
       char *endptr = NULL;
-      long val = (!is_int && in_buf[0]) ? strtol(in_buf, &endptr, 10) : -1;
+      int64_t val = (!is_int && in_buf[0]) ? strtoll(in_buf, &endptr, 10) : -1;
       Port arg = (is_int == 2) ? net_alloc_bool(n, (int)fv.iv) : is_int ? net_alloc_scott(n, res_int) : (in_buf[0] && endptr && !*endptr && val >= 0) ? net_alloc_scott(n, val) : net_alloc_string(n, in_buf);
       free(ib.s);
       eff_apply(n, cb, arg);
@@ -566,8 +587,8 @@ static size_t vis_cap = 0;
 static char *ob_buf = NULL; static size_t ob_len, ob_cap;
 static char **viz_txt = NULL;      /* memo: node*3+port -> rendered text */
 static int *viz_depth = NULL;      /* ... and the binder depth it was rendered at (see pp_push) */
-static long qmarks = 0;            /* '?' (unexpressible sharing / over-depth) marks emitted so far */
-static long dmarks = 0;            /* '_' marks emitted for a node the reduction DISCARDED */
+static int64_t qmarks = 0;            /* '?' (unexpressible sharing / over-depth) marks emitted so far */
+static int64_t dmarks = 0;            /* '_' marks emitted for a node the reduction DISCARDED */
 
 /* The binders currently being printed, innermost last.  An occurrence carries no name of its own --
    print_port renders it from the binder node its wire leads to -- and a net has no stored name to
@@ -612,7 +633,7 @@ static void ob_printf(const char *f, ...) {
 }
 /* render a decoded value into the output buffer; 1 when it rendered */
 static int ob_val(Val v) {
-  if (v.kind == 1) ob_printf("%ld", v.iv);
+  if (v.kind == 1) ob_printf("%" PRId64 "", v.iv);
   else if (v.kind == 2) { ob_putc('"'); ob_puts(v.sv); ob_putc('"'); }
   else if (v.kind == 3) ob_puts(v.iv ? "true" : "false");
   else if (v.kind == 4) { double d; memcpy(&d, &v.iv, 8); ob_printf("%g", d); }
@@ -660,7 +681,7 @@ static void print_port(Port p, int depth, int dom) {
   if (viz_txt && in_txt && viz_txt[key] && viz_depth[key] == pp_top) { ob_puts(viz_txt[key]); return; }   /* in_txt: printing FORCES, which grows the net, so a key can outrun the table */
   if (vis_print && in_vis && vis_print[p.node]) { ob_putc('?'); qmarks++; return; }
   if (vis_print && in_vis) vis_print[p.node] = 1;
-  long q0 = qmarks; size_t o0 = ob_len;
+  int64_t q0 = qmarks; size_t o0 = ob_len;
   switch (N->tag[p.node]) {
   case ROOT: print_port(wire(p), depth + 1, dom); break;
   case ERA: ob_putc('_'); break;
@@ -724,7 +745,7 @@ static void print_struct(FILE *f, Port r, int domain) {
    through a superposition the walk cannot resolve, is not guessed at -- the caller prints the term. */
 static int ctor_fields(Net *n, Port p, FILE *f, int depth);
 static int field_value(Net *n, Port p, FILE *f, int depth) {
-  long amb = lin_fan_ambiguous;
+  int64_t amb = lin_fan_ambiguous;
   Port v = net_dup_hop(n, net_force_val(n, p));
   if (lin_fan_ambiguous != amb) return 0;                       /* which copy is this field's?  not known here */
   if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) return 0;
@@ -744,7 +765,7 @@ static int ctor_fields(Net *n, Port p, FILE *f, int depth) {
   for (int i = 0; i < n->nn && live(bnd) && n->tag[bnd.node] == DUP && bnd.port != 0; i++)
     bnd = wire((Port){bnd.node, 0});                            /* ...also through the fan copying it */
   if (!live(bnd) || n->tag[bnd.node] != ERA) return 0;
-  long id;
+  int64_t id;
   if (!net_read_i64(n, wire((Port){q.node, 2}), &id)) return 0;
   const LinCtor *ci = lin_ctor_info(id);
   if (!ci || ci->m != m) return 0;
@@ -814,8 +835,8 @@ static int print_untyped(Net *n, Port p, const char *parent, FILE *f, int depth)
     if (ok) fwrite(buf, 1, len, f);
     free(buf);
     if (ok) return 1; }
-  long x;
-  if (net_read_i64(n, v, &x)) { fprintf(f, "%ld", x); return 1; }
+  int64_t x;
+  if (net_read_i64(n, v, &x)) { fprintf(f, "%" PRId64 "", x); return 1; }
   if (parent) {
     char *buf = NULL; size_t len = 0; FILE *g = open_memstream(&buf, &len); int ok = 0;
     if (g) { char *d = malloc(strlen(parent) + 4); sprintf(d, "D%s()", parent); ok = print_typed(n, v, d, g, depth + 1); free(d); fclose(g); }
@@ -862,11 +883,11 @@ static int print_typed_in(Net *n, Port p, const char *d, FILE *f, int depth, con
     args = realloc(args, sizeof *args * (size_t)(nargs + 1)); aend = realloc(aend, sizeof *aend * (size_t)(nargs + 1));
     args[nargs] = q; aend[nargs] = r; nargs++; q = r; }
   int m = 0, kmax = 0;
-  for (long id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name)) { m = c->m; if (c->k > kmax) kmax = c->k; } }
+  for (int64_t id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name)) { m = c->m; if (c->k > kmax) kmax = c->k; } }
   const LinCtor *ci = NULL; int i = -1, k = -1, ok = 0;
   Port *fields = malloc(sizeof *fields * (size_t)(kmax + 1));
   if (m) k = net_read_scott(n, p, m, &i, fields, kmax);
-  if (k >= 0) for (long id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name) && c->i == i && c->k == k) ci = c; }
+  if (k >= 0) for (int64_t id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (!strcmp(c->dt, name) && c->i == i && c->k == k) ci = c; }
   if (ci) {
     const char *nm = strrchr(ci->name, '.'); nm = nm ? nm + 1 : ci->name;
     ok = 1;
@@ -902,12 +923,12 @@ static int print_by_type(Net *n, Port p, const char *d, FILE *out) {
    list of numbers as the list it is -- `[10 20 30]` -- rather than as bytes no one typed.  0 = not a list of
    numbers (the caller decodes as before). */
 static int print_num_list(Net *n, Port p, FILE *f) {
-  long *xs = NULL; size_t k = 0, cap = 0; int text = 1, ok = 0;
+  int64_t *xs = NULL; size_t k = 0, cap = 0; int text = 1, ok = 0;
   Port cur = p;
   for (size_t step = 0; step <= (size_t)n->nn; step++) {
     Port head, tail;
     if (!net_read_cell(n, cur, &head, &tail)) { ok = k > 0 && net_read_int(n, cur, LIN_ENC_STR) == 0; break; }
-    long x; if (!net_read_i64(n, head, &x)) break;
+    int64_t x; if (!net_read_i64(n, head, &x)) break;
     if (k == cap) xs = realloc(xs, sizeof *xs * (cap = cap ? cap * 2 : 16));
     xs[k++] = x;
     text &= (x >= 32 && x <= 255 && x != 127) || x == 9 || x == 10 || x == 13;
@@ -915,7 +936,7 @@ static int print_num_list(Net *n, Port p, FILE *f) {
   }
   if (ok && !text) {
     fputc('[', f);
-    for (size_t i = 0; i < k; i++) fprintf(f, i ? " %ld" : "%ld", xs[i]);
+    for (size_t i = 0; i < k; i++) fprintf(f, i ? " %" PRId64 "" : "%" PRId64 "", xs[i]);
     fputc(']', f); fflush(f);
   }
   free(xs);
@@ -961,11 +982,11 @@ static int print_body(Net *n, int domain) {
               text, so a '?'-bearing result must not be treated as an answer by anything downstream.
               See print_port for the decision. */
   if (dmarks) {
-    fprintf(stderr, "lin: readback reached a node the reduction had discarded (%ld mark(s)); "
+    fprintf(stderr, "lin: readback reached a node the reduction had discarded (%" PRId64 " mark(s)); "
                     "the result is not a value\n", dmarks);
     fflush(stderr);
   } else if (qmarks) {
-    fprintf(stderr, "lin: note: readback of a shared normal form (%ld mark(s)); the value is "
+    fprintf(stderr, "lin: note: readback of a shared normal form (%" PRId64 " mark(s)); the value is "
                     "correct but the printed text is not unique -- force it with `count` or by "
                     "applying it\n", qmarks);
     fflush(stderr);
@@ -1009,16 +1030,16 @@ static int rb_print(Net *n, void *st, int domain) {
   lin_unpin(n);
   return rc;
 }
-static long rb_run_io(Net *n, void *st, long limit) {
+static int64_t rb_run_io(Net *n, void *st, int64_t limit) {
   (void)st;
   lin_pin(n);
-  long rc = run_io_body(n, limit);
+  int64_t rc = run_io_body(n, limit);
   lin_unpin(n);
   return rc;
 }
 
 LinDriver lin_readback_driver;
-static void __attribute__((constructor)) readback_load(void) {
+LIN_PLUGIN_INIT(readback) {
   static int registered = 0;
   if (registered) return;
   registered = 1;

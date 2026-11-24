@@ -2,7 +2,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef LIN_STATIC
 #include <dlfcn.h>
+#endif
 
 /* The core's value readers: net STRUCTURE in, a value out -- under an encoding the CALLER states (lin.h's
    value-ENCODINGS block says why a node cannot say which value it holds).  The source of meaning is the type
@@ -36,33 +38,33 @@ void lin_domains_init(void) {
    value but one per copy, and the walk takes copy 1.  That is right for a reader that only wants a shape, and
    wrong for one that wants THE value -- so every such choice is counted, and a fold whose operands needed one
    knows its value is not the same for every copy (std/drivers/arith.c). */
-static LinCtor *ctors; static long nctors, cctors;
-long lin_ctor_register(const char *dt, const char *name, int m, int i, int k) {
-  for (long j = nctors; j-- > 0; )                   /* a reloaded declaration keeps its ID */
+static LinCtor *ctors; static int64_t nctors, cctors;
+int64_t lin_ctor_register(const char *dt, const char *name, int m, int i, int k) {
+  for (int64_t j = nctors; j-- > 0; )                   /* a reloaded declaration keeps its ID */
     if (!strcmp(ctors[j].dt, dt) && !strcmp(ctors[j].name, name) && ctors[j].m == m && ctors[j].i == i && ctors[j].k == k) return j + 1;
   if (nctors >= cctors) ctors = realloc(ctors, (size_t)(cctors = cctors ? cctors * 2 : 32) * sizeof *ctors);
   ctors[nctors] = (LinCtor){ lin_intern(dt, strlen(dt)), lin_intern(name, strlen(name)), m, i, k, NULL, lin_ctor_prog };
   return ++nctors;
 }
 int lin_ctor_prog;
-void lin_ctor_set_fdesc(long id, const char *fdesc) { if (id >= 1 && id <= nctors && fdesc) ctors[id - 1].fdesc = lin_intern(fdesc, strlen(fdesc)); }
+void lin_ctor_set_fdesc(int64_t id, const char *fdesc) { if (id >= 1 && id <= nctors && fdesc) ctors[id - 1].fdesc = lin_intern(fdesc, strlen(fdesc)); }
 const char *lin_result_desc;
-const LinCtor *lin_ctor_info(long id) { return id >= 1 && id <= nctors ? &ctors[id - 1] : NULL; }
+const LinCtor *lin_ctor_info(int64_t id) { return id >= 1 && id <= nctors ? &ctors[id - 1] : NULL; }
 /* The latest declaration of that name wins, as a definition does -- the PROGRAM's before the library's: a library
    module loaded lazily, after the program declared a constructor of the same name, stands for one loaded before
    it (main.c, def_find, says the same of definitions). */
-long lin_ctor_lookup(const char *name) {
+int64_t lin_ctor_lookup(const char *name) {
   const char *dot = strrchr(name, '.');
-  if (dot) for (long j = nctors; j-- > 0; ) if (!strcmp(ctors[j].name, name)) return j + 1;   /* a qualified name means that one */
+  if (dot) for (int64_t j = nctors; j-- > 0; ) if (!strcmp(ctors[j].name, name)) return j + 1;   /* a qualified name means that one */
   for (int pass = 1; pass >= 0; pass--)
-    for (long j = nctors; j-- > 0; ) {
+    for (int64_t j = nctors; j-- > 0; ) {
       if (pass && !ctors[j].prog) continue;
       const char *cn = ctors[j].name, *cd = strrchr(cn, '.');
       if (!strcmp(cn, name) || (cd && !strcmp(cd + 1, name)) || (dot && !strcmp(dot + 1, cd ? cd + 1 : cn))) return j + 1;
     }
   return 0;
 }
-long lin_fan_ambiguous;
+int64_t lin_fan_ambiguous;
 /* CHOOSING A COPY.  A reader that stands for ONE copy of a superposition (a fold driver reading a redex it
    split per copy) says which: fan node -> the auxiliary port of that copy.  A crossing walk arriving at a
    chosen fan's principal takes that port, and that is not ambiguous; arriving at any other fan's principal
@@ -84,7 +86,7 @@ static inline Port fstep(Net *n, Port q, int cross) {
 }
 #define FSTEP(q) fstep(n, (q), cross)
 static inline Port fan_walk(Net *n, Port p, int cross) {
-  Port a = p, b = p; long lim = (long)n->nn, st = 0, L = 1; int chase = 1;
+  Port a = p, b = p; int64_t lim = (int64_t)n->nn, st = 0, L = 1; int chase = 1;
   for (; st < lim && live(n, a) && n->tag[a.node] == DUP; st++) {
     a = FSTEP(a);
     if (!live(n, a) || n->tag[a.node] != DUP || !chase) break;
@@ -96,7 +98,7 @@ static inline Port fan_walk(Net *n, Port p, int cross) {
   }
   if (!chase || !live(n, a) || n->tag[a.node] != DUP || a.node != b.node || a.port != b.port) return a;
   for (Port c = FSTEP(a); (c.node != a.node || c.port != a.port) && L < lim; L++) c = FSTEP(c);
-  for (long r = (lim - st - 1) % L; r > 0 && live(n, a) && n->tag[a.node] == DUP; r--) a = FSTEP(a);
+  for (int64_t r = (lim - st - 1) % L; r > 0 && live(n, a) && n->tag[a.node] == DUP; r--) a = FSTEP(a);
   return a;
 }
 static inline Port dup_hop(Net *n, Port p) { return fan_walk(n, p, 1); }
@@ -255,43 +257,43 @@ static int enc_layer(Net *n, Port p, int enc, Layer *out) {
    carries the SIGN: `\c.\n.true` means every further bit is 0, `\c.\n.false` that every further bit is 1.
    So the chain is a two's complement number, sign-extended to 64 bits; the arithmetic over it (std/num.lin)
    wraps at 64 bits, exactly as int64_t does in the drivers.  Net structure only -- no payload, no node kind. */
-static long read_layers(Net *n, Port p, int enc);
+static int64_t read_layers(Net *n, Port p, int enc);
 static int nil_sign(Net *n, Port p) {               /* 1 non-negative, 0 negative, -1 not a numeral terminal */
   if (!hop_lam(n, &p, 0)) return -1;
   Port c = skip_dup(n, net_force_val(n, wr(n, (Port){p.node, 2})));
   if (c.port != 0 || !live(n, c) || n->tag[c.node] != LAM) return -1;
-  long b = net_read_int(n, wr(n, (Port){c.node, 2}), LIN_ENC_BOOL);
+  int64_t b = net_read_int(n, wr(n, (Port){c.node, 2}), LIN_ENC_BOOL);
   return b < 0 ? 1 : (int)b;                        /* a terminal with no sign (a plain nil) reads as 0-extended */
 }
-int net_read_i64(Net *n, Port p, long *out) {
-  unsigned long a = 0; int k = 0; Layer L;
+int net_read_i64(Net *n, Port p, int64_t *out) {
+  uint64_t a = 0; int k = 0; Layer L;
   for (;;) {
     if (!cons_layer(n, p, &L)) break;
     if (L.layer == L_TERMINAL) {
       if (k == 0) break;                            /* a bare terminal is a list, not a numeral */
-      if (nil_sign(n, p) == 0 && k < LIN_INT_BITS) a |= ~0UL << k;
-      *out = (long)a; return 1;
+      if (nil_sign(n, p) == 0 && k < LIN_INT_BITS) a |= ~(uint64_t)0 << k;
+      *out = (int64_t)a; return 1;
     }
-    long b = net_read_int(n, L.head, LIN_ENC_BOOL);
+    int64_t b = net_read_int(n, L.head, LIN_ENC_BOOL);
     if (b < 0 || k > n->nn) break;                 /* a chain of distinct cells: the net's size bounds it */
-    if (k < LIN_INT_BITS) a |= (unsigned long)(b & 1) << k;
+    if (k < LIN_INT_BITS) a |= (uint64_t)(b & 1) << k;
     k++; p = L.tail;
   }
-  long v = read_layers(n, p, LIN_ENC_NUM);          /* the other numeral: a Scott successor tower (non-negative) */
+  int64_t v = read_layers(n, p, LIN_ENC_NUM);          /* the other numeral: a Scott successor tower (non-negative) */
   if (k == 0 && v >= 0) { *out = v; return 1; }
   return 0;
 }
-long net_read_bits(Net *n, Port p) { long v; return net_read_i64(n, p, &v) && v >= 0 ? v : -1; }
-long net_read_int(Net *n, Port p, int enc) {
-  if (enc == LIN_ENC_NUM) { long b = net_read_bits(n, p); if (b >= 0) return b; }
+int64_t net_read_bits(Net *n, Port p) { int64_t v; return net_read_i64(n, p, &v) && v >= 0 ? v : -1; }
+int64_t net_read_int(Net *n, Port p, int enc) {
+  if (enc == LIN_ENC_NUM) { int64_t b = net_read_bits(n, p); if (b >= 0) return b; }
   return read_layers(n, p, enc);
 }
-static long read_layers(Net *n, Port p, int enc) {
-  long count = 0;
+static int64_t read_layers(Net *n, Port p, int enc) {
+  int64_t count = 0;
   for (int step = 0; step < n->nn; step++) {
     Layer L;
     if (!enc_layer(n, p, enc, &L)) {
-      if (enc == LIN_ENC_NUM && count > 0) { long base = net_read_bits(n, p); if (base >= 0) return count + base; }
+      if (enc == LIN_ENC_NUM && count > 0) { int64_t base = net_read_bits(n, p); if (base >= 0) return count + base; }
       return -1;
     }
     if (enc == LIN_ENC_BOOL) return L.layer == L_TERMINAL;
@@ -315,7 +317,7 @@ int net_read_string_arena(Net *n, Port p, int pay_enc, const char **out) {
        terminal (`\b0.\b1.b0`) is also TRUE and nil, so reading it as a character would be a guess; a
        payload that is itself a CELL is a 1-element list whose "cell" is an `_ffi` closure's header (the
        two ARE one net: `\c.\n.((c h) t)` and `\_ffi.\_ret.((_ffi fn) args)`).  Both are skipped. */
-    long ch = net_read_int(n, L.head, pay_enc);
+    int64_t ch = net_read_int(n, L.head, pay_enc);
     if (ch > 0 && ch < 256) { if (len == cap) buf = realloc(buf, cap = cap ? cap * 2 : 64); buf[len++] = (char)ch; }
     cur = L.tail;
   }
@@ -327,20 +329,20 @@ int net_read_string_arena(Net *n, Port p, int pay_enc, const char **out) {
    gives the operations their pure meanings).  So decoding one is reading the numeral; what says "float"
    is the TYPE, which the caller knows -- the structure alone never claims a numeral is a float. */
 int net_read_float(Net *n, Port p, double *out) {
-  long bits;
+  int64_t bits;
   if (!net_read_i64(n, p, &bits)) return 0;
   memcpy(out, &bits, 8);
   return 1;
 }
 
 /* ---------------- the encodings' builders (net structure, not policy) ---------------- */
-static Port alloc_scott(Net *n, long k, Scope lvl) {
+static Port alloc_scott(Net *n, int64_t k, Scope lvl) {
   Scope bl = scope_app(n, lvl, 1);
   Port nl = net_alloc(n, LAM, lvl), n2 = net_alloc(n, LAM, bl), cur;
   net_link(n, (Port){nl.node, 2}, (Port){n2.node, 0}, 0); cur = (Port){nl.node, 0};
   /* bits, least significant first, until what remains is all sign: at least one cell, so a numeral is never a
      bare terminal (that is the empty list) */
-  int bits[LIN_INT_BITS], w = 0; long r = k;
+  int bits[LIN_INT_BITS], w = 0; int64_t r = k;
   do { bits[w++] = (int)(r & 1); r >>= 1; } while (w < LIN_INT_BITS && !(r == 0 || r == -1));
   net_link(n, (Port){n2.node, 2}, net_alloc_bool(n, r == 0), 0);   /* the terminal's SIGN: true = 0-extended */
   net_link(n, (Port){nl.node, 1}, net_alloc(n, ERA, lvl), 0); net_link(n, (Port){n2.node, 1}, net_alloc(n, ERA, lvl), 0);
@@ -357,12 +359,12 @@ static Port alloc_scott(Net *n, long k, Scope lvl) {
   }
   return cur;
 }
-Port net_alloc_scott_at(Net *n, long k, Scope lvl) { return alloc_scott(n, k, lvl); }
-Port net_alloc_scott(Net *n, long k) { return alloc_scott(n, k, scope_nil()); }
+Port net_alloc_scott_at(Net *n, int64_t k, Scope lvl) { return alloc_scott(n, k, lvl); }
+Port net_alloc_scott(Net *n, int64_t k) { return alloc_scott(n, k, scope_nil()); }
 
 /* A BOXED INDEX: `\b0.\b1.(b0 (b1 i))` -- deliberately NOT the number encoding, which is what makes a
    box readable with no expectation at all (a numeral applies ONE binder per layer, a box BOTH). */
-Port net_box_index(Net *n, long i) {
+Port net_box_index(Net *n, int64_t i) {
   Scope sc = scope_nil();
   Port a = net_alloc(n, LAM, sc), b = net_alloc(n, LAM, sc);
   Port ia = net_alloc(n, APP, sc), oa = net_alloc(n, APP, sc);
@@ -390,7 +392,7 @@ static int box_layer(Net *n, Port p, Port *idx) {
   if (idx) *idx = wr(n, (Port){ia.node, 2});
   return 1;
 }
-long net_peel_index(Net *n, Port p) {
+int64_t net_peel_index(Net *n, Port p) {
   Port idx;
   if (!box_layer(n, p, &idx)) return -1;
   return net_read_int(n, idx, LIN_ENC_NUM);
@@ -420,7 +422,7 @@ Port net_alloc_list_nil(Net *n) {
 
 /* ...and building one is building the numeral of its bits. */
 Port net_alloc_float(Net *n, double d) {
-  long bits; memcpy(&bits, &d, 8);
+  int64_t bits; memcpy(&bits, &d, 8);
   return net_alloc_scott(n, bits);
 }
 
@@ -516,7 +518,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
      floats belong, and `(lin_parse_float (getenv "N"))` has one where a string belongs.  Dispatching
      is the readback provider's, and its own shape test is pure, so a slot that already IS a value
      pays only a walk of two wires. */
-  long amb = lin_fan_ambiguous;                      /* the closure test below is a SHAPE probe: its fan choices read no value */
+  int64_t amb = lin_fan_ambiguous;                      /* the closure test below is a SHAPE probe: its fan choices read no value */
   int und = lin_fan_undecided;
   if (net_read_value(n, p, DT_FFI, v) && v->kind) { lin_fan_ambiguous = amb; lin_fan_undecided = und; return 1; }   /* (the call's own value: dispatched once) */
   {
@@ -527,12 +529,12 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
   lin_fan_ambiguous = amb; lin_fan_undecided = und;
   switch (dom) {
   case DT_NUM: {
-    long x;
+    int64_t x;
     if (net_read_i64(n, p, &x)) { v->iv = x; v->kind = 1; return 1; }
     break;
   }
   case DT_BOOL: {
-    long b = net_read_int(n, p, LIN_ENC_BOOL);
+    int64_t b = net_read_int(n, p, LIN_ENC_BOOL);
     if (b >= 0) { v->iv = b; v->kind = 3; return 1; }
     break;
   }
@@ -551,7 +553,7 @@ static int dec_arg(Net *n, Port p, int dom, Val *v) {
     break;                        /* an OP/EFF closure is not a scalar operand */
   }
   /* what the STRUCTURE determines by itself (see above): a float is a numeral, so only its type says so */
-  long x = net_read_int(n, p, LIN_ENC_NUM);
+  int64_t x = net_read_int(n, p, LIN_ENC_NUM);
   if (x > 0) { v->iv = x; v->kind = 1; return 1; }
   if (net_read_string_arena(n, p, LIN_ENC_NUM, &v->sv) > 0) { v->kind = 2; return 1; }
   return 0;
@@ -603,8 +605,26 @@ int net_read_value(Net *n, Port p, int domain, Val *v) {
 
 /* dlopen a driver plugin by name (idempotent): how a self-describing artifact reaches whoever wrote
    it.  `<name>_driver` is the symbol every plugin exports, which makes a NAME-only section enough. */
+#ifdef LIN_STATIC
+const LinStaticPlugin *lin_static_plugin(const char *name) {
+  static unsigned char *started; static int nplug = -1;
+  if (nplug < 0) { for (nplug = 0; lin_static_plugins[nplug].name; nplug++) {} started = calloc((size_t)nplug + 1, 1); }
+  for (int i = 0; i < nplug; i++)
+    if (!strcmp(lin_static_plugins[i].name, name)) {
+      if (!started[i]) { started[i] = 1; if (lin_static_plugins[i].init) lin_static_plugins[i].init(); }
+      return &lin_static_plugins[i];
+    }
+  return NULL;
+}
+#endif
 int lin_driver_load(const char *name) {
   if (!name || !name[0]) return 0;
+#ifdef LIN_STATIC
+  if (lin_static_plugin(name)) return 1;
+  static const char *said_s; const char *nm_s = lin_intern(name, strlen(name));
+  if (said_s != nm_s) { said_s = nm_s; fprintf(stderr, "warning: driver plugin '%s' is not in this build\n", name); }
+  return 0;
+#else
   const char *sym = lin_internf("lin_%s_driver", name);
   if (dlsym(RTLD_DEFAULT, sym)) return 1;               /* already loaded */
   const char *dir = getenv("LIN_STD_DIR");
@@ -615,11 +635,12 @@ int lin_driver_load(const char *name) {
   static const char *said; const char *nm = lin_intern(name, strlen(name));
   if (said != nm) { said = nm; fprintf(stderr, "warning: driver plugin '%s' not available (looked for '%s')\n", name, path); }
   return 0;
+#endif
 }
 
 /* The native scalar table is a REGISTRY the plugins write into (arith.so registers lin_arith_scalar at
    construction), so it is the core's however the dispatch is packaged.  Dispatch is *open*: the first
-   provider that owns `fn` supplies it.  outkind 1=int, 3=bool, 4=float-bits.  A provider DECLARES its own
+   provider that owns `fn` supplies it.  outkind 1=int, 2=string (a C string the provider keeps), 3=bool, 4=float-bits.  A provider DECLARES its own
    purity where it registers (lin.h), because only it can; the core classifies a call by that declaration,
    never by the symbol's name, and while a build marker is up a provider that declared nothing is not
    consulted at all -- so a call nobody vouched for cannot happen. */
@@ -638,7 +659,7 @@ int lin_build_observed = 0;
    CAPABILITY -- the caller's own declaration, or a declared-pure provider's, because one call can be
    reached two ways (a driver's own row, or the registry's ownership query). */
 int lin_build_gate(const char *fn, int pure) {
-  long out; int okind = 0;
+  int64_t out; int okind = 0;
   if (!lin_build_depth && !lin_precompile_depth) return 1;      /* run time: every call is performed */
   if (pure || lin_scalar_ops_run(fn, -1, NULL, &out, &okind)) return 1;
   if (!lin_build_observed++)                                     /* the first one is the one reported */
@@ -650,6 +671,9 @@ int lin_build_gate(const char *fn, int pure) {
 /* dlopen a std/drivers plugin by its `<sym>_driver` symbol (idempotent); its constructor registers providers. */
 void lin_scalar_ops_load(const char *sym) {
   if (!sym || !sym[0]) return;
+#ifdef LIN_STATIC
+  if (!lin_static_plugin(sym)) fprintf(stderr, "warning: driver plugin '%s' is not in this build\n", sym);
+#else
   const char *dir = getenv("LIN_STD_DIR"); if (!dir) dir = "std";
   size_t n = strlen(dir) + strlen(sym) + 16;   /* sized from the PARTS, not a constant: a longer path would be silently truncated, and a truncated path names a different file -- or none */
   char sfx[n], path[n];
@@ -658,6 +682,7 @@ void lin_scalar_ops_load(const char *sym) {
   snprintf(path, n, "%s/drivers/%s.so", dir, sym);
   if (dlopen(path, RTLD_NOW | RTLD_GLOBAL)) return;
   fprintf(stderr, "warning: driver plugin '%s' not found (looked for '%s')\n", sym, path);
+#endif
 }
 
 /* The native scalar ops the std's float and ffi modules reach for come from std/drivers/arith.so.  The
@@ -668,7 +693,7 @@ void lin_scalar_ops_load(const char *sym) {
    decoded every closure's spine to classify it took test/sat_verify.lin from 295 ms to 82 s).  Only a
    provider that DECLARED purity is ever asked, and one that cannot answer is not pre-approved either --
    the sound direction, since the artifact makes such calls at run time; a plain query never loads one. */
-int lin_scalar_ops_run(const char *fn, int argc, const long *args, long *out, int *outkind) {
+int lin_scalar_ops_run(const char *fn, int argc, const int64_t *args, int64_t *out, int *outkind) {
   if (n_scalar_ops == 0 && argc >= 0) lin_scalar_ops_load("arith");
   int build = argc < 0 || lin_build_depth > 0 || lin_precompile_depth > 0;
   for (int s = 0; s < n_scalar_ops; s++) {
@@ -719,7 +744,7 @@ int net_print(Net *n, int domain) {
   return d ? d->print(n, lin_driver_state(n, d), domain) : 0;
 }
 
-long net_run_io(Net *n, long limit) {
+int64_t net_run_io(Net *n, int64_t limit) {
   LinDriver *d = readback_driver();
   return d ? d->run_io(n, lin_driver_state(n, d), limit) : 0;
 }

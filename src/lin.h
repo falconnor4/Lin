@@ -2,6 +2,7 @@
 #define LIN_H
 #define _GNU_SOURCE
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stddef.h>
 
@@ -40,6 +41,14 @@ typedef uint32_t Scope;
    or why (tags, ports, wiring only), so a loop compiler, a fusion pass and a scalar folder share one
    protocol.  Every exit must be at an AUXILIARY port: a redex is two mutually wired principal ports, so
    such a boundary cannot be crossed by one -- the whole safety argument for rewriting in isolation. */
+/* a spin-wait's hint to the core it runs on (none where the target has no such instruction: wasm) */
+#if defined(__x86_64__) || defined(__i386__)
+#define LIN_PAUSE() __asm__ __volatile__("pause")
+#elif defined(__aarch64__) || defined(__arm__)
+#define LIN_PAUSE() __asm__ __volatile__("yield")
+#else
+#define LIN_PAUSE() ((void)0)
+#endif
 #define N_OF(a) ((int)(sizeof (a) / sizeof *(a)))   /* how many the STORAGE holds: every bound is `what fits`, never a number chosen separately, so a region and its guard cannot drift apart */
 #define LIN_MAX_CLAIM_PAIRS 32      /* the region's own size (see LinClaim below) */
 #define LIN_MAX_CLAIM_EXITS 16      /* the region's own size */
@@ -102,7 +111,7 @@ typedef struct {
   LinClaim held[4];
   LinDriver *held_drv[4];
   int nheld;
-  long steps;
+  int64_t steps;
   /* APPEND-ONLY TAIL.  A plugin reads the Net it is handed directly, so a field beside its kin would
      shift every later offset and misdirect every plugin; appended here it shifts nothing.  `act_of[i]` =
      node i's queued-pair index in `act` or -1; `dem_out`/`dem_cnt`/`dem_cap` = this wave's emitted pairs. */
@@ -150,10 +159,10 @@ void net_drop(Net *n, int v);
 /* Readback holds ports across nested reductions, so it pins the net: no reclamation while pinned. */
 void lin_pin(Net *n); void lin_unpin(Net *n);
 void net_init(Net *n, int cap); void net_free(Net *n); int net_interact(Net *n, Port a, Port b);
-long net_reduce(Net *n, long limit);
+int64_t net_reduce(Net *n, int64_t limit);
 /* Evaluate the spine from `p` to a weak head normal form (or the step budget), by registering `p`
    as a demand root and running the needed-order reducer.  Re-entrant and local. */
-long net_force(Net *n, Port p);
+int64_t net_force(Net *n, Port p);
 /* Force `p` to WHNF and return a port that still names the value: what readback needs, and the reason
    the core owns it (the caller would otherwise hold a port the rule it fired consumed). */
 Port net_force_val(Net *n, Port p);
@@ -170,7 +179,7 @@ void net_level_set(Net *n, int nlv, const int *parent, const unsigned char *bit)
 
 /* A decoded value: the ABI's common currency between the core's readers and a driver's storage.
    kind: 0 none, 1 int, 2 str, 3 bool, 4 float (iv carries IEEE-754 bits). */
-typedef struct { int kind; long iv; const char *sv; } Val;   /* sv points into the core's identifier arena: a value carries the WHOLE string, and nobody states its length */
+typedef struct { int kind; int64_t iv; const char *sv; } Val;   /* sv points into the core's identifier arena: a value carries the WHOLE string, and nobody states its length */
 
 /* ---------------- value ENCODINGS: the SHAPE a value is written in ----------------
    A value DOMAIN (DT_*) is what a value MEANS; an ENCODING (LIN_ENC_*) is the net STRUCTURE it is
@@ -230,7 +239,7 @@ struct LinDriver {
   uint64_t caps;                                 /* OR of LIN_CAP_* bits      */
   int priority;                                  /* lower runs earlier        */
   int (*claim)(const Net *n, Port p1, Port p2);  /* pure: can this driver handle this redex? */
-  int (*reduce)(Net *n, Port *redexes, int nred, long limit, int *changed); /* consume claimed slice */
+  int (*reduce)(Net *n, Port *redexes, int nred, int64_t limit, int *changed); /* consume claimed slice */
   /* ---- ABI 5, append-only; every field optional ---- */
   uint32_t size;                                 /* sizeof(LinDriver); bounds what the core reads */
   uint64_t wants;                                /* LIN_WANT_* this driver requires */
@@ -267,7 +276,7 @@ struct LinDriver {
      that hand the work to whichever driver declares LIN_WANT_READBACK. */
   int  (*read_value)(Net *n, void *st, Port p, int domain, Val *v); /* decode one value, as `domain` */
   int  (*print)(Net *n, void *st, int domain);             /* walk the net and write the result */
-  long (*run_io)(Net *n, void *st, long limit);            /* run the net's effects */
+  int64_t (*run_io)(Net *n, void *st, int64_t limit);            /* run the net's effects */
   /* ---- ABI 6, append-only: the AOT PASS POINT.  The compiler OFFERS it, the driver OWNS the pass:
      called once per AOT build in priority order with the expanded term, the types inferred for it, the
      net, and a term -> port map as a CALLBACK that is compile-time only -- never serialised, never
@@ -297,6 +306,19 @@ LinDriver *lin_driver_wanting(uint64_t want);
 /* dlopen a driver plugin by name (idempotent); an artifact's sections use this to load whoever
    wrote them, so a container is self-describing without the core knowing any driver. */
 int lin_driver_load(const char *name);
+/* PLUGINS, LOADED OR LINKED.  A plugin's start-up is LIN_PLUGIN_INIT(name) { ... }: where plugins are shared
+   objects it runs when the object is opened (a constructor), and in a STATIC build (LIN_STATIC: a target with
+   no dlopen, such as WebAssembly) the plugins are linked in and it runs when a program first asks for the
+   plugin by name -- the same moment, so a program sees the same drivers either way.  A static build lists
+   its plugins in `lin_static_plugins` (see web/plugins.c), ended by an entry with no name. */
+#ifdef LIN_STATIC
+#define LIN_PLUGIN_INIT(name) void lin_plugin_init_##name(void)
+typedef struct { const char *name; void (*init)(void); LinDriver *driver; } LinStaticPlugin;
+extern const LinStaticPlugin lin_static_plugins[];
+const LinStaticPlugin *lin_static_plugin(const char *name);   /* started on first ask; NULL: not in this build */
+#else
+#define LIN_PLUGIN_INIT(name) static void __attribute__((constructor)) lin_plugin_init_##name(void)
+#endif
 /* This driver's tables for `n`, created on first use and released with the net. */
 void *lin_driver_state(Net *n, LinDriver *d);
 /* Storage for a value domain, resolved to whichever driver declared it (NONE / 0 if none). */
@@ -310,12 +332,12 @@ void lin_driver_carry_read(Net *n, FILE *f, uint32_t count);
 int  lin_driver_carry_legacy(Net *n, int domain, const void *blob, size_t len);
 /* A BOXED INDEX (LIN_ENC_BOX): the shape a domain whose value is an ENTRY IN A TABLE writes, which is
    the generic primitive a value provider builds its own boxes with.  Net structure, not policy. */
-Port net_box_index(Net *n, long i);
-long net_peel_index(Net *n, Port p);
+Port net_box_index(Net *n, int64_t i);
+int64_t net_peel_index(Net *n, Port p);
 int wave_snapshot(Net *n, Port **out, int *cap);  /* this wave's DEMANDED pairs; the rest stay queued */
 void lin_reduce_wave_parallel(Net *n, Port *curr, int wave_cnt, int *changed);
 void lin_enqueue(Net *n, Port a, Port b); /* push an active redex pair (plugin hook) */
-void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold accounting */
+void lin_fold_bump(void);  int64_t lin_fold_total(void); /* driver native-fold accounting */
 /* ---- the program cache ----
    A program whose every top-level expression was answered by ONE compiled call on constants need not be parsed,
    checked and compiled again while nothing it depends on has changed: the core derives a KEY from the source
@@ -323,10 +345,10 @@ void lin_fold_bump(void);  long lin_fold_total(void); /* driver native-fold acco
    arguments, answered expression `lin_form_idx`.  The next run asks the driver to RUN those units (never to
    remember their answers).  The core knows nothing of what a unit is: two hooks, registered by the driver. */
 extern uint64_t lin_form_key; extern int lin_form_idx, lin_form_domain; extern void *lin_form_net;
-typedef int (*LinFormRecall)(uint64_t key, int idx, int threads, long *word, int *kind, int *domain);   /* 1 ran, 0 no more, -1 cannot */
+typedef int (*LinFormRecall)(uint64_t key, int idx, int threads, int64_t *word, int *kind, int *domain);   /* 1 ran, 0 no more, -1 cannot */
 typedef void (*LinFormCommit)(uint64_t key, int count);   /* the file's `count` expressions are all evaluated */
 void lin_form_register(LinFormRecall recall, LinFormCommit commit);
-typedef int (*ScalarOpFn)(const char *fn, int argc, const long *args, long *out, int *outkind);
+typedef int (*ScalarOpFn)(const char *fn, int argc, const int64_t *args, int64_t *out, int *outkind);
 /* A provider of callables DECLARES, where it registers, whether calling it observes the world: `pure`
    means every call it supplies is a function of its operands alone.  That is a CAPABILITY, never a naming
    convention -- a pure callable need not be `lin_`-prefixed, and an `lin_`-prefixed one may observe the
@@ -339,8 +361,8 @@ void lin_scalar_ops_load(const char *sym);
 /* Hand `fn` to the registered providers (first that owns it supplies the result); 1 on success.  The
    registry is the core's because plugins register into it, so whoever dispatches, it stays here.
    Under a build marker only a provider that DECLARED purity is consulted at all (src/io.c). */
-int lin_scalar_ops_run(const char *fn, int argc, const long *args, long *out, int *outkind);
-int lin_arith_scalar(const char *fn, int argc, const long *args, long *out, int *outkind);
+int lin_scalar_ops_run(const char *fn, int argc, const int64_t *args, int64_t *out, int *outkind);
+int lin_arith_scalar(const char *fn, int argc, const int64_t *args, int64_t *out, int *outkind);
 
 /* ---------------- parser ---------------- */
 typedef void (*FormFn)(Term *, const char *, void *);
@@ -393,20 +415,20 @@ void lin_domains_init(void);
 /* The core's readers.  EVERY one takes the encoding it expects; none of them consults a node's
    label, so a raw net reads exactly as a compiled one does.  A value that is not in the expected
    encoding -- including one that is still an unreduced thunk -- is DECLINED, never guessed. */
-long net_read_int(Net *n, Port p, int enc);          /* layers: a numeral's value, a list's length,
+int64_t net_read_int(Net *n, Port p, int enc);          /* layers: a numeral's value, a list's length,
                                                         a BOOL's 1/0; -1 when `p` is not that encoding */
 /* The integer width: a numeral's value is a `long`, so the width is the type's, never a number chosen here. */
-#define LIN_INT_BITS ((int)(sizeof(long) * 8))
+#define LIN_INT_BITS ((int)(sizeof(int64_t) * 8))
 /* A numeral's VALUE as a 64-bit two's complement integer: 1 and *out on success, 0 when `p` is not a
    numeral.  (net_read_int's -1 "not this encoding" cannot tell a failure from the number -1.) */
-int  net_read_i64(Net *n, Port p, long *out);
+int  net_read_i64(Net *n, Port p, int64_t *out);
 int  net_read_string_arena(Net *n, Port p, int pay_enc, const char **out); /* cell chain into the arena; pay_enc = the char-code encoding */
 /* One cell of the language's cons encoding: `*head`/`*tail` when `p` is a cell, 0 otherwise.  The
    cell shape is the one every spine walk agrees on, so it is exported once (readback walks it to
    check a payload, a driver to read an operand list). */
 int  net_read_cell(Net *n, Port p, Port *head, Port *tail);
 int  net_read_float(Net *n, Port p, double *out);    /* the DT_FLOAT provider's table, via its index */
-long net_run_io(Net *n, long limit);
+int64_t net_run_io(Net *n, int64_t limit);
 /* Write the observed result.  `domain` is what the program's TYPE says the result means (a DT_*,
    or -1 when the type is unknown), so readback decodes with the meaning the compiler computed
    instead of guessing one off a node. */
@@ -431,15 +453,15 @@ Port net_dhop(Net *n, Port p);                          /* deref a DUP(port0) ch
    names an entry here: the datatype, the constructor, its index among the m constructors and its k fields.
    Drivers and readback ask by ID; nothing in the core's reduction depends on it. */
 typedef struct { const char *dt, *name; int m, i, k; const char *fdesc; int prog; } LinCtor;   /* prog: declared by the program, not the library */
-long lin_ctor_register(const char *dt, const char *name, int m, int i, int k);   /* its ID, >= 1 */
-const LinCtor *lin_ctor_info(long id);                                          /* NULL: no such ID */
-long lin_ctor_lookup(const char *name);
+int64_t lin_ctor_register(const char *dt, const char *name, int m, int i, int k);   /* its ID, >= 1 */
+const LinCtor *lin_ctor_info(int64_t id);                                          /* NULL: no such ID */
+int64_t lin_ctor_lookup(const char *name);
 extern int lin_ctor_prog;   /* set by the loader: a constructor registered now is the program's (it wins a lookup by name) */
 /* The core's own list datatype (src/main.c, builtin_list): its constructors' IDs, 0 before it is declared. */
-extern long lin_list_cons_id, lin_list_nil_id;
+extern int64_t lin_list_cons_id, lin_list_nil_id;
 /* The constructor's FIELD TYPES as descriptors (type_desc), concatenated: what lets a reader print a value of a
    declared datatype by its type alone, markers or not.  NULL until stated. */
-void lin_ctor_set_fdesc(long id, const char *fdesc);
+void lin_ctor_set_fdesc(int64_t id, const char *fdesc);
 /* The observed result's type as a descriptor (NULL: none): set beside the domain (main.c, an artifact's load). */
 extern const char *lin_result_desc;
 /* One layer of a value of an m-constructor datatype, `\d0..\d(m-1). (d_i f1..fk)`, read with forcing: writes i
@@ -448,7 +470,7 @@ int net_read_scott(Net *n, Port p, int m, int *idx, Port *fields, int kmax);
 /* Called by the reader for a match pattern naming no declared constructor yet: a module that declares it is
    loaded then (main.c's lazy modules), so the branch states its constructor as it would have. */
 extern void (*lin_ctor_demand)(const char *name);                                         /* 0: not a constructor */
-extern long lin_fan_ambiguous;
+extern int64_t lin_fan_ambiguous;
 extern int lin_fan_undecided;            /* the first un-chosen fan whose principal a crossing walk reached (-1: none) */
 void lin_fan_choose(int node, int port);  /* read the superposition at `node` as its copy `port` (1 or 2) */
 void lin_fan_unchoose_all(void);
@@ -480,7 +502,7 @@ extern int lin_build_depth;
    naming the symbol. */
 int lin_build_gate(const char *fn, int pure);
 extern int lin_build_observed;
-Port net_alloc_scott(Net *n, long k); Port net_alloc_scott_at(Net *n, long k, Scope lvl); Port net_alloc_bool(Net *n, int v);
+Port net_alloc_scott(Net *n, int64_t k); Port net_alloc_scott_at(Net *n, int64_t k, Scope lvl); Port net_alloc_bool(Net *n, int v);
 Port net_alloc_list_nil(Net *n);   /* the end of a list (the core's list datatype's `nil`) */
 Port net_alloc_float(Net *n, double d);
 /* Float boxes are net structure like any other; the TABLE behind the index is a driver's

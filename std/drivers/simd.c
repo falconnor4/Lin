@@ -77,7 +77,7 @@ static int simd_op_value(Net *n, Port lam, Port app, Val *v) {
   int slots = g_slots(n, argp);                 /* `_op` is N-ary: the spine sets the buffer size */
   if (slots < 1) return 0;
   Val *fargs = calloc((size_t)slots, sizeof *fargs);
-  long *c_args = calloc((size_t)slots, sizeof *c_args);
+  int64_t *c_args = calloc((size_t)slots, sizeof *c_args);
   if (!fargs || !c_args) { free(fargs); free(c_args); return 0; }
   int argc = g_spine(n, argp, DOMS_NUM, 1, fargs, slots);
   if (argc < 1) { free(fargs); free(c_args); return 0; }
@@ -85,7 +85,7 @@ static int simd_op_value(Net *n, Port lam, Port app, Val *v) {
     if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c_args); return 0; }
     c_args[i] = fargs[i].iv;
   }
-  long out; int okind = 0;
+  int64_t out; int okind = 0;
   int ok = lin_scalar_ops_run(fn, argc, c_args, &out, &okind);
   free(fargs); free(c_args);
   if (!ok) return 0;
@@ -110,7 +110,7 @@ static int simd_op_ready(const Net *n, Port lam, Port app) {
   int slots = g_slots((Net *)n, argp);          /* `_op` is N-ary: the spine sets the buffer size */
   if (slots < 1) return 0;
   Val *fargs = calloc((size_t)slots, sizeof *fargs);
-  long *c_args = calloc((size_t)slots, sizeof *c_args);
+  int64_t *c_args = calloc((size_t)slots, sizeof *c_args);
   if (!fargs || !c_args) { free(fargs); free(c_args); return 0; }
   int argc = g_spine((Net *)n, argp, DOMS_NUM, 1, fargs, slots);
   if (argc < 1) { free(fargs); free(c_args); return 0; }
@@ -118,7 +118,7 @@ static int simd_op_ready(const Net *n, Port lam, Port app) {
     if (fargs[i].kind != 1 && fargs[i].kind != 3 && fargs[i].kind != 4) { free(fargs); free(c_args); return 0; }
     c_args[i] = fargs[i].iv;
   }
-  long out; int okind = 0;
+  int64_t out; int okind = 0;
   int ok = lin_scalar_ops_run(fn, argc, c_args, &out, &okind);
   free(fargs); free(c_args);
   return ok;
@@ -132,16 +132,16 @@ static void resolve_decoder(void) {
   if (!g_ffi_fn) g_ffi_fn = (int (*)(Net *, Port, char *, int))dlsym(RTLD_DEFAULT, "net_ffi_fn");
   if (!g_ffi_args) g_ffi_args = (int (*)(Net *, Port, const int *, int, Val *, int))dlsym(RTLD_DEFAULT, "net_ffi_args");
 }
-static int ev_ffi(Net *n, Port p, long *v, int *is_bool, int *is_float) {
+static int ev_ffi(Net *n, Port p, int64_t *v, int *is_bool, int *is_float) {
   resolve_decoder();
   char fn[256];
   if (!g_ffi_fn || !g_ffi_fn(n, (Port){p.node, 0}, fn, sizeof fn)) return 0;
   Val vals[2]; int na = g_ffi_args ? g_ffi_args(n, (Port){p.node, 0}, DOMS_NUM, 1, vals, 2) : 0;
-  long a[2] = {0, 0};
+  int64_t a[2] = {0, 0};
   for (int i = 0; i < na && i < 2; i++) a[i] = vals[i].iv;
   *is_bool = 0; *is_float = 0;
   if (na < 1) return 0;
-  long out; int okind = 0;
+  int64_t out; int okind = 0;
   if (!lin_scalar_ops_run(fn, na, a, &out, &okind)) return 0;
   if (okind == 4) { memcpy(v, &out, 8); *is_float = 1; }
   else if (okind == 3) { *v = out; *is_bool = 1; }
@@ -199,7 +199,7 @@ static int simd_claim(const Net *n, Port p1, Port p2) {
  *  ---------------------------------------------------------------------- */
 
 /* Per-lane result of the eval phase. */
-typedef struct { int ok; int lam, app; int kind; int ffi; long iv; } SimdLane;
+typedef struct { int ok; int lam, app; int kind; int ffi; int64_t iv; } SimdLane;
 
 /* Eval phase for DT_OP: decode + scalar-table the value, no mutation. */
 static int simd_eval_op(Net *n, int lam, int app, SimdLane *ln) {
@@ -232,7 +232,7 @@ static void simd_apply_op(Net *n, SimdLane *ln) {
 
 /* Eval phase for DT_FFI: decode + scalar-table the float/legacy value. */
 static int simd_eval_ffi(Net *n, int lam, int app, SimdLane *ln) {
-  long v; int is_bool = 0, is_float = 0;
+  int64_t v; int is_bool = 0, is_float = 0;
   if (!ev_ffi(n, (Port){lam, 0}, &v, &is_bool, &is_float)) return 0;
   ln->kind = is_float ? 4 : is_bool ? 3 : 1; ln->iv = v;
   ln->lam = lam; ln->app = app; ln->ok = 1;
@@ -252,7 +252,7 @@ static void simd_apply_ffi(Net *n, SimdLane *ln) {
 
 /* reduce: fold the claimed native-num slice in SIMD_WIDTH batches.  Phase A
    (eval) runs across each batch, then Phase B (apply) rewires the net. */
-static int simd_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
+static int simd_reduce(Net *n, Port *redexes, int nred, int64_t limit, int *changed) {
   int consumed = 0;
   int i = 0;
   while (i < nred) {
@@ -289,7 +289,7 @@ static int simd_reduce(Net *n, Port *redexes, int nred, long limit, int *changed
 
 /* The fold-shape predicate the core gates `LIN_CAP_FOLD` on (registered like the scalar table, so nothing
    tells the core what an `_op` or an `_ffi` closure looks like).  This file has no other constructor. */
-__attribute__((constructor)) static void simd_register(void) { lin_pair_fold_register(lin_pat_fold_shape); }
+LIN_PLUGIN_INIT(simd) { lin_pair_fold_register(lin_pat_fold_shape); }
 
 LinDriver lin_simd_driver = {
   .magic = LIN_DRIVER_MAGIC, .abi = LIN_DRIVER_ABI, .net_size = (uint32_t)sizeof(Net),

@@ -205,7 +205,7 @@ static Term *parse_tail(Term *f) {
    plain pattern per constructor, in order, compiles to the same term it always did.
    It is checked while it is compiled: a constructor no branch covers, and a branch no value can reach, are
    errors (the second catches a misspelt nullary constructor, which would otherwise read as a variable). */
-typedef struct Pat { int kind; const char *name; long cid; int k; struct Pat **sub; } Pat;   /* kind: */
+typedef struct Pat { int kind; const char *name; int64_t cid; int k; struct Pat **sub; } Pat;   /* kind: */
 enum { P_WILD, P_VAR, P_CTOR, P_NUM };
 typedef struct { const char *name, *var; } PBind;
 typedef struct { Pat **ps; Term *body; PBind *b; int nb, id; } PRow;
@@ -216,15 +216,15 @@ static char PCTXMSG[160];   /* what a branch is missing for, when none is left: 
 static void pfailf(const char *fmt, const char *a, const char *b) {
   char m[sizeof PMSG]; snprintf(m, sizeof m, fmt, a, b ? b : ""); pfail(m);
 }
-static long ctor_find(const char *name) {
-  long cid = lin_ctor_lookup(name);
+static int64_t ctor_find(const char *name) {
+  int64_t cid = lin_ctor_lookup(name);
   if (!cid && lin_ctor_demand && strcmp(name, "_")) { lin_ctor_demand(name); cid = lin_ctor_lookup(name); }
   return cid;
 }
 /* the latest declaration of constructor i of datatype dt (as lin_ctor_lookup: the latest wins) */
-static long ctor_of(const char *dt, int i) {
-  long best = 0;
-  for (long id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (c->i == i && !strcmp(c->dt, dt)) best = id; }
+static int64_t ctor_of(const char *dt, int i) {
+  int64_t best = 0;
+  for (int64_t id = 1; lin_ctor_info(id); id++) { const LinCtor *c = lin_ctor_info(id); if (c->i == i && !strcmp(c->dt, dt)) best = id; }
   return best;
 }
 static Pat *pat_new(int kind, const char *name) { Pat *p = calloc(1, sizeof *p); p->kind = kind; p->name = name; return p; }
@@ -234,7 +234,7 @@ static Pat *parse_pat(int top, int *has) {
   if (S[P] == '(') {
     P++; skipws();
     const char *h = sym(); if (!h) pfail("match: bad pattern");
-    long cid = ctor_find(h);
+    int64_t cid = ctor_find(h);
     Pat *p = pat_new(P_CTOR, h); p->cid = cid; int cap = 0;
     if (cid) *has |= 1;
     for (;;) {
@@ -249,7 +249,7 @@ static Pat *parse_pat(int top, int *has) {
   const char *n = sym(); if (!n) pfail("match: bad pattern");
   if (!strcmp(n, "_")) return pat_new(P_WILD, n);
   if (isnum(n)) { *has |= 2; return pat_new(P_NUM, n); }
-  long cid = ctor_find(n);
+  int64_t cid = ctor_find(n);
   if (cid && lin_ctor_info(cid)->k == 0) { Pat *p = pat_new(P_CTOR, n); p->cid = cid; *has |= 1; if (!top) *has |= 2; return p; }
   if (!top) *has |= 2;   /* a variable below the top binds a field: only the compiled form has one */
   return pat_new(P_VAR, n);
@@ -324,7 +324,7 @@ static Term *pcompile(const char **vs, int nv, PRow *rows, int nr) {
     out = pvar(vs[c]);
     char ctx[sizeof PCTXMSG]; memcpy(ctx, PCTXMSG, sizeof ctx);
     for (int i = 0; i < m; i++) {
-      long cid = ctor_of(dt, i); const LinCtor *ci = lin_ctor_info(cid); int k = ci->k;
+      int64_t cid = ctor_of(dt, i); const LinCtor *ci = lin_ctor_info(cid); int k = ci->k;
       PRow *sp = malloc((size_t)nr * sizeof *sp); int ns = 0, nv2 = nv - 1 + k;
       for (int j = 0; j < nr; j++) {
         Pat *q = rs[j].ps[c];
@@ -346,7 +346,7 @@ static Term *pcompile(const char **vs, int nv, PRow *rows, int nr) {
       Term *lam = pcompile(v2, nv2, sp, ns);
       memcpy(PCTXMSG, ctx, sizeof ctx);
       for (int f = k - 1; f >= 0; f--) lam = term_new(TLAM, v2[nv - 1 + f], lam, NULL);
-      lam = term_new(TAPP, "", term_new(TLAM, "_m", lam, NULL), term_new(TNUM, lin_internf("%ld", cid), NULL, NULL));
+      lam = term_new(TAPP, "", term_new(TLAM, "_m", lam, NULL), term_new(TNUM, lin_internf("%" PRId64 "", cid), NULL, NULL));
       out = term_new(TAPP, lin_internf("match:%s", ci->name), out, lam);
       free(sp); free(v2);
     }
@@ -426,7 +426,7 @@ static Term *parse_atom(const char *kw) {
    because `\c.\n.n` alone is exactly the boolean false. */
 static Term *list_value(Term *h, Term *t) {
   Term *b = h ? term_new(TAPP, "", term_new(TAPP, "", term_new(TVAR, " c", NULL, NULL), h), t) : term_new(TVAR, " n", NULL, NULL);
-  if (!h && lin_list_nil_id) b = term_new(TAPP, "", term_new(TLAM, "_c", b, NULL), term_new(TNUM, lin_internf("%ld", lin_list_nil_id), NULL, NULL));
+  if (!h && lin_list_nil_id) b = term_new(TAPP, "", term_new(TLAM, "_c", b, NULL), term_new(TNUM, lin_internf("%" PRId64 "", lin_list_nil_id), NULL, NULL));
   return term_new(TLAM, " c", term_new(TLAM, " n", b, NULL), NULL);
 }
 
@@ -446,7 +446,7 @@ static Term *parse_term(void) {
           c = (unsigned char)((S[P] - '0') * 8 + (S[P + 1] - '0')); P += 2;
         } else if (c == '0') c = '\0';
         else if (c == 'x' && isxdigit((unsigned char)S[P]) && isxdigit((unsigned char)S[P + 1])) {
-          char h[3] = {S[P], S[P + 1], 0}; c = (unsigned char)strtol(h, NULL, 16); P += 2;
+          char h[3] = {S[P], S[P + 1], 0}; c = (unsigned char)strtoll(h, NULL, 16); P += 2;
         }
       }
       if (dlen < (int)sizeof(dec)) dec[dlen++] = c;

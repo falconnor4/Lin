@@ -86,7 +86,7 @@ static Port ct_splice(Def *d, Scope sc) {
 /* Where a binder's uses went: the first is whatever the bind port leads to (none, when the body IS
    that use), the rest are the ERA placeholders `ct` made, which are spent either way. */
 static Port *use_ports(CVar *e, Port bind) {
-  Port *ts = malloc(sizeof(Port) * (long)e->count);
+  Port *ts = malloc(sizeof(Port) * (int64_t)e->count);
   ts[0] = N->wire[bind.node * 3 + bind.port];
   for (int i = 0; i < e->nextra; i++) {
     ts[i + 1] = N->wire[e->extra[i].node * 3 + 1];
@@ -111,9 +111,9 @@ Port lin_node_of(void *ctx, const Term *t) {
 
 static Port ct_in(Term *t, Scope sc) {
   switch (t->type) {
-  case TFLOAT: { double d = strtod(t->name, NULL); long bits; memcpy(&bits, &d, 8);   /* a float literal IS the numeral of its bits */
+  case TFLOAT: { double d = strtod(t->name, NULL); int64_t bits; memcpy(&bits, &d, 8);   /* a float literal IS the numeral of its bits */
                 return net_alloc_scott_at(N, bits, fan_lvl()); }
-  case TNUM: return net_alloc_scott_at(N, atol(t->name), fan_lvl());
+  case TNUM: return net_alloc_scott_at(N, atoll(t->name), fan_lvl());
   case TVAR: {
     for (int i = csp - 1; i >= 0; i--) {
       if (strcmp(cstack[i].name, t->name)) continue;
@@ -273,7 +273,7 @@ static void eg_union(EGraph *g, int c1, int c2) {
    whole measured win of this pass is `beta` (`line_ffi` 8,166 -> 7,802 compiled nodes, 122,143 ->
    119,843 bytes, 13 unionations; bytes move with the container format).  LIN_EGRULES=beta,eta turns it on. */
 enum { EG_BETA = 1, EG_ETA };
-typedef struct { const char *name; int kind; int param; int on; long fires, declines; } EgRule;
+typedef struct { const char *name; int kind; int param; int on; int64_t fires, declines; } EgRule;
 static EgRule eg_rules[] = {
   /* name   kind      param  on  fires declines */
   { "beta", EG_BETA,  64,    1,  0,    0 },
@@ -528,8 +528,8 @@ Term *egraph_optimize(Term *t) {
   if (getenv("LIN_PASSES")) {
     fprintf(stderr, "[egraph] %d classes, %d e-nodes, %d CSE lifted, rules:", g.nc, g.nn, ncse);
     for (int r = 0; r < EG_NRULES; r++) {
-      fprintf(stderr, " %s=%s/%ld", eg_rules[r].name, eg_rules[r].on ? "on" : "off", eg_rules[r].fires);
-      if (eg_rules[r].declines) fprintf(stderr, "(+%ld capture-declined)", eg_rules[r].declines);
+      fprintf(stderr, " %s=%s/%" PRId64 "", eg_rules[r].name, eg_rules[r].on ? "on" : "off", eg_rules[r].fires);
+      if (eg_rules[r].declines) fprintf(stderr, "(+%" PRId64 " capture-declined)", eg_rules[r].declines);
     }
     fprintf(stderr, "\n");
   }
@@ -574,10 +574,10 @@ int net_save_line(Net *n, const char *path) {
   int32_t dom = lin_line_domain; fwrite(&dom, sizeof dom, 1, f);
   /* v9: the CONSTRUCTOR REGISTRY.  A constructor's marker names it by ID (lin.h); the IDs mean nothing without
      the table, and an artifact runs in a process that never read the declarations. */
-  uint32_t nc = 0; while (lin_ctor_info((long)nc + 1)) nc++;
+  uint32_t nc = 0; while (lin_ctor_info((int64_t)nc + 1)) nc++;
   fwrite(&nc, sizeof nc, 1, f);
   for (uint32_t k = 1; k <= nc; k++) {
-    const LinCtor *ci = lin_ctor_info((long)k);
+    const LinCtor *ci = lin_ctor_info((int64_t)k);
     uint32_t ld = (uint32_t)strlen(ci->dt), ln = (uint32_t)strlen(ci->name); int32_t mik[3] = { ci->m, ci->i, ci->k };
     fwrite(&ld, sizeof ld, 1, f); fwrite(ci->dt, 1, ld, f); fwrite(&ln, sizeof ln, 1, f); fwrite(ci->name, 1, ln, f);
     fwrite(mik, sizeof mik, 1, f);
@@ -641,7 +641,7 @@ int net_load_line(Net *n, const char *path) {
       if (fread(&ld, sizeof ld, 1, f) == 1 && (dt = calloc(ld + 1, 1)) && fread(dt, 1, ld, f) == ld &&
           fread(&ln, sizeof ln, 1, f) == 1 && (nm = calloc(ln + 1, 1)) && fread(nm, 1, ln, f) == ln &&
           fread(mik, sizeof mik, 1, f) == 1) {
-        long id = lin_ctor_register(dt, nm, mik[0], mik[1], mik[2]);
+        int64_t id = lin_ctor_register(dt, nm, mik[0], mik[1], mik[2]);
         uint32_t lf = 0; char *fd = NULL;
         if (fread(&lf, sizeof lf, 1, f) == 1 && (!lf || ((fd = calloc(lf, 1)) && fread(fd, 1, lf - 1, f) == lf - 1))) { if (lf) lin_ctor_set_fdesc(id, fd); ok = 1; }
         free(fd);

@@ -117,7 +117,7 @@ static size_t load_spv(const uint32_t **out) {
   snprintf(path, sizeof path, "%s/drivers/reduce.spv", dir ? dir : "std");
   FILE *f = fopen(path, "rb"); if (!f) f = fopen("reduce.spv", "rb");
   if (!f) return 0;
-  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  fseek(f, 0, SEEK_END); int64_t sz = ftell(f); fseek(f, 0, SEEK_SET);
   nw = (size_t)sz / 4; words = malloc(sz + 16);
   if (fread(words, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); return 0; }
   fclose(f);
@@ -397,7 +397,7 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
 /* reduce: dispatch the (already-claimed) fixed-rule slice on-device, commit,
    and fall back to net_interact for the sector-non-disjoint subset.  The core
    has already routed commute redexes to the base engine. */
-static int gpu_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
+static int gpu_reduce(Net *n, Port *redexes, int nred, int64_t limit, int *changed) {
   /* Require a built pipeline: if gpu_ready but pipe_ready is 0 (device found but
      the compute shader/pipeline failed to build, e.g. no reduce.spv), dispatching
      would dereference NULL device objects and segfault.  Fall back to the CPU

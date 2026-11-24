@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lin Playground</title>
+<style>
+  :root { --bg: #fbfaf7; --fg: #1d1d1b; --muted: #6b6a66; --line: #e3e0d8; --panel: #ffffff; --accent: #2f5d50; --err: #a3342b; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #e9e7e1; --muted: #9a978f; --line: #2c2b28; --panel: #1e1e1c; --accent: #7fb8a4; --err: #e0786e; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 16px; color: var(--muted); }
+  .bar { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+  select, button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+  button.run { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; }
+  textarea, pre { width: 100%; font: 13.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--fg); padding: 12px; margin: 0; }
+  textarea { height: 280px; resize: vertical; }
+  pre { min-height: 120px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .err { color: var(--err); }
+  #status { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lin</h1>
+  <p class="sub">The Lin engine, compiled to WebAssembly, running in this page.</p>
+  <div class="bar">
+    <select id="example" aria-label="Example"></select>
+    <button class="run" id="run" disabled>Run</button>
+    <span id="status">loading…</span>
+  </div>
+  <textarea id="src" spellcheck="false" aria-label="Program"></textarea>
+  <div class="bar"><strong>Output</strong></div>
+  <pre id="out" aria-live="polite"></pre>
+</main>
+<script type="module">
+import createLin from './dist/lin.js';
+const examples = {
+  'Numbers and lists': '(load "std/std.lin")\n(add 1 2)\n(mul 3000000000 3)\n(ssum (srange 0 100))\n(fadd 1.5 2.25)\n',
+  'Recursion': '(load "std/std.lin")\n(define fib (\\n (if (lt n 2) n (add (fib (sub n 1)) (fib (sub n 2))))))\n(fib 20)\n',
+  'A datatype': '(load "std/std.lin")\n(datatype T (leaf) (node (l T) (v num) (r T)))\n(define ins (\\x (\\t (match t (leaf (node leaf x leaf)) ((node l v r) (if (lt x v) (node (ins x l) v r) (node l v (ins x r))))))))\n(define sum (\\t (match t (leaf 0) ((node l v r) (add v (add (sum l) (sum r)))))))\n(sum (ins 5 (ins 3 (ins 8 (ins 1 leaf)))))\n',
+  'Strings': '(load "std/std.lin")\n"hello, web"\n(str_concat "lin" " in a page")\n',
+};
+const $ = (id) => document.getElementById(id);
+for (const k of Object.keys(examples)) $('example').add(new Option(k, k));
+$('src').value = examples[$('example').value];
+$('example').onchange = () => { $('src').value = examples[$('example').value]; };
+async function run() {
+  $('run').disabled = true; $('status').textContent = 'running…'; $('out').textContent = '';
+  const lines = [];
+  const add = (s, cls) => { const span = document.createElement('span'); if (cls) span.className = cls; span.textContent = s + '\n'; $('out').append(span); };
+  try {
+    // a fresh module per run: a program starts from a clean engine
+    const lin = await createLin({ print: (s) => add(s), printErr: (s) => add(s, 'err') });
+    lin.FS.writeFile('/main.lin', $('src').value);
+    const t0 = performance.now();
+    try { lin.callMain(['main.lin']); } catch (e) { if (!(e && e.name === 'ExitStatus')) add(String(e), 'err'); }
+    $('status').textContent = `ran in ${(performance.now() - t0).toFixed(1)} ms`;
+  } catch (e) { add(String(e), 'err'); $('status').textContent = 'failed'; }
+  $('run').disabled = false;
+}
+$('run').onclick = run;
+$('run').disabled = false; $('status').textContent = 'ready';
+</script>
+</body>
+</html>

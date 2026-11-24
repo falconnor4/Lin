@@ -173,7 +173,7 @@ printf '%s\n' '(ssum (sfilter (\x (eq (mod x 3) 0)) (smap (\x (add x 1)) (sappen
   '(slength (stake 2500000 (srange 0 3000000)))' '(ssum (smap (\x (mul x 2)) (srange 0 10)))' > "$TMP/dp.lin"
 dp=$(timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>/dev/null | tr '\n' ' ')
 [ "$dp" = "=> 3000003000000 => 2500000 => 90 " ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL destination passing: '$dp'"; }
-dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep -c "_d(long \*dst")
+dn=$(LIN_FN_DEBUG=2 timeout 120 "$LIN_BIN" "$TMP/dp.lin" 2>&1 >/dev/null | grep -c "_d(int64_t \*dst")
 [ "$dn" -ge 1 ] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL no destination-passing form was written"; }
 # A CAPTURED VARIABLE is held by the inner function for every step of its loop: in the n-body benchmark the list
 # of bodies is read by each body's update while the map over that same list runs, so the map must not rebuild

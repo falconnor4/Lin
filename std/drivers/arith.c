@@ -51,7 +51,7 @@ static int arith_supplies(const char *fn) {
   return 0;
 }
 
-int lin_arith_scalar(const char *fn, int argc, const long *a, long *out, int *outkind) {
+int lin_arith_scalar(const char *fn, int argc, const int64_t *a, int64_t *out, int *outkind) {
   *outkind = 0;
   if (!fn) return 0;
   if (argc < 0) return arith_supplies(fn);        /* the ownership query: no operands, no computing */
@@ -159,7 +159,7 @@ static int op_head_of(Net *n, int app, const char **fn, Port *ops) {
   *ops = (Port){-1, 0};
   if (!IN_NET(n, app) || n->dead[app] || n->tag[app] != APP) return 0;
   if (!net_read_cell(n, wire_at(n, app, 2), &head, &tail)) return 0;
-  long code = net_read_int(n, head, LIN_ENC_NUM);
+  int64_t code = net_read_int(n, head, LIN_ENC_NUM);
   *fn = lin_op_fn((int)code);
   *ops = tail;
   return *fn != NULL;
@@ -345,7 +345,7 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
      are watched and that case alone goes to the core's beta. */
   int shared = result_shared(n, lam, app);
   chain_grow(n); chain_apply(n, app);              /* a split copy reads as its copy */
-  lin_fan_undecided = -1; long amb0 = lin_fan_ambiguous;
+  lin_fan_undecided = -1; int64_t amb0 = lin_fan_ambiguous;
   int rc0 = EV_NO;
   if (!op_head_of(n, app, &fn, &argp)) { lin_fan_unchoose_all(); return rc0; }
   int slots = net_spine_slots(n, argp);
@@ -354,7 +354,7 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
      fixed count declines the fold past it -- not a wrong answer (the redex still reduces, through the
      pure-Lin fallback below) but a fold given up on every visit, where once would do. */
   Val *fargs = calloc((size_t)slots, sizeof *fargs);
-  long *c = calloc((size_t)slots, sizeof *c);
+  int64_t *c = calloc((size_t)slots, sizeof *c);
   if (!fargs || !c) { free(fargs); free(c); lin_fan_unchoose_all(); return EV_WAIT; }
   int argc = net_spine_args(n, argp, DOMS_NUM, 1, fargs, slots);
   lin_fan_unchoose_all();
@@ -369,7 +369,7 @@ static int op_eval(Net *n, int lam, int app, Val *v) {
     c[i] = fargs[i].iv;
   }
   free(fargs);
-  long out = 0; int okind = 0;
+  int64_t out = 0; int okind = 0;
   /* Through the registry, like every other call this driver resolves: an `_op` head's operator comes
      from the fixed pure-Lin vocabulary (LIN_OP_*), and the provider that supplies it states its purity
      where it registers. */
@@ -406,7 +406,7 @@ static int ffi_row_pure(const char *fn) {
    readable — checking only the first let later non-concrete operands fold as
    garbage; a nested `_ffi`/`_op` operand must itself be fully concrete (the
    shared dec_arg does that, and a slot it cannot decode is counted skipped). */
-static int ffi_apply(const char *fn, int slots, Val *vals, long *c, Val *v);
+static int ffi_apply(const char *fn, int slots, Val *vals, int64_t *c, Val *v);
 
 static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   Port a1, argp;
@@ -438,7 +438,7 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
           (the ownership query, `argc < 0`) rather than by making the call.
        2. MAY A BUILD MAKE IT NOW?  The core's one gate: it stops a build at the calls nobody declared
           pure, so a reduction that would bake the program's own observation does not happen. */
-  long q = 0; int qk = 0;
+  int64_t q = 0; int qk = 0;
   if (!ffi_row(fn) && !lin_scalar_ops_run(fn, -1, NULL, &q, &qk)) return EV_NO;
   if (!lin_build_gate(fn, ffi_row_pure(fn))) return EV_NO;
   if (fnout && fnmax > 0) snprintf(fnout, (size_t)fnmax, "%s", fn);
@@ -455,7 +455,7 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
   int slots = net_spine_slots(n, argp);
   if (slots < 0) slots = 0;                                     /* not a cons spine: only the empty arg list is concrete */
   Val *vals = slots ? calloc((size_t)slots, sizeof *vals) : NULL;
-  long *c = slots ? calloc((size_t)slots, sizeof *c) : NULL;
+  int64_t *c = slots ? calloc((size_t)slots, sizeof *c) : NULL;
   if (slots && (!vals || !c)) { free(vals); free(c); return EV_WAIT; }
   int na = net_spine_args(n, argp, DOMS_NUM, 1, vals, slots);
   if (na < slots || (!slots && na != 0)) { free(vals); free(c); return EV_WAIT; }  /* an operand is not concrete */
@@ -465,14 +465,14 @@ static int ffi_eval(Net *n, int lam, Val *v, char *fnout, int fnmax) {
 }
 
 /* The fold itself, over operands the caller sized from the spine. */
-static int ffi_apply(const char *fn, int slots, Val *vals, long *c, Val *v) {
+static int ffi_apply(const char *fn, int slots, Val *vals, int64_t *c, Val *v) {
   for (int i = 0; i < slots; i++) {
     int k = vals[i].kind;
-    if (k == 2) c[i] = (long)(intptr_t)vals[i].sv;             /* string operand: hand the C string through, as run_ffi does */
+    if (k == 2) c[i] = (int64_t)(intptr_t)vals[i].sv;             /* string operand: hand the C string through, as run_ffi does */
     else if (k == 1 || k == 3 || k == 4) c[i] = vals[i].iv;
     else return EV_WAIT;
   }
-  long out = 0; int okind = 0;
+  int64_t out = 0; int okind = 0;
   if (lin_scalar_ops_run(fn, slots, c, &out, &okind)) {        /* a provider DECLARED this call pure */
     v->kind = okind == 4 ? 4 : (okind == 3 ? 3 : 1);
     v->iv = out;
@@ -486,11 +486,11 @@ static int ffi_apply(const char *fn, int slots, Val *vals, long *c, Val *v) {
   if (!strcmp(fn, "lin_folds"))  { v->kind = 1; v->iv = lin_fold_total(); return EV_READY; }
   if (!strcmp(fn, "lin_folded")) { v->kind = 3; v->iv = lin_fold_total() > 0; return EV_READY; }
   if (!strcmp(fn, "lin_float") && slots >= 1) {
-    double d = (double)c[0]; long rb; memcpy(&rb, &d, 8); v->kind = 4; v->iv = rb; return EV_READY;
+    double d = (double)c[0]; int64_t rb; memcpy(&rb, &d, 8); v->kind = 4; v->iv = rb; return EV_READY;
   }
   if (!strcmp(fn, "lin_parse_float")) {
     if (slots < 1 || vals[0].kind != 2) return EV_NO;
-    double d = strtod(vals[0].sv, NULL); long rb; memcpy(&rb, &d, 8); v->kind = 4; v->iv = rb; return EV_READY;
+    double d = strtod(vals[0].sv, NULL); int64_t rb; memcpy(&rb, &d, 8); v->kind = 4; v->iv = rb; return EV_READY;
   }
   return EV_NO;
 }
@@ -654,7 +654,7 @@ static int producer_open(Net *n, Port p) {
   }
 }
 /* the steps count each deferred redex was last left at: deferring again needs the net to have moved */
-static long *op_defer_at; static int op_defer_cap;
+static int64_t *op_defer_at; static int op_defer_cap;
 static int op_defer(Net *n, int app) {
   if (op_defer_cap < n->nn) {
     int c = n->nn * 2 + 64;
@@ -662,8 +662,8 @@ static int op_defer(Net *n, int app) {
     for (int i = op_defer_cap; i < c; i++) op_defer_at[i] = -1;
     op_defer_cap = c;
   }
-  if (op_defer_at[app] == (long)n->steps) return 0;   /* nothing moved since we last waited here */
-  op_defer_at[app] = (long)n->steps;
+  if (op_defer_at[app] == (int64_t)n->steps) return 0;   /* nothing moved since we last waited here */
+  op_defer_at[app] = (int64_t)n->steps;
   return 1;
 }
 static int operands_open(Net *n, Port argp) {
@@ -687,10 +687,10 @@ static int operands_open(Net *n, Port argp) {
    `redexes` holds 2*nred ports.  Every claimed pair is consumed one way or another: forced
    and folded, or handed back to the core's β, which is always correct (just slower) -- a
    claimed-but-unhandled pair would be dropped from the wave and stranded. */
-static int arith_reduce(Net *n, Port *redexes, int nred, long limit, int *changed) {
+static int arith_reduce(Net *n, Port *redexes, int nred, int64_t limit, int *changed) {
   int done = 0;
   for (int i = 0; i < nred; i++) {
-    if (limit > 0 && (long)n->steps >= limit) break;
+    if (limit > 0 && (int64_t)n->steps >= limit) break;
     Port pa = redexes[2 * i], pb = redexes[2 * i + 1];
     if (pa.port || pb.port) continue;
     if (!IN_NET(n, pa.node) || !IN_NET(n, pb.node)) continue;
@@ -848,7 +848,7 @@ static int arith_aot(Net *n, void *st, const Term *t, const Scheme *sch,
    std/std.lin loads std/drivers/arith.lin, which is what dlopens this .so; the core itself
    starts with no driver at all. */
 LinDriver lin_arith_driver;                                /* defined below; registered by the constructor */
-static void __attribute__((constructor)) arith_load(void) {
+LIN_PLUGIN_INIT(arith) {
   /* The table DECLARES ITS PURITY here, once, for every row: each is arithmetic on its operands, so a
      build may fold one and bake the value (src/io.c's gate is what turns that declaration into the
      rule).  A provider that cannot say this of its calls registers with 0 and a build stops at it. */

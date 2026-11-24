@@ -187,7 +187,7 @@
    net it walks (every step descends to a node or is stopped by one), so a
    generous constant factor of the net's size cannot decline a match the net
    could support -- while still being a bound the caller owns and can tighten. */
-#define LIN_PAT_BUDGET_FOR(n) (256L + 16L * (long)((n) ? (n)->nn : 0))
+#define LIN_PAT_BUDGET_FOR(n) (256L + 16L * (int64_t)((n) ? (n)->nn : 0))
 
 /* ---------------------------------------------------------------------------
  * the pattern itself
@@ -237,7 +237,7 @@ typedef struct {
   const Net *n;
   Port root;               /* the port the match started at                    */
   int  ok;
-  long used;               /* steps this attempt consumed; meaningful either way, so a
+  int64_t used;               /* steps this attempt consumed; meaningful either way, so a
                               caller can see how far a DECLINED match walked */
   int  nslots;             /* slots every spine in the pattern contributed      */
   Port slots[LIN_PAT_SLOTS];      /* ... their ports, in match order (capped)   */
@@ -248,7 +248,7 @@ typedef struct {
   int  nnodes, overflow;          /* the covered set (overflow: it did not fit) */
   int  nodes[LIN_PAT_NODES];
   /* internal: the budget and the in-progress set that make recursion terminate. */
-  long budget;
+  int64_t budget;
   int  nin;
   const LinPat *ipat[LIN_PAT_DEPTH];
   Port ipport[LIN_PAT_DEPTH];
@@ -474,7 +474,7 @@ static inline int lin_pat_at(LinMatch *m, Port p, const LinPat *pat) {
 /* Match `pat` with the root at `root`.  1 = matched (m holds the bindings, the slots
    and the covered set), 0 = declined, in which case nothing in m may be read as a
    result.  `budget` bounds the work: see LIN_PAT_BUDGET_FOR. */
-static inline int lin_pat_match(Net *n, Port root, const LinPat *pat, long budget, LinMatch *m) {
+static inline int lin_pat_match(Net *n, Port root, const LinPat *pat, int64_t budget, LinMatch *m) {
   memset(m, 0, sizeof *m);
   m->n = n;
   m->root = root;
@@ -489,7 +489,7 @@ static inline int lin_pat_match(Net *n, Port root, const LinPat *pat, long budge
 /* The same, over an unordered candidate pair: a wave offers redexes as two ports
    whose order is not the pattern's business, so the first that matches wins. */
 static inline int lin_pat_match_pair(Net *n, Port p1, Port p2, const LinPat *pat,
-                                     long budget, LinMatch *m) {
+                                     int64_t budget, LinMatch *m) {
   return lin_pat_match(n, p1, pat, budget, m) || lin_pat_match(n, p2, pat, budget, m);
 }
 
@@ -503,11 +503,11 @@ static inline int lin_pat_match_pair(Net *n, Port p1, Port p2, const LinPat *pat
    argument is still a thunk (an unreduced application) makes the next layer's test fail, so a
    partially reduced numeral DECLINES instead of being demanded: this is the only reader a pure
    context (a `claim`, a per-pair predicate) may use. */
-static inline int lin_pat_num_nf(const Net *n, Port p, long *out);
+static inline int lin_pat_num_nf(const Net *n, Port p, int64_t *out);
 
 /* FORCING: the same value, every layer demanded and reduced first.  The reader a caller uses when
    it needs the value and is allowed to reduce (the match phase, readback). */
-static inline long lin_pat_num(Net *n, Port p) {
+static inline int64_t lin_pat_num(Net *n, Port p) {
   return n ? net_read_int(n, p, LIN_ENC_NUM) : -1;
 }
 
@@ -672,7 +672,7 @@ static const LinPat *const lin_pat_enc_ffi = P_FAN(P_ALL3(
 
 /* the layer walk the payload is read with (`lin_pat_enc_num_nf`), declared here because a box states
    its payload's encoding and this is where that is stated */
-static inline int lin_pat_enc_num_nf(const Net *n, Port p, int enc, long *out);
+static inline int lin_pat_enc_num_nf(const Net *n, Port p, int enc, int64_t *out);
 
 /* `(X (Y v))` at the current position: X and Y are the two innermost binders of the box, in the
    order this domain applies them, and v (slot 7) is the payload they are applied to. */
@@ -785,11 +785,11 @@ static inline int lin_pat_enc_layer_of(const Net *n, Port p, int enc, int *layer
    unreduced application) fails the next layer's test and the whole read DECLINES
    instead of demanding it.  This is `lin_pat_num_nf` with the expected encoding
    supplied by the CALLER -- the form that works on a net with no names. */
-static inline int lin_pat_enc_num_nf(const Net *n, Port p, int enc, long *out) {
-  long cnt = 0;
+static inline int lin_pat_enc_num_nf(const Net *n, Port p, int enc, int64_t *out) {
+  int64_t cnt = 0;
   if (!n || enc == LIN_ENC_OP || enc == LIN_ENC_FFI) return 0;
   if (enc == LIN_ENC_NUM) {
-    long v;
+    int64_t v;
     if (net_read_i64((Net *)n, p, &v)) { if (out) *out = v; return 1; }
   }
   for (int step = 0; step < n->nn; step++) {
@@ -807,11 +807,11 @@ static inline int lin_pat_enc_num_nf(const Net *n, Port p, int enc, long *out) {
    (net_force_val), so a partially reduced value reads.  This is REDUCTION -- legal
    in a match phase or from readback, and NOT in a pure context -- and it still
    consults no name, which is what makes it usable on a raw net. */
-static inline int lin_pat_enc_num(Net *n, Port p, int enc, long *out) {
-  long cnt = 0;
+static inline int lin_pat_enc_num(Net *n, Port p, int enc, int64_t *out) {
+  int64_t cnt = 0;
   if (!n || enc == LIN_ENC_OP || enc == LIN_ENC_FFI) return 0;
   if (enc == LIN_ENC_NUM) {
-    long v;
+    int64_t v;
     if (net_read_i64(n, p, &v)) { if (out) *out = v; return 1; }
   }
   for (int step = 0; step < n->nn; step++) {
@@ -835,7 +835,7 @@ static inline int lin_pat_enc_num(Net *n, Port p, int enc, long *out) {
    business.  `codes` collects up to `max` payload values and `*nout` gets the
    count; a list that does not fit, or a payload that is not that encoding's normal
    form, DECLINES rather than truncating.  PURE. */
-static inline int lin_pat_enc_str_nf(const Net *n, Port p, int pay_enc, long *codes, int max, int *nout) {
+static inline int lin_pat_enc_str_nf(const Net *n, Port p, int pay_enc, int64_t *codes, int max, int *nout) {
   int cnt = 0;
   if (!n) return 0;
   if (nout) *nout = 0;
@@ -843,7 +843,7 @@ static inline int lin_pat_enc_str_nf(const Net *n, Port p, int pay_enc, long *co
     int layer; LinMatch m;
     if (!lin_pat_enc_layer_of(n, p, LIN_ENC_STR, &layer, &m)) return 0;
     if (layer != LIN_L_INDUCTIVE) { if (nout) *nout = cnt; return 1; }   /* the nil cell ends it */
-    long code;
+    int64_t code;
     if (cnt >= max) return 0;                                           /* would not fit */
     if (!lin_pat_enc_num_nf(n, m.bind[4], pay_enc, &code)) return 0;
     if (codes) codes[cnt] = code;
@@ -855,7 +855,7 @@ static inline int lin_pat_enc_str_nf(const Net *n, Port p, int pay_enc, long *co
 
 /* The FORCING sibling of the string walk: each cell AND each payload is reduced
    first, so a string whose chars are still thunks reads.  REDUCTION. */
-static inline int lin_pat_enc_str(Net *n, Port p, int pay_enc, long *codes, int max, int *nout) {
+static inline int lin_pat_enc_str(Net *n, Port p, int pay_enc, int64_t *codes, int max, int *nout) {
   int cnt = 0;
   if (!n) return 0;
   if (nout) *nout = 0;
@@ -864,7 +864,7 @@ static inline int lin_pat_enc_str(Net *n, Port p, int pay_enc, long *codes, int 
     p = net_force_val(n, p);
     if (!lin_pat_enc_layer_of((const Net *)n, p, LIN_ENC_STR, &layer, &m)) return 0;
     if (layer != LIN_L_INDUCTIVE) { if (nout) *nout = cnt; return 1; }
-    long code;
+    int64_t code;
     if (cnt >= max) return 0;
     m.bind[4] = net_force_val(n, m.bind[4]);
     if (!lin_pat_enc_num(n, m.bind[4], pay_enc, &code)) return 0;
@@ -946,7 +946,7 @@ static inline int lin_pat_claim(const LinMatch *m, LinClaim *c, const Port *exit
 /* ---------------------------------------------------------------------------
  * the per-net match cache (a derivation, never the authority)
  * ------------------------------------------------------------------------- */
-typedef struct { int node; unsigned gen; long val; } LinPatCacheEnt;
+typedef struct { int node; unsigned gen; int64_t val; } LinPatCacheEnt;
 typedef struct { LinPatCacheEnt *e; int cap; unsigned gen; } LinPatCache;
 
 /* `store` is the caller's memory (a driver's state, so it dies with the net and is
@@ -962,14 +962,14 @@ static inline void lin_pat_cache_drop(LinPatCache *c, int node) {
   if (!c->e || c->cap <= 0) return;
   c->e[(unsigned)node % (unsigned)c->cap].gen = 0;
 }
-static inline int lin_pat_cache_get(const LinPatCache *c, int node, long *val) {
+static inline int lin_pat_cache_get(const LinPatCache *c, int node, int64_t *val) {
   if (!c->e || c->cap <= 0) return 0;
   const LinPatCacheEnt *e = &c->e[(unsigned)node % (unsigned)c->cap];
   if (e->gen != c->gen || e->node != node) return 0;
   if (val) *val = e->val;
   return 1;
 }
-static inline void lin_pat_cache_put(LinPatCache *c, int node, long val) {
+static inline void lin_pat_cache_put(LinPatCache *c, int node, int64_t val) {
   if (!c->e || c->cap <= 0) return;
   LinPatCacheEnt *e = &c->e[(unsigned)node % (unsigned)c->cap];
   e->node = node; e->gen = c->gen; e->val = val;
@@ -1121,7 +1121,7 @@ static inline int lin_pat_op_code(const Net *n, int app) {
   Port head, ops;
   if (!lin_pat_live(n, app) || n->tag[app] != APP) return -1;
   if (!lin_pat_cell_at(n, net_wire(n, (Port){app, 2}), &head, &ops)) return -1;
-  long code = -1;
+  int64_t code = -1;
   if (!lin_pat_enc_num_nf(n, head, LIN_ENC_NUM, &code)) return -1;
   return (code >= 0 && code < LIN_OP_N) ? (int)code : -1;
 }
@@ -1134,7 +1134,7 @@ static inline Port lin_pat_op_args(const Net *n, int app) {
 }
 
 /* The pure NUM reader declared above IS the LIN_ENC_NUM case of the enc-based walk. */
-static inline int lin_pat_num_nf(const Net *n, Port p, long *out) {
+static inline int lin_pat_num_nf(const Net *n, Port p, int64_t *out) {
   return lin_pat_enc_num_nf(n, p, LIN_ENC_NUM, out);
 }
 

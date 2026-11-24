@@ -18,46 +18,46 @@
 #include <string.h>
 #include "../../src/lin.h"
 
-long lin_tlen(const char *s) { return s ? (long)strlen(s) : 0; }
+int64_t lin_tlen(const char *s) { return s ? (int64_t)strlen(s) : 0; }
 
 /* The byte at `i`, or -1 past the end: past-the-end is how every caller here spells "no more". */
-long lin_tget(const char *s, long i) {
+int64_t lin_tget(const char *s, int64_t i) {
   if (!s || i < 0) return -1;
   size_t n = strlen(s);
-  return (size_t)i < n ? (long)(unsigned char)s[i] : -1;
+  return (size_t)i < n ? (int64_t)(unsigned char)s[i] : -1;
 }
 
 /* First `ch` at or after `i`.  NOT FOUND IS THE END OF THE TEXT, not -1: every caller wants to
    continue THERE, and a -1 would have to be compared before it could be used. */
-long lin_tfind(const char *s, long i, long ch) {
-  if (!s || i < 0 || ch < 0 || ch > (long)UCHAR_MAX) return 0;
+int64_t lin_tfind(const char *s, int64_t i, int64_t ch) {
+  if (!s || i < 0 || ch < 0 || ch > (int64_t)UCHAR_MAX) return 0;
   size_t n = strlen(s);
-  if ((size_t)i >= n) return (long)n;
+  if ((size_t)i >= n) return (int64_t)n;
   const char *p = strchr(s + i, (int)ch);
-  return p ? (long)(p - s) : (long)n;
+  return p ? (int64_t)(p - s) : (int64_t)n;
 }
 
 /* First byte at or after `i` that is in `stops`, i.e. strcspn: one call finds the end of a token. */
-long lin_tfindany(const char *s, long i, const char *stops) {
+int64_t lin_tfindany(const char *s, int64_t i, const char *stops) {
   if (!s || !stops || i < 0) return 0;
   size_t n = strlen(s);
-  if ((size_t)i >= n) return (long)n;
-  return (long)(i + (long)strcspn(s + i, stops));
+  if ((size_t)i >= n) return (int64_t)n;
+  return (int64_t)(i + (int64_t)strcspn(s + i, stops));
 }
 
 /* Is `i` at or past the end?  A boolean, so a reader's loop head branches on it with no compare. */
-long lin_tbend(const char *s, long i) { return !s || i < 0 || (size_t)i >= strlen(s); }
+int64_t lin_tbend(const char *s, int64_t i) { return !s || i < 0 || (size_t)i >= strlen(s); }
 
 /* First byte at or after `i` that is NOT in `accept`, i.e. strspn: the end of a run. */
-long lin_trun(const char *s, long i, const char *accept) {
+int64_t lin_trun(const char *s, int64_t i, const char *accept) {
   if (!s || !accept || i < 0 || (size_t)i > strlen(s)) return -1;
-  return (long)(i + (long)strspn(s + i, accept));
+  return (int64_t)(i + (int64_t)strspn(s + i, accept));
 }
 
 /* Does the text at `i` begin with `lit`?  `b` = the result is a BOOLEAN, so the caller's `if`
    consumes it directly: a numeric result would have to be compared, and a comparison inside a
    recursive definition is the expensive shape this whole domain exists to avoid. */
-long lin_tbhas(const char *s, long i, const char *lit) {
+int64_t lin_tbhas(const char *s, int64_t i, const char *lit) {
   if (!s || !lit || i < 0) return 0;
   size_t n = strlen(s);
   if ((size_t)i > n) return 0;
@@ -65,7 +65,7 @@ long lin_tbhas(const char *s, long i, const char *lit) {
 }
 
 /* The same test, numerically (1/0), for a caller that wants a value rather than a branch. */
-long lin_tmatch(const char *s, long i, const char *lit) {
+int64_t lin_tmatch(const char *s, int64_t i, const char *lit) {
   if (!s || !lit || i < 0) return 0;
   size_t n = strlen(s);
   if ((size_t)i > n) return 0;
@@ -81,7 +81,7 @@ long lin_tmatch(const char *s, long i, const char *lit) {
    the net as it reads it). */
 static char *slice_arena;
 static size_t slice_cap, slice_used;
-char *lin_tsub(const char *s, long i, long n) {
+char *lin_tsub(const char *s, int64_t i, int64_t n) {
   size_t len = s ? strlen(s) : 0, take = 0;
   if (s && i >= 0 && n > 0 && (size_t)i < len) {
     take = (size_t)n;
@@ -116,7 +116,7 @@ static int text_known(const char *fn) {
   for (size_t i = 0; i < sizeof rows / sizeof *rows; i++) if (!strcmp(fn, rows[i])) return 1;
   return 0;
 }
-static int text_ops(const char *fn, int argc, const long *a, long *out, int *outkind) {
+static int text_ops(const char *fn, int argc, const int64_t *a, int64_t *out, int *outkind) {
   if (argc < 0) return text_known(fn);                 /* the OWNERSHIP query: is it ours, and pure */
   if (!text_known(fn) || !a) return 0;
   const char *s = (const char *)(intptr_t)a[0];
@@ -133,7 +133,7 @@ static int text_ops(const char *fn, int argc, const long *a, long *out, int *out
 }
 
 LinDriver lin_text_driver;
-static void __attribute__((constructor)) text_load(void) {
+LIN_PLUGIN_INIT(text) {
   static int registered = 0;
   if (registered) return;
   registered = 1;
