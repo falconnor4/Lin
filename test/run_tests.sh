@@ -163,6 +163,17 @@ fi
 rm -f "$IO_LOG"
 
 # ----------------------------------------------------------------------------
+# Tier 2.795: effects that loop, their state read into compiled units each turn (test/io_loop.sh).
+# ----------------------------------------------------------------------------
+IL_LOG=$(mktemp)
+if bash test/io_loop.sh "$LIN_BIN" >"$IL_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 14)); echo "PASS test/io_loop.sh ($(tail -1 "$IL_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/io_loop.sh"; cat "$IL_LOG"
+fi
+rm -f "$IL_LOG"
+
+# ----------------------------------------------------------------------------
 # Tier 2.8: the net's demand walk stays proportional to the work (test/net_walk.sh).
 # ----------------------------------------------------------------------------
 NW_LOG=$(mktemp)

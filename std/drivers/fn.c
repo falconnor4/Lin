@@ -479,6 +479,7 @@ static V *match_add(V *m, Lz *x) {
   V *res = mkv(V_SYM); res->e = hc(r); return res;
 }
 /* A known constructor value, read as data: the closure's m dispatch binders, the marker, the fields. */
+static int list_end(const Net *n, Port p); static const char *td_dt(const char *d); static const char *list_dt(void);
 static Expr *ctor_expr(V *v) {
   int nl = 0, di = -1; Port q = (Port){v->lam, 0};
   for (int i = 0; i < N->nn && is(N, q, LAM, 0); i++) { nl++; q = dhop(N, W(N, (Port){q.node, 2})); }
@@ -494,8 +495,20 @@ static Expr *ctor_expr(V *v) {
   if (nf != ci->k || !(x.node == di && x.port == 1)) return NULL;
   Expr *e = mke(E_CTOR, 5); e->k = ci->i; e->nargs = nf; e->args = A(sizeof(Expr *) * (size_t)(nf ? nf : 1));
   { int box; e->untag = dt_boxed(ci->dt, &box) == 1; } e->ci = ci;
-  for (int j = 0; j < nf; j++)                       /* (collected last field first) */
-    if (!(e->args[nf - 1 - j] = to_expr(eval(fields[j], v->env)))) return NULL;
+  const char *fd = ci->fdesc;
+  for (int i = 0; i < nf; i++, fd = fd && *fd ? fd_skip(fd) : fd) {   /* (collected last field first) */
+    Port f = fields[nf - 1 - i];
+    /* a field DECLARED a list whose value is the bare terminal is the list's end: the terminal is also the
+       numeral zero and false, and read as a number it is a 0 where the unit's code looks for a block */
+    if (fd && (*fd == 'L' || (*fd == 'D' && td_dt(fd) && td_dt(fd) == list_dt())) && list_end(N, f)) {
+      cells_init();
+      if (!cell_nil) return NULL;
+      Expr *z = mke(E_CTOR, 5); z->k = cell_nil->i; z->nargs = 0; z->ci = cell_nil;
+      { int box; z->untag = dt_boxed(cell_nil->dt, &box) == 1; }
+      e->args[i] = hc(z); continue;
+    }
+    if (!(e->args[i] = to_expr(eval(f, v->env)))) return NULL;
+  }
   return hc(e);
 }
 
@@ -5544,6 +5557,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
           for (int i = 0; i < n_inp && !M.bad; i++, pi++) {   /* the inputs met inside the arguments */
             if (pi >= c2->npsh) { M.bad = 1; break; }
             xa[nn++] = marshal(&M, inp_port[i], c2->psh[pi]);
+            if (dbg > 1) { DBG("[input %d passed in as ", i); sh_print(c2->psh[pi]); fprintf(stderr, ": %" PRIx64 " bad %d]\n", (uint64_t)xa[nn - 1], M.bad); }
           }
           if (M.bad) { DBG("an argument could not be read in: the net computes the call\n"); ms_free(&M); free(xa); goto decline_ex; }
           extern int lin_threads;
