@@ -53,6 +53,32 @@ __thread __attribute__((tls_model("initial-exec"))) char *lin_stack_lo;
 __thread __attribute__((tls_model("initial-exec"))) int64_t *lin_hp, *lin_he;
 __thread __attribute__((tls_model("initial-exec"))) int64_t *lin_fl[8 + 8 * sizeof(int64_t)];   /* freed blocks by size class, for reuse: see lin_cls */
 static int dbg = -1;
+/* THE GPU's door (see THE GPU): a compiled unit hands a kernel's states here, and the GPU driver -- loaded the first
+   time one is, quietly, since a machine without a device or a Vulkan loader is the ordinary case -- runs it.  0: it
+   did not (no driver, no device, no shader compiler, LIN_GPU=0, or fewer than LIN_GPU_MIN states: the threads are
+   cheaper than a dispatch for a few), and the caller computes the states itself. */
+typedef int (*LinGpuKernel)(const char *, uint64_t, int64_t, int, const int64_t *, const unsigned char *, int64_t *);
+int lin_gpu_map(const char *src, uint64_t key, int64_t n, int na, const int64_t *st, const unsigned char *vecs, int64_t *out) {
+#if defined(__EMSCRIPTEN__) || defined(LIN_STATIC)
+  (void)src; (void)key; (void)n; (void)na; (void)st; (void)vecs; (void)out; return 0;
+#else
+  static LinGpuKernel k; static int tried; static int64_t least = -1; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+  if (least < 0) { const char *e = getenv("LIN_GPU"), *mn = getenv("LIN_GPU_MIN"); least = e && e[0] == '0' ? INT64_MAX : mn && mn[0] ? atoll(mn) : 1024; }
+  if (n < least) return 0;
+  pthread_mutex_lock(&m);
+  if (!tried) {
+    tried = 1;
+    k = (LinGpuKernel)dlsym(RTLD_DEFAULT, "lin_gpu_kernel");
+    if (!k) { const char *dir = getenv("LIN_STD_DIR"); char path[PATH_MAX];
+      snprintf(path, sizeof path, "%s/drivers/gpu.so", dir ? dir : "std");
+      if (dlopen(path, RTLD_NOW | RTLD_GLOBAL)) k = (LinGpuKernel)dlsym(RTLD_DEFAULT, "lin_gpu_kernel");
+      else if (getenv("LIN_GPU_DEBUG")) fprintf(stderr, "[gpu] no GPU driver (%s): kernels run on the CPU\n", dlerror()); }
+  }
+  int r = k ? k(src, key, n, na, st, vecs, out) : 0;
+  pthread_mutex_unlock(&m);
+  return r;
+#endif
+}
 #include <time.h>
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 #define DBG(...) do { if (dbg) { fprintf(stderr, "fn: " __VA_ARGS__); fflush(stderr); } } while (0)
@@ -197,6 +223,7 @@ static void fun_rollback(int from) {
 }
 static int arity;   /* funs[0]'s, which the entry point and the parallel sites are written for */
 static int fail_quiet;   /* a speculative read (is_fun_value): its failures are answers, not declines */
+static int kt_on, kt_n; static int kt_index(int64_t k);   /* (THE ENTRY'S CONSTANTS, below) */
 static void fail(const char *why) { if (!failed && !fail_quiet) DBG("declined: %s\n", why); failed = 1; }
 
 static V *mkv(int k) { V *v = A(sizeof *v); v->k = k; return v; }
@@ -1653,7 +1680,7 @@ static int emit_arg(Buf *b, Buf *pre, const Expr *call, int i, int par, int budg
    the states first (the loop's own cheap part), computes every G on worker threads, and folds them into acc
    IN ORDER -- the same fold the loop makes, so the answer is the loop's whatever A is.  It is used where the
    caller is itself running in parallel (the entry, a parallel copy), with the depth `d` bounding the nesting. */
-typedef struct { int acc, base_then; const Expr *cond, *step, *G, *Gname, *base; const Expr **chain; int nchain; } PL;   /* Gname: G's name, when a let binds it (EXPLICIT BINDING) */
+typedef struct { int acc, base_then; const Expr *cond, *step, *G, *Gname, *base; const Expr **chain; int nchain; const Expr **in; int nin; } PL;   /* in: what G reads (a call: its arguments; an element written in place: the names it reads) */   /* Gname: G's name, when a let binds it (EXPLICIT BINDING) */
 static PL *plinfo; static unsigned char *pl_done; static int plpar, pl_unit;   /* pl_unit: writing a data unit (its runtime has the threads) */
 static int pl_ment(const Expr *e, int f, int k, unsigned char *seen) {   /* does e read parameter k of f? */
   if (!e || seen[e->id]) return 0;
@@ -1686,6 +1713,44 @@ static int pl_split(const Expr *e, int f, int acc, const Expr **G, unsigned char
   }
   if (!pl_split(e->a, f, acc, G, seen) || !pl_split(e->b, f, acc, G, seen) || (e->op != E_CTOR && !pl_split(e->c, f, acc, G, seen))) return 0;
   for (int i = 0; i < e->nargs && e->args; i++) if (!pl_split(e->args[i], f, acc, G, seen)) return 0;
+  return 1;
+}
+/* AN ELEMENT WRITTEN IN PLACE.  When A's part that does not read acc is not a call -- the function a per-pixel loop
+   applies was small enough to be written into the loop -- that part is G itself, and what it reads (the state's
+   parameters, the chain's names) are its arguments. */
+static int pl_splitx(const Expr *e, int f, int acc, const Expr **G, unsigned char *seen) {
+  if (!e || seen[e->id]) return 1;
+  seen[e->id] = 1;
+  if (!pl_m(e, f, acc)) {
+    unsigned char *s2 = calloc((size_t)eid + 1, 1); int r = !pl_params(e, f, s2); free(s2);
+    if (r && e->op != E_VAR) return 1;               /* (a constant) */
+    if (*G && *G != e) return 0;
+    *G = e; return 1;
+  }
+  if (!pl_splitx(e->a, f, acc, G, seen) || !pl_splitx(e->b, f, acc, G, seen) || (e->op != E_CTOR && !pl_splitx(e->c, f, acc, G, seen))) return 0;
+  for (int i = 0; i < e->nargs && e->args; i++) if (!pl_splitx(e->args[i], f, acc, G, seen)) return 0;
+  return 1;
+}
+static int pl_size(const Expr *e, int lim) {   /* nodes in e, counted to lim */
+  if (!e || lim <= 0) return 0;
+  int n = 1;
+  n += pl_size(e->a, lim - n); n += pl_size(e->b, lim - n); if (e->op != E_CTOR) n += pl_size(e->c, lim - n);
+  for (int i = 0; i < e->nargs && e->args && n < lim; i++) n += pl_size(e->args[i], lim - n);
+  return n;
+}
+/* the names an element reads: f's parameters, and the names bound outside it (its own lets are its own) */
+static int pl_inputs(const Expr *e, int f, unsigned char *seen, unsigned char *inner, const Expr ***in, int *n, int *cap) {
+  if (!e || seen[e->id]) return 1;
+  seen[e->id] = 1;
+  if (e->op == E_PARAM || (e->op == E_VAR && !inner[e->bind->id])) {
+    if (e->op == E_PARAM && e->nargs != f) return 0;
+    if (*n == *cap) *in = realloc(*in, sizeof **in * (size_t)(*cap = *cap ? *cap * 2 : 8));
+    (*in)[(*n)++] = e; return 1;
+  }
+  if (e->op == E_LET) inner[e->id] = 1;
+  if (e->op == E_CALL && (e->k == f || (e->k < lifted && nfv[e->k]))) return 0;   /* (a call that reads f's scope through its own) */
+  if (!pl_inputs(e->a, f, seen, inner, in, n, cap) || !pl_inputs(e->b, f, seen, inner, in, n, cap) || (e->op != E_CTOR && !pl_inputs(e->c, f, seen, inner, in, n, cap))) return 0;
+  for (int i = 0; i < e->nargs && e->args; i++) if (!pl_inputs(e->args[i], f, seen, inner, in, n, cap)) return 0;
   return 1;
 }
 static int pl_has(const Expr *e, const Expr *x, unsigned char *seen) {   /* is x in e (a name, a node)? */
@@ -1735,7 +1800,16 @@ static int pl_ok(int f) {
     for (int i = 0; i < nc && !G; i++)                /* G named by a let, read by A */
       if (chain[i]->op == E_LET && chain[i]->a->op == E_CALL && chain[i]->a->k != f && pl_in(A, chain[i]->bind, NULL)) { G = chain[i]->a; Gname = chain[i]->bind; }
     if (!G) { unsigned char *seen = calloc((size_t)eid + 1, 1); if (!pl_split(A, f, acc, &G, seen)) G = NULL; free(seen); }
-    if (!G || G->op != E_CALL || G->k < 0 || G->k >= nfun || G->k == f || (G->k < lifted && nfv[G->k]) || pl_m(G, f, acc) || (Gname && pl_in(G, Gname, NULL))) bad = 1;
+    const Expr **in = NULL; int nin = 0;
+    if (!G) {                                        /* (see AN ELEMENT WRITTEN IN PLACE) */
+      unsigned char *seen = calloc((size_t)eid + 1, 1); if (!pl_splitx(A, f, acc, &G, seen)) G = NULL; free(seen);
+      if (G && (G->op == E_PARAM || G->op == E_VAR || G->op == E_CONST || (!has_call(G) && pl_size(G, 12) < 12))) G = NULL;   /* (too little to be worth a thread) */
+      if (G) { unsigned char *sn = calloc((size_t)eid + 1, 1), *inner = calloc((size_t)eid + 1, 1); int cap = 0;
+        if (!pl_inputs(G, f, sn, inner, &in, &nin, &cap)) G = NULL;
+        free(sn); free(inner); }
+      for (int i = 0; G && i < nin; i++) if (in[i]->op == E_PARAM && in[i]->k == acc) G = NULL;
+    } else if (G->op == E_CALL) { in = malloc(sizeof *in * (size_t)(G->nargs + 1)); nin = G->nargs; for (int i = 0; i < nin; i++) in[i] = G->args[i]; }
+    if (!G || (G->op == E_CALL && (G->k < 0 || G->k >= nfun || G->k == f || (G->k < lifted && nfv[G->k]))) || pl_m(G, f, acc) || (Gname && pl_in(G, Gname, NULL))) bad = 1;
     int after = 0;
     for (int i = 0; i < nc && !bad; i++) {           /* the chain: no acc; after G, not G's value */
       const Expr *c = chain[i];
@@ -1750,29 +1824,228 @@ static int pl_ok(int f) {
       if (pl_m(step->args[k], f, acc) || (Gname && pl_in(step->args[k], Gname, NULL)) || pl_in(step->args[k], G, NULL)) bad = 1;
       if (pl_mskip(A, f, k, G)) bad = 1;
     }
-    if (bad) { free(chain); continue; }
-    PL *L = &plinfo[f];
+    if (bad) { free(chain); free(in); continue; }
+    PL *L = &plinfo[f]; L->in = in; L->nin = nin;
     L->acc = acc; L->base_then = !side; L->cond = B->a; L->step = step; L->G = G; L->Gname = Gname; L->base = base; L->chain = chain; L->nchain = nc;
-    if (dbg) DBG("f%d folds independent steps: its calls of f%" PRId64 " run in parallel\n", f, G->k);
+    if (dbg) { if (G->op == E_CALL) DBG("f%d folds independent steps: its calls of f%" PRId64 " run in parallel\n", f, G->k); else DBG("f%d folds independent steps: its elements (of %d input%s) run in parallel\n", f, nin, nin == 1 ? "" : "s"); }
     return 1;
   }
   return 0;
+}
+/* THE GPU.  A loop whose steps are independent (above) computes one G per state, and when G -- the function it calls
+   and every function that one calls -- does nothing but arithmetic on numbers and floats, reads of vectors it was
+   given, and loops that end in themselves, G is a shader: the same Lin, written out a second time as GLSL.  The
+   parallel form then hands the states it walked to the GPU driver (std/drivers/gpu.c) and folds what comes back,
+   in order, as it folds what its threads compute; with no device, no shader compiler, or a dispatch that fails, the
+   threads run as before.  Nothing is asked of the program: a per-pixel loop is a kernel because of what it is.
+   (The GLSL is this file's C, operation for operation: i64.h's integer and float rows, its sine and cosine -- which
+   are computed by i64.h itself, not the C library, so that both sides have one -- and `precise`, so no two
+   operations are fused into one the CPU does not make.  A float is then the same bits from either side wherever the
+   device rounds as IEEE-754 says, which a conformant double does for + - * and conversions; a device's division
+   and square root may differ in the last bit.  pow, atan2 and tan are the C library's and stay on the CPU.) */
+static const char GL_PRELUDE[] =
+  "#version 450\n#extension GL_ARB_gpu_shader_int64 : require\n"
+  "layout(local_size_x = 64) in;\n"
+  "layout(std430, binding = 0) readonly buffer S { int64_t st[]; };\n"
+  "layout(std430, binding = 1) writeonly buffer O { int64_t res[]; };\n"
+  "layout(std430, binding = 2) readonly buffer V { int64_t vec[]; };\n"
+  "layout(push_constant) uniform P { uint n; uint wx; } pc;\n"
+  "double D(int64_t x) { return int64BitsToDouble(x); }\n"
+  "int64_t L(double d) { return doubleBitsToInt64(d); }\n"
+  "int64_t i_div(int64_t a, int64_t b) { return b == 0l ? 0l : (b == -1l ? -a : a / b); }\n"
+  "int64_t i_mod(int64_t a, int64_t b) { return (b == 0l || b == -1l) ? 0l : a - (a / b) * b; }\n"
+  "int64_t i_pow(int64_t b, int64_t e) { int64_t r = 1l; if (e < 0l) return b == 1l ? 1l : (b == -1l ? ((e & 1l) != 0l ? -1l : 1l) : 0l);\n"
+  "  while (e > 0l) { if ((e & 1l) != 0l) r = r * b; b = b * b; e = e >> 1; } return r; }\n"
+  "int64_t i_shl(int64_t a, int64_t k) { return (k < 0l || k >= 64l) ? 0l : a << k; }\n"
+  "int64_t i_shr(int64_t a, int64_t k) { return k < 0l ? 0l : (k >= 64l ? (a < 0l ? -1l : 0l) : a >> k); }\n"
+  "int64_t f_add(int64_t a, int64_t b) { precise double r = D(a) + D(b); return L(r); }\n"
+  "int64_t f_sub(int64_t a, int64_t b) { precise double r = D(a) - D(b); return L(r); }\n"
+  "int64_t f_mul(int64_t a, int64_t b) { precise double r = D(a) * D(b); return L(r); }\n"
+  "int64_t f_div(int64_t a, int64_t b) { precise double r = D(b) != 0.0lf ? D(a) / D(b) : 0.0lf; return L(r); }\n"
+  "int64_t f_min(int64_t a, int64_t b) { return D(a) < D(b) ? a : b; }\n"
+  "int64_t f_max(int64_t a, int64_t b) { return D(a) > D(b) ? a : b; }\n"
+  "int64_t f_sqrt(int64_t a) { precise double r = D(a) >= 0.0lf ? sqrt(D(a)) : 0.0lf; return L(r); }\n"
+  "int64_t f_abs(int64_t a) { return a & 9223372036854775807l; }\n"
+  "int64_t f_sign(int64_t a) { return L(D(a) >= 0.0lf ? 1.0lf : -1.0lf); }\n"
+  "int64_t f_fract(int64_t a) { precise double r = D(a) - floor(D(a)); return L(r); }\n"
+  "int64_t f_eq(int64_t a, int64_t b) { return int64_t(D(a) == D(b)); }\n"
+  "int64_t f_lt(int64_t a, int64_t b) { return int64_t(D(a) < D(b)); }\n"
+  "int64_t f_leq(int64_t a, int64_t b) { return int64_t(D(a) <= D(b)); }\n"
+  "int64_t f_floor(int64_t a) { double f = floor(D(a)); return (f != f || f >= 9223372036854775808.0lf || f < -9223372036854775808.0lf) ? (-9223372036854775807l - 1l) : int64_t(f); }\n"
+  "int64_t f_floorf(int64_t a) { return L(floor(D(a))); }\n"
+  "int64_t f_of_int(int64_t i) { return L(double(i)); }\n"
+  "double trig(double x, int64_t c) {\n"
+  "  if (!(abs(x) <= 1e15lf)) { precise double u = x - x; return c != 0l ? u + 1.0lf : u; }\n"
+  "  precise double n = floor(x * 6.36619772367581382433e-01lf + 0.5lf);\n"
+  "  precise double r = ((x - n * 1.57079632673412561417e+00lf) - n * 6.07710050630396597660e-11lf) - n * 2.02226624871116645580e-21lf;\n"
+  "  int64_t q = (int64_t(n) + c) & 3l; precise double z = r * r;\n"
+  "  precise double s = r + r * z * (-1.66666666666666324348e-01lf + z * (8.33333333332248946124e-03lf + z * (-1.98412698298579493134e-04lf + z * (2.75573137070700676789e-06lf + z * (-2.50507602534068634195e-08lf + z * 1.58969099521155010221e-10lf)))));\n"
+  "  precise double k = (1.0lf - 0.5lf * z) + z * z * (4.16666666666666019037e-02lf + z * (-1.38888888888741095749e-03lf + z * (2.48015872894767294178e-05lf + z * (-2.75573143513906633035e-07lf + z * (2.08757232129817482790e-09lf + z * -1.13596475577881948265e-11lf)))));\n"
+  "  return q == 0l ? s : (q == 1l ? k : (q == 2l ? -s : -k)); }\n"
+  "int64_t f_sin(int64_t a) { return L(trig(D(a), 0l)); }\n"
+  "int64_t f_cos(int64_t a) { return L(trig(D(a), 1l)); }\n"
+  "int64_t vlen(int64_t v) { return vec[uint(v)]; }\n"
+  "int64_t vget(int64_t v, int64_t i) { return uint64_t(i) < uint64_t(vec[uint(v)]) ? vec[uint(v + 1l + i)] : 0l; }\n";
+/* the GLSL of each operation, by LIN_OP_* (comparisons are written in place) and by FROW row (NULL: not on the GPU) */
+static const char *const GL_OP[LIN_OP_N] = { [LIN_OP_DIV] = "i_div", [LIN_OP_MOD] = "i_mod", [LIN_OP_POW] = "i_pow",
+  [LIN_OP_SHL] = "i_shl", [LIN_OP_SHR] = "i_shr", [LIN_OP_FADD] = "f_add", [LIN_OP_FSUB] = "f_sub", [LIN_OP_FMUL] = "f_mul",
+  [LIN_OP_FDIV] = "f_div", [LIN_OP_FEQ] = "f_eq", [LIN_OP_FLT] = "f_lt", [LIN_OP_FLEQ] = "f_leq", [LIN_OP_FMIN] = "f_min",
+  [LIN_OP_FMAX] = "f_max", [LIN_OP_FSQRT] = "f_sqrt", [LIN_OP_FFLOOR] = "f_floorf", [LIN_OP_FTOI] = "f_floor",
+  [LIN_OP_ITOF] = "f_of_int", [LIN_OP_FABS] = "f_abs", [LIN_OP_FSIGN] = "f_sign", [LIN_OP_FFRACT] = "f_fract" };
+static const char *gl_frow(int64_t k) {
+  static const char *const m[][2] = { { "lin_fadd", "f_add" }, { "lin_fsub", "f_sub" }, { "lin_fmul", "f_mul" }, { "lin_fdiv", "f_div" },
+    { "lin_fmin", "f_min" }, { "lin_fmax", "f_max" }, { "lin_fsqrt", "f_sqrt" }, { "lin_fsin", "f_sin" }, { "lin_fcos", "f_cos" },
+    { "lin_fabs", "f_abs" }, { "lin_fsign", "f_sign" }, { "lin_ffract", "f_fract" }, { "lin_feq", "f_eq" }, { "lin_flt", "f_lt" },
+    { "lin_fleq", "f_leq" }, { "lin_ffloor", "f_floor" }, { "lin_float", "f_of_int" } };
+  for (int i = 0; i < N_OF(m); i++) if (!strcmp(FROW[k].name, m[i][0])) return m[i][1];
+  return NULL;
+}
+static Shape **sh_par, *sh_fun;
+static int gl_word(Shape s) { return s.k == 1 || s.k == 3; }
+static int drop_fn(Shape sh);
+static int data_drop(Shape s) { return s.k == 5 && s.dt ? drop_fn(s) : -1; }   /* (a counted value's drop function; -1: a word) */
+static int gl_vec(Shape s) { return s.k == 5 && s.dt == VEC_DT && s.a && s.a->n == 1 && gl_word(s.a->s[0]); }
+static unsigned char *gl_st; static int *gl_order, gl_norder, *gl_vn, gl_nv;   /* per function: 0 not looked at, 1 being looked at, 2 a shader function, 3 not */
+static int gl_fun(int g);
+static int gl_ok(const Expr *e, int f, int tail) {
+  if (!e) return 0;
+  switch (e->op) {
+  case E_CONST: return !e->box;
+  case E_PARAM: return e->nargs == f && e->k < funs[f].arity && (gl_word(sh_par[f][e->k]) || gl_vec(sh_par[f][e->k]));
+  case E_VAR: return e->bind != NULL;
+  case E_LET: return gl_ok(e->a, f, 0) && gl_ok(e->b, f, tail);
+  case E_BIN: return e->k >= 0 && e->k < LIN_OP_N && gl_ok(e->a, f, 0) && gl_ok(e->b, f, 0);
+  case E_IF: return gl_ok(e->a, f, 0) && gl_ok(e->b, f, tail) && gl_ok(e->c, f, tail);
+  case E_FOP: if (!gl_frow(e->k)) return 0; for (int i = 0; i < e->nargs; i++) if (!gl_ok(e->args[i], f, 0)) return 0; return 1;
+  case E_VOP: if (e->k != LIN_VOP_LEN && e->k != LIN_VOP_GET) return 0; for (int i = 0; i < e->nargs; i++) if (!gl_ok(e->args[i], f, 0)) return 0; return 1;
+  case E_DUP: case E_AFTER: return gl_ok(e->a, f, tail);       /* (counts: a GPU frees nothing, and keeps nothing) */
+  case E_DROP: return gl_ok(e->b, f, tail);
+  case E_CALL:
+    if (e->k < 0 || e->k >= nfun || e->nargs != funs[e->k].arity) return 0;
+    if (e->k == f) { if (!tail) return 0; }                    /* (a loop: it ends in itself, or it is not a shader's) */
+    else if (!gl_fun((int)e->k)) return 0;
+    for (int i = 0; i < e->nargs; i++) if (!gl_ok(e->args[i], f, 0)) return 0;
+    return 1;
+  default: return 0;
+  }
+}
+static int gl_fun(int g) {
+  if (gl_st[g]) return gl_st[g] == 2;                           /* (1: called while being looked at -- recursion that is not a loop) */
+  gl_st[g] = 1;
+  int ok = funs[g].body && !(g < lifted && nfv[g]) && gl_word(sh_fun[g]);
+  for (int k = 0; ok && k < funs[g].arity; k++) ok = gl_word(sh_par[g][k]) || gl_vec(sh_par[g][k]);
+  ok = ok && gl_ok(funs[g].body, g, 1);
+  gl_st[g] = ok ? 2 : 3;
+  if (!ok) DBG("f%d is not a GPU kernel's (shapes: result %d%s)\n", g, sh_fun[g].k, funs[g].body && gl_ok(funs[g].body, g, 1) ? "" : ", its body");
+  if (ok) gl_order[gl_norder++] = g;                            /* (callees first: GLSL names a function after it is written) */
+  return ok;
+}
+static int gl_lets(const Expr *e) {                             /* does e bind a name (and so need statements)? */
+  if (!e) return 0;
+  if (e->op == E_LET) return 1;
+  if (e->op == E_VAR) return 0;
+  if (gl_lets(e->a) || gl_lets(e->b) || (e->op != E_CTOR && gl_lets(e->c))) return 1;
+  for (int i = 0; i < e->nargs && e->args; i++) if (gl_lets(e->args[i])) return 1;
+  return 0;
+}
+/* e as a GLSL expression into b; what must run first (a name's value, a branch that binds names) into pre */
+static void gl_stmt(Buf *b, const Expr *e, int f);
+static void gl_x(Buf *b, Buf *pre, const Expr *e, int f) {
+  switch (e->op) {
+  case E_CONST: if (e->k == INT64_MIN) put(b, "(-9223372036854775807l - 1l)"); else put(b, "(%" PRId64 "l)", e->k); return;
+  case E_PARAM: put(b, "p%" PRId64, e->k); return;
+  case E_VAR: put(b, "w%d", gl_vn[e->bind->id]); return;
+  case E_LET: { int v = gl_nv++; put(pre, "int64_t w%d = ", v); gl_x(pre, pre, e->a, f); put(pre, ";\n"); gl_vn[e->id] = v; gl_x(b, pre, e->b, f); return; }
+  case E_DUP: case E_AFTER: gl_x(b, pre, e->a, f); return;
+  case E_DROP: gl_x(b, pre, e->b, f); return;
+  case E_BIN: {
+    static const char *const cmp[] = { [LIN_OP_EQ] = "==", [LIN_OP_LT] = "<", [LIN_OP_LEQ] = "<=", [LIN_OP_GT] = ">", [LIN_OP_GEQ] = ">=" };
+    static const char *const ar[] = { [LIN_OP_ADD] = "+", [LIN_OP_MUL] = "*", [LIN_OP_SUB] = "-", [LIN_OP_BAND] = "&", [LIN_OP_BOR] = "|", [LIN_OP_BXOR] = "^" };
+    int k = (int)e->k, un = k >= LIN_OP_FSQRT && k <= LIN_OP_FFRACT;
+    if (k >= LIN_OP_EQ && k <= LIN_OP_GEQ) { put(b, "int64_t("); gl_x(b, pre, e->a, f); put(b, " %s ", cmp[k]); gl_x(b, pre, e->b, f); put(b, ")"); return; }
+    if (k < (int)N_OF(ar) && ar[k]) { put(b, "("); gl_x(b, pre, e->a, f); put(b, " %s ", ar[k]); gl_x(b, pre, e->b, f); put(b, ")"); return; }
+    put(b, "%s(", GL_OP[k]); gl_x(b, pre, e->a, f); if (!un) { put(b, ", "); gl_x(b, pre, e->b, f); } put(b, ")"); return;
+  }
+  case E_FOP: put(b, "%s(", gl_frow(e->k)); for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); gl_x(b, pre, e->args[i], f); } put(b, ")"); return;
+  case E_VOP:
+    if (e->k == LIN_VOP_LEN) { put(b, "vlen("); gl_x(b, pre, e->args[0], f); put(b, ")"); return; }
+    put(b, "vget("); gl_x(b, pre, e->args[0], f); put(b, ", "); gl_x(b, pre, e->args[1], f); put(b, ")"); return;
+  case E_CALL: put(b, "g%" PRId64 "(", e->k); for (int i = 0; i < e->nargs; i++) { if (i) put(b, ", "); gl_x(b, pre, e->args[i], f); } put(b, ")"); return;
+  case E_IF:
+    if (!gl_lets(e->b) && !gl_lets(e->c)) {                     /* (?: evaluates one side, as the C does) */
+      put(b, "("); gl_x(b, pre, e->a, f); put(b, " != 0l ? "); gl_x(b, pre, e->b, f); put(b, " : "); gl_x(b, pre, e->c, f); put(b, ")"); return;
+    }
+    { int t = gl_nv++; Buf c = nbuf(64); gl_x(&c, pre, e->a, f);
+      put(pre, "int64_t w%d;\nif (%s != 0l) {\n", t, c.s); free(c.s);
+      for (int s = 0; s < 2; s++) { Buf in = nbuf(256), x = nbuf(64); gl_x(&x, &in, s ? e->c : e->b, f); put(pre, "%sw%d = %s;\n}%s", in.s, t, x.s, s ? "\n" : " else {\n"); free(in.s); free(x.s); }
+      put(b, "w%d", t); return; }
+  default: return;
+  }
+}
+static void gl_stmt(Buf *b, const Expr *e, int f) {           /* e in tail position: return it, or loop */
+  switch (e->op) {
+  case E_LET: { int v = gl_nv++; put(b, "int64_t w%d = ", v); gl_x(b, b, e->a, f); put(b, ";\n"); gl_vn[e->id] = v; gl_stmt(b, e->b, f); return; }
+  case E_DUP: case E_AFTER: gl_stmt(b, e->a, f); return;
+  case E_DROP: gl_stmt(b, e->b, f); return;
+  case E_IF: { Buf c = nbuf(64); gl_x(&c, b, e->a, f); put(b, "if (%s != 0l) {\n", c.s); free(c.s); gl_stmt(b, e->b, f); put(b, "} else {\n"); gl_stmt(b, e->c, f); put(b, "}\n"); return; }
+  case E_CALL: if (e->k == f) {
+      int n0 = gl_nv; gl_nv += e->nargs;
+      for (int i = 0; i < e->nargs; i++) { Buf x = nbuf(64); gl_x(&x, b, e->args[i], f); put(b, "int64_t w%d = %s;\n", n0 + i, x.s); free(x.s); }
+      for (int i = 0; i < e->nargs; i++) put(b, "p%d = w%d; ", i, n0 + i);
+      put(b, "continue;\n"); return;
+    }  /* fall through */
+  default: { Buf x = nbuf(64); gl_x(&x, b, e, f); put(b, "return %s;\n", x.s); free(x.s); return; }
+  }
+}
+/* The kernel for a loop's G (a call of g with na arguments), or NULL: the GLSL of every function it reaches, and a
+   main that calls g once per state.  vecs[i]: argument i is a vector (the driver lays them out side by side). */
+static char *gl_kernel(int f, const Expr *G, const Expr *const *in, int na, unsigned char *vecs) {
+  int call = G->op == E_CALL, g = call ? (int)G->k : f;
+  gl_st = calloc((size_t)nfun + 1, 1); gl_order = malloc(sizeof *gl_order * (size_t)(nfun + 1)); gl_norder = 0;
+  int ok = call ? gl_fun(g) : gl_ok(G, f, 0);                 /* (an element written in place: f's own expression) */
+  for (int i = 0; ok && i < na; i++) { Shape s = call ? sh_par[g][i] : shape_of(in[i]); vecs[i] = gl_vec(s); ok = vecs[i] || gl_word(s); }
+  char *r = NULL;
+  if (ok) {
+    Buf b = nbuf(4096); put(&b, "%s", GL_PRELUDE);
+    gl_vn = malloc(sizeof *gl_vn * (size_t)(eid + 1)); gl_nv = 0;
+    for (int i = 0; i < gl_norder; i++) {
+      int h = gl_order[i];
+      put(&b, "int64_t g%d(", h);
+      for (int k = 0; k < funs[h].arity; k++) put(&b, "%sint64_t p%d", k ? ", " : "", k);
+      put(&b, ") {\nfor (;;) {\n"); gl_stmt(&b, funs[h].body, h); put(&b, "}\n}\n");
+    }
+    int NA = na ? na : 1;
+    if (!call) {                                                /* the element, as a function of what it reads */
+      put(&b, "int64_t gx("); for (int k = 0; k < na; k++) put(&b, "%sint64_t a%d", k ? ", " : "", k); put(&b, ") {\n");
+      for (int k = 0; k < na; k++) {
+        if (in[k]->op == E_PARAM) put(&b, "int64_t p%" PRId64 " = a%d;\n", in[k]->k, k);
+        else { int v = gl_nv++; gl_vn[in[k]->bind->id] = v; put(&b, "int64_t w%d = a%d;\n", v, k); }
+      }
+      Buf x = nbuf(256); gl_x(&x, &b, G, f); put(&b, "return %s;\n}\n", x.s); free(x.s);
+      put(&b, "void main() {\nuint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * pc.wx;\nif (i >= pc.n) return;\nres[i] = gx(");
+    } else put(&b, "void main() {\nuint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * pc.wx;\nif (i >= pc.n) return;\nres[i] = g%d(", g);
+    for (int k = 0; k < na; k++) put(&b, "%sst[i * %du + %du]", k ? ", " : "", NA, k);
+    put(&b, ");\n}\n");
+    free(gl_vn); r = b.s;
+  }
+  free(gl_st); free(gl_order); gl_st = NULL;
+  return r;
 }
 static int emit_region(Buf *b, Buf *pre, const Expr *e, int par, int budget);
 static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per unit into `pre` */
   if (pl_done[f]) return 1;
   pl_done[f] = 1;
   const PL *L = &plinfo[f]; int ar = funs[f].arity, ok = 1, se = emitting; emitting = f;
-  const Expr *G = L->G; int na = G->nargs;
+  const Expr *G = L->G; int na = L->nin; const Expr *const *GA = L->in; int inplace = G->op != E_CALL;
   Buf g = nbuf(1024), w = nbuf(2048);
   /* G, as a function of its arguments (their nodes stand for them while it is written) */
   put(&g, "static int64_t f%d_g(", f); for (int i = 0; i < na; i++) put(&g, "int64_t a%d, ", i); put(&g, "int d) { return ");
   fscope++;
   { int a0 = nvar; nvar += na; int *sv = malloc(sizeof *sv * (size_t)(2 * na + 1));
-    for (int i = 0; i < na; i++) { Expr *a = (Expr *)G->args[i]; sv[2 * i] = a->var; sv[2 * i + 1] = a->vscope; a->var = a0 + i; a->vscope = fscope; }
+    for (int i = 0; i < na; i++) { Expr *a = (Expr *)GA[i]; sv[2 * i] = a->var; sv[2 * i + 1] = a->vscope; a->var = a0 + i; a->vscope = fscope; }
     put(&g, "({ "); for (int i = 0; i < na; i++) put(&g, "int64_t v%d = a%d; ", a0 + i, i);
     ok = emitx(&g, pre, G, 1, budget - 1); put(&g, "; })");
-    for (int i = 0; i < na; i++) { Expr *a = (Expr *)G->args[i]; a->var = sv[2 * i]; a->vscope = sv[2 * i + 1]; }
+    for (int i = 0; i < na; i++) { Expr *a = (Expr *)GA[i]; a->var = sv[2 * i]; a->vscope = sv[2 * i + 1]; }
     free(sv); }
   put(&g, "; }\n");
   put(&g, "typedef struct { const int64_t *st; int64_t *g; int64_t n, next; int d; } PL%d;\n", f);
@@ -1794,7 +2067,9 @@ static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per 
   put(&w, "break; }\n");
   put(&w, "      if (n == cap) st = realloc(st, sizeof(int64_t) * (size_t)(cap *= 2) * %d);\n", NA);
   int *bound_v = malloc(sizeof *bound_v * (size_t)(L->nchain + 1)), gdone = 0;
-  #define PL_GARGS() do { for (int i = 0; ok && i < na; i++) { put(&w, "      st[n * %d + %d] = ", NA, i); ok = emit_region(&w, pre, G->args[i], 0, budget - 1); put(&w, ";\n"); } gdone = 1; } while (0)
+  /* (an element written in place reads names the loop goes on holding: what it is handed is a reference of its own,
+     let go once it has run -- below) */
+  #define PL_GARGS() do { for (int i = 0; ok && i < na; i++) { int dd = inplace ? data_drop(shape_of(GA[i])) : -1; put(&w, dd >= 0 ? "      st[n * %d + %d] = lin_dup(" : "      st[n * %d + %d] = (", NA, i); ok = emit_region(&w, pre, GA[i], 0, budget - 1); put(&w, ");\n"); } gdone = 1; } while (0)
   for (int i = 0; ok && i < L->nchain; i++) {
     const Expr *c = L->chain[i];
     if (c->op == E_DROP) {
@@ -1818,10 +2093,27 @@ static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per 
   put(&w, "\n    } }\n");
   /* every G at once: the threads and this one take states in turn */
   put(&w, "  int64_t *g = malloc(sizeof(int64_t) * (size_t)(n + 1));\n");
+  { unsigned char *vecs = calloc((size_t)na + 1, 1); char *ker = getenv("LIN_GPU_OFF") ? NULL : gl_kernel(f, G, GA, na, vecs);   /* (see THE GPU) */
+    if (ker) {
+      uint64_t h = 1469598103934665603ULL; for (const char *c = ker; *c; c++) h = (h ^ (unsigned char)*c) * 1099511628211ULL;
+      Buf q = nbuf(strlen(ker) * 2 + 64);
+      put(&q, "static const char f%d_gl[] = \"", f);
+      for (const char *c = ker; *c; c++) { if (*c == '\n') put(&q, "\\n\"\n\""); else if (*c == '"' || *c == '\\') put(&q, "\\%c", *c); else put(&q, "%c", *c); }
+      put(&q, "\";\nstatic const unsigned char f%d_glv[] = { ", f); for (int i = 0; i < NA; i++) put(&q, "%d, ", i < na ? vecs[i] : 0); put(&q, "};\n");
+      put(pre, "%s", q.s); free(q.s);
+      if (dbg) DBG("f%d's elements are a GPU kernel:\n%s", f, ker);
+      put(&w, "  int gpu = lin_gpu_map(f%d_gl, 0x%016" PRIx64 "ULL, n, %d, st, f%d_glv, g);\n", f, h, NA, f);
+      Buf dr = nbuf(64);                     /* (an argument G owns is let go where G would have) */
+      for (int i = 0; i < na && !inplace; i++) if (vecs[i] && !rc_borrowed((int)G->k, i)) { int df = data_drop(sh_par[G->k][i]); if (df >= 0) put(&dr, "lin_drop%d(st[i * %d + %d]); ", df, NA, i); }
+      if (dr.len) put(&w, "  if (gpu) for (int64_t i = 0; i < n; i++) { %s}\n", dr.s);
+      free(dr.s); free(ker);
+      put(&w, "  if (!gpu) {\n");
+    } else put(&w, "  {\n");
+    free(vecs); }
   put(&w, "  PL%d s = { st, g, n, 0, d }; int T = lin_threads_ > 0 ? lin_threads_ : 1; pthread_t t[T]; int nt = 0;\n", f);
   {                                     /* (counted: what the threads are given, frozen -- they may share blocks, and no count of them is taken again) */
     Buf sh = nbuf(64);
-    for (int i = 0; i < na; i++) { const Expr *ga = G->args[i]; while (ga->op == E_DUP || ga->op == E_AFTER) ga = ga->a; int sf = rc_share_fn(shape_of(ga)); if (sf >= 0) { put(&sh, "lin_%s%d(st[i * %d + %d]); ", rc_mark, sf, NA, i); } }
+    for (int i = 0; i < na; i++) { const Expr *ga = GA[i]; while (ga->op == E_DUP || ga->op == E_AFTER) ga = ga->a; int sf = rc_share_fn(shape_of(ga)); if (sf >= 0) { put(&sh, "lin_%s%d(st[i * %d + %d]); ", rc_mark, sf, NA, i); } }
     if (sh.len) put(&w, "  if (T > 1 && n > 1) for (int64_t i = 0; i < n; i++) { %s}\n", sh.s);
     free(sh.s);
   }
@@ -1829,7 +2121,13 @@ static int pl_emit(Buf *pre, int f, int budget) {    /* fN_pl, written once per 
   put(&w, "    if (pthread_create(&t[nt], &attr, plrun%d, &s)) { __sync_sub_and_fetch(&lin_live, 1); break; } nt++; }\n", f);
   put(&w, "  for (int64_t i; (i = __sync_fetch_and_add(&s.next, 1)) < n; ) g[i] = f%d_g(", f);
   for (int k = 0; k < na; k++) put(&w, "st[i * %d + %d], ", NA, k);
-  put(&w, "d + 1);\n  for (int k = 0; k < nt; k++) { pthread_join(t[k], 0); __sync_sub_and_fetch(&lin_live, 1); }\n  (void)LIN_JOINED;\n");
+  put(&w, "d + 1);\n  for (int k = 0; k < nt; k++) { pthread_join(t[k], 0); __sync_sub_and_fetch(&lin_live, 1); }\n  (void)LIN_JOINED;\n  }\n");
+  if (inplace) {                                         /* (the elements' own references, let go) */
+    Buf dr = nbuf(64);
+    for (int i = 0; i < na; i++) { int dd = data_drop(shape_of(GA[i])); if (dd >= 0) put(&dr, "lin_drop%d(st[i * %d + %d]); ", dd, NA, i); }
+    if (dr.len) put(&w, "  for (int64_t i = 0; i < n; i++) { %s}\n", dr.s);
+    free(dr.s);
+  }
   /* the fold, in order (A reads only acc and G) */
   int gv = nvar++;
   put(&w, "  int64_t acc = p%d;\n  for (int64_t i = 0; i < n; i++) {\n    int64_t p%d = acc; int64_t v%d = g[i];\n    acc = ", L->acc, L->acc, gv);
@@ -2027,7 +2325,9 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
     }
   }
   switch (e->op) {
-  case E_CONST: if (e->k == INT64_MIN) put(b, "(-%" PRId64 "L-1)", -(e->k + 1)); else put(b, "(%" PRId64 "L)", e->k); return 1;
+  case E_CONST:
+    if (kt_on && emitting == -1 && !e->box) { put(b, "lin_kt[%d]", kt_index(e->k)); return 1; }   /* (THE ENTRY'S CONSTANTS) */
+    if (e->k == INT64_MIN) put(b, "(-%" PRId64 "L-1)", -(e->k + 1)); else put(b, "(%" PRId64 "L)", e->k); return 1;
   case E_PARAM:   /* an outer function's parameter: lifted into this one's extra parameters */
     if (e->nargs == emitting) { put(b, "p%" PRId64 "", e->k); return 1; }
     if (emitting >= 0 && emitting < lifted && fv_has(emitting, e->nargs, e->k)) { put(b, "l%d_%" PRId64 "", e->nargs + 1, e->k); return 1; }
@@ -2274,7 +2574,19 @@ extern const LinFnUnit lin_fn_units[];
 #endif
 typedef struct { uint64_t h; Entry fn; int arity, kind; unsigned strict; int *aborted;
                  Shape res; Shape **fld; int64_t nctor; void (*release)(void); Shape *psh; int npsh; } Compiled;   /* psh: each runtime argument's shape */   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
-static Compiled **done; static int ndone, donecap;   /* (pointers: a call holds one while another compiles) */
+static Compiled **done; static int ndone, donecap;
+/* THE ENTRY'S CONSTANTS.  While an io loop runs, the call a unit compiles is the same every step but for the
+   numbers already built in its arguments -- the loop's state: a frame counter, a position.  Written into the C
+   as literals, every step is a new source and a new C compile (measured: ~230 ms a frame, against ~1 ms run).
+   So there the entry's constants are a table the unit reads (lin_kt, after its arguments in the array it is
+   given): the source, and so the unit, is the same each step; the values are this call's.  Only the entry's:
+   a function's own constants are its code, and the same every time. */
+static int kt_cap; static int64_t *kt_val;
+static int kt_index(int64_t k) {
+  for (int i = 0; i < kt_n; i++) if (kt_val[i] == k) return i;
+  if (kt_n == kt_cap) kt_val = realloc(kt_val, sizeof *kt_val * (size_t)(kt_cap = kt_cap ? kt_cap * 2 : 16));
+  kt_val[kt_n] = k; return kt_n++;
+}   /* (pointers: a call holds one while another compiles) */
 /* -march=native code must never be loaded on a different CPU, so the cache key includes this one's identity. */
 static uint64_t cpu_key(void) {
   static uint64_t k;
@@ -3702,6 +4014,7 @@ static const char *DATA_RT =
   "#include <setjmp.h>\n#include <stdlib.h>\n#include <stdio.h>\n"
   "#define LIN_TLS __thread __attribute__((tls_model(\"initial-exec\")))\n"
   "extern LIN_TLS jmp_buf lin_jb; extern LIN_TLS char *lin_stack_lo; int lin_fn_aborted;\n"
+  "extern int lin_gpu_map(const char *, uint64_t, int64_t, int, const int64_t *, const unsigned char *, int64_t *);\n"
   "extern LIN_TLS int64_t *lin_hp, *lin_he; static int64_t lin_used; static void **lin_ch; static int lin_nch, lin_cch; \n"
   "static pthread_mutex_t lin_chm = PTHREAD_MUTEX_INITIALIZER;\n"
   /* A CHUNK POOL.  A task's thread ends with most of its chunk unused; the rest is put here for the next thread, so
@@ -4390,12 +4703,15 @@ static Compiled *compile_fn_ex(Net *n, int F, const Port *aports, const int *anu
   vop_used = 0;
   Compiled *r = compile_fn_ex1(n, F, aports, anum);
   if (!r && vop_used && !vop_off) { vop_off = 1; r = compile_fn_ex1(n, F, aports, anum); vop_off = 0; }   /* (see OWNED VECTORS) */
+  kt_on = 0;
+  if (!r) kt_n = 0;                                  /* (the table is the unit's that compiled: its call reads it) */
   return r;
 }
 static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *anum) {
   N = n; failed = 0; fuel = 20000000; nfun = 0; eid = 0; nvar = 0; mr_ntok = 0; hc_reset(); uses_data = 0; rc_bor = NULL; rc_pure = NULL; rc_mt = 0;
+  kt_on = aports && lin_io_looping && !getenv("LIN_FN_NO_KT"); kt_n = 0;
   /* a one-time compile: the budget only stops an evaluation that does not end */
-  DBG("compile F=%d (net %d nodes)%s\n", F, n->nn, aports ? " with its arguments" : "");
+  DBG("compile F=%d (net %d nodes)%s%s\n", F, n->nn, aports ? " with its arguments" : "", kt_on ? " (in a loop: its constants a table)" : "");
   Compiled *r = NULL;
   V **known = NULL;                                  /* an argument that is a FUNCTION: the entry's copy is specialised to it */
   if (aports) {
@@ -4566,7 +4882,9 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
       Buf eb = nbuf(1024);                             /* the entry's call, as an expression of its parameters */
       emitting = -1; fscope++; ok = ok && emit_region(&eb, &pre, entry, 0, 4096);
       int data = uses_data;
+      char kts[64]; snprintf(kts, sizeof kts, " lin_kt = a + %d;", nnum);   /* (the constants follow the arguments) */
       put(&b, "%s%s\n#include <pthread.h>\n", LIN_I64_SRC, LIN_F64_SRC);
+      if (kt_on) put(&b, "static const int64_t *lin_kt;\n");
       if (data && getenv("LIN_FN_POISON")) put(&b, "#define LIN_POISON 1\n");
       if (data && getenv("LIN_FN_STATS")) put(&b, "#define LIN_STATS 1\n");   /* (blocks built and freed, per size: is memory the live data?) */
       if (data) put(&b, "%s", DATA_RT); else put(&b, "#define LIN_ENTER\n#define LIN_LEAVE\n#define LIN_TASK_START(ss)\n#define LIN_JOINED 0\nint lin_fn_aborted;\n");
@@ -4626,7 +4944,7 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
         }
         put(&b, "  lin_res = %s; return 0; }\n", eb.s);
         free(ebp.s);
-        put(&b, "int64_t lin_fn_entry(const int64_t *a, int threads) { lin_threads_ = threads; lin_args = a; lin_fn_aborted = 0;%s\n", data ? (rc_mt ? " lin_mt = threads > 1;" : " lin_mt = 0;") : "");
+        put(&b, "int64_t lin_fn_entry(const int64_t *a, int threads) { lin_threads_ = threads; lin_args = a;%s lin_fn_aborted = 0;%s\n", kt_on ? kts : "", data ? (rc_mt ? " lin_mt = threads > 1;" : " lin_mt = 0;") : "");
         put(&b, "  pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);\n");
         /* a structure result stays in the arena until the driver has built it into the net (lin_fn_release) */
         put(&b, "  if (pthread_create(&t, &at, lin_run, 0)) { LIN_NO_THREAD; } else pthread_join(t, 0);%s return lin_res; }\n",
@@ -4648,7 +4966,7 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
         r = compile_src(b.s, nnum, numeric ? (rbool ? 3 : 1) : 5, rshape);
         if (r) r->strict = funs[0].strict;
       } else if (ok && aports) {                       /* numbers only, with expression arguments: the plain entry */
-        put(&b, "%slong lin_fn_entry(const int64_t *a, int threads) { (void)threads;\n", pre.s);
+        put(&b, "%slong lin_fn_entry(const int64_t *a, int threads) { (void)threads;%s\n", pre.s, kt_on ? kts : "");
         for (int i = 0; i < nnum; i++) put(&b, "  int64_t p%d = a[%d];\n", i, i);
         put(&b, "  return %s; }\n", eb.s);
         DBG("compiling (%d functions, entry with expression arguments):\n%s\n", nfun, b.s + strlen(LIN_I64_SRC));
@@ -4950,6 +5268,27 @@ static Port result_port(Net *n, const Compiled *c, int64_t r) {
   return R.bad ? NONE : v;
 }
 
+/* (see A LIST'S REST, HANDED OVER FLAT, in lin.h) a unit's result that is a list of words, read by a spine walk that
+   holds it alone (out is the slot the walk named): its words go to the walk as they are, and the slot gets the end */
+static int fn_flat(Net *n, const Compiled *c, int64_t r, Port out, Port *val) {
+  if (lin_flat_use.node < 0 || out.node != lin_flat_use.node || out.port != lin_flat_use.port) return 0;
+  Shape s = c->res;
+  if (c->kind != 5 || s.k != 5 || !cells_dt || s.dt != cells_dt || !s.a || s.a->n < 1 || !(s.a->s[0].k == 1 || s.a->s[0].k == 3)) return 0;
+  int64_t cap = 1024, k = 0, *v = malloc(sizeof *v * (size_t)cap);
+  for (int64_t w = r;;) {
+    const int64_t *f; const LinCtor *ci = rd_word(cells_dt, w, &f);
+    if (!ci || (ci->k != 0 && ci->k != 2)) { free(v); return 0; }
+    if (ci->k == 0) break;
+    if (k == cap) v = realloc(v, sizeof *v * (size_t)(cap *= 2));
+    v[k++] = f[0]; w = f[1];
+  }
+  Reif R; memset(&R, 0, sizeof R); R.n = n; R.c = c;
+  *val = rf_ctor(&R, cell_nil, NULL);
+  if (c->release) c->release();
+  lin_flat_put(out, v, k);
+  DBG("(the result's %" PRId64 " words handed over flat)\n", k);
+  return 1;
+}
 static int numeral_shape(const Net *n, Port p);
 /* DATA PASSED IN.  An argument that is already a value in the net -- a string the program read, a structure an
    earlier call built -- is not compiled as a constant (a megabyte of input is not a C literal): the driver reads it
@@ -5541,7 +5880,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
         double t_c1 = now_ms();
         if (c2) {
           int nn = 0, pi = 0;
-          int64_t *xa = malloc(sizeof *xa * (size_t)(car + n_inp + c2->npsh + 1));   /* (the arguments, inputs included) */
+          int64_t *xa = malloc(sizeof *xa * (size_t)(car + n_inp + c2->npsh + kt_n + 1));   /* (the arguments, inputs included) */
           Marsh M; memset(&M, 0, sizeof M); M.n = n; M.c = c2; M.steps0 = n->steps;
           for (int k = 0; k < car && !M.bad; k++) {
             if (an[k] == 1) { net_read_i64(n, ap[k], &xa[nn++]); pi++; }
@@ -5560,6 +5899,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
             if (dbg > 1) { DBG("[input %d passed in as ", i); sh_print(c2->psh[pi]); fprintf(stderr, ": %" PRIx64 " bad %d]\n", (uint64_t)xa[nn - 1], M.bad); }
           }
           if (M.bad) { DBG("an argument could not be read in: the net computes the call\n"); ms_free(&M); free(xa); goto decline_ex; }
+          for (int i = 0; i < kt_n; i++) xa[nn++] = kt_val[i];   /* (THE ENTRY'S CONSTANTS, after the arguments) */
           extern int lin_threads;
           double t_m = now_ms();
           int64_t r = c2->fn(xa, lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN));
@@ -5568,11 +5908,11 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
           free(xa);
           if (c2->aborted && *c2->aborted) { DBG("the data unit's guard fired: the net computes it\n"); ms_free(&M); }
           else {
-            Port val = result_port(n, c2, r);
+            Port val; if (!fn_flat(n, c2, r, W(n, (Port){cl, 1}), &val)) val = result_port(n, c2, r);
             ms_free(&M);                                 /* (after the result is read: it may hold blocks passed in) */
             if (val.node < 0) goto decline_ex;
             Port out = W(n, (Port){cl, 1});
-            { int plain = n_inp == 0; for (int k = 0; plain && k < car; k++) plain = an[k] != 2;   /* (nothing read in at run time) */
+            { int plain = n_inp == 0 && kt_n == 0; for (int k = 0; plain && k < car; k++) plain = an[k] != 2;   /* (nothing read in at run time) */
               if (plain && n->tag[out.node] == ROOT) { int64_t *ka = malloc(sizeof *ka * (size_t)(car + 1)); int kn = 0;
                 for (int k = 0; k < car; k++) if (an[k] == 1) net_read_i64(n, ap[k], &ka[kn++]);
                 form_note(n, c2, ka, kn); free(ka); } }
@@ -5619,7 +5959,7 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
       y_decline(n, p1, p2, changed);
       continue;
     }
-    Port val = result_port(n, c, r);
+    Port val; if (!fn_flat(n, c, r, W(n, (Port){call, 1}), &val)) val = result_port(n, c, r);
     if (val.node < 0) {
       y_decline(n, p1, p2, changed);
       continue;

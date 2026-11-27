@@ -22,10 +22,10 @@
 
 #define WIRE(n, p) ((n)->wire[(p).node * 3 + (p).port])
 
-static int gpu_ready = 0, pipe_ready = 0;
+static int gpu_ready = 0, pipe_ready = 0, gpu_load_done = 0;
 static VkInstance vk_instance; static VkPhysicalDevice vk_phys;
 static VkDevice vk_dev; static VkQueue vk_queue; static uint32_t vk_qfam;
-static void *vk_lib;
+static void *vk_lib; static int vk_have64; static uint32_t vk_maxgx, vk_maxgy; static char vk_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
 
 /* Emit a one-time, NON-SILENT fallback notice: the GPU driver loaded but cannot
    produce a usable on-device reducer, so reduction transparently falls back to
@@ -35,7 +35,11 @@ static void *vk_lib;
    `warning:` prefix is the repo convention that test/run_tests.sh strips via
    `grep -v '^warning'`, so a functional fallback still passes the suite. */
 static int gpu_warned = 0;
+static const char *vk_why;   /* why the net reducer is off, said when it is first asked to reduce (gpu_claim): a program
+                                that only runs kernels (see KERNELS) loads this driver too, and must hear nothing */
 static void gpu_warn(const char *why) {
+  if (!vk_why) vk_why = why;
+  if (!gpu_load_done) return;
   if (gpu_warned) return;
   gpu_warned = 1;
   /* Informational diagnostic to stderr (never stdout): the value-output stream
@@ -81,6 +85,9 @@ static PFN_vkGetBufferMemoryRequirements p_vkGetBufferMemoryRequirements;
 static PFN_vkAllocateMemory p_vkAllocateMemory;
 static PFN_vkBindBufferMemory p_vkBindBufferMemory;
 static PFN_vkMapMemory p_vkMapMemory;
+static PFN_vkDestroyBuffer p_vkDestroyBuffer; static PFN_vkFreeMemory p_vkFreeMemory; static PFN_vkCmdPipelineBarrier p_vkCmdPipelineBarrier;
+static PFN_vkCreateFence p_vkCreateFence; static PFN_vkWaitForFences p_vkWaitForFences; static PFN_vkResetFences p_vkResetFences;
+static int vk_devok;
 
 static int g_mem_type = -1;
 static int mem_type_for(uint32_t bits) {
@@ -240,6 +247,12 @@ static void vk_init(void) {
       qi.queueFamilyIndex = j; qi.queueCount = 1; qi.pQueuePriorities = &prio;
       VkDeviceCreateInfo di = {0}; di.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
       di.queueCreateInfoCount = 1; di.pQueueCreateInfos = &qi;
+      VkPhysicalDeviceFeatures have = {0}, want = {0};   /* (the kernels' words are 64-bit integers and doubles) */
+      PFN_vkGetPhysicalDeviceFeatures gf = (PFN_vkGetPhysicalDeviceFeatures)dlsym(vk_lib, "vkGetPhysicalDeviceFeatures");
+      if (gf) gf(vk_phys, &have);
+      want.shaderInt64 = have.shaderInt64; want.shaderFloat64 = have.shaderFloat64; vk_have64 = have.shaderInt64 && have.shaderFloat64;
+      di.pEnabledFeatures = &want;
+      if (p_vkGetPhysicalDeviceProperties) { VkPhysicalDeviceProperties pr; p_vkGetPhysicalDeviceProperties(vk_phys, &pr); vk_maxgx = pr.limits.maxComputeWorkGroupCount[0]; vk_maxgy = pr.limits.maxComputeWorkGroupCount[1]; snprintf(vk_name, sizeof vk_name, "%s", pr.deviceName); }
       if (p_vkCreateDevice(vk_phys, &di, NULL, &vk_dev) != VK_SUCCESS || !vk_dev) break;
       p_vkGetDeviceQueue(vk_dev, j, 0, &vk_queue);
       if (getenv("LIN_GPU_DEVICE")) gpu_ready = 1;
@@ -262,6 +275,9 @@ device_ok:
   LOAD(vkGetBufferMemoryRequirements); LOAD(vkAllocateMemory); LOAD(vkBindBufferMemory); LOAD(vkMapMemory);
   if (getenv("LIN_GPU_DEBUG")) { fprintf(stderr, "[gpu] device ready\n"); }
 
+  LOAD(vkDestroyBuffer); LOAD(vkFreeMemory); LOAD(vkCmdPipelineBarrier); LOAD(vkCreateFence); LOAD(vkWaitForFences); LOAD(vkResetFences);
+  vk_devok = 1;
+  if (!gpu_ready) return;                /* (the net reducer was not asked for: kernels only, see KERNELS) */
   /* build the compute pipeline now that all device entry points are loaded */
   build_pipeline();
   /* A device was found, but if the compute pipeline (descriptors/shader) could
@@ -353,7 +369,7 @@ static int gpu_claim(const Net *n, Port p1, Port p2) {
      redex; with either absent we are a pure no-op and the base engine owns the
      wave.  Checking pipe_ready here (not just gpu_ready) prevents claiming a
      redex the driver then cannot dispatch because the shader/pipeline failed. */
-  if (!gpu_ready || !pipe_ready) return 0;
+  if (!gpu_ready || !pipe_ready) { if (!gpu_load_done) { gpu_load_done = 1; gpu_warn(vk_why ? vk_why : "the device could not be set up"); } return 0; }
   if (p1.node < 0 || p2.node < 0 || n->dead[p1.node] || n->dead[p2.node]) return 0;
   /* principal-port validity (mirrors lin_reduce_wave_parallel) */
   if (p1.port || p2.port) return 0;
@@ -520,6 +536,173 @@ gpu_done:
       lin_enqueue(n, (Port){i, 0}, n->wire[i*3]);
 
   return nred;
+}
+
+/* ============================================================================
+ * KERNELS: a compiled loop's steps, run on the device (std/drivers/fn.c, THE GPU).
+ * ============================================================================
+ * fn writes a loop's per-state function as GLSL -- the program's own Lin, translated -- and hands this driver the
+ * states (n rows of na words) to run it on.  The source is compiled once to SPIR-V by glslangValidator and kept
+ * in the native cache under its hash; its pipeline is kept for the run.  A vector argument (a flat vector the loop
+ * reads, the same one in every row) is laid out once in a third buffer, as [len, elements...], and the row's word
+ * becomes its offset there.  Any failure answers 0, and the loop computes on the CPU what it would have: the
+ * device is a way of computing the same thing faster, never a requirement. */
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <pthread.h>
+typedef struct { uint64_t key; VkPipeline pipe; int bad; } Kern;
+static Kern *kerns; static int nkern, ckern;
+static VkDescriptorSetLayout k_dsl; static VkPipelineLayout k_pl; static VkDescriptorPool k_dp; static VkDescriptorSet k_ds;
+static VkCommandPool k_cp; static VkCommandBuffer k_cb; static VkFence k_fence;
+static struct Buf k_st, k_out, k_vec;
+static int k_state;   /* 0 not yet, 1 ready, 2 not available */
+static int k_dbg(void) { static int d = -1; if (d < 0) d = getenv("LIN_GPU_DEBUG") != NULL; return d; }
+static void buf_free(struct Buf *g) {
+  if (g->b) p_vkDestroyBuffer(vk_dev, g->b, NULL);
+  if (g->m) p_vkFreeMemory(vk_dev, g->m, NULL);
+  memset(g, 0, sizeof *g);
+}
+static int buf_need(struct Buf *g, VkDeviceSize sz) {           /* at least sz bytes, doubling */
+  if (g->b && g->sz >= sz) return 1;
+  VkDeviceSize c = g->sz ? g->sz : 4096; while (c < sz) c *= 2;
+  buf_free(g);
+  return buf_alloc(g, c);
+}
+static int k_init(void) {
+  if (k_state) return k_state == 1;
+  k_state = 2;
+  if (!vk_devok) { if (k_dbg()) fprintf(stderr, "[gpu] kernels off: %s\n", vk_why ? vk_why : "no device"); return 0; }
+  if (!vk_have64) { if (k_dbg()) fprintf(stderr, "[gpu] kernels off: the device has no 64-bit integers or doubles in shaders\n"); return 0; }
+  VkDescriptorSetLayoutBinding binds[3];
+  for (int i = 0; i < 3; i++) binds[i] = (VkDescriptorSetLayoutBinding){ (uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+  VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = binds };
+  if (p_vkCreateDescriptorSetLayout(vk_dev, &dli, NULL, &k_dsl) != VK_SUCCESS) return 0;
+  VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 2 * sizeof(uint32_t) };
+  VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &k_dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
+  if (p_vkCreatePipelineLayout(vk_dev, &pli, NULL, &k_pl) != VK_SUCCESS) return 0;
+  VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 };
+  VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &dps };
+  if (p_vkCreateDescriptorPool(vk_dev, &dpi, NULL, &k_dp) != VK_SUCCESS) return 0;
+  VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = k_dp, .descriptorSetCount = 1, .pSetLayouts = &k_dsl };
+  if (p_vkAllocateDescriptorSets(vk_dev, &dai, &k_ds) != VK_SUCCESS) return 0;
+  VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = vk_qfam };
+  if (p_vkCreateCommandPool(vk_dev, &cpi, NULL, &k_cp) != VK_SUCCESS) return 0;
+  VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = k_cp, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+  if (p_vkAllocateCommandBuffers(vk_dev, &cai, &k_cb) != VK_SUCCESS) return 0;
+  VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+  if (!p_vkCreateFence || p_vkCreateFence(vk_dev, &fi, NULL, &k_fence) != VK_SUCCESS) return 0;
+  if (k_dbg()) fprintf(stderr, "[gpu] kernels run on %s\n", vk_name);
+  k_state = 1; return 1;
+}
+static const char *k_cache_dir(void) {
+  static char dir[4096];
+  if (dir[0]) return dir;
+  const char *env = getenv("LIN_NATIVE_CACHE"), *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+  if (env && env[0]) snprintf(dir, sizeof dir, "%s", env);
+  else if (xdg && xdg[0]) snprintf(dir, sizeof dir, "%s/lin/native", xdg);
+  else if (home && home[0]) snprintf(dir, sizeof dir, "%s/.cache/lin/native", home);
+  else snprintf(dir, sizeof dir, "/tmp/lin-native-%u", (unsigned)getuid());
+  size_t L = strlen(dir) + 1; char p[L]; memcpy(p, dir, L);   /* (made, a component at a time) */
+  for (char *c = p + 1; *c; c++) if (*c == '/') { *c = 0; mkdir(p, 0755); *c = '/'; }
+  mkdir(p, 0755);
+  return dir;
+}
+static uint32_t *k_spirv(const char *src, uint64_t key, size_t *nbytes) {   /* the SPIR-V for src: the cache's, or compiled now */
+  const char *dir = k_cache_dir();
+  size_t L = strlen(dir) + 64; char spv[L], comp[L], tmp[L];
+  snprintf(spv, L, "%s/gk-%016llx.spv", dir, (unsigned long long)key);
+  snprintf(comp, L, "%s/gk-%016llx.comp", dir, (unsigned long long)key);
+  snprintf(tmp, L, "%s/gk-%016llx.%d.spv", dir, (unsigned long long)key, (int)getpid());
+  FILE *f = fopen(spv, "rb");
+  if (!f) {
+    FILE *c = fopen(comp, "w"); if (!c) return NULL;
+    fputs(src, c); fclose(c);
+    const char *gl = getenv("LIN_GLSLANG"); if (!gl || !gl[0]) gl = "glslangValidator";
+    pid_t pid = fork();
+    if (pid == 0) {
+      if (!k_dbg()) { int nul = open("/dev/null", O_WRONLY); if (nul >= 0) { dup2(nul, 1); dup2(nul, 2); } }
+      execlp(gl, gl, "-V", "--target-env", "vulkan1.1", "-o", tmp, comp, (char *)NULL); _exit(127);
+    }
+    int stt = 0; if (pid < 0 || waitpid(pid, &stt, 0) < 0 || !WIFEXITED(stt) || WEXITSTATUS(stt)) {
+      if (k_dbg()) fprintf(stderr, "[gpu] %s could not compile %s (status %d): the loop runs on the CPU\n", gl, comp, WIFEXITED(stt) ? WEXITSTATUS(stt) : -1);
+      unlink(tmp); return NULL;
+    }
+    if (rename(tmp, spv)) return NULL;
+    f = fopen(spv, "rb"); if (!f) return NULL;
+  }
+  fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+  uint32_t *w = sz > 0 ? malloc((size_t)sz) : NULL;
+  if (!w || fread(w, 1, (size_t)sz, f) != (size_t)sz) { free(w); fclose(f); return NULL; }
+  fclose(f); *nbytes = (size_t)sz; return w;
+}
+static VkPipeline k_pipeline(const char *src, uint64_t key) {
+  for (int i = 0; i < nkern; i++) if (kerns[i].key == key) return kerns[i].bad ? VK_NULL_HANDLE : kerns[i].pipe;
+  if (nkern == ckern) kerns = realloc(kerns, sizeof *kerns * (size_t)(ckern = ckern ? ckern * 2 : 8));
+  Kern *k = &kerns[nkern++]; k->key = key; k->pipe = VK_NULL_HANDLE; k->bad = 1;
+  size_t nb = 0; uint32_t *code = k_spirv(src, key, &nb);
+  if (!code) return VK_NULL_HANDLE;
+  VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nb, .pCode = code };
+  VkShaderModule sm; VkResult r = p_vkCreateShaderModule(vk_dev, &smi, NULL, &sm); free(code);
+  if (r != VK_SUCCESS) return VK_NULL_HANDLE;
+  VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = k_pl,
+    .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" } };
+  if (p_vkCreateComputePipelines(vk_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &k->pipe) != VK_SUCCESS) { k->pipe = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
+  k->bad = 0; return k->pipe;
+}
+static pthread_mutex_t k_mu = PTHREAD_MUTEX_INITIALIZER;
+int lin_gpu_kernel(const char *src, uint64_t key, int64_t n, int na, const int64_t *st, const unsigned char *vecs, int64_t *out) {
+  pthread_mutex_lock(&k_mu);
+  int ok = 0;
+  if (n <= 0 || na <= 0 || !k_init()) goto done;
+  /* the vectors: one per argument that is one, the same in every row (else not this kernel's: 0) */
+  int64_t vw = 1;                                               /* (word 0 is unused: no offset is 0) */
+  for (int j = 0; j < na; j++) if (vecs[j]) {
+    for (int64_t i = 1; i < n; i++) if (st[i * na + j] != st[j]) goto done;
+    vw += ((const int64_t *)st[j])[0] + 1;
+  }
+  /* (a kernel indexes its buffers with 32-bit words: a larger dispatch is the CPU's) */
+  if ((uint64_t)n * (uint64_t)na >= (1ull << 31) || (uint64_t)vw >= (1ull << 31) || (uint64_t)n >= (1ull << 31)) goto done;
+  VkPipeline pipe = k_pipeline(src, key);
+  if (!pipe) goto done;
+  if (!buf_need(&k_st, (VkDeviceSize)(n * na) * 8) || !buf_need(&k_out, (VkDeviceSize)n * 8) || !buf_need(&k_vec, (VkDeviceSize)vw * 8)) goto done;
+  int64_t *S = k_st.map, *Vv = k_vec.map, at = 1;
+  memcpy(S, st, (size_t)(n * na) * 8);
+  Vv[0] = 0;
+  for (int j = 0; j < na; j++) if (vecs[j]) {
+    const int64_t *v = (const int64_t *)st[j]; int64_t len = v[0];
+    Vv[at] = len; memcpy(&Vv[at + 1], v + 2, (size_t)len * 8);
+    for (int64_t i = 0; i < n; i++) S[i * na + j] = at;
+    at += len + 1;
+  }
+  VkDescriptorBufferInfo dbi[3] = { { k_st.b, 0, VK_WHOLE_SIZE }, { k_out.b, 0, VK_WHOLE_SIZE }, { k_vec.b, 0, VK_WHOLE_SIZE } };
+  VkWriteDescriptorSet wds[3];
+  for (int i = 0; i < 3; i++) wds[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = k_ds, .dstBinding = (uint32_t)i,
+    .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &dbi[i] };
+  p_vkUpdateDescriptorSets(vk_dev, 3, wds, 0, NULL);
+  uint64_t groups = ((uint64_t)n + 63) / 64, gx = groups < vk_maxgx ? groups : vk_maxgx, gy = (groups + gx - 1) / gx;
+  if (gy > vk_maxgy) goto done;
+  uint32_t pc[2] = { (uint32_t)n, (uint32_t)(gx * 64) };
+  VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+  if (p_vkBeginCommandBuffer(k_cb, &bi) != VK_SUCCESS) goto done;
+  p_vkCmdBindPipeline(k_cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+  p_vkCmdBindDescriptorSets(k_cb, VK_PIPELINE_BIND_POINT_COMPUTE, k_pl, 0, 1, &k_ds, 0, NULL);
+  p_vkCmdPushConstants(k_cb, k_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+  p_vkCmdDispatch(k_cb, (uint32_t)gx, (uint32_t)gy, 1);
+  VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+  p_vkCmdPipelineBarrier(k_cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+  if (p_vkEndCommandBuffer(k_cb) != VK_SUCCESS) goto done;
+  VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &k_cb };
+  p_vkResetFences(vk_dev, 1, &k_fence);
+  if (p_vkQueueSubmit(vk_queue, 1, &si, k_fence) != VK_SUCCESS) goto done;
+  if (p_vkWaitForFences(vk_dev, 1, &k_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) goto done;
+  memcpy(out, k_out.map, (size_t)n * 8);
+  if (k_dbg()) fprintf(stderr, "[gpu] kernel %016llx: %lld states\n", (unsigned long long)key, (long long)n);
+  ok = 1;
+done:
+  pthread_mutex_unlock(&k_mu);
+  return ok;
 }
 
 LinDriver lin_gpu_driver = {

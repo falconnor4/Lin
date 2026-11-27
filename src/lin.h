@@ -497,6 +497,14 @@ void lin_pair_fold_register(uint32_t (*shape)(const Net *n, Port p1, Port p2)); 
    CELL shape is the language's one cons encoding (LIN_ENC_CONS), so what varies is what slots MEAN. */
 int  net_ffi_args(Net *n, Port lam, const int *doms, int ndoms, Val *vals, int max);
 int  net_spine_args(Net *n, Port argp, const int *doms, int ndoms, Val *vals, int max);
+/* A LIST'S REST, HANDED OVER FLAT.  While the spine walk above forces a list's tail it names the cell slot the tail
+   hangs from (lin_flat_use); a driver that computes that tail as a list of words -- the function compiler, whose
+   unit already holds them in a block chain -- may give the walk the words themselves (lin_flat_put) and the tail
+   the list's end, instead of building every element in the net for the walk to read straight back.  Only a walk
+   that holds the list alone asks (nothing else can see the end it is given).  A frame of pixels for an FFI call
+   is the case it is for: 64k numerals a frame, each a chain of bit cells, is most of what drawing one cost. */
+extern Port lin_flat_use;
+void lin_flat_put(Port use, int64_t *vals, int64_t n);   /* takes vals (malloc'd) */
 int  net_spine_slots(Net *n, Port argp); /* operand count of a cell-spine (-1: not a cons spine) */
 /* !=0 while def_precompile reduces an open body: a driver must not fold there, since the operands are free vars
    that never become concrete and a baked closure would capture a stale value */

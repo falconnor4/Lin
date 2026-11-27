@@ -48,10 +48,14 @@ pkgs.stdenv.mkDerivation {
     cp -r std/* $out/share/lin/std/
     # The function compiler (std/drivers/fn.c) emits C and compiles it at run time, so the C compiler is
     # part of the runtime closure; without one it declines and the net computes the same values, slower.
+    # Likewise a loop it writes as a GPU kernel is compiled by glslangValidator and run through the Vulkan
+    # loader (std/drivers/gpu.c, KERNELS): both are found here, the device's own driver from the system.
     wrapProgram $out/bin/lin \
       --set-default LIN_STD "$out/share/lin/std/std.lin" \
       --set-default LIN_STD_DIR "$out/share/lin/std" \
-      --prefix PATH : ${pkgs.stdenv.cc}/bin
+      --prefix PATH : ${pkgs.stdenv.cc}/bin \
+      --suffix PATH : ${pkgs.glslang}/bin \
+      --suffix LD_LIBRARY_PATH : ${pkgs.vulkan-loader}/lib
     runHook postInstall
   '';
 

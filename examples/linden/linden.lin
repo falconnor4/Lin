@@ -34,6 +34,7 @@
 ;     (rect x y w h c r) (box x y w h c r)   filled / outlined rectangle
 ;     (line x0 y0 x1 y1 c r) (disc x y rad c r) (tri x0 y0 x1 y1 x2 y2 c r)
 ;     (number x y n s c r) (text x y "str" s c r) (glyph x y ch s c r)   s: pixels per dot
+;     (image x y w h pixels r)     w*h colours (a vector), row by row: a rendered view
 ;
 ; (That shape is what keeps a frame cheap: every command is a call the compiler
 ; turns into code (std/drivers/fn) -- measured, a hundred rectangles built this way
@@ -80,6 +81,13 @@
 (define text (\x (\y (\str (\s (\c (\r (match str
   ((cons ch rest) (cons 6 (cons x (cons y (cons ch (cons s (cons c (linden.text (add x (mul 4 s)) y rest s c r))))))))
   (nil r)))))))))
+
+; an image: w*h pixels (a vector of colours, row by row) at x y, under what comes after.
+; This is how a game draws what it renders itself -- a 3D view (examples/linden/three.lin).
+; The pixels reach the plugin without being built in the net one by one: the call that
+; lists them is compiled (std/drivers/fn), and its words are handed to the frame flat.
+(define image (\x (\y (\w (\h (\pix (\r (cons 8 (cons x (cons y (cons w (cons h (linden.pixels pix (alen pix) r)))))))))))))
+(define pixels (\v (\i (\r (if (eq i 0) r (linden.pixels v (sub i 1) (cons (aget v (sub i 1)) r)))))))
 
 ; --- colours ---------------------------------------------------------------------
 (define rgb (\r (\g (\b (add (mul r 65536) (add (mul g 256) b))))))

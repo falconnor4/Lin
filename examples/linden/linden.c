@@ -26,6 +26,7 @@
  *     5 x y n s c             the integer n, glyphs s pixels per dot
  *     6 x y ch s c            one character (its code)
  *     7 x y w h c             rectangle outline
+ *     8 x y w h p...          an image: w*h pixels, row by row (what a game renders itself -- a 3D view)
  *
  * Colours are 0xRRGGBB.  A command cut short by the end of the list is ignored, as is an unknown op
  * (which ends the frame: its length is not known, so nothing after it can be read).
@@ -174,6 +175,16 @@ static int render(int argc, const int64_t *a) {
   int i = 2;
   while (i < argc) {
     int64_t op = a[i++];
+    if (op == 8) {                                  /* (an image: its length is its size) */
+      if (i + 4 > argc) break;
+      int64_t x0 = a[i], y0 = a[i + 1], w = a[i + 2], h = a[i + 3]; i += 4;
+      if (w < 0 || h < 0 || w * h > argc - i) break;
+      for (int64_t y = 0; y < h; y++) {
+        int64_t yy = y0 + y; if (yy < 0 || yy >= H) continue;
+        for (int64_t x = 0; x < w; x++) { int64_t xx = x0 + x; if (xx >= 0 && xx < W) fb[yy * W + xx] = (uint32_t)a[i + y * w + x]; }
+      }
+      i += (int)(w * h); continue;
+    }
     if (op < 0 || op >= (int64_t)(sizeof len / sizeof *len)) break;
     if (i + len[op] > argc) break;
     const int64_t *p = a + i; i += len[op];
