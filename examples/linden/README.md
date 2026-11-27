@@ -16,7 +16,9 @@ page.
 ```
 
 `examples/linden/leaves.lin` is a complete game in about 80 lines: move a basket
-to catch falling leaves.
+to catch falling leaves. `examples/linden/three.lin` is a 3D scene: a tree of
+Gaussian splats on a checkered ground, rendered per pixel by a shader written in
+Lin that runs on the GPU (see [3D, and the GPU](#3d-and-the-gpu)).
 
 ## Files
 
@@ -25,6 +27,7 @@ to catch falling leaves.
 | `linden.lin` | The Lin side: `game`, `run`, the drawing commands, keys and mouse |
 | `linden.c` | The plugin: a rasteriser into a `0xRRGGBB` buffer, shown in a window, a PPM file or a canvas |
 | `leaves.lin` | The example game |
+| `three.lin` | The 3D example: a camera, a sky, a ground and Gaussian splats, its shader in Lin |
 
 ## Running
 
@@ -92,6 +95,7 @@ ended by `nil`:
 | `(disc x y rad c r)` | A filled circle |
 | `(tri x0 y0 x1 y1 x2 y2 c r)` | A filled triangle |
 | `(number x y n s c r)`, `(text x y "str" s c r)`, `(glyph x y ch s c r)` | Digits and text, `s` pixels per dot |
+| `(image x y w h pixels r)` | A `w` by `h` block of pixels: a vector of colours, row by row |
 
 Coordinates are integers and colours are `0xRRGGBB` numbers (`rgb r g b` builds
 one). A part of a scene is a function that takes the rest too, which keeps a
@@ -123,6 +127,44 @@ other C functions between frames:
 (run turn start)
 ```
 
+## 3D, and the GPU
+
+A 3D game renders its own picture and draws it with `image`. The picture is a
+vector built one pixel at a time:
+
+```scheme
+(define tab (\cam (\i (\n (\acc
+  (if (eq i n) acc (tab cam (add i 1) n (apush acc (shade cam i)))))))))
+(image 0 0 W H (tab cam 0 (mul W H) (array 0 0)) rest)
+```
+
+`shade` is the shader: an ordinary Lin function of the pixel's index and of
+values the whole frame shares (the camera, a vector of splats). Nothing marks it
+as one. Each pixel is independent of the others, so the function compiler
+(`std/drivers/fn.c`, A LOOP WHOSE STEPS ARE INDEPENDENT) writes the loop as a
+GLSL compute kernel generated from the same definitions. The gpu driver
+(`std/drivers/gpu.c`, KERNELS) compiles it with `glslangValidator` and runs it
+through Vulkan. Without a device, or for a loop too small to be worth a dispatch
+(`LIN_GPU_MIN`, 1024 pixels by default), the same loop runs on the CPU's threads.
+Both give the same picture bit for bit. Floats are IEEE doubles on both, and
+`fsin`/`fcos` share one argument reduction (`std/runtime/i64.h`). `fpow`,
+`fatan2` and `ftan` keep a loop on the CPU, and `three.lin` writes its own `exp`.
+
+`three.lin` projects its splats through the camera and sorts them by depth on
+the CPU each frame. Each pixel then composites them front to back over the sky
+or the ground its ray meets.
+
+| Variable | Effect |
+|----------|--------|
+| `LIN_GPU=0` | Never dispatch to the GPU |
+| `LIN_GPU_MIN` | The smallest loop sent to the GPU (default 1024 elements) |
+| `LIN_GPU_DEBUG=1` | Report the device and each kernel run |
+| `LIN_GLSLANG` | The shader compiler (default `glslangValidator` on the `PATH`) |
+
+The Nix build puts `glslangValidator` and the Vulkan loader on `lin`'s path, and
+the device's own driver comes from the system. To try it without a GPU, point
+`VK_ICD_FILENAMES` at Mesa's lavapipe (`lvp_icd.x86_64.json`).
+
 ## Performance
 
 Each turn the effects runner hands the game a fresh copy of its step, forces the
@@ -132,6 +174,17 @@ stays flat over any number of frames. The function compiler
 reads the state into them each frame. It also remembers the calls it cannot
 compile, so it does not try them again every turn.
 
+A frame's pixels reach the plugin flat, without being built in the net. The
+numbers that change every frame, such as the frame counter and the camera, reach
+the frame's compiled unit as a table it reads, so the unit is compiled with `cc`
+once for the whole run, not once per frame.
+
 `leaves.lin` takes about 25 ms a frame natively, headless, and about 47 ms in
 WebAssembly under Node. Most of that is `step` and `scene` evaluated on the net:
 their non-recursive parts are not compiled yet.
+
+`three.lin` (160x120, about 160 splats) takes about 110 ms a frame headless on a
+CPU-only machine. The shader itself takes about 5 ms on lavapipe. The rest is the
+function compiler re-deriving the frame's unit from the net every frame before
+it finds the unit already compiled. Recognising the same call without re-deriving
+it is the next step.

@@ -183,9 +183,13 @@ typedef struct Lz { int state; Port p; Env *env; struct Lz *f, *x; V *v; int bus
 
 /* One compile attempt's memory: everything is freed together, so it is carved from chunks rather than asked of
    malloc one object at a time (measured: 8.7M callocs, a fifth of examples/games/tictactoe.lin).  A chunk is
-   as large as the attempt has needed so far, doubled; an object larger than a quarter of one gets its own. */
+   as large as the attempt has needed so far, doubled; an object larger than a quarter of one gets its own.
+   The CHUNKS ARE KEPT for the next attempt (only the large objects go back): a game compiles its frame's unit
+   every frame, and fresh chunks were fresh pages -- a page fault and the kernel's zeroing for every one
+   (measured: a sixth of examples/linden/three.lin's frame).  What is handed out is zeroed as it is handed out. */
 static void **arena; static int narena, arcap;
 static char *ar_at; static size_t ar_left, ar_chunk;
+static char **ach; static size_t *achsz; static int nach, achcap, ach_cur = -1;
 static void *ar_keep(void *p) {
   if (narena >= arcap) arena = realloc(arena, (size_t)(arcap = arcap ? arcap * 2 : 1024) * sizeof *arena);
   arena[narena++] = p; return p;
@@ -195,15 +199,23 @@ static void *A(size_t sz) {
   if (sz > ar_left) {
     if (!ar_chunk) ar_chunk = 4096 * 16;
     if (sz > ar_chunk / 4) return ar_keep(calloc(1, sz));
-    ar_at = ar_keep(calloc(1, ar_chunk)); ar_left = ar_chunk; ar_chunk *= 2;
+    ach_cur++;
+    if (ach_cur == nach) {
+      if (nach == achcap) { achcap = achcap ? achcap * 2 : 16; ach = realloc(ach, sizeof *ach * (size_t)achcap); achsz = realloc(achsz, sizeof *achsz * (size_t)achcap); }
+      ach[nach] = NULL; achsz[nach] = 0; nach++;
+    }
+    if (achsz[ach_cur] < sz) { free(ach[ach_cur]); ach[ach_cur] = malloc(ar_chunk); achsz[ach_cur] = ar_chunk; }
+    ar_at = ach[ach_cur]; ar_left = achsz[ach_cur];
+    if (ar_chunk < ar_left) ar_chunk = ar_left;
+    ar_chunk *= 2;
   }
-  void *p = ar_at; ar_at += sz; ar_left -= sz; return p;
+  void *p = ar_at; ar_at += sz; ar_left -= sz; memset(p, 0, sz); return p;
 }
 struct Memo;
 static struct Memo **memo; static int memocap;
 static void arena_free(void) {
   for (int i = 0; i < narena; i++) free(arena[i]);
-  narena = 0; ar_left = 0; ar_at = NULL; ar_chunk = 0;
+  narena = 0; ar_left = 0; ar_at = NULL; ar_chunk = 0; ach_cur = -1;   /* (the chunks stay: see above) */
   if (memocap) memset(memo, 0, (size_t)memocap * sizeof *memo);   /* its entries lived in the arena */
 }
 

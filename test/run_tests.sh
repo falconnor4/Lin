@@ -163,6 +163,16 @@ fi
 rm -f "$IO_LOG"
 
 # ----------------------------------------------------------------------------
+# Tier 2.796: the 3D Linden scene, its shader Lin: the same picture on the GPU, the CPU's threads, and with the
+# frame's constants compiled in; the frame's unit compiled once for the run (test/linden_3d.sh).
+L3_LOG=$(mktemp)
+if bash test/linden_3d.sh "$LIN_BIN" >"$L3_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 6)); echo "PASS test/linden_3d.sh ($(tail -1 "$L3_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/linden_3d.sh"; cat "$L3_LOG"
+fi
+rm -f "$L3_LOG"
+
 # Tier 2.795: effects that loop, their state read into compiled units each turn (test/io_loop.sh).
 # ----------------------------------------------------------------------------
 IL_LOG=$(mktemp)
