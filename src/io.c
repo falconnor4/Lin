@@ -137,6 +137,157 @@ Port net_force_val(Net *n, Port p) {
   return p;
 }
 
+/* A VALUE FORCED AS DATA (the io loop's state, std/drivers/readback.c; a constant definition, main.c's
+   def_precompile).  Under needed order a part of a value that nothing looks at is never evaluated; forced as
+   data, the value is forced, and if it is a constructor -- a chain of abstractions whose body applies one of the
+   chain's own variables (the Scott encoding every datatype, list, number and boolean has) -- so is each field.  Anything else (a function) is left as it is: entering it could
+   unfold a recursion forever.  Each node is visited once, so shared data is forced once. */
+static Port *df_stk; static size_t df_cap; static unsigned *df_seen; static size_t df_seen_cap; static unsigned df_gen;
+int net_force_data(Net *n, Port use, int64_t limit) {   /* use: the consumer's end of the value's wire */
+  size_t sp = 0; int top_ctor = -1;
+  if (++df_gen == 0) { memset(df_seen, 0, df_seen_cap * sizeof *df_seen); df_gen = 1; }
+#define DF_PUSH(x) do { if (sp == df_cap) df_stk = realloc(df_stk, sizeof *df_stk * (df_cap = df_cap ? df_cap * 2 : 64)); \
+                        df_stk[sp++] = (x); } while (0)
+  /* the stack holds CONSUMER ends (a port whose wire leads to the term): forcing re-aims wires, and these stay */
+  DF_PUSH(use);
+  while (sp) {
+    if (limit > 0 && n->steps > limit) return 0;   /* (the budget: what is left is left lazy) */
+    Port at = df_stk[--sp];
+    if (at.node < 0 || at.node >= n->nn || n->dead[at.node]) continue;
+    Port v = net_force_val(n, wr(n, at));
+    if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) continue;
+    if (df_seen_cap < (size_t)n->nn) {
+      size_t o = df_seen_cap; df_seen_cap = (size_t)n->nn * 2;
+      df_seen = realloc(df_seen, df_seen_cap * sizeof *df_seen); memset(df_seen + o, 0, (df_seen_cap - o) * sizeof *df_seen);
+    }
+    if (df_seen[v.node] == df_gen) continue;
+    df_seen[v.node] = df_gen;
+    /* the chain of binders: each body forced in turn, while it is another abstraction */
+    int lam = v.node, nchain = 0, chain_top = lam;
+    Port body;
+    for (;;) {
+      nchain++;
+      /* a constructor's MARKER, `((\_c (d_i f1..fk)) ID)`, is how a value says which constructor it is (the fn
+         driver reads it to take data in; printing, to name it): forcing the body would fire it, so it is stepped
+         over, to the application inside */
+      { Port m = wr(n, (Port){lam, 2});
+        if (m.node >= 0 && !n->dead[m.node] && n->tag[m.node] == APP && m.port == 1) {
+          Port fl = wr(n, (Port){m.node, 0});
+          if (fl.node >= 0 && n->tag[fl.node] == LAM && fl.port == 0) {
+            Port bd = wr(n, (Port){fl.node, 1});
+            if (bd.node >= 0 && n->tag[bd.node] == ERA) { body = net_force_val(n, wr(n, (Port){fl.node, 2})); break; }
+          }
+        }
+      }
+      body = net_force_val(n, wr(n, (Port){lam, 2}));
+      if (body.node < 0 || body.node >= n->nn || n->dead[body.node] || n->tag[body.node] != LAM || body.port != 0) break;
+      lam = body.node;
+      if (df_seen[lam] == df_gen) break;
+      df_seen[lam] = df_gen;
+    }
+    /* the body: a spine of applications whose head is one of the chain's variables, or that variable alone */
+    Port hd = body; int nargs = 0;
+    while (hd.node >= 0 && hd.node < n->nn && !n->dead[hd.node] && n->tag[hd.node] == APP && hd.port == 1) { nargs++; hd = wr(n, (Port){hd.node, 0}); }
+    int is_ctor = 0;
+    if (hd.node >= 0 && hd.node < n->nn && !n->dead[hd.node] && n->tag[hd.node] == LAM && hd.port == 1) {
+      for (int x = chain_top, k = 0; k < nchain; k++) {
+        if (x == hd.node) { is_ctor = 1; break; }
+        Port b = wr(n, (Port){x, 2});
+        if (b.node < 0 || n->tag[b.node] != LAM || b.port != 0) break;
+        x = b.node;
+      }
+    }
+    if (top_ctor < 0) top_ctor = is_ctor;
+    if (!is_ctor) continue;
+    for (Port a = body; nargs-- > 0; a = wr(n, (Port){a.node, 0})) DF_PUSH(((Port){a.node, 2}));   /* (each field) */
+  }
+#undef DF_PUSH
+  return top_ctor == 1;
+}
+
+/* A VALUE REBUILT AS DATA OF ITS OWN (the io loop's state, std/drivers/readback.c).  A value computed by sharing
+   is reached through fans: its parts sit behind the duplications the computation made, and those duplications also
+   hang from whatever else shared the code -- a loop's step, for one, whose next copy then cannot be taken without
+   taking the state along (copy_closed).  Once the value is data (net_force_data), it is read through its fans --
+   down a fan's copy port to what it shares, and back up a fan's principal by the copy it came down -- and built
+   again as plain nodes; the old one is erased.  Only a closed term of abstractions and applications is rebuilt,
+   each variable used once; anything else (a free variable, a variable used twice, a fan the walk cannot place, a
+   value too large) leaves the value as it is.  1: rebuilt. */
+typedef struct { Scope lab; int aux; } RdFan;
+typedef struct { int old, neu, used; } RdVar;
+static RdFan *rd_fan; static size_t rd_nfan, rd_cfan;
+static RdVar *rd_var; static size_t rd_nvar, rd_cvar;
+static int64_t rd_count, rd_cap; static int rd_build, rd_depth;
+static Port rd_term(Net *n, Port q) {              /* q: the value's end; builds (rd_build) or counts; {-1}: not data */
+  Port bad = {-1, 0};
+  if (++rd_depth > 20000 || ++rd_count > rd_cap) { rd_depth--; return bad; }
+  size_t fan0 = rd_nfan;
+  { int64_t v;                                      /* a numeral: its value, read as every reader reads one (across its fans) */
+    Port c = live(n, q) ? wr(n, q) : q;              /* (not in a function's place: reading a redex would fire it) */
+    if (live(n, q) && !(live(n, c) && n->tag[c.node] == APP && c.port == 0) &&
+        ((n->tag[q.node] == LAM && q.port == 0) || (n->tag[q.node] == DUP && q.port != 0)) && net_read_i64(n, q, &v)) {
+      rd_count += 2 * LIN_INT_BITS; rd_depth--;
+      return rd_build ? net_alloc_scott(n, v) : (Port){0, 0};
+    } }
+  for (int64_t k = 0; live(n, q) && n->tag[q.node] == DUP; k++) {
+    if (k > n->nn) { q = bad; break; }
+    if (q.port != 0) {                               /* down a copy: remember which */
+      if (rd_nfan == rd_cfan) rd_fan = realloc(rd_fan, sizeof *rd_fan * (rd_cfan = rd_cfan ? rd_cfan * 2 : 64));
+      rd_fan[rd_nfan++] = (RdFan){ n->scope[q.node], q.port };
+      q = wr(n, (Port){q.node, 0});
+    } else {                                         /* up a principal: the copy this path came down */
+      int aux = 0;
+      for (size_t i = rd_nfan; i-- > 0; ) if (scope_eq(n, rd_fan[i].lab, n->scope[q.node])) { aux = rd_fan[i].aux; break; }
+      if (!aux) { q = bad; break; }
+      q = wr(n, (Port){q.node, aux});
+    }
+  }
+  Port res = bad;
+  if (!live(n, q)) goto out;
+  int t = n->tag[q.node];
+  if (t == LAM && q.port == 0) {
+    Port b = wr(n, (Port){q.node, 1});
+    int erased = live(n, b) && n->tag[b.node] == ERA;
+    Port L = rd_build ? net_alloc(n, LAM, scope_nil()) : (Port){0, 0};
+    if (rd_nvar == rd_cvar) rd_var = realloc(rd_var, sizeof *rd_var * (rd_cvar = rd_cvar ? rd_cvar * 2 : 64));
+    size_t vi = rd_nvar++; rd_var[vi] = (RdVar){ q.node, L.node, 0 };
+    Port body = rd_term(n, wr(n, (Port){q.node, 2}));
+    int used = rd_var[vi].used; rd_nvar = vi;
+    if (body.node < 0 || (!used && !erased)) goto out;
+    if (rd_build) {
+      if (!used) net_link(n, (Port){L.node, 1}, net_alloc(n, ERA, scope_nil()), 1);
+      net_link(n, (Port){L.node, 2}, body, 1);
+    }
+    res = (Port){L.node, 0};
+  } else if (t == APP && q.port == 1) {
+    Port A = rd_build ? net_alloc(n, APP, scope_nil()) : (Port){0, 0};
+    Port f = rd_term(n, wr(n, (Port){q.node, 0}));
+    if (f.node < 0) goto out;
+    Port a = rd_term(n, wr(n, (Port){q.node, 2}));
+    if (a.node < 0) goto out;
+    if (rd_build) { net_link(n, (Port){A.node, 0}, f, 1); net_link(n, (Port){A.node, 2}, a, 1); }
+    res = (Port){A.node, 1};
+  } else if (t == LAM && q.port == 1) {              /* a variable: its binder must be in the term, and used once */
+    for (size_t i = rd_nvar; i-- > 0; )
+      if (rd_var[i].old == q.node) { if (!rd_var[i].used) { rd_var[i].used = 1; res = (Port){rd_var[i].neu, 1}; } break; }
+  }
+out:
+  rd_nfan = fan0; rd_depth--;
+  return res;
+}
+int net_reify_data(Net *n, Port use) {              /* use: the consumer's end of the value's wire */
+  Port q = wr(n, use);
+  rd_cap = (int64_t)(n->nn - n->nfree) + 4096;      /* (no larger than the net it came from, give or take) */
+  rd_build = 0; rd_count = 0; rd_nfan = rd_nvar = 0; rd_depth = 0;
+  if (rd_term(n, q).node < 0) return 0;
+  rd_build = 1; rd_count = 0; rd_nfan = rd_nvar = 0; rd_depth = 0;
+  Port v = rd_term(n, q);
+  if (v.node < 0) return 0;                          /* (cannot happen: the same walk counted it) */
+  net_link(n, q, net_alloc(n, ERA, scope_nil()), 1); /* the old value, erased */
+  net_link(n, use, v, 1);
+  return 1;
+}
+
 /* ---------------- the encoding walks ----------------
    Every layer is FORCED before it is read: under needed order a cell can still hold an unreduced
    thunk, and reading it is what demands it (readback is the consumer, so readback forces).  A layer

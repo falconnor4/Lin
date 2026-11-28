@@ -416,22 +416,47 @@ static int64_t reduce_term(Term *t, Net *net, int optimize, int depth, int64_t l
   return steps;
 }
 
-/* Non-recursive define: evaluate once and cache the reduced net so each reference clones it.  A
-   recursive def is a Y-knot and is spliced textually: its net IS a cycle, so baking a copy would
-   only duplicate the knot. */
+/* A CONSTANT IS EVALUATED ONCE.  A definition is expanded into each place it is referenced, so a constant -- a
+   definition whose body is not a function: a table, a number, a list -- is computed again by every copy of the
+   code that references it.  That is invisible in code run once, and it is the whole cost in code that is COPIED
+   to be run again: a loop's step is copied every turn (std/drivers/readback.c), and measured, a 256-entry table
+   the step read was rebuilt every turn -- 1.7M nodes -- until the loop's state could not be forced in time and the
+   loop stopped.  So a constant is evaluated the first time something references it, as data (net_force_data, the
+   drivers folding as at run time), and every reference splices its VALUE (compile.c, ct_splice).  Only a value
+   with no work left in it is kept: one the budget did not finish (an endless stream), or one that is a function
+   or holds one with unreduced code, stays an expression, expanded as before.  LIN_PRECOMPILE=0 turns this off;
+   LIN_PRECOMPILE=1 bakes every non-recursive definition, functions included (its own reduction, which does not
+   fold: an open body's operands are free variables).  A recursive definition is a Y-knot, expanded textually: its
+   net IS a cycle, and baking a copy would only duplicate the knot. */
 static void def_precompile(Def *d) {
-  /* A build-time decision, not a rule -- OFF unless asked for: eager reduce_term per define costs more than the splice saves. */
-  if (!getenv("LIN_PRECOMPILE") || strcmp(getenv("LIN_PRECOMPILE"), "1")) return;
-  if (d->comp_tried) return;
+  const char *pc = getenv("LIN_PRECOMPILE");
+  int every = pc && !strcmp(pc, "1");
+  if ((pc && !strcmp(pc, "0")) || d->comp_tried || d->rec) return;
+  if (!every) {                                                      /* (a function -- by its TYPE: its net can look like data -- is code) */
+    Type *ty = d->sch.t;
+    while (ty && ty->kind == TLINK) ty = ty->a;
+    if (!d->term || d->term->type == TLAM || !ty || ty->kind == TARROW || ty->kind == TVR) return;
+  }
   d->comp_tried = 1;
-  if (d->rec) return;
   char err[512]; Net src; net_init(&src, 1 << 14);
-  int64_t full = reduce_term(d->term, &src, 0, DEPTH_PRECOMPILE, STEP_LIMIT, NULL, err, sizeof err);
-  /* `act` is what net_reduce could NOT fire because nothing demanded it, so a non-empty list means the body
-     still has unreduced work.  Under needed order that is the normal case (and `(fact 5)` bakes no value at
-     all until something asks for it), so caching would store the term, not a value -- and it would ALSO hide
-     the body from the e-graph pass, which is measured on the expanded term (`test/aot_equiv.py`). */
-  if (full < 0 || full >= STEP_LIMIT || src.atop > 0) { net_free(&src); return; }
+  if (every) {
+    /* `act` is what net_reduce could NOT fire because nothing demanded it, so a non-empty list means the body
+       still has unreduced work.  Under needed order that is the normal case (and `(fact 5)` bakes no value at
+       all until something asks for it), so caching would store the term, not a value -- and it would ALSO hide
+       the body from the e-graph pass, which is measured on the expanded term (`test/aot_equiv.py`). */
+    int64_t full = reduce_term(d->term, &src, 0, DEPTH_PRECOMPILE, STEP_LIMIT, NULL, err, sizeof err);
+    if (full < 0 || full >= STEP_LIMIT || src.atop > 0) { net_free(&src); return; }
+  } else {
+    int64_t budget = (int64_t)1 << 23;
+    if (reduce_term(d->term, &src, 0, DEPTH_RUN, budget, NULL, err, sizeof err) < 0) {
+      if (getenv("LIN_PRECOMPILE_DEBUG")) fprintf(stderr, "precompile: %s: not compiled: %s\n", d->name, err);
+      net_free(&src); return; }
+    /* (what pairs are left are the constructors' markers, which forcing steps over: a value, not work) */
+    int data = net_force_data(&src, (Port){0, 0}, budget);
+    if (getenv("LIN_PRECOMPILE_DEBUG")) fprintf(stderr, "precompile: %s: %lld steps, %lld nodes -> %s\n", d->name, (long long)src.steps,
+      (long long)((int64_t)src.nn - src.nfree), data ? "a value" : "an expression");
+    if (!data) { net_free(&src); return; }
+  }
   d->compiled = net_copy(&src); net_free(&src);
 }
 

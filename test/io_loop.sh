@@ -3,7 +3,9 @@
 # and forces the state as data between turns (std/drivers/readback.c).  The state is any value -- a number, a
 # list of records, a record holding a list -- and the compiled units read it in every turn: each program must
 # print the same compiled as on the net alone.  The record whose list starts empty is the case that once read the
-# list's end as the number 0 (the terminal is both) and crashed the unit that walked it.
+# list's end as the number 0 (the terminal is both) and crashed the unit that walked it.  The float stepped by a
+# table read is the case that stopped after its second turn: the turns shared the step's constants through fans,
+# and the state, computed through them, could neither be forced nor read on its own.
 set -u
 LIN_BIN="${1:-./lin}"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -57,5 +59,11 @@ check "a game's world, stepped" '(load "std/std.lin")
     (world px (spawn t seed (still_falling px fl)) (add score got) (sub lives (if (gt lost lives) lives lost)) (rnd seed) (add t 1))))))))
 (io_loop (world 68 nil 0 3 2024 0) (\w (match w ((world px ls score lives seed t)
   (if (gt t 150) (io_print score (io_print lives io_done)) (io_next (step w)))))))' '00'
+check "a float stepped by a table read" '(load "std/std.lin")
+(define fill (\k (\v (if (eq k 0) v (fill (sub k 1) (apush v (mod k 5)))))))
+(define MAP (fill 16 (array 0 0)))
+(datatype G (g (x float) (t num)))
+(io_loop (g (i2f 3) 0) (\w (match w ((g x t)
+  (io_print (f2i x) (if (eq t 6) io_done (io_next (g (fadd x (i2f (aget MAP 3))) (add t 1)))))))))' '36912151821'
 [ "$fail" = 0 ] && echo "io_loop: OK ($n loops, from a counter to records holding lists, compiled and on the net)"
 exit $fail

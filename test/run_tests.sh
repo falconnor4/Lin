@@ -177,7 +177,7 @@ rm -f "$L3_LOG"
 # ----------------------------------------------------------------------------
 IL_LOG=$(mktemp)
 if bash test/io_loop.sh "$LIN_BIN" >"$IL_LOG" 2>&1; then
-  pass=$((pass+1)); total_checks=$((total_checks + 14)); echo "PASS test/io_loop.sh ($(tail -1 "$IL_LOG"))"
+  pass=$((pass+1)); total_checks=$((total_checks + 16)); echo "PASS test/io_loop.sh ($(tail -1 "$IL_LOG"))"
 else
   fail=$((fail+1)); echo "FAIL test/io_loop.sh"; cat "$IL_LOG"
 fi

@@ -570,7 +570,10 @@ static int *loops, nloops, cloops;                /* the holders of the running 
    step's SHARES (a fan entered at an auxiliary port) and treats each by what the share leads to.  A share of
    something the step USES (a definition, a value) gives the copy a share of its own, a fresh fan; a share the
    step FEEDS (the argument or body of an application or abstraction still waiting) gets an eraser on the copy:
-   the step's own contribution is there already, and a copy adds nothing to it.  Returns the copy's root port,
+   the step's own contribution is there already, and a copy adds nothing to it.  A wire to a node already gone
+   (left by a rewrite that discarded what it led to) is neither: the copy's end gets an eraser, and it no longer
+   costs the turn its closed copy (measured: one such wire made every turn of a loop share its step's
+   constants through fans, and the fans tangled the state with the step).  Returns the copy's root port,
    or {-1} when the step is gone. */
 static int *cp_map, *cp_list; static size_t cp_cap;
 static int node_arity(const Net *n, int i) { int t = n->tag[i]; return t == ERA || t == ROOT ? 1 : 3; }
@@ -592,7 +595,8 @@ static Port copy_closed(Net *n, int holder) {
       for (int p = 0; p < node_arity(n, i); p++) {
         Port w = n->wire[i * 3 + p];
         if (w.node == holder) continue;                       /* (the holder: what the copy hangs from) */
-        if (w.node < 0 || w.node >= n->nn || n->dead[w.node] || n->tag[w.node] == ROOT) { closed = 0; break; }
+        if (w.node < 0 || w.node >= n->nn || n->dead[w.node]) continue;   /* (a wire to nothing: the copy's gets an eraser) */
+        if (n->tag[w.node] == ROOT) { closed = 0; break; }
         if (edges && n->tag[w.node] == DUP && w.port != 0) continue;   /* (a share: below) */
         if (cp_map[w.node] == -1) { cp_map[w.node] = -2; cp_list[m++] = w.node; }
       }
@@ -606,6 +610,7 @@ static Port copy_closed(Net *n, int holder) {
       for (int p = 0; p < node_arity(n, i); p++) {
         Port w = n->wire[i * 3 + p];
         if (w.node == holder) continue;
+        if (w.node < 0 || w.node >= n->nn || n->dead[w.node]) { net_link(n, (Port){cp_map[i], p}, net_alloc(n, ERA, scope_nil()), 1); continue; }
         if (cp_map[w.node] == -1) {                           /* a share the copy did not take in */
           Port x = w;
           for (int k2 = 0; k2 < n->nn && x.node >= 0 && x.node < n->nn && !n->dead[x.node] && n->tag[x.node] == DUP && x.port != 0; k2++)
@@ -630,72 +635,11 @@ static Port copy_closed(Net *n, int holder) {
     for (size_t i = old; i < cp_cap; i++) cp_map[i] = -1; }
   return res;
 }
-/* A LOOP'S STATE IS FORCED TO DATA.  Under needed order a part of the state that no turn looks at is never
-   evaluated, so it grows by one suspended step per turn -- measured, a list of 40 numbers advanced each turn and
-   never read kept 186 nodes per turn, without end.  A loop's state is what the program carries on with, so
-   before the next turn it is evaluated as data: a value is forced, and if it is a constructor -- a chain of
-   abstractions whose body applies one of the chain's own variables (the Scott encoding every datatype, list,
-   number and boolean has) -- so is each field.  Anything else (a function) is left as it is: entering it could
-   unfold a recursion forever.  Each node is visited once, so shared data is forced once. */
-static Port *df_stk; static size_t df_cap; static unsigned *df_seen; static size_t df_seen_cap; static unsigned df_gen;
-static void force_data(Net *n, Port use) {   /* use: the consumer's end of the state's wire */
-  size_t sp = 0;
-  if (++df_gen == 0) { memset(df_seen, 0, df_seen_cap * sizeof *df_seen); df_gen = 1; }
-#define DF_PUSH(x) do { if (sp == df_cap) df_stk = realloc(df_stk, sizeof *df_stk * (df_cap = df_cap ? df_cap * 2 : 64)); \
-                        df_stk[sp++] = (x); } while (0)
-  /* the stack holds CONSUMER ends (a port whose wire leads to the term): forcing re-aims wires, and these stay */
-  DF_PUSH(use);
-  while (sp) {
-    Port at = df_stk[--sp];
-    if (at.node < 0 || at.node >= n->nn || n->dead[at.node]) continue;
-    Port v = net_force_val(n, wire(at));
-    if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) continue;
-    if (df_seen_cap < (size_t)n->nn) {
-      size_t o = df_seen_cap; df_seen_cap = (size_t)n->nn * 2;
-      df_seen = realloc(df_seen, df_seen_cap * sizeof *df_seen); memset(df_seen + o, 0, (df_seen_cap - o) * sizeof *df_seen);
-    }
-    if (df_seen[v.node] == df_gen) continue;
-    df_seen[v.node] = df_gen;
-    /* the chain of binders: each body forced in turn, while it is another abstraction */
-    int lam = v.node, nchain = 0, chain_top = lam;
-    Port body;
-    for (;;) {
-      nchain++;
-      /* a constructor's MARKER, `((\_c (d_i f1..fk)) ID)`, is how a value says which constructor it is (the fn
-         driver reads it to take data in; printing, to name it): forcing the body would fire it, so it is stepped
-         over, to the application inside */
-      { Port m = wire((Port){lam, 2});
-        if (m.node >= 0 && !n->dead[m.node] && n->tag[m.node] == APP && m.port == 1) {
-          Port fl = wire((Port){m.node, 0});
-          if (fl.node >= 0 && n->tag[fl.node] == LAM && fl.port == 0) {
-            Port bd = wire((Port){fl.node, 1});
-            if (bd.node >= 0 && n->tag[bd.node] == ERA) { body = net_force_val(n, wire((Port){fl.node, 2})); break; }
-          }
-        }
-      }
-      body = net_force_val(n, wire((Port){lam, 2}));
-      if (body.node < 0 || body.node >= n->nn || n->dead[body.node] || n->tag[body.node] != LAM || body.port != 0) break;
-      lam = body.node;
-      if (df_seen[lam] == df_gen) break;
-      df_seen[lam] = df_gen;
-    }
-    /* the body: a spine of applications whose head is one of the chain's variables, or that variable alone */
-    Port hd = body; int nargs = 0;
-    while (hd.node >= 0 && hd.node < n->nn && !n->dead[hd.node] && n->tag[hd.node] == APP && hd.port == 1) { nargs++; hd = wire((Port){hd.node, 0}); }
-    int is_ctor = 0;
-    if (hd.node >= 0 && hd.node < n->nn && !n->dead[hd.node] && n->tag[hd.node] == LAM && hd.port == 1) {
-      for (int x = chain_top, k = 0; k < nchain; k++) {
-        if (x == hd.node) { is_ctor = 1; break; }
-        Port b = wire((Port){x, 2});
-        if (b.node < 0 || n->tag[b.node] != LAM || b.port != 0) break;
-        x = b.node;
-      }
-    }
-    if (!is_ctor) continue;
-    for (Port a = body; nargs-- > 0; a = wire((Port){a.node, 0})) DF_PUSH(((Port){a.node, 2}));   /* (each field) */
-  }
-#undef DF_PUSH
-}
+/* A LOOP'S STATE IS FORCED TO DATA (net_force_data, src/io.c).  Under needed order a part of the state that no turn
+   looks at is never evaluated, so it grows by one suspended step per turn -- measured, a list of 40 numbers advanced
+   each turn and never read kept 186 nodes per turn, without end.  A loop's state is what the program carries on
+   with, so before the next turn it is evaluated as data. */
+static void force_data(Net *n, Port use) { net_force_data(n, use, 0); }
 static int64_t run_io_body(Net *n, int64_t step_limit) {
   N = n;
   int did_io = 0;
@@ -760,6 +704,7 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
         if (nloops == 0) { eff_erase(n, s_p); break; }   /* (`io_next` outside any loop: nothing to continue) */
       }
       force_data(n, (Port){eh.h[1], 0});                  /* (the state, as data: see above) */
+      net_reify_data(n, (Port){eh.h[1], 0});              /* (... and as data of its own: net_reify_data, src/io.c) */
       {                                                    /* (a safepoint: the runner holds only its holders) */
         int64_t live = (int64_t)n->nn - n->nfree;
         if (live > 2 * swept_at) { int pins = n->pins; n->pins = 0; net_sweep(n); n->pins = pins; swept_at = (int64_t)n->nn - n->nfree; }

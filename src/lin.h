@@ -166,6 +166,13 @@ int64_t net_force(Net *n, Port p);
 /* Force `p` to WHNF and return a port that still names the value: what readback needs, and the reason
    the core owns it (the caller would otherwise hold a port the rule it fired consumed). */
 Port net_force_val(Net *n, Port p);
+/* Force the value a consumer's port leads to AS DATA: the value, and if it is a constructor (any Scott-encoded
+   datatype, list, number) each field, to the end; a function is left as it is.  `limit`: the step count to stop
+   at (0: none) -- what is left then stays lazy.  1: forced to the end, and the value is a constructor (data). */
+int net_force_data(Net *n, Port use, int64_t limit);
+/* Rebuild the data value a consumer's port leads to as nodes of its own, read through the fans it is reached by:
+   a value computed by sharing stays joined to what shared the code.  1: rebuilt; 0: left as it is (not closed data). */
+int net_reify_data(Net *n, Port use);
 /* Free what no ROOT and no demand root reaches (net.c: WHAT NOTHING CAN REACH).  A safepoint operation. */
 int64_t net_sweep(Net *n);
 /* Register an extra demand root: a port whose weak head normal form the caller is about to observe. */
