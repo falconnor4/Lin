@@ -3,6 +3,7 @@
 #
 #   web/build.sh [-o out-dir] [program.lin ...]
 #
+# LIN_EMCC_FLAGS adds flags to the final link (e.g. --profiling-funcs, for names in a stack trace).
 # Needs emcc (`nix shell nixpkgs#emscripten`) and, to compile programs' units ahead, the native ./lin
 # built from this tree (`make all`).  Writes <out-dir>/lin.js, lin.wasm and lin.data (the std).
 #
@@ -42,7 +43,7 @@ if [ ${#PROGS[@]} -gt 0 ]; then
     [ -e "$c" ] || continue
     h=$(basename "$c" .c); h=${h#fn-}
     # (each unit names its entry, abort flag and release alike: renamed apart, one per unit)
-    emcc -O2 -std=gnu99 -w -c "$c" -o "$TMP/u-$h.o" -Dlin_fn_entry=lin_fn_entry_$h -Dlin_fn_aborted=lin_fn_aborted_$h -Dlin_fn_release=lin_fn_release_$h
+    emcc -O2 -std=gnu99 -w -c "$c" -o "$TMP/u-$h.o" -Dlin_fn_entry=lin_fn_entry_$h -Dlin_fn_entry_here=lin_fn_entry_here_$h -Dlin_fn_aborted=lin_fn_aborted_$h -Dlin_fn_release=lin_fn_release_$h
     UOBJS+=("$TMP/u-$h.o")
     rel=0; grep -q 'lin_fn_release(void)' "$c" && rel="lin_fn_release_$h"
     echo "extern int64_t lin_fn_entry_$h(const int64_t *, int); extern int lin_fn_aborted_$h;" >> "$UNITS"
@@ -55,7 +56,7 @@ fi
 SRCS="src/*.c std/drivers/arith.c std/drivers/readback.c std/drivers/text.c std/drivers/simd.c std/drivers/fn.c examples/linden/linden.c web/plugins.c $UNITS"
 # One thread (a page has no shared memory without special headers); a deep stack (the reducer and the
 # parser recurse as deep as the program's data); memory that grows.
-emcc -O2 -std=gnu99 -DLIN_STATIC -w $SRCS ${UOBJS[@]+"${UOBJS[@]}"} -o "$OUT/lin.js" \
+emcc -O2 -std=gnu99 -DLIN_STATIC -w ${LIN_EMCC_FLAGS:-} $SRCS ${UOBJS[@]+"${UOBJS[@]}"} -o "$OUT/lin.js" \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createLin -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 \
   -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=64MB \
   -sEXPORTED_FUNCTIONS=_main,_lin_resume,_linden_fb,_linden_w,_linden_h,_linden_input \

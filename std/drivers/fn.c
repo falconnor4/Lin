@@ -1347,7 +1347,7 @@ static void ex_dump(const Expr *e, int d) {         /* (LIN_FN_DEBUG=4: a tree, 
   if (e->c && e->op != E_CTOR) ex_dump(e->c, d + 1);
   for (int i = 0; i < e->nargs && e->args; i++) ex_dump(e->args[i], d + 1);
 }
-static void plistn(Buf *b, int typed, int n) { for (int i = 0; i < n; i++) put(b, typed ? "%slong p%d" : "%sp%d", i ? ", " : "", i); }
+static void plistn(Buf *b, int typed, int n) { for (int i = 0; i < n; i++) put(b, typed ? "%sint64_t p%d" : "%sp%d", i ? ", " : "", i); }
 static void plist(Buf *b, int typed) { plistn(b, typed, arity); }
 static int emit_op(Buf *b, int64_t k, const char *x, const char *y) {
   static const char *const fn[LIN_OP_N] = { [LIN_OP_ADD] = "lin_i64_add", [LIN_OP_MUL] = "lin_i64_mul",
@@ -1459,7 +1459,7 @@ static int fork_open(Buf *b, Buf *pre, const Expr *x, int budget, Buf *call, int
   { unsigned char *seen = calloc((size_t)eid + 1, 1); captures(x, seen, &cap, &nc); free(seen); }
   Buf sb = nbuf(512);
   put(&sb, "static int64_t site%d(", k); plistn(&sb, 1, np);
-  for (int c = 0; c < nc; c++) put(&sb, "%slong v%d", np || c ? ", " : "", cap[c]->var);
+  for (int c = 0; c < nc; c++) put(&sb, "%sint64_t v%d", np || c ? ", " : "", cap[c]->var);
   put(&sb, "%sint d) { return ", np || nc ? ", " : "");
   *ok = emit_region(&sb, pre, x, 1, budget - 1);   /* (the same scope: the locals it reads are its parameters) */
   put(&sb, "; }\ntypedef struct { int64_t p[%d]; int64_t v[%d]; int d; int64_t r; } S%d;\n", np + 1, nc + 1, k);
@@ -1548,7 +1548,7 @@ static void lift(void) {
   lifted = nfun;
 }
 static void fv_params(Buf *b, int f, int typed, int lead) {   /* a function's extra parameters, after its own */
-  for (int i = 0; i < nfv[f]; i++) put(b, typed ? "%slong l%d_%" PRId64 "" : "%sl%d_%" PRId64 "", (lead || i) ? ", " : "", fvs[f][i].h + 1, fvs[f][i].k);
+  for (int i = 0; i < nfv[f]; i++) put(b, typed ? "%sint64_t l%d_%" PRId64 "" : "%sl%d_%" PRId64 "", (lead || i) ? ", " : "", fvs[f][i].h + 1, fvs[f][i].k);
 }
 /* INDEXED FIELDS.  A datatype with many fields of one kind is how a program says "an array of k slots" in pure Lin
    (std/array.lin's trie nodes): choosing slot k is a decision tree of comparisons, and replacing it is one
@@ -2184,7 +2184,7 @@ static int emit_ixu(Buf *b, Buf *pre, const Expr *e, const Expr *K, const Expr *
   if (t == ixu_always) put(b, "; int64_t *_o = t%d; int _r = 1; t%d = 0; ", t, t);   /* (see spec_ix_only) */
   else {
     put(b, "; int64_t *_o; int _r = t%d != 0; if (_r) { _o = t%d; t%d = 0; } else { _o = lin_alloc(%d); ", t, t, t, W);
-    if (!e->untag) put(b, "_o[0] = %" PRId64 "L; ", e->k);
+    if (!e->untag) put(b, "_o[0] = %" PRId64 "LL; ", e->k);
     for (int i = 0; i < e->nargs; i++) { put(b, "_o[%d] = ", i + off); if (!emitx(b, pre, e->args[i]->c, par, budget - 1)) return 0; put(b, "; "); }
     put(b, "} ");
   }
@@ -2339,7 +2339,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
   switch (e->op) {
   case E_CONST:
     if (kt_on && emitting == -1 && !e->box) { put(b, "lin_kt[%d]", kt_index(e->k)); return 1; }   /* (THE ENTRY'S CONSTANTS) */
-    if (e->k == INT64_MIN) put(b, "(-%" PRId64 "L-1)", -(e->k + 1)); else put(b, "(%" PRId64 "L)", e->k); return 1;
+    if (e->k == INT64_MIN) put(b, "(-%" PRId64 "LL-1)", -(e->k + 1)); else put(b, "(%" PRId64 "LL)", e->k); return 1;
   case E_PARAM:   /* an outer function's parameter: lifted into this one's extra parameters */
     if (e->nargs == emitting) { put(b, "p%" PRId64 "", e->k); return 1; }
     if (emitting >= 0 && emitting < lifted && fv_has(emitting, e->nargs, e->k)) { put(b, "l%d_%" PRId64 "", e->nargs + 1, e->k); return 1; }
@@ -2374,12 +2374,12 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
      and picks the branch; a field is a word of the block. */
   case E_CTOR:
     uses_data = 1;
-    if (!e->nargs) { put(b, "(%" PRId64 "L)", e->k * 2 + 1); return 1; }
+    if (!e->nargs) { put(b, "(%" PRId64 "LL)", e->k * 2 + 1); return 1; }
     { const Expr *K2, *x0; if (ix_update(e, &K2, &x0)) return emit_ixu(b, pre, e, K2, x0, par, budget, 0); }
     if (e->tok) {                                    /* (see REUSE) built in the block an arm took apart, when it was unique */
       int t = e->tok - 1, W = e->nargs + !e->untag;
       put(b, "({ int64_t *_o; int _r = t%d != 0; if (_r) { _o = t%d; t%d = 0; } else _o = lin_alloc(%d); ", t, t, t, W);
-      if (!e->untag) put(b, "_o[0] = %" PRId64 "L; ", e->k);
+      if (!e->untag) put(b, "_o[0] = %" PRId64 "LL; ", e->k);
       for (int i = 0; i < e->nargs; i++) {
         if (e->ci && !field_live(e->ci, i)) continue;
         const Expr *a = e->args[i];
@@ -2391,7 +2391,7 @@ static int emitx(Buf *b, Buf *pre, const Expr *e, int par, int budget) {
       put(b, "(int64_t)_o; })"); return 1;
     }
     if (e->untag) put(b, "({ int64_t *_o = lin_alloc(%d); ", e->nargs);
-    else put(b, "({ int64_t *_o = lin_alloc(%d); _o[0] = %" PRId64 "L; ", e->nargs + 1, e->k);
+    else put(b, "({ int64_t *_o = lin_alloc(%d); _o[0] = %" PRId64 "LL; ", e->nargs + 1, e->k);
     for (int i = 0; i < e->nargs; i++) {
       if (e->ci && !field_live(e->ci, i)) continue;   /* (a field nobody reads is not computed) */
       put(b, "_o[%d] = (", i + !e->untag); if (!emitx(b, pre, e->args[i], par, budget - 1)) return 0; put(b, "); ");
@@ -2691,7 +2691,7 @@ static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
 #endif
     cp->nctor = sh_nctor; cp->fld = calloc((size_t)sh_nctor + 1, sizeof *cp->fld);
     for (int64_t k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; cp->fld[k] = malloc(sizeof **cp->fld * (size_t)nk); memcpy(cp->fld[k], sh_fld[k], sizeof **cp->fld * (size_t)nk); }
-    if (kind == 5 && !cp->release) e = NULL;
+    if (kind == 5 && !cp->release) e = cp->fn = NULL;   /* (a data unit's arena must be released: without it, no unit) */
   }
 #ifndef LIN_STATIC
   cp->here = here;
@@ -2873,7 +2873,7 @@ static int red_defs(Buf *b, Buf *pre, const Red *red, int data) {
   put(b, "static int64_t g("); plist(b, 1); put(b, ") { return ");
   emitting = 0; fscope++; int ok = emit_region(b, pre, red->g, 0, 4096); put(b, "; }\n");
   put(b, "typedef struct { int64_t p[%d]; int64_t lo, block, r; int64_t *next; } R;\n", arity);
-  put(b, "static void *rrun(void *v) { R *q = v; int64_t acc = %" PRId64 "L;%s\n", id, data ? " LIN_TASK_START((size_t)256 << 20);" : "");
+  put(b, "static void *rrun(void *v) { R *q = v; int64_t acc = %" PRId64 "LL;%s\n", id, data ? " LIN_TASK_START((size_t)256 << 20);" : "");
   for (int i = 0; i < arity; i++) put(b, "  int64_t p%d = q->p[%d];\n", i, i);
   put(b, "  for (;;) { int64_t hi = __atomic_fetch_sub(q->next, q->block, __ATOMIC_RELAXED); if (hi <= q->lo) break;\n");
   put(b, "    int64_t lo = hi - q->block; if (lo < q->lo) lo = q->lo;\n    for (int64_t i = hi; i > lo; i--) { p%d = i%s; int64_t x = g(", red->iv, red->up ? " - 1" : "");
@@ -2885,7 +2885,7 @@ static void red_run(Buf *b, const Red *red, int data, const char *threads, const
   Buf lob = nbuf(32), hib = nbuf(32);
   Buf *mv = red->up ? &lob : &hib, *bd = red->up ? &hib : &lob;   /* the moving end, and the bound */
   put(mv, "p%d", red->iv);
-  if (red->bnd >= 0) put(bd, "p%d", red->bnd); else put(bd, "%" PRId64 "L", red->c);
+  if (red->bnd >= 0) put(bd, "p%d", red->bnd); else put(bd, "%" PRId64 "LL", red->c);
   const char *lo = lob.s, *hi = hib.s;
   /* a cheap step needs some thousands of iterations to pay for a thread; a step that CALLS (a whole inner loop)
      pays from a few per thread */
@@ -4055,10 +4055,10 @@ static const char *DATA_RT =
   "  pthread_mutex_lock(&lin_chm);\n"   /* (first what a finished thread left: see lin_task_end) */
   "  for (int i = lin_npool - 1; i >= 0; i--) if (lin_pool[i].e - lin_pool[i].p >= n) { lin_hp = lin_pool[i].p; lin_he = lin_pool[i].e; lin_pool[i] = lin_pool[--lin_npool]; pthread_mutex_unlock(&lin_chm); return; }\n"
   "  pthread_mutex_unlock(&lin_chm);\n"
-  "  int64_t g = lin_nch < 6 ? lin_nch : 6, sz = 65536L << g; if (sz < n) sz = n; int64_t *c;\n"
-  "  if (sz >= (1L << 18) && !(sz & ((1L << 18) - 1))) { c = aligned_alloc((size_t)1 << 21, (size_t)sz * 8); if (c) LIN_HUGE(c, (size_t)sz * 8); }\n"
+  "  int64_t g = lin_nch < 6 ? lin_nch : 6, sz = (int64_t)65536 << g; if (sz < n) sz = n; int64_t *c;\n"
+  "  if (sz >= ((int64_t)1 << 18) && !(sz & (((int64_t)1 << 18) - 1))) { c = aligned_alloc((size_t)1 << 21, (size_t)sz * 8); if (c) LIN_HUGE(c, (size_t)sz * 8); }\n"
   "  else c = malloc((size_t)sz * 8);\n"
-  "  if (!c || lin_fn_aborted || lin_used > (1L << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) { free(c); lin_fn_aborted = 1; longjmp(lin_jb, 1); }\n"
+  "  if (!c || lin_fn_aborted || lin_used > ((int64_t)1 << 28) || (char *)__builtin_frame_address(0) < lin_stack_lo) { free(c); lin_fn_aborted = 1; longjmp(lin_jb, 1); }\n"
   "  pthread_mutex_lock(&lin_chm);\n"
   "  if (lin_nch >= lin_cch) { lin_cch = lin_cch ? lin_cch * 2 : 64; lin_ch = realloc(lin_ch, (size_t)lin_cch * sizeof *lin_ch); }\n"
   "  lin_ch[lin_nch++] = c; lin_used += sz; pthread_mutex_unlock(&lin_chm); lin_hp = c; lin_he = c + sz; }\n"
@@ -4066,7 +4066,7 @@ static const char *DATA_RT =
   /* (SIZE CLASSES: a block under 8 words has a list of its own size; a larger one is rounded up to a power of two,
      one list per power -- so the block a freed vector leaves serves the next of its class, and memory stays the
      live data however large the blocks are) */
-  "static inline int lin_cls(int64_t n) { return n < 8 ? (int)n : 8 + (int)(8 * sizeof(int64_t)) - __builtin_clzl((uint64_t)(n - 1)); }\n"
+  "static inline int lin_cls(int64_t n) { return n < 8 ? (int)n : 8 + (int)(8 * sizeof(int64_t)) - __builtin_clzll((uint64_t)(n - 1)); }\n"
   /* EVERY BLOCK CARRIES A COUNT, in the word before it (so a field's offset is the same with or without it): how
      many references hold it.  A new block has one. */
   "#ifdef LIN_STATS\nstatic int64_t lin_na[9], lin_nf[9];\n#define LIN_NA(n) lin_na[(n) < 8 ? (n) : 8]++\n#define LIN_NF(n) lin_nf[(n) < 8 ? (n) : 8]++\n#else\n#define LIN_NA(n)\n#define LIN_NF(n)\n#endif\n"
@@ -4081,7 +4081,7 @@ static const char *DATA_RT =
   "  for (int s = 0; s <= mx; s++) if (cnt[s]) fprintf(stderr, \"lin: site %d holds %\" PRId64 \" blocks\\n\", s, cnt[s]); free(cnt); }\n"
   "#define LIN_LF(p) lin_leak_forget(p)\n#else\n#define LIN_LF(p)\n#define lin_leak_report()\n#endif\n"
   "static inline int64_t *lin_alloc(int64_t n) { LIN_NA(n); int c = lin_cls(n); int64_t *f = lin_fl[c]; if (f) { lin_fl[c] = (int64_t *)f[0]; f[-1] = 1; return f; }\n"
-  "  if (n >= 8) n = 1L << (c - 8);\n"
+  "  if (n >= 8) n = (int64_t)1 << (c - 8);\n"
   "  if (__builtin_expect(lin_hp + n + 1 > lin_he, 0)) lin_refill(n + 1); int64_t *r = lin_hp + 1; r[-1] = 1; lin_hp += n + 1; return r; }\n"
   /* (a count is positive while one thread alone can see the block, and is then plain arithmetic; what is handed to
      another thread is first marked SHARED -- its count negated, see gen_data_fns -- and a shared count is atomic.
@@ -4994,7 +4994,7 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
         r = compile_src(b.s, nnum, numeric ? (rbool ? 3 : 1) : 5, rshape);
         if (r) r->strict = funs[0].strict;
       } else if (ok && aports) {                       /* numbers only, with expression arguments: the plain entry */
-        put(&b, "%slong lin_fn_entry(const int64_t *a, int threads) { (void)threads;%s\n", pre.s, kt_on ? kts : "");
+        put(&b, "%sint64_t lin_fn_entry(const int64_t *a, int threads) { (void)threads;%s\n", pre.s, kt_on ? kts : "");
         for (int i = 0; i < nnum; i++) put(&b, "  int64_t p%d = a[%d];\n", i, i);
         put(&b, "  return %s; }\n", eb.s);
         DBG("compiling (%d functions, entry with expression arguments):\n%s\n", nfun, b.s + strlen(LIN_I64_SRC));
@@ -5133,6 +5133,9 @@ static int big_call(void (*f)(void *), void *u) { (void)f; (void)u; return 0; }
 #endif
 /* f(u) on a large stack: the driver's own, else a thread's; 0 when neither could be had */
 static int on_big_stack(void *(*f)(void *), void *u) {
+#ifdef __EMSCRIPTEN__
+  f(u); return 1;                                   /* (a page: one thread, its stack the build's own -- web/build.sh) */
+#endif
   if (big_call((void (*)(void *))(void (*)(void))f, u)) return 1;
   pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);
   pthread_t t; int ok = !pthread_create(&t, &at, f, u);
@@ -6186,6 +6189,7 @@ static int part_run(Net *n, StepPart *p, int an, Port arg, int nx, int64_t x, in
   for (int i = 0; i < p->nkt; i++) xa[nn++] = p->kt[i];
   extern int lin_threads;
   int th = lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN);
+  if (dbg > 2) DBG("step: a part's unit %016" PRIx64 " (entry %p, here %p, %d words in)\n", c->h, (void *)(intptr_t)c->fn, (void *)(intptr_t)c->here, nn);
   StepCall sc = { c->here, xa, th, 0 };
   if (c->here && big_call(step_call, &sc)) *r = sc.r; else *r = c->fn(xa, th);
   free(xa);
