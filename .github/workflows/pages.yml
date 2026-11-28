@@ -1,0 +1,51 @@
+# The web build on GitHub Pages: the Lin playground (web/index.html) and the Linden games (web/linden.html).
+# The native engine is built first: it runs each game headless once to compile its units ahead (web/build.sh),
+# which are then compiled to WebAssembly and linked into the page's engine.
+name: pages
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native engine
+        run: |
+          sudo apt-get update && sudo apt-get install -y libffi-dev
+          make lin
+          for d in arith readback text simd fn; do
+            cc -O2 -std=c99 -fPIC -shared -o std/drivers/$d.so std/drivers/$d.c -ldl -lm -lpthread -lffi
+          done
+          make examples/linden/linden.so
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.10
+      - name: WebAssembly build, the games' units compiled ahead
+        run: |
+          LINDEN_FRAMES=300 bash web/build.sh -o web/dist examples/linden/wisps.lin examples/linden/leaves.lin examples/linden/three.lin
+          mkdir -p _site && cp web/index.html web/linden.html _site/ && cp -r web/dist _site/dist
+      - name: The build runs (node)
+        run: |
+          printf '(add 1 2)\n' > /tmp/smoke.lin
+          node web/run.mjs web/dist /tmp/smoke.lin | grep -q '=> 3'
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

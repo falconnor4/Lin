@@ -16,3 +16,4 @@ examples/faster_than_c/bench_linden
 examples/faster_than_c/bench_stream
 web/dist/
 .boot-src
+_site/

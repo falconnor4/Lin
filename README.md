@@ -98,6 +98,23 @@ Run a program, evaluate an expression, or start the REPL:
 ./lin
 ```
 
+## Games and the browser
+
+Linden (`examples/linden/`) is a small game engine whose games are Lin programs: a game is a pure
+`draw` and `update` over a world value, and each frame -- drawing, input, the next world -- is compiled
+to native code once and run every frame (`std/drivers/fn.c`, A LOOP'S STEP).  Headless, on four CPU
+threads: `leaves.lin` ~0.2 ms a frame, `three.lin` (a 3D scene, its renderer Lin) ~4 ms, `wisps.lin`
+(a first-person shooter, its ray caster Lin) ~6 ms.
+
+```bash
+make linden && ./lin examples/linden/wisps.lin
+```
+
+`web/build.sh` builds the engine for the browser, the games' compiled units included
+(`web/linden.html` plays them, `web/index.html` is a playground).  `.github/workflows/pages.yml`
+publishes both to GitHub Pages from `main` (Settings -> Pages -> Source: GitHub Actions).  See
+`examples/linden/README.md`.
+
 ## Documentation
 
 | Document | Contents |
