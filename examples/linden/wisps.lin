@@ -1,0 +1,273 @@
+; ==============================================================================
+; wisps.lin -- a small first-person shooter for Linden: a walled night garden,
+; and the wisps that drift through it towards you
+; ------------------------------------------------------------------------------
+; Up/down (W/S) walk, left/right (A/D) turn, space (or Z) shoots.  A wisp that
+; reaches you drains your light; Enter starts again once it is out.
+;
+;   Run (from the repository root):  make linden && ./lin examples/linden/wisps.lin
+;   Headless, for a check:           LINDEN_HEADLESS=1 LINDEN_FRAMES=120 LINDEN_PPM=wisps.ppm ./lin ...
+;   In the browser:                  web/build.sh examples/linden/wisps.lin (examples/linden/README.md)
+;
+; THE RENDERER IS LIN.  `shade` is one pixel: its column's ray is walked through
+; the map cell by cell (DDA) to the wall it meets, the wall is textured and fogged
+; by its distance, the floor and sky fill the rest, and every wisp in front of the
+; wall glows over it.  Each pixel depends only on its index and on values the frame
+; shares, so the function compiler runs the loop over them in parallel: on the
+; CPU's threads, or as a GPU kernel written from these definitions.
+;
+; The game itself -- walking, the walls you bump into, the shot, the wisps' chase --
+; is `update`, a pure function of the world and the keys.
+; ==============================================================================
+(load "std/std.lin")
+(load "linden.lin")
+
+(define W 160)
+(define H 120)
+(define N (mul W H))
+(define MW 16)                 ; the map is MW cells square
+
+(define f (\s (float s)))
+(define ZERO (i2f 0))
+(define ONE (i2f 1))
+(define HALF (f "0.5"))
+(define FW (i2f W))
+(define FH (i2f H))
+(define HH (fmul FH HALF))     ; the horizon
+(define FOV (f "0.66"))        ; the camera plane's half width: a field of view of about 66 degrees
+
+; --- the map: 0 open, 1 stone, 2 moss, 3 brick, 4 wood ---------------------------
+;   (the rows one after another, north to south, MW cells a row:
+;      1111111111111111
+;      1000000000000001
+;      1022200000333001
+;      1020000000003001
+;      1020000110003001
+;      1000000110000001
+;      1000000000000001
+;      1003300000022001
+;      1003000000002001
+;      1000000000000001
+;      1000011000000001
+;      1000010000044401
+;      1000010000000401
+;      1022000000000001
+;      1000000000000001
+;      1111111111111111)
+; (one string: a map folded together from a list of row strings is not yet something the frame
+;  compiler reads as a flat vector -- it declines the frame -- so the rows are written as one)
+(define ROWS "1111111111111111100000000000000110222000003330011020000000003001102000011000300110000001100000011000000000000001100330000002200110030000000020011000000000000001100001100000000110000100000444011000010000000401102200000000000110000000000000011111111111111111")
+(define row_cells (\s (\v (match s (nil v) ((cons c r) (row_cells r (apush v (sub c 48))))))))
+(define MAP (row_cells ROWS (array 0 0)))
+; THE SAME MAP AS A LIST, for the game's logic (walking, shooting, spawning).  The frame reads the vector,
+; on the GPU; the turn reads the list.  (A vector read in a turn of the loop is not safe yet: a float the
+; world carries, computed from one, stops the loop two turns later -- see examples/linden/README.md.)
+(define list_cells (\s (match s (nil nil) ((cons c r) (cons (sub c 48) (list_cells r))))))
+(define MAPL (list_cells ROWS))
+
+(define cell (\mv (\x (\y (aget mv (add (mul y MW) x))))))
+(define nth (\l (\i (match l (nil 0) ((cons h r) (if (eq i 0) h (nth r (sub i 1))))))))
+(define lcell (\ml (\x (\y (nth ml (add (mul y MW) x))))))
+(define solid (\ml (\x (\y (gt (lcell ml (f2i x) (f2i y)) 0)))))
+
+; --- a ray through the map (DDA): the cell it stops in, and which kind of side it crossed ---
+; The answer is one number, (cell index) * 2 + side: side 0 crossed an x line, 1 a y line.
+(define cast (\mv (\mx (\my (\sdx (\sdy (\ddx (\ddy (\sx (\sy (\n
+  (if (flt sdx sdy)
+    (let ((nx (add mx sx)))
+      (if (or (gt (cell mv nx my) 0) (gt n 64))
+        (mul (add (mul my MW) nx) 2)
+        (cast mv nx my (fadd sdx ddx) sdy ddx ddy sx sy (add n 1))))
+    (let ((ny (add my sy)))
+      (if (or (gt (cell mv mx ny) 0) (gt n 64))
+        (add (mul (add (mul ny MW) mx) 2) 1)
+        (cast mv mx ny sdx (fadd sdy ddy) ddx ddy sx sy (add n 1))))))))))))))))
+
+(define inv (\d (if (feq d ZERO) (f "1e30") (fabs (fdiv ONE d)))))
+(define sgn (\d (if (flt d ZERO) -1 1)))
+(define first_side (\p (\m (\d (\dd (if (flt d ZERO) (fmul (fsub p (i2f m)) dd) (fmul (fsub (i2f (add m 1)) p) dd)))))))
+(define hit_of (\mv (\px (\py (\rx (\ry
+  (let ((mx (f2i px)) (my (f2i py)) (ddx (inv rx)) (ddy (inv ry)))
+    (cast mv mx my (first_side px mx rx ddx) (first_side py my ry ddy) ddx ddy (sgn rx) (sgn ry) 0))))))))
+; (the same two over the list, for the shot)
+(define lcast (\mv (\mx (\my (\sdx (\sdy (\ddx (\ddy (\sx (\sy (\n
+  (if (flt sdx sdy)
+    (let ((nx (add mx sx)))
+      (if (or (gt (lcell mv nx my) 0) (gt n 64))
+        (mul (add (mul my MW) nx) 2)
+        (lcast mv nx my (fadd sdx ddx) sdy ddx ddy sx sy (add n 1))))
+    (let ((ny (add my sy)))
+      (if (or (gt (lcell mv mx ny) 0) (gt n 64))
+        (add (mul (add (mul ny MW) mx) 2) 1)
+        (lcast mv mx ny sdx (fadd sdy ddy) ddx ddy sx sy (add n 1))))))))))))))))
+(define lhit_of (\mv (\px (\py (\rx (\ry
+  (let ((mx (f2i px)) (my (f2i py)) (ddx (inv rx)) (ddy (inv ry)))
+    (lcast mv mx my (first_side px mx rx ddx) (first_side py my ry ddy) ddx ddy (sgn rx) (sgn ry) 0))))))))
+; the wall's distance along the view direction (not the ray's length: no fisheye)
+(define perp (\code (\px (\py (\rx (\ry
+  (let ((c (div code 2)))
+    (if (eq (mod code 2) 0)
+      (fdiv (fadd (fsub (i2f (mod c MW)) px) (if (flt rx ZERO) ONE ZERO)) rx)
+      (fdiv (fadd (fsub (i2f (div c MW)) py) (if (flt ry ZERO) ONE ZERO)) ry)))))))))
+
+; --- THE SHADER: one pixel --------------------------------------------------------------
+(define byte (\x (let ((i (f2i x))) (if (lt i 0) 0 (if (gt i 255) 255 i)))))
+(define rgbf (\r (\g (\b (linden.rgb (byte r) (byte g) (byte b))))))
+(define chan (\c (\s (i2f (band (shr c s) 255)))))
+(define fog (\d (fdiv ONE (fadd ONE (fmul (fmul d d) (f "0.025"))))))
+(define base (\k (if (eq k 1) (linden.rgb 120 126 140) (if (eq k 2) (linden.rgb 70 125 70) (if (eq k 3) (linden.rgb 150 70 55) (linden.rgb 130 95 60))))))
+(define NIGHT (linden.rgb 8 10 24))
+
+; a wall: bricks (mortar lines), the y sides darker, fading into the night with distance
+(define wall (\k (\side (\u (\v (\d
+  (let ((row (ffloor (fmul v (f "4")))))
+  (let ((mortar (or (flt (ffract (fmul v (f "4"))) (f "0.08"))
+                    (flt (ffract (fadd (fmul u (f "2")) (fmul row HALF))) (f "0.05")))))
+  (let ((lit (fmul (fog d) (fmul (if (eq side 1) (f "0.72") ONE) (if mortar (f "0.5") ONE)))) (c (base k)))
+    (rgbf (fadd (f "8") (fmul lit (chan c 16))) (fadd (f "10") (fmul lit (chan c 8))) (fadd (f "24") (fmul lit (chan c 0)))))))))))))
+
+; the floor (grass, in tiles) seen along the ray at this row, and the sky above
+(define ground (\px (\py (\rx (\ry (\r
+  (let ((dist (fdiv HH (fsub r HH))))
+  (let ((gx (fadd px (fmul dist rx))) (gy (fadd py (fmul dist ry))))
+  (let ((odd (eq (band (add (f2i gx) (f2i gy)) 1) 1)) (lit (fog dist)))
+    (rgbf (fadd (f "8") (fmul lit (if odd (f "40") (f "52"))))
+          (fadd (f "10") (fmul lit (if odd (f "90") (f "110"))))
+          (fadd (f "24") (fmul lit (if odd (f "40") (f "48"))))))))))))))
+(define sky (\r (let ((s (fdiv r HH))) (rgbf (fmul s (f "30")) (fmul s (f "34")) (fadd (f "30") (fmul s (f "50")))))))
+
+; the wisps over it: each one in front of the wall and nearer than the last glows over the colour
+; (wisp vector: x y bob, three floats each)
+(define wisps_over (\wv (\j (\n (\px (\py (\dx (\dy (\plx (\ply (\col (\r (\depth (\cr (\cg (\cb
+  (if (geq j n)
+    (rgbf cr cg cb)
+    (let ((sx (fsub (aget wv j) px)) (sy (fsub (aget wv (add j 1)) py)) (det (fdiv ONE (fsub (fmul plx dy) (fmul dx ply)))))
+    (let ((tx (fmul det (fsub (fmul dy sx) (fmul dx sy)))) (ty (fmul det (fadd (fmul (fsub ZERO ply) sx) (fmul plx sy)))))
+      (if (or (flt ty (f "0.2")) (flt depth ty))
+        (wisps_over wv (add j 3) n px py dx dy plx ply col r depth cr cg cb)
+        (let ((cx (fmul (fmul FW HALF) (fadd ONE (fdiv tx ty)))) (size (fdiv FH ty)))
+        (let ((cy (fadd HH (fmul size (fadd (f "0.1") (fmul (f "0.08") (aget wv (add j 2))))))) (rad (fmul size (f "0.16"))))
+        (let ((e (fdiv (fadd (fmul (fsub col cx) (fsub col cx)) (fmul (fsub r cy) (fsub r cy))) (fmul rad rad))))
+          (if (flt ONE e)
+            (wisps_over wv (add j 3) n px py dx dy plx ply col r depth cr cg cb)
+            (let ((a (fmin ONE (fmul (fsub ONE e) (f "1.8")))) (core (fmax ZERO (fsub ONE (fmul e (f "3"))))))
+              (wisps_over wv (add j 3) n px py dx dy plx ply col r ty
+                (fadd (fmul cr (fsub ONE a)) (fmul a (fadd (f "120") (fmul core (f "135")))))
+                (fadd (fmul cg (fsub ONE a)) (fmul a (fadd (f "230") (fmul core (f "25")))))
+                (fadd (fmul cb (fsub ONE a)) (fmul a (f "255")))))))))))))))))))))))))))))
+
+(define shade (\mv (\wv (\px (\py (\dx (\dy (\plx (\ply (\i
+  (let ((col (i2f (mod i W))) (r (fadd (i2f (div i W)) HALF)))
+  (let ((cam (fsub (fdiv (fmul (f "2") col) FW) ONE)))
+  (let ((rx (fadd dx (fmul plx cam))) (ry (fadd dy (fmul ply cam))))
+  (let ((code (hit_of mv px py rx ry)))
+  (let ((d (perp code px py rx ry)))
+  (let ((lh (fdiv FH d)))
+  (let ((top (fsub HH (fmul lh HALF))))
+  (let ((c (if (and (fleq top r) (flt r (fadd top lh)))
+             (let ((side (mod code 2)))
+               (wall (aget mv (div code 2)) side
+                     (ffract (if (eq side 0) (fadd py (fmul d ry)) (fadd px (fmul d rx))))
+                     (fdiv (fsub r top) lh) d))
+             (if (flt HH r) (ground px py rx ry r) (sky r)))))
+    (wisps_over wv 0 (alen wv) px py dx dy plx ply col r d (chan c 16) (chan c 8) (chan c 0))))))))))))))))))))
+
+; every pixel, in order: the loop the compiler runs in parallel
+(define tab (\mv (\wv (\px (\py (\dx (\dy (\plx (\ply (\i (\n (\acc
+  (if (eq i n) acc (tab mv wv px py dx dy plx ply (add i 1) n (apush acc (shade mv wv px py dx dy plx ply i))))))))))))))))
+
+; --- the world ------------------------------------------------------------------------------
+(datatype Wisp (wisp (x float) (y float) (ph float)))
+(datatype World (world (x float) (y float) (a float) (hp num) (score num) (cool num) (ws list Wisp) (t num) (seed num)))
+
+(define rnd (\s (mod (add (mul s 1103515245) 12345) 2147483648)))
+(define start (\seed (world (f "8.5") (f "8.5") ZERO 100 0 0 nil 0 seed)))
+
+; walking: each axis moves only if the cell it would enter (with a margin) is open
+(define MARGIN (f "0.25"))
+(define slide (\mv (\x (\y (\vx (\vy
+  (let ((nx (fadd x vx)) (ny (fadd y vy)))
+  (let ((ox (if (solid mv (fadd nx (if (flt vx ZERO) (fsub ZERO MARGIN) MARGIN)) y) x nx)))
+  (let ((oy (if (solid mv ox (fadd ny (if (flt vy ZERO) (fsub ZERO MARGIN) MARGIN))) y ny)))
+    (wisp ox oy ZERO))))))))))
+
+; the shot: the nearest wisp close to the line of sight, and in front of the wall that line meets
+(define facing (\x (\y (\dx (\dy (\w (match w ((wisp wx wy ph)
+  (let ((fx (fsub wx x)) (fy (fsub wy y)))
+  (let ((ahead (fadd (fmul fx dx) (fmul fy dy))) (side (fsub (fmul fy dx) (fmul fx dy))))
+    (if (and (flt ZERO ahead) (flt (fabs side) (f "0.35"))) ahead (f "1e30"))))))))))))
+(define nearest (\x (\y (\dx (\dy (\ws (\best (match ws
+  (nil best)
+  ((cons w r) (nearest x y dx dy r (fmin best (facing x y dx dy w))))))))))))
+(define shoot (\mv (\x (\y (\dx (\dy (\ws
+  (let ((wall_d (perp (lhit_of mv x y dx dy) x y dx dy)))
+  (let ((d (nearest x y dx dy ws wall_d)))
+    (if (flt d wall_d) (remove_at x y dx dy d ws) ws))))))))))
+(define remove_at (\x (\y (\dx (\dy (\d (\ws (match ws
+  (nil nil)
+  ((cons w r) (if (feq (facing x y dx dy w) d) r (cons w (remove_at x y dx dy d r))))))))))))
+(define count (\l (match l (nil 0) ((cons h t) (add 1 (count t))))))
+
+; the wisps drift towards you (around the walls, one axis at a time), and drain you when they touch
+(define drift (\mv (\x (\y (\speed (\w (match w ((wisp wx wy ph)
+  (let ((fx (fsub x wx)) (fy (fsub y wy)))
+  (let ((len (fmax (f "0.001") (fsqrt (fadd (fmul fx fx) (fmul fy fy))))))
+  (match (slide mv wx wy (fmul speed (fdiv fx len)) (fmul speed (fdiv fy len)))
+    ((wisp nx ny _) (wisp nx ny (fadd ph (f "0.15")))))))))))))))
+(define drift_all (\mv (\x (\y (\speed (\ws (match ws (nil nil) ((cons w r) (cons (drift mv x y speed w) (drift_all mv x y speed r))))))))))
+(define touching (\x (\y (\ws (match ws
+  (nil 0)
+  ((cons w r) (match w ((wisp wx wy ph)
+    (add (if (flt (fadd (fmul (fsub wx x) (fsub wx x)) (fmul (fsub wy y) (fsub wy y))) (f "0.36")) 1 0) (touching x y r))))))))))
+
+; a new wisp now and then, in an open cell away from you
+(define spawn (\mv (\x (\y (\t (\seed (\ws
+  (if (or (lt 0 (mod t 75)) (gt (count ws) 7))
+    ws
+    (let ((cx (add 1 (mod (shr seed 8) 14))) (cy (add 1 (mod (shr seed 16) 14))))
+    (let ((wx (fadd (i2f cx) HALF)) (wy (fadd (i2f cy) HALF)))
+      (if (or (gt (lcell mv cx cy) 0) (flt (fadd (fmul (fsub wx x) (fsub wx x)) (fmul (fsub wy y) (fsub wy y))) (f "25")))
+        ws
+        (cons (wisp wx wy ZERO) ws))))))))))))
+
+(define update (\w (\keys (match w ((world x y a hp score cool ws t seed)
+  (let ((mv MAPL))
+  (if (eq hp 0)
+    (if (linden.pressed keys linden.key_start) (start (rnd seed)) w)
+    (let ((na (fadd a (fsub (if (linden.down keys linden.key_right) (f "0.06") ZERO) (if (linden.down keys linden.key_left) (f "0.06") ZERO)))))
+    (let ((dx (fcos na)) (dy (fsin na))
+          (step (fsub (if (linden.down keys linden.key_up) (f "0.08") ZERO) (if (linden.down keys linden.key_down) (f "0.08") ZERO))))
+    (match (slide mv x y (fmul step dx) (fmul step dy))
+      ((wisp nx ny _)
+        (let ((fire (and (linden.pressed keys linden.key_a) (eq cool 0))))
+        (let ((alive (if fire (shoot mv nx ny dx dy ws) ws)))
+        (let ((moved (drift_all mv nx ny (fadd (f "0.012") (fmul (i2f score) (f "0.0015"))) alive)))
+          (world nx ny na
+                 (let ((left (sub hp (touching nx ny moved)))) (if (lt left 0) 0 left))
+                 (add score (sub (count ws) (count alive)))
+                 (if fire 10 (if (gt cool 0) (sub cool 1) 0))
+                 (spawn mv nx ny t seed moved)
+                 (add t 1) (rnd seed))))))))))))))))
+
+; --- the picture ---------------------------------------------------------------------------
+(define wisp_vec (\t (\ws (\v (match ws
+  (nil v)
+  ((cons w r) (match w ((wisp x y ph) (wisp_vec t r (apush (apush (apush v x) y) (fsin ph)))))))))))
+
+(define hud (\hp (\score (\cool (\r
+  (linden.rect 79 56 2 8 16777215 (linden.rect 76 59 8 2 16777215
+  (linden.rect 4 112 52 5 2236962 (linden.rect 5 113 (div hp 2) 3 (if (lt hp 30) 16729156 8454016)
+  (linden.number 140 4 score 2 16777215
+  (if (gt cool 6) (linden.disc 80 104 (mul 2 (sub cool 4)) 16774304 r) r)))))))))))
+
+(define gameover (\score (\r
+  (linden.rect 30 46 100 28 1052688 (linden.text 46 50 "GAME OVER" 1 16777215 (linden.text 38 62 "ENTER: AGAIN" 1 12632256 r))))))
+
+(define draw (\w (match w ((world x y a hp score cool ws t seed)
+  (let ((dx (fcos a)) (dy (fsin a)))
+  (linden.frame W H
+    (linden.image 0 0 W H
+      (tab MAP (wisp_vec t ws (array 0 0)) x y dx dy (fmul (fsub ZERO dy) FOV) (fmul dx FOV) 0 N (array 0 0))
+      (hud hp score cool (if (eq hp 0) (gameover score nil) nil)))))))))
+
+(linden.game draw update (start 2024))
