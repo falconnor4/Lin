@@ -91,6 +91,8 @@ DECLARED = {
     ("src/lin.h", "nodes[LIN_CLAIM_NODES]"): "the storage that LIN_CLAIM_NODES sizes -- bounds derive from it, never from the macro",
     ("src/main.c", "#define PATH_MAX 4096"): "POSIX path length, restated for hosts without limits.h",
     ("src/main.c", "<< 30"): "rlimit request: a 1 GB stack, capped at whatever the OS allows",
+    ("src/main.c", "<< 23"): "a constant's evaluation budget (def_precompile): past it the definition stays an expression, expanded as before -- a bound on work done ahead of demand, not on the program",
+    ("src/io.c", "> 20000"): "net_reify_data's recursion depth: the C stack it walks on; deeper data is left as it is, not rebuilt",
     ("src/main.c", "<< 22"): "AOT_STEP_LIMIT: the artifact build's own ceiling (known limit, next to remove)",
     ("src/net.c", "<< 30"): "table growth guard: refuses to double past 1 << 30 entries (allocation)",
     ("src/net.c", "<< 22"): "per-wave reduce quantum: work done before returning to the wave loop (scheduling, not a ceiling)",
