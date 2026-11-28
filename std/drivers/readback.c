@@ -401,54 +401,53 @@ enum { EFF_DONE = 0, EFF_PRINT, EFF_WRITE, EFF_WAIT, EFF_LOOP, EFF_NEXT, EFF_N }
    effect apart from the language's own data: `\k.((k a) b)` is a PAIR and `\c.\n.((c h) t)` is a LIST
    CELL, so an effect with fewer payloads than two would make every such VALUE read as a finished
    effect -- measured: `(pair true false)` printed nothing, swallowed as `io_done`. */
-static const int eff_pay[EFF_N] = { 2, 2, 3, 2, 2, 2 };
+static const int eff_pay[EFF_N] = { 1, 2, 3, 2, 2, 1 };
 
-/* dig the effect at `p`: 1 when `p` is one, with its code and its payload ports in APPLICATION
-   order (pay[0] is applied first).  The OBSERVED port is forced -- an effect is only there once the
-   reduction reached it -- and the body below it is then READ, never demanded: forcing a payload or a
-   continuation here would evaluate work nothing asked for, and on a recursive net that is what
-   unrolls the knot the reducer deliberately left alone (the code is a literal numeral, so reading it
-   costs nothing). */
-static int eff_dig(Net *n, Port p, int *code, Port pay[3], int *npay) {
-  Port l = net_dup_hop(n, net_force_val(n, p));
-  if (l.node < 0 || l.node >= n->nn || n->dead[l.node] || n->tag[l.node] != LAM) return 0;
-  Port cur = net_dhop(n, wire((Port){l.node, 2}));
-  Port tmp[3]; int np = 0;
-  for (int step = 0; step < 8; step++) {
-    if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || cur.port != 1 ||
-        n->tag[cur.node] != APP) return 0;
-    Port fn = net_dup_hop(n, wire((Port){cur.node, 0}));
-    /* the tag's own binder: the code is here.  Across a fan the walk may stand in ANOTHER copy of the
-       effect than `l` (a recursive function's), so the test is "a binder", and eff_open -- which reduces
-       rather than walks -- is what then reads the right copy and checks it. */
-    if (fn.port == 1 && n->tag[fn.node] == LAM) {
-      int64_t c = net_read_int(n, wire((Port){cur.node, 2}), LIN_ENC_NUM);
-      if (c < 0 || c >= EFF_N || np != eff_pay[c]) return 0;
-      for (int i = 0; i < np; i++) pay[i] = tmp[np - 1 - i];
-      if (npay) *npay = np;
-      if (code) *code = (int)c;
-      return 1;
-    }
-    if (np >= 3) return 0;
-    tmp[np++] = wire((Port){cur.node, 2});
-    cur = net_dhop(n, wire((Port){cur.node, 0}));
+/* WHICH EFFECT A VALUE IS.  An effect is a value of std/io.lin's datatype `_Io`, so it is six dispatch
+   binders over its constructor's MARKER, `((\_c (d_i f1..fk)) ID)` -- the ID names the constructor, and the
+   constructor is the code (they are declared in the codes' order).  A marker the reduction already fired
+   leaves `(d_i f1..fk)`, and the head binder's place says the same thing.  The walk READS the body below the
+   forced top, never demands it: forcing a payload here would evaluate work nothing asked for.  `hop` says
+   whether the walk crosses fans (the effect's own copy is then checked when eff_open takes it apart). */
+static int eff_code(Net *n, Port l, int hop) {
+  if (!live(l) || n->tag[l.node] != LAM || l.port != 0) return -1;
+  int bind[EFF_N];
+  Port cur = l, body = (Port){-1, 0};
+  for (int i = 0; i < EFF_N; i++) {
+    if (!live(cur) || n->tag[cur.node] != LAM || cur.port != 0) return -1;
+    bind[i] = cur.node;
+    body = wire((Port){cur.node, 2});
+    if (hop) body = net_dhop(n, body);
+    cur = body;
   }
-  return 0;
+  if (!live(body) || n->tag[body.node] != APP || body.port != 1) return -1;
+  Port fl = wire((Port){body.node, 0});
+  if (hop) fl = net_dhop(n, fl);
+  if (live(fl) && n->tag[fl.node] == LAM && fl.port == 0 && live(wire((Port){fl.node, 1})) &&
+      n->tag[wire((Port){fl.node, 1}).node] == ERA) {
+    const LinCtor *ci = lin_ctor_info(net_read_int(n, wire((Port){body.node, 2}), LIN_ENC_NUM));
+    if (!ci || strcmp(ci->dt, "_Io") || ci->m != EFF_N || ci->i < 0 || ci->i >= EFF_N || ci->k != eff_pay[ci->i]) return -1;
+    return ci->i;
+  }
+  int nargs = 0; Port hd = body;                    /* (the marker fired: the head binder says it) */
+  while (live(hd) && n->tag[hd.node] == APP && hd.port == 1) { nargs++; hd = wire((Port){hd.node, 0}); if (hop) hd = net_dhop(n, hd); }
+  if (!live(hd) || n->tag[hd.node] != LAM || hd.port != 1) return -1;
+  for (int i = 0; i < EFF_N; i++) if (bind[i] == hd.node) return nargs == eff_pay[i] ? i : -1;
+  return -1;
+}
+static int eff_dig(Net *n, Port p, int *code, Port pay[3], int *npay) {
+  (void)pay;
+  int c = eff_code(n, net_dup_hop(n, net_force_val(n, p)), 1);
+  if (c < 0) return 0;
+  *code = c; *npay = eff_pay[c];
+  return 1;
 }
 
 /* A non-forcing "is this an effect?" test, for the continuation check below: the shape only. */
 static int eff_shape(Net *n, Port p) {
   for (int step = 0; step < n->nn && p.node >= 0 && p.node < n->nn && !n->dead[p.node] && n->tag[p.node] == DUP; step++)
     p = p.port == 0 ? wire((Port){p.node, 1}) : wire((Port){p.node, 0});
-  if (!live(p) || n->tag[p.node] != LAM) return 0;
-  Port cur = wire((Port){p.node, 2});
-  for (int step = 0; step < 8; step++) {
-    if (!live(cur) || cur.port != 1 || n->tag[cur.node] != APP) return 0;
-    Port fn = wire((Port){cur.node, 0});
-    if (fn.node == p.node && fn.port == 1) return n->tag[wire((Port){cur.node, 2}).node] != ERA;
-    cur = wire((Port){cur.node, 0});
-  }
-  return 0;
+  return eff_code(n, p, 0) >= 0;
 }
 
 /* The string encoding, built here because readback is who needs one (an input line, a command's
@@ -529,30 +528,33 @@ static Port eff_pay_now(Net *n, int i) { (void)n; return wire((Port){eh.h[i + 1]
 static int eff_open(Net *n, int64_t step_limit, int *code, Port pay[3], int *npay) {
   if (eh.n != n) { eh.n = n; for (int i = 0; i < 5; i++) eh.h[i] = net_alloc(n, ROOT, scope_nil()).node; }
   Scope sc = scope_nil();
-  Port lc = net_alloc(n, LAM, sc), la = net_alloc(n, LAM, sc), lb = net_alloc(n, LAM, sc), ld = net_alloc(n, LAM, sc);
-  Port lam[4] = { lc, la, lb, ld };
-  for (int i = 0; i < 4; i++) {
-    net_link(n, (Port){lam[i].node, 1}, (Port){eh.h[i], 0}, 0);
-    net_link(n, (Port){lam[i].node, 2}, i < 3 ? (Port){lam[i + 1].node, 0} : (Port){eh.h[4], 0}, 0);
+  int c = *code, k = eff_pay[c];
+  /* the effect is applied to six handlers: its own constructor's takes the fields onto the holders and
+     answers the sentinel; the others are erasers, as the constructor erases them */
+  Port val = wire((Port){0, 0}), head = (Port){-1, 0}, fnp = (Port){-1, 0};
+  for (int i = 0; i < EFF_N; i++) {
+    Port hnd;
+    if (i == c) {
+      Port lam[3];
+      for (int j = 0; j < k; j++) lam[j] = net_alloc(n, LAM, sc);
+      for (int j = 0; j < k; j++) {
+        net_link(n, (Port){lam[j].node, 1}, (Port){eh.h[j + 1], 0}, 0);
+        net_link(n, (Port){lam[j].node, 2}, j + 1 < k ? (Port){lam[j + 1].node, 0} : (Port){eh.h[4], 0}, 0);
+      }
+      hnd = (Port){lam[0].node, 0};
+    } else hnd = net_alloc(n, ERA, sc);
+    Port app = net_alloc(n, APP, sc);
+    net_link(n, (Port){app.node, 2}, hnd, 0);
+    if (i == 0) head = app; else net_link(n, (Port){app.node, 0}, fnp, 0);
+    fnp = (Port){app.node, 1};
   }
-  Port app = net_alloc(n, APP, sc), val = wire((Port){0, 0});
-  net_link(n, (Port){app.node, 2}, (Port){lc.node, 0}, 0);
-  net_link(n, (Port){0, 0}, (Port){app.node, 1}, 0);
-  net_link(n, (Port){app.node, 0}, val, 1);
+  net_link(n, (Port){0, 0}, fnp, 0);
+  net_link(n, (Port){head.node, 0}, val, 1);        /* (the head application is the redex) */
   net_reduce(n, step_limit);
   Port r = wire((Port){0, 0});
-  int np;
-  if (r.node == ld.node && r.port == 0 && !n->dead[ld.node]) {   /* two payloads: the last lambda is left over */
-    np = 2;
-    for (int k = 0; k < 3; k++) n->wire[ld.node * 3 + k] = (Port){-1, 0};   /* (cut from the holders, then reclaimed) */
-    net_drop(n, ld.node);
-  } else if (r.node == eh.h[4]) np = 3;
-  else return 0;
-  int64_t c = net_read_int(n, wire((Port){eh.h[0], 0}), LIN_ENC_NUM);
-  eff_erase(n, wire((Port){eh.h[0], 0}));
-  if (c < 0 || c >= EFF_N || eff_pay[c] != np) return 0;
-  for (int i = 0; i < np; i++) pay[i] = wire((Port){eh.h[i + 1], 0});
-  *code = (int)c; *npay = np;
+  if (r.node != eh.h[4]) return 0;
+  for (int i = 0; i < k; i++) pay[i] = wire((Port){eh.h[i + 1], 0});
+  *npay = k;
   return 1;
 }
 
@@ -700,7 +702,6 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
         loops[nloops++] = h.node;
         lin_io_looping = 1;
       } else {
-        eff_erase(n, eff_pay_now(n, 1));
         if (nloops == 0) { eff_erase(n, s_p); break; }   /* (`io_next` outside any loop: nothing to continue) */
       }
       force_data(n, (Port){eh.h[1], 0});                  /* (the state, as data: see above) */

@@ -626,7 +626,7 @@ void lin_form_register(LinFormRecall r, LinFormCommit c) { form_recall = r; form
 static int form_count, form_bad, form_nest, form_skip;   /* expressions seen; one was not cacheable; inside a load; results already printed */
 static int term_impure(const Term *t) {              /* an effect or a foreign call: its answer is not the source's alone */
   for (; t; t = t->r) {
-    if (t->type == TLAM && t->name && (!strcmp(t->name, "_ffi") || !strcmp(t->name, "_eff"))) return 1;
+    if (t->type == TLAM && t->name && (!strcmp(t->name, "_ffi") || !strncmp(t->name, "_eff", 4))) return 1;   /* (an effect: std/io.lin) */
     if (term_impure(t->l)) return 1;
   }
   return 0;

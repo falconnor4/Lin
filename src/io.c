@@ -143,6 +143,11 @@ Port net_force_val(Net *n, Port p) {
    chain's own variables (the Scott encoding every datatype, list, number and boolean has) -- so is each field.  Anything else (a function) is left as it is: entering it could
    unfold a recursion forever.  Each node is visited once, so shared data is forced once. */
 static Port *df_stk; static size_t df_cap; static unsigned *df_seen; static size_t df_seen_cap; static unsigned df_gen;
+static void df_grow(Net *n) {                     /* the seen marks cover every node: forcing allocates */
+  if (df_seen_cap >= (size_t)n->nn) return;
+  size_t o = df_seen_cap; df_seen_cap = (size_t)n->nn * 2;
+  df_seen = realloc(df_seen, df_seen_cap * sizeof *df_seen); memset(df_seen + o, 0, (df_seen_cap - o) * sizeof *df_seen);
+}
 int net_force_data(Net *n, Port use, int64_t limit) {   /* use: the consumer's end of the value's wire */
   size_t sp = 0; int top_ctor = -1;
   if (++df_gen == 0) { memset(df_seen, 0, df_seen_cap * sizeof *df_seen); df_gen = 1; }
@@ -156,10 +161,7 @@ int net_force_data(Net *n, Port use, int64_t limit) {   /* use: the consumer's e
     if (at.node < 0 || at.node >= n->nn || n->dead[at.node]) continue;
     Port v = net_force_val(n, wr(n, at));
     if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) continue;
-    if (df_seen_cap < (size_t)n->nn) {
-      size_t o = df_seen_cap; df_seen_cap = (size_t)n->nn * 2;
-      df_seen = realloc(df_seen, df_seen_cap * sizeof *df_seen); memset(df_seen + o, 0, (df_seen_cap - o) * sizeof *df_seen);
-    }
+    df_grow(n);
     if (df_seen[v.node] == df_gen) continue;
     df_seen[v.node] = df_gen;
     /* the chain of binders: each body forced in turn, while it is another abstraction */
@@ -175,11 +177,12 @@ int net_force_data(Net *n, Port use, int64_t limit) {   /* use: the consumer's e
           Port fl = wr(n, (Port){m.node, 0});
           if (fl.node >= 0 && n->tag[fl.node] == LAM && fl.port == 0) {
             Port bd = wr(n, (Port){fl.node, 1});
-            if (bd.node >= 0 && n->tag[bd.node] == ERA) { body = net_force_val(n, wr(n, (Port){fl.node, 2})); break; }
+            if (bd.node >= 0 && n->tag[bd.node] == ERA) { body = net_force_val(n, wr(n, (Port){fl.node, 2})); df_grow(n); break; }
           }
         }
       }
       body = net_force_val(n, wr(n, (Port){lam, 2}));
+      df_grow(n);                                  /* (forcing can grow the net) */
       if (body.node < 0 || body.node >= n->nn || n->dead[body.node] || n->tag[body.node] != LAM || body.port != 0) break;
       lam = body.node;
       if (df_seen[lam] == df_gen) break;
