@@ -143,6 +143,7 @@ Port net_force_val(Net *n, Port p) {
    chain's own variables (the Scott encoding every datatype, list, number and boolean has) -- so is each field.  Anything else (a function) is left as it is: entering it could
    unfold a recursion forever.  Each node is visited once, so shared data is forced once. */
 static Port *df_stk; static size_t df_cap; static unsigned *df_seen; static size_t df_seen_cap; static unsigned df_gen;
+int (*lin_data_fold)(Net *n, Port use);
 static void df_grow(Net *n) {                     /* the seen marks cover every node: forcing allocates */
   if (df_seen_cap >= (size_t)n->nn) return;
   size_t o = df_seen_cap; df_seen_cap = (size_t)n->nn * 2;
@@ -161,6 +162,7 @@ int net_force_data(Net *n, Port use, int64_t limit) {   /* use: the consumer's e
     if (at.node < 0 || at.node >= n->nn || n->dead[at.node]) continue;
     Port v = net_force_val(n, wr(n, at));
     if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) continue;
+    if (lin_data_fold && lin_data_fold(n, at)) continue;   /* (a pure foreign call: its value, see lin.h) */
     df_grow(n);
     if (df_seen[v.node] == df_gen) continue;
     df_seen[v.node] = df_gen;
@@ -208,6 +210,7 @@ int net_force_data(Net *n, Port use, int64_t limit) {   /* use: the consumer's e
   return top_ctor == 1;
 }
 
+
 /* A VALUE REBUILT AS DATA OF ITS OWN (the io loop's state, std/drivers/readback.c).  A value computed by sharing
    is reached through fans: its parts sit behind the duplications the computation made, and those duplications also
    hang from whatever else shared the code -- a loop's step, for one, whose next copy then cannot be taken without
@@ -221,6 +224,22 @@ typedef struct { int old, neu, used; } RdVar;
 static RdFan *rd_fan; static size_t rd_nfan, rd_cfan;
 static RdVar *rd_var; static size_t rd_nvar, rd_cvar;
 static int64_t rd_count, rd_cap; static int rd_build, rd_depth;
+/* IS IT A NUMERAL -- asked of the structure only.  Reading one forces each layer, and forcing a constructor's value
+   fires its MARKER (`\d0..((\_c ..) ID)`): the value would no longer say which constructor it is.  So the reader is
+   asked only of a value already shaped as a numeral's cell, `\c.\n.((c h) t)` -- never of a bare terminal, which is a
+   list's end as much as a zero (rebuilt as the numeral it would be a CELL). */
+static int rd_numeral(Net *n, Port q) {
+  Port c = net_dhop(n, q);
+  if (!live(n, c) || n->tag[c.node] != LAM || c.port != 0) return 0;
+  Port nn = net_dhop(n, wr(n, (Port){c.node, 2}));
+  if (!live(n, nn) || n->tag[nn.node] != LAM || nn.port != 0) return 0;
+  Port b = net_dhop(n, wr(n, (Port){nn.node, 2}));
+  if (!live(n, b) || n->tag[b.node] != APP || b.port != 1) return 0;
+  Port ia = net_dhop(n, wr(n, (Port){b.node, 0}));
+  if (!live(n, ia) || n->tag[ia.node] != APP || ia.port != 1) return 0;
+  Port hd = net_dhop(n, wr(n, (Port){ia.node, 0}));
+  return hd.node == c.node && hd.port == 1;
+}
 static Port rd_term(Net *n, Port q) {              /* q: the value's end; builds (rd_build) or counts; {-1}: not data */
   Port bad = {-1, 0};
   if (++rd_depth > 20000 || ++rd_count > rd_cap) { rd_depth--; return bad; }
@@ -228,7 +247,9 @@ static Port rd_term(Net *n, Port q) {              /* q: the value's end; builds
   { int64_t v;                                      /* a numeral: its value, read as every reader reads one (across its fans) */
     Port c = live(n, q) ? wr(n, q) : q;              /* (not in a function's place: reading a redex would fire it) */
     if (live(n, q) && !(live(n, c) && n->tag[c.node] == APP && c.port == 0) &&
-        ((n->tag[q.node] == LAM && q.port == 0) || (n->tag[q.node] == DUP && q.port != 0)) && net_read_i64(n, q, &v)) {
+        ((n->tag[q.node] == LAM && q.port == 0) || (n->tag[q.node] == DUP && q.port != 0)) && rd_numeral(n, q) && net_read_i64(n, q, &v)) {
+      /* (not a bare terminal: that is a list's end as much as a zero, and rebuilt as the numeral it is a CELL --
+         walked as it stands, it stays both) */
       rd_count += 2 * LIN_INT_BITS; rd_depth--;
       return rd_build ? net_alloc_scott(n, v) : (Port){0, 0};
     } }
@@ -290,7 +311,6 @@ int net_reify_data(Net *n, Port use) {              /* use: the consumer's end o
   net_link(n, use, v, 1);
   return 1;
 }
-
 /* ---------------- the encoding walks ----------------
    Every layer is FORCED before it is read: under needed order a cell can still hold an unreduced
    thunk, and reading it is what demands it (readback is the consumer, so readback forces).  A layer

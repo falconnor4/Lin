@@ -2585,7 +2585,7 @@ typedef struct { uint64_t h; Entry entry; int *aborted; void (*release)(void); }
 extern const LinFnUnit lin_fn_units[];
 #endif
 typedef struct { uint64_t h; Entry fn; int arity, kind; unsigned strict; int *aborted;
-                 Shape res; Shape **fld; int64_t nctor; void (*release)(void); Shape *psh; int npsh; } Compiled;   /* psh: each runtime argument's shape */   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
+                 Shape res; Shape **fld; int64_t nctor; void (*release)(void); Shape *psh; int npsh; Entry here; } Compiled;   /* psh: each runtime argument's shape */   /* kind 5: a data result, read by res/fld */   /* aborted: a data unit's guard fired */   /* strict: the parameters certainly evaluated */
 static Compiled **done; static int ndone, donecap;
 /* THE ENTRY'S CONSTANTS.  While an io loop runs, the call a unit compiles is the same every step but for the
    numbers already built in its arguments -- the loop's state: a frame counter, a position.  Written into the C
@@ -2676,6 +2676,7 @@ static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
   }
   Entry e = hnd ? (Entry)(intptr_t)dlsym(hnd, "lin_fn_entry") : NULL;   /* one per object, loaded RTLD_LOCAL */
   int *ab = hnd ? (int *)dlsym(hnd, "lin_fn_aborted") : NULL;
+  Entry here = hnd ? (Entry)(intptr_t)dlsym(hnd, "lin_fn_entry_here") : NULL;
   if (!e) DBG("no compiler or the build failed for %s\n", c);
 #endif
   if (ndone >= donecap) done = realloc(done, (size_t)(donecap = donecap ? donecap * 2 : 32) * sizeof *done);
@@ -2692,6 +2693,9 @@ static Compiled *compile_src(const char *src, int ar, int kind, Shape res) {
     for (int64_t k = 1; k <= sh_nctor; k++) { int nk = lin_ctor_info(k)->k + 1; cp->fld[k] = malloc(sizeof **cp->fld * (size_t)nk); memcpy(cp->fld[k], sh_fld[k], sizeof **cp->fld * (size_t)nk); }
     if (kind == 5 && !cp->release) e = NULL;
   }
+#ifndef LIN_STATIC
+  cp->here = here;
+#endif
   done[ndone++] = cp;
   return e ? cp : NULL;
 }
@@ -4961,6 +4965,9 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
         /* a structure result stays in the arena until the driver has built it into the net (lin_fn_release) */
         put(&b, "  if (pthread_create(&t, &at, lin_run, 0)) { LIN_NO_THREAD; } else pthread_join(t, 0);%s return lin_res; }\n",
             numeric ? " lin_free_all();" : "");
+        /* (the same entry on the caller's stack, which must be as large as lin_run's: the driver's own, see BIG STACK) */
+        put(&b, "int64_t lin_fn_entry_here(const int64_t *a, int threads) { lin_threads_ = threads; lin_args = a;%s lin_fn_aborted = 0;%s lin_run(0);%s return lin_res; }\n",
+            kt_on ? kts : "", data ? (rc_mt ? " lin_mt = threads > 1;" : " lin_mt = 0;") : "", numeric ? " lin_free_all();" : "");
         put(&b, "void lin_fn_release(void) { lin_free_all(); }\n");
         {                                              /* the shapes the parallel code and the entry met, then every prototype */
           Buf db = nbuf(256);
@@ -5084,6 +5091,46 @@ static int fn_claim(const Net *n, Port p1, Port p2) {
    reads a constructor reads these -- and a block the result reaches more than once is built ONCE and shared by a
    fan with a label of its own, as the program's own sharing would be: the net gets the DAG, not a tree. */
 typedef struct { int64_t ptr; int refs; int used; Port *outs; } RBlk;
+/* BIG STACK.  Data is deep, so what walks it -- reading data in, building a result back, a data unit's own entry --
+   runs on a stack of its own, a gigabyte reserved and mostly never touched.  Made a new thread per call, that was
+   most of a loop turn (measured: thread creation and the unmapping after it, ~60 us of a ~170 us turn).  So the
+   driver keeps ONE such stack, reserved once, and runs the walk there by switching to it: the same stack, no
+   thread.  (A walk already on it -- or a build without ucontext -- takes a thread, as before.) */
+#if !defined(LIN_STATIC) && !defined(__EMSCRIPTEN__)
+#include <ucontext.h>
+#include <sys/mman.h>
+static ucontext_t big_ctx, big_back; static char *big_stack; static size_t big_size; static int big_in;
+static void (*big_job)(void *); static void *big_arg;
+static void big_tramp(void) { big_job(big_arg); }
+static int big_call(void (*f)(void *), void *u) {
+  if (big_in) return 0;
+  if (!big_stack) {
+    size_t pg = (size_t)sysconf(_SC_PAGESIZE); big_size = ((size_t)1 << 30) + pg;   /* (lin_run's own size, and a guard page) */
+    void *m = mmap(NULL, big_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
+    if (m == MAP_FAILED) return 0;
+    mprotect(m, pg, PROT_NONE);
+    big_stack = m;
+  }
+  if (getcontext(&big_ctx)) return 0;
+  big_ctx.uc_stack.ss_sp = big_stack; big_ctx.uc_stack.ss_size = big_size; big_ctx.uc_link = &big_back;
+  makecontext(&big_ctx, big_tramp, 0);
+  big_job = f; big_arg = u; big_in = 1;
+  int bad = swapcontext(&big_back, &big_ctx);
+  big_in = 0;
+  return !bad;
+}
+#else
+static int big_call(void (*f)(void *), void *u) { (void)f; (void)u; return 0; }
+#endif
+/* f(u) on a large stack: the driver's own, else a thread's; 0 when neither could be had */
+static int on_big_stack(void *(*f)(void *), void *u) {
+  if (big_call((void (*)(void *))(void (*)(void))f, u)) return 1;
+  pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);
+  pthread_t t; int ok = !pthread_create(&t, &at, f, u);
+  if (ok) pthread_join(t, NULL);
+  pthread_attr_destroy(&at);
+  return ok;
+}
 typedef struct { Net *n; const Compiled *c; RBlk *tab; int64_t cap, cnt; int64_t budget; int bad; uint64_t lbl; } Reif;
 static RBlk *rb_get(Reif *R, int64_t ptr, int make) {
   if (make && (R->cnt + 1) * 2 > R->cap) {
@@ -5267,10 +5314,7 @@ static Port result_port(Net *n, const Compiled *c, int64_t r) {
   Port v = NONE;
   if (!R.bad) {
     RfArg a = { &R, r, NONE };
-    pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);
-    pthread_t t;
-    if (!pthread_create(&t, &at, rf_thread, &a)) { pthread_join(t, NULL); v = a.out; }
-    pthread_attr_destroy(&at);
+    if (on_big_stack(rf_thread, &a)) v = a.out;
   }
   lbl = R.lbl;
   for (int64_t i = 0; i < R.cap; i++) free(R.tab[i].outs);
@@ -5495,10 +5539,7 @@ static void *ms_thread(void *u) {
 }
 static int64_t marshal(Marsh *M, Port p, Shape s) {   /* (on a large stack: data is deep) */
   MsArg a = { M, p, s, 0 };
-  pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, (size_t)1 << 30);
-  pthread_t t;
-  if (pthread_create(&t, &at, ms_thread, &a)) M->bad = 1; else pthread_join(t, NULL);
-  pthread_attr_destroy(&at);
+  if (!on_big_stack(ms_thread, &a)) M->bad = 1;
   return a.w;
 }
 /* Is this argument a DATA value already -- a list or a constructor -- rather than a number or a function? */
@@ -5984,6 +6025,84 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
     lin_fold_bump(); folded++; (*changed)++; n->steps++;
   }
   return folded;
+}
+
+/* A LOOP'S STEP, COMPILED (the io runner's: std/drivers/readback.c).  `io_loop s step` runs `step s` every turn,
+   and the step is the same function every turn: it is compiled ONCE, as a unit taking the state (a number, or data
+   passed in) and returning the effect it ends with -- an effect is a datatype's value (std/io.lin), so the unit
+   builds it as it builds any structure.  A turn is then: read the state in, run, build the effect back -- not the
+   step's whole body reduced on the net (measured: a counter at ~240 us a turn on the net).
+
+   The step is a closed function `\s. body`, not a recursive call, so the unit's function is the step under a self
+   binder nothing names (fun_params skips it), built for the compile and taken away after.  Whatever the compile
+   reads but the turn's state -- inputs met inside the step (a vector it closes over), the entry's constant table --
+   is the step's own and the same every turn: kept with the unit, read in again each turn. */
+typedef struct { Compiled *c; int an; int64_t *kt; int nkt; Port *inp; int ninp; } FnStep;
+typedef struct { Entry f; const int64_t *a; int th; int64_t r; } StepCall;
+static void step_call(void *u) { StepCall *k = u; k->r = k->f(k->a, k->th); }
+static int arg_kind(Net *n, Port a) {
+  int64_t d;
+  if (numeral_shape(n, a) && net_read_i64(n, a, &d)) return 1;
+  if (data_value(n, a) && !list_end(n, a)) return 2;
+  return 0;
+}
+void *lin_fn_step_compile(Net *n, int holder, Port arg) {
+  N = n;
+  if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
+  if (fn_off || getenv("LIN_STEP_OFF")) return NULL;
+  Port step = W(n, (Port){holder, 0});
+  if (!is(n, step, LAM, 0)) return NULL;
+  int an = arg_kind(n, arg);
+  if (!an) { DBG("step: the state is neither a number nor data\n"); return NULL; }
+  Port G = net_alloc(n, LAM, n->scope[step.node]), e = net_alloc(n, ERA, n->scope[step.node]);
+  net_link(n, (Port){G.node, 1}, e, 0);
+  net_link(n, (Port){G.node, 2}, step, 0);
+  int rm = root_mode; root_mode = 0; cx_n = 0;
+  Port ap[1] = { arg }; int ann[1] = { an };
+  DBG("step: compiling the loop's step (the state %s)\n", an == 1 ? "a number" : "data");
+  failed = 0; fuel = 1000000;                        /* (the arity reads a returned constructor's marker: an evaluation) */
+  Compiled *c = fun_arity(G.node) == 1 ? compile_pref(n, G.node, ap, ann, 1) : NULL;
+  root_mode = rm;
+  net_link(n, (Port){holder, 0}, W(n, (Port){G.node, 2}), 0);   /* (the step back on its holder; the wrapper goes) */
+  for (int k = 0; k < 3; k++) n->wire[G.node * 3 + k] = NONE;
+  n->wire[e.node * 3] = NONE;
+  net_drop(n, G.node); net_drop(n, e.node);
+  if (!c || ann[0] != an || c->kind != 5) { DBG("step: declined%s\n", c ? " (the unit is not the effect)" : ""); return NULL; }
+  FnStep *u = calloc(1, sizeof *u);
+  u->c = c; u->an = an;
+  u->nkt = kt_n; if (kt_n) { u->kt = malloc(sizeof *u->kt * (size_t)kt_n); memcpy(u->kt, kt_val, sizeof *u->kt * (size_t)kt_n); }
+  u->ninp = n_inp; if (n_inp) { u->inp = malloc(sizeof *u->inp * (size_t)n_inp); memcpy(u->inp, inp_port, sizeof *u->inp * (size_t)n_inp); }
+  DBG("step: compiled (%d constant%s, %d input%s)\n", u->nkt, u->nkt == 1 ? "" : "s", u->ninp, u->ninp == 1 ? "" : "s");
+  return u;
+}
+/* one turn: 1 and the effect built at *val, or 0 -- the net runs this turn (the state changed kind, a guard fired) */
+int lin_fn_step_run(Net *n, void *h, Port arg, Port *val) {
+  FnStep *u = h; Compiled *c = u->c;
+  N = n;
+  if (arg_kind(n, arg) != u->an) return 0;
+  int64_t *xa = malloc(sizeof *xa * (size_t)(2 + u->ninp + u->nkt)); int nn = 0, pi = 0;
+  Marsh M; memset(&M, 0, sizeof M); M.n = n; M.c = c; M.steps0 = n->steps;
+  if (u->an == 1) { net_read_i64(n, arg, &xa[nn++]); pi++; }
+  else if (!c->npsh || c->psh[0].k == 0) { xa[nn++] = 0; pi++; }
+  else { xa[nn++] = marshal(&M, arg, c->psh[0]); pi++; }
+  for (int i = 0; i < u->ninp && !M.bad; i++, pi++) {
+    if (pi >= c->npsh) { M.bad = 1; break; }
+    xa[nn++] = marshal(&M, u->inp[i], c->psh[pi]);
+  }
+  if (M.bad) { ms_free(&M); free(xa); DBG("step: the state could not be read in\n"); return 0; }
+  for (int i = 0; i < u->nkt; i++) xa[nn++] = u->kt[i];
+  extern int lin_threads;
+  int th = lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN);
+  int64_t r;
+  StepCall sc = { c->here, xa, th, 0 };
+  if (c->here && big_call(step_call, &sc)) r = sc.r; else r = c->fn(xa, th);
+  free(xa);
+  if (c->aborted && *c->aborted) { ms_free(&M); DBG("step: the guard fired\n"); return 0; }
+  Port v = result_port(n, c, r);
+  ms_free(&M);
+  if (v.node < 0) return 0;
+  *val = v;
+  return 1;
 }
 
 /* THE WHOLE EXPRESSION, BEFORE ANYTHING ELSE TOUCHES IT.  A call's context is a chain, and a chain ends at a

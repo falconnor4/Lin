@@ -560,6 +560,28 @@ static int eff_open(Net *n, int64_t step_limit, int *code, Port pay[3], int *npa
 
 static int64_t swept_at;                          /* the live size after the loop's last sweep: it sweeps when that doubles */
 static int *loops, nloops, cloops;                /* the holders of the running loops' steps, innermost last */
+static void **loop_unit; static char *loop_tried;   /* ... and each one's compiled step (fn: lin_fn_step_compile), once tried */
+/* THE STEP, COMPILED.  The fn driver compiles a loop's step once, as a unit from the state to the effect the turn
+   ends with (std/drivers/fn.c, A LOOP'S STEP, COMPILED); a turn is then a call, and the net is not reduced at all.
+   A step it does not compile -- or a turn it hands back -- is the copy below, as before. */
+typedef void *(*StepCompile)(Net *, int, Port);
+typedef int (*StepRun)(Net *, void *, Port, Port *);
+#ifdef LIN_STATIC
+extern void *lin_fn_step_compile(Net *, int, Port); extern int lin_fn_step_run(Net *, void *, Port, Port *);
+static StepCompile step_compile(void) { return lin_fn_step_compile; }
+static StepRun step_run(void) { return lin_fn_step_run; }
+#else
+static StepCompile step_compile(void) {
+  static int tried; static StepCompile f;
+  if (!tried) { tried = 1; f = (StepCompile)dlsym(RTLD_DEFAULT, "lin_fn_step_compile"); if (!f && lin_driver_load("fn")) f = (StepCompile)dlsym(RTLD_DEFAULT, "lin_fn_step_compile"); }
+  return f;
+}
+static StepRun step_run(void) {
+  static int tried; static StepRun f;
+  if (!tried) { tried = 1; f = (StepRun)dlsym(RTLD_DEFAULT, "lin_fn_step_run"); }
+  return f;
+}
+#endif
 
 /* A TURN IS A FRESH INSTANCE OF THE STEP.  The turn is made the way a compiled call instantiates a function:
    the step's net is copied, node for node, and the copy is applied to the state.  That is what a duplication of
@@ -640,8 +662,21 @@ static Port copy_closed(Net *n, int holder) {
 /* A LOOP'S STATE IS FORCED TO DATA (net_force_data, src/io.c).  Under needed order a part of the state that no turn
    looks at is never evaluated, so it grows by one suspended step per turn -- measured, a list of 40 numbers advanced
    each turn and never read kept 186 nodes per turn, without end.  A loop's state is what the program carries on
-   with, so before the next turn it is evaluated as data. */
-static void force_data(Net *n, Port use) { net_force_data(n, use, 0); }
+   with, so before the next turn it is evaluated as data -- a pure foreign call in it included (a float the program
+   parsed from a literal, `(float "8.5")`): its number, not the call, is what the turn reads (lin.h, lin_data_fold). */
+static int data_fold(Net *n, Port use) {
+  Port p = net_dhop(n, wire(use)), a1, argp;
+  if (!live(p) || !net_ffi_header(n, (Port){p.node, 0}, &a1, &argp) || !live(a1) || a1.port != 1 || n->tag[a1.node] != APP) return 0;
+  const char *fn;
+  if (net_read_string_arena(n, wire((Port){a1.node, 2}), LIN_ENC_NUM, &fn) <= 0 || !ffi_row_pure(fn) || !strcmp(fn, "lin_streq")) return 0;
+  Val fv = run_ffi(n, p);
+  if (fv.kind != 1 && fv.kind != 4) return 0;             /* (a number, or a float's bits: both numerals) */
+  Port old = wire(use);
+  net_link(n, use, net_alloc_scott(n, fv.iv), 1);
+  eff_erase(n, old);
+  return 1;
+}
+static void force_data(Net *n, Port use) { lin_data_fold = data_fold; net_force_data(n, use, 0); }
 static int64_t run_io_body(Net *n, int64_t step_limit) {
   N = n;
   int did_io = 0;
@@ -696,7 +731,9 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
     if (code == EFF_LOOP || code == EFF_NEXT) {
       Port s_p = eff_pay_now(n, 0);
       if (code == EFF_LOOP) {
-        if (nloops == cloops) loops = realloc(loops, sizeof *loops * (size_t)(cloops = cloops ? cloops * 2 : 4));
+        if (nloops == cloops) { cloops = cloops ? cloops * 2 : 4; loops = realloc(loops, sizeof *loops * (size_t)cloops);
+          loop_unit = realloc(loop_unit, sizeof *loop_unit * (size_t)cloops); loop_tried = realloc(loop_tried, (size_t)cloops); }
+        loop_unit[nloops] = NULL; loop_tried[nloops] = 0;
         Port h = net_alloc(n, ROOT, scope_nil());
         net_link(n, (Port){h.node, 0}, eff_pay_now(n, 1), 0);
         loops[nloops++] = h.node;
@@ -705,11 +742,22 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
         if (nloops == 0) { eff_erase(n, s_p); break; }   /* (`io_next` outside any loop: nothing to continue) */
       }
       force_data(n, (Port){eh.h[1], 0});                  /* (the state, as data: see above) */
-      net_reify_data(n, (Port){eh.h[1], 0});              /* (... and as data of its own: net_reify_data, src/io.c) */
       {                                                    /* (a safepoint: the runner holds only its holders) */
         int64_t live = (int64_t)n->nn - n->nfree;
         if (live > 2 * swept_at) { int pins = n->pins; n->pins = 0; net_sweep(n); n->pins = pins; swept_at = (int64_t)n->nn - n->nfree; }
       }
+      {                                                    /* the compiled step, when there is one */
+        int li = nloops - 1;
+        if (!loop_tried[li]) { loop_tried[li] = 1; StepCompile sc = step_compile(); if (sc) loop_unit[li] = sc(n, loops[li], eff_pay_now(n, 0)); }
+        Port ev; StepRun sr = step_run();
+        if (loop_unit[li] && sr && sr(n, loop_unit[li], eff_pay_now(n, 0), &ev)) {
+          eff_erase(n, eff_pay_now(n, 0));                /* (read in: the turn's state is consumed) */
+          net_link(n, (Port){0, 0}, ev, 1);
+          io_reduce(n, step_limit); did_io = 1;           /* (unpinned: what the turn discarded is reclaimed) */
+          continue;
+        }
+      }
+      net_reify_data(n, (Port){eh.h[1], 0});              /* (... and as data of its own: net_reify_data, src/io.c) */
       s_p = eff_pay_now(n, 0);
       int h = loops[nloops - 1];
       Port app = net_alloc(n, APP, scope_nil());

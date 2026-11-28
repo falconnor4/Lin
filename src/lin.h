@@ -169,9 +169,11 @@ Port net_force_val(Net *n, Port p);
 /* Force the value a consumer's port leads to AS DATA: the value, and if it is a constructor (any Scott-encoded
    datatype, list, number) each field, to the end; a function is left as it is.  `limit`: the step count to stop
    at (0: none) -- what is left then stays lazy.  1: forced to the end, and the value is a constructor (data). */
+/* A PURE FOREIGN CALL IN DATA IS ITS VALUE: a float parsed from a literal, an int made a float -- what forcing data
+   to its values meets (net_force_data) is folded to the number it computes, by the provider that knows the calls
+   (std/drivers/readback.c sets it): 1 when the value at `use` was replaced. */
+extern int (*lin_data_fold)(Net *n, Port use);
 int net_force_data(Net *n, Port use, int64_t limit);
-/* Rebuild the data value a consumer's port leads to as nodes of its own, read through the fans it is reached by:
-   a value computed by sharing stays joined to what shared the code.  1: rebuilt; 0: left as it is (not closed data). */
 int net_reify_data(Net *n, Port use);
 /* Free what no ROOT and no demand root reaches (net.c: WHAT NOTHING CAN REACH).  A safepoint operation. */
 int64_t net_sweep(Net *n);
