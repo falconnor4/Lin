@@ -29,6 +29,11 @@ void lin_domains_init(void) {
   nominal_register("float", 0);
   nominal_register("list", 1);
   nominal_register("vec", 1);    /* (std/array.lin: a vector's type, whatever stores it) */
+  /* An EFFECT's type (std/io.lin).  Its encoding applies the effect's own binder to a continuation that is
+     itself an effect, so as a structural type it is infinite and a program that loops through effects could
+     not be typed at all ("infinite type").  Named, it is one type: what `io_wait`, `io_print`, `io_loop` and
+     `io_done` build. */
+  nominal_register("io", 0);
 }
 
 /* ---------------- fan walks ----------------  Fan chains: `dup_hop` is the crossing walk, `skip_dup` the plain one.  A CHAIN MAY CYCLE and the bound
@@ -89,7 +94,9 @@ static inline Port fan_walk(Net *n, Port p, int cross) {
   Port a = p, b = p; int64_t lim = (int64_t)n->nn, st = 0, L = 1; int chase = 1;
   for (; st < lim && live(n, a) && n->tag[a.node] == DUP; st++) {
     a = FSTEP(a);
-    if (!live(n, a) || n->tag[a.node] != DUP || !chase) break;
+    if (!live(n, a) || n->tag[a.node] != DUP) break;
+    if (!chase) continue;          /* (the chaser left the fans: no cycle, and the walk goes on to the end alone --
+                                      measured: a walk across four fans stopped ON the second, a fan, not a value) */
     if (!live(n, b) || n->tag[b.node] != DUP) { chase = 0; continue; }
     b = FSTEP(b);
     if (!live(n, b) || n->tag[b.node] != DUP) { chase = 0; continue; }
@@ -488,16 +495,42 @@ static int spine_entry(Net *n, Port argp) {
 /* Operand count of a cell-spine; -1 means it is not one, so only an empty list reads as concrete.
    The ONE authority on whether a spine is fully present: fewer decoded values than slots means an
    operand is not concrete YET, and a fold must be declined rather than guessed. */
+/* (see A LIST'S REST, HANDED OVER FLAT in lin.h) the words a driver gave for the tail at a cell slot, until the walk
+   that reads the arguments takes them */
+Port lin_flat_use = { -1, 0 };
+typedef struct { Port use; int64_t *v, n; } FlatRest;
+static FlatRest *flats; static int nflats, cflats;
+void lin_flat_put(Port use, int64_t *vals, int64_t k) {
+  if (nflats == cflats) flats = realloc(flats, sizeof *flats * (size_t)(cflats = cflats ? cflats * 2 : 4));
+  flats[nflats++] = (FlatRest){ use, vals, k };
+}
+static FlatRest *flat_at(Port use) {
+  for (int i = nflats - 1; i >= 0; i--) if (flats[i].use.node == use.node && flats[i].use.port == use.port) return &flats[i];
+  return NULL;
+}
+static void flat_drop(FlatRest *f) { free(f->v); *f = flats[--nflats]; }
+/* force the tail at value port t, letting a driver hand it over flat when the walk is its only reader */
+static Port flat_force(Net *n, Port t, int alone) {
+  Port su = lin_flat_use;
+  lin_flat_use = alone ? wr(n, t) : (Port){ -1, 0 };
+  Port v = net_force_val(n, t);
+  lin_flat_use = su;
+  return v;
+}
 int net_spine_slots(Net *n, Port argp) {
-  Port cur = skip_dup(n, net_force_val(n, argp));
+  Port c0 = net_force_val(n, argp), cur = skip_dup(n, c0);
   if (!spine_entry(n, cur)) return -1;
-  int slots = 0;
+  int slots = 0, alone = c0.node == cur.node;            /* (a list reached through a fan has another reader) */
   for (int step = 0; step < n->nn; step++) {
     Layer L;
     if (!cons_layer(n, cur, &L)) break;
     if (L.layer != L_INDUCTIVE) break;
     slots++;
-    cur = net_force_val(n, L.tail);
+    Port use = wr(n, L.tail);
+    cur = flat_force(n, L.tail, alone);
+    alone = alone && n->tag[cur.node] != DUP;
+    FlatRest *f = flat_at(use);
+    if (f) { slots += (int)f->n; break; }
   }
   return slots;
 }
@@ -572,6 +605,14 @@ int net_spine_args(Net *n, Port argp, const int *doms, int ndoms, Val *vals, int
   if (!spine_entry(n, cur)) return dec_arg(n, argp, doms[0], &vals[0]) ? 1 : 0;
   for (int step = 0; step < n->nn && argc < max; step++) {
     Layer L;
+    if (step) {                                       /* (a rest handed over flat: its words are the slots) */
+      FlatRest *f = flat_at(wr(n, cur));
+      if (f) {
+        int dom = doms[step < ndoms ? step : ndoms - 1];
+        for (int64_t i = 0; i < f->n && argc < max; i++) { vals[argc].iv = f->v[i]; vals[argc].kind = dom == DT_FLOAT ? 4 : 1; argc++; }
+        flat_drop(f); break;
+      }
+    }
     if (!cons_layer(n, cur, &L)) break;
     if (L.layer != L_INDUCTIVE) break;
     int dom = doms[step < ndoms ? step : ndoms - 1];
@@ -744,6 +785,8 @@ int net_print(Net *n, int domain) {
   return d ? d->print(n, lin_driver_state(n, d), domain) : 0;
 }
 
+int lin_io_yield;
+int lin_io_looping;
 int64_t net_run_io(Net *n, int64_t limit) {
   LinDriver *d = readback_driver();
   return d ? d->run_io(n, lin_driver_state(n, d), limit) : 0;

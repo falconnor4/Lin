@@ -435,6 +435,33 @@ static void era_drain(Net *n) {
   }
 }
 
+/* WHAT NOTHING CAN REACH.  Erasure reclaims what an eraser reaches, but some garbage is closed to it: a fan
+   with one copy erased waits for its next interaction (the rules above), and when the rest of its world was
+   discarded too there is none -- an island of nodes wired only to each other, no ROOT and no demand reaching
+   it.  Nothing in it can ever be observed (every observation starts at a root), so it is freed the way an
+   eraser frees, node by node.  A long-running program needs this: a game's loop left ~3k such nodes per frame
+   (examples/linden/leaves.lin, measured 887k of 921k live nodes unreachable after 150 frames).  It is a
+   safepoint operation -- no wave, no nested reduction, no pinned reader, no held claim -- and the caller
+   decides when (net_sweep is O(net)); returns the number of nodes freed. */
+int64_t net_sweep(Net *n) {
+  if (in_parallel || reduce_depth > 0 || n->pins || n->nheld) return 0;
+  unsigned char *mk = calloc((size_t)n->nn, 1); int *st = malloc(sizeof *st * (size_t)(n->nn + 1)); int sp = 0;
+  if (!mk || !st) { free(mk); free(st); return 0; }
+  for (int i = 0; i < n->nn; i++) if (!n->dead[i] && n->tag[i] == ROOT) { mk[i] = 1; st[sp++] = i; }
+  for (int r = 0; r < n->nroot; r++) { int v = n->root[r].node; if (v >= 0 && v < n->nn && !n->dead[v] && !mk[v]) { mk[v] = 1; st[sp++] = v; } }
+  while (sp) {
+    int i = st[--sp], ar = n->tag[i] == ERA || n->tag[i] == ROOT ? 1 : 3;
+    for (int p = 0; p < ar; p++) {
+      Port w = n->wire[i * 3 + p];
+      if (w.node >= 0 && w.node < n->nn && !n->dead[w.node] && !mk[w.node]) { mk[w.node] = 1; st[sp++] = w.node; }
+    }
+  }
+  int64_t freed = 0;
+  for (int i = 1; i < n->nn; i++) if (!n->dead[i] && !mk[i]) { node_free(n, i); freed++; }
+  free(mk); free(st);
+  return freed;
+}
+
 /* ---------------- fresh labels: a duplication retired when one copy can no longer be observed ----------------
    A fan waits when an eraser reaches ONE of its copy ports (see the erasure rules): collapsing it there is
    unsound, because a fan's partner is found by its label and the partner may still be on its way.  A label that

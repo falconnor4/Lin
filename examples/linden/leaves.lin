@@ -1,0 +1,81 @@
+; ==============================================================================
+; leaves.lin -- a small Linden game: catch the falling linden leaves
+; ------------------------------------------------------------------------------
+; Move the basket with the arrows (or A/D); every leaf caught scores, every leaf
+; that reaches the ground costs a life.  Enter starts again once the game is over.
+;
+;   Run (from the repository root):  make linden && ./lin examples/linden/leaves.lin
+;   Headless, for a check:           LINDEN_HEADLESS=1 LINDEN_FRAMES=600 LINDEN_PPM=leaves.ppm ./lin ...
+;   In the browser:                  web/build.sh examples/linden/leaves.lin, then open web/linden.html
+;                                    (see examples/linden/README.md)
+;
+; The whole game is the value `World` and two pure functions of it -- `step` (the
+; next world, given the keys) and `scene` (the picture of it).  Linden draws the
+; picture and answers with the keys; `game` runs the loop, the only effect.
+; ==============================================================================
+(load "std/std.lin")
+(load "linden.lin")
+
+(define W 160)
+(define H 120)
+(define BASKET 24)
+
+(datatype Leaf (leaf (x num) (y num) (v num)))
+(datatype World (world (px num) (leaves list Leaf) (score num) (lives num) (seed num) (t num)))
+
+; a linear congruential generator: the world carries its seed, so the game is a function of its input
+(define rnd (\s (mod (add (mul s 1103515245) 12345) 2147483648)))
+
+(define start (\seed (world 68 nil 0 3 seed 0)))
+
+; --- the leaves ------------------------------------------------------------------
+(define fall (\ls (match ls
+  ((cons l r) (match l ((leaf x y v) (cons (leaf x (add y v) v) (fall r)))))
+  (nil nil))))
+(define in_basket (\px (\l (match l ((leaf x y v)
+  (and (gt y (sub H 16)) (and (lt y (sub H 6)) (and (gt (add x 4) px) (lt x (add px BASKET))))))))))
+(define landed (\l (match l ((leaf x y v) (gt y (sub H 6))))))
+(define caught (\px (\ls (match ls ((cons l r) (add (if (in_basket px l) 1 0) (caught px r))) (nil 0)))))
+(define missed (\ls (match ls ((cons l r) (add (if (landed l) 1 0) (missed r))) (nil 0))))
+(define still_falling (\px (\ls (match ls
+  ((cons l r) (if (or (in_basket px l) (landed l)) (still_falling px r) (cons l (still_falling px r))))
+  (nil nil)))))
+
+; --- one step of the world ----------------------------------------------------------
+(define clamp (\lo (\hi (\v (if (lt v lo) lo (if (gt v hi) hi v))))))
+(define move (\px (\keys (clamp 0 (sub W BASKET)
+  (add px (sub (if (down keys key_right) 3 0) (if (down keys key_left) 3 0)))))))
+(define spawn (\t (\seed (\ls
+  (if (eq (mod t 24) 0) (cons (leaf (mod (shr seed 8) (sub W 8)) 0 (add 1 (mod (shr seed 16) 2))) ls) ls)))))
+
+(define step (\w (\keys (match w ((world px ls score lives seed t)
+  (if (eq lives 0)
+    (if (pressed keys key_start) (start seed) w)
+    (let ((np (move px keys)) (fl (fall ls)))
+      (let ((got (caught np fl)) (lost (missed fl)))
+        (world np (spawn t seed (still_falling np fl)) (add score got) (sub lives (if (gt lost lives) lives lost)) (rnd seed) (add t 1))))))))))
+
+; --- the picture: each part drawn onto the rest (r) ----------------------------------
+(define sky 1452875)        ; #162b4b
+(define ground 3832370)     ; #3a7a32
+(define white 16777215)
+(define leaf_pic (\l (\r (match l ((leaf x y v)
+  (tri x (add y 3) (add x 4) y (add x 8) (add y 3) 9031208 (tri x (add y 3) (add x 4) (add y 7) (add x 8) (add y 3) 6729514 r)))))))
+(define leaves_pic (\ls (\r (match ls ((cons l rest) (leaf_pic l (leaves_pic rest r))) (nil r)))))
+(define hearts (\n (\x (\r (if (eq n 0) r (disc x 6 2 15158332 (hearts (sub n 1) (add x 7) r)))))))
+(define status (\score (\lives (\r (number 4 4 score 1 white
+  (if (eq lives 0)
+    (text 46 48 "GAME OVER" 2 white (text 40 66 "ENTER: AGAIN" 1 13421772 r))
+    (hearts lives (sub W 24) r)))))))
+
+(define scene (\w (match w ((world px ls score lives seed t)
+  (frame W H
+    (clear sky
+    (rect 0 (sub H 6) W 6 ground
+    (leaves_pic ls
+    (rect px (sub H 12) BASKET 6 12087594
+    (box px (sub H 12) BASKET 6 8336150
+    (status score lives nil)))))))))))
+
+; --- the game ---------------------------------------------------------------------
+(game scene step (start 2024))

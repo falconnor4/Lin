@@ -347,7 +347,12 @@ static Val rb_rows(const char *fn, int argc, int64_t *c_args, const Val *fargs, 
     if (!strcmp(fn, "lin_parse_float") && argc > 0) { double d = strtod((char *)c_args[0], NULL); int64_t rb; memcpy(&rb, &d, 8); v.kind = 4; v.iv = rb; return v; }
     if (!strcmp(fn, "lin_streq") && argc >= 2 && fargs[1].kind == 2) { v.kind = 3; v.iv = !strcmp((char *)c_args[0], (char *)c_args[1]); return v; }
 #ifdef LIN_STATIC
-    if (!strcmp(fn, "dlopen") && argc > 0) { v.kind = 1; v.iv = 0; return v; }   /* (nothing to open: what a static build has is linked in) */
+    if (!strcmp(fn, "dlopen") && argc > 0) {   /* nothing to open: what a static build has is linked in, so the PATH names the
+                                                  plugin (its file name, less the extension) and that copy is started */
+      const char *path = (char *)c_args[0], *base = strrchr(path, '/'); base = base ? base + 1 : path;
+      size_t len = strcspn(base, "."); char name[len + 1]; memcpy(name, base, len); name[len] = 0;
+      v.kind = 1; v.iv = lin_static_plugin(name) != NULL; return v;
+    }
 #else
     if (!strcmp(fn, "dlopen") && argc > 0) { v.kind = 1; v.iv = (int64_t)(intptr_t)dlopen((char *)c_args[0], RTLD_NOW | RTLD_GLOBAL); return v; }
 #endif
@@ -391,12 +396,12 @@ static int net_try_ffi(Net *n, Port p) {
    what makes the effects tellable apart with no label: `io_print msg next` and `io_wait src cb` are
    OTHERWISE THE SAME NET (a payload and a continuation).  The code's payload count is fixed
    (below), so a lambda that merely applies its own binder to a number is not mistaken for one. */
-enum { EFF_DONE = 0, EFF_PRINT, EFF_WRITE, EFF_WAIT, EFF_N };
+enum { EFF_DONE = 0, EFF_PRINT, EFF_WRITE, EFF_WAIT, EFF_LOOP, EFF_NEXT, EFF_N };
 /* How many payloads each code carries.  EVERY code carries at least two, and that is what keeps an
    effect apart from the language's own data: `\k.((k a) b)` is a PAIR and `\c.\n.((c h) t)` is a LIST
    CELL, so an effect with fewer payloads than two would make every such VALUE read as a finished
    effect -- measured: `(pair true false)` printed nothing, swallowed as `io_done`. */
-static const int eff_pay[EFF_N] = { 2, 2, 3, 2 };
+static const int eff_pay[EFF_N] = { 2, 2, 3, 2, 2, 2 };
 
 /* dig the effect at `p`: 1 when `p` is one, with its code and its payload ports in APPLICATION
    order (pay[0] is applied first).  The OBSERVED port is forced -- an effect is only there once the
@@ -412,8 +417,11 @@ static int eff_dig(Net *n, Port p, int *code, Port pay[3], int *npay) {
   for (int step = 0; step < 8; step++) {
     if (cur.node < 0 || cur.node >= n->nn || n->dead[cur.node] || cur.port != 1 ||
         n->tag[cur.node] != APP) return 0;
-    Port fn = net_dhop(n, wire((Port){cur.node, 0}));
-    if (fn.node == l.node && fn.port == 1) {           /* the tag's own binder: the code is here */
+    Port fn = net_dup_hop(n, wire((Port){cur.node, 0}));
+    /* the tag's own binder: the code is here.  Across a fan the walk may stand in ANOTHER copy of the
+       effect than `l` (a recursive function's), so the test is "a binder", and eff_open -- which reduces
+       rather than walks -- is what then reads the right copy and checks it. */
+    if (fn.port == 1 && n->tag[fn.node] == LAM) {
       int64_t c = net_read_int(n, wire((Port){cur.node, 2}), LIN_ENC_NUM);
       if (c < 0 || c >= EFF_N || np != eff_pay[c]) return 0;
       for (int i = 0; i < np; i++) pay[i] = tmp[np - 1 - i];
@@ -489,14 +497,217 @@ static void eff_apply(Net *n, Port fn, Port arg) {
   net_link(n, (Port){0, 0}, (Port){app.node, 1}, 1);
 }
 
+/* TAKE THE EFFECT APART BY REDUCTION.  The shape walk above RECOGNISES an effect, but a walk cannot
+   EXTRACT one that is shared: an effect a recursive function returns is reached through the fans of its
+   instantiations, and a walk across a fan reads one copy (the first) whatever copy the program is at --
+   measured: a loop of `io_print`s printed its first message and then re-read that same effect forever.
+   So the effect is APPLIED to a decoder, `\c.\a.\b.\d.<hole>`, and the reducer performs exactly the
+   copying the program's own reduction would: the code and the payloads arrive on HOLDERS, ROOT nodes
+   (which never form a redex, net.c), and a two-payload effect leaves the decoder's last lambda unapplied
+   where a three-payload one consumes it.  The holders are this run's, reused by every effect it opens. */
+/* BETWEEN TWO EFFECTS IS A SAFEPOINT.  The run is pinned (rb_run_io) because readback holds ports while
+   it decodes, and a pinned net defers erasure and slot reuse -- for a program that is one effect that is
+   nothing, but a loop of effects (a game's frames) then never reclaims what each step discards: measured,
+   ~80 nodes kept per step and every step slower than the last.  Once an effect is consumed the runner holds
+   no port but its holders (ROOT nodes, which nothing frees), so the reduction that follows runs unpinned. */
+static void io_reduce(Net *n, int64_t step_limit) {
+  int pins = n->pins;
+  n->pins = 0;
+  net_reduce(n, step_limit);
+  n->pins = pins;
+}
+typedef struct { Net *n; int h[5]; } EffHold;
+static EffHold eh;
+static void eff_erase(Net *n, Port p) {             /* a consumed payload: the calculus's own eraser reclaims it */
+  if (p.node < 0 || p.node >= n->nn || n->dead[p.node]) return;
+  Port e = net_alloc(n, ERA, scope_nil());
+  net_link(n, e, p, 1);
+}
+/* Payload i, as its holder sees it NOW: reading a payload forces it, and a force re-aims the wire (a shared
+   payload is copied, net_force_val), so a port saved before the read can name a node the copy left behind. */
+static Port eff_pay_now(Net *n, int i) { (void)n; return wire((Port){eh.h[i + 1], 0}); }
+static int eff_open(Net *n, int64_t step_limit, int *code, Port pay[3], int *npay) {
+  if (eh.n != n) { eh.n = n; for (int i = 0; i < 5; i++) eh.h[i] = net_alloc(n, ROOT, scope_nil()).node; }
+  Scope sc = scope_nil();
+  Port lc = net_alloc(n, LAM, sc), la = net_alloc(n, LAM, sc), lb = net_alloc(n, LAM, sc), ld = net_alloc(n, LAM, sc);
+  Port lam[4] = { lc, la, lb, ld };
+  for (int i = 0; i < 4; i++) {
+    net_link(n, (Port){lam[i].node, 1}, (Port){eh.h[i], 0}, 0);
+    net_link(n, (Port){lam[i].node, 2}, i < 3 ? (Port){lam[i + 1].node, 0} : (Port){eh.h[4], 0}, 0);
+  }
+  Port app = net_alloc(n, APP, sc), val = wire((Port){0, 0});
+  net_link(n, (Port){app.node, 2}, (Port){lc.node, 0}, 0);
+  net_link(n, (Port){0, 0}, (Port){app.node, 1}, 0);
+  net_link(n, (Port){app.node, 0}, val, 1);
+  net_reduce(n, step_limit);
+  Port r = wire((Port){0, 0});
+  int np;
+  if (r.node == ld.node && r.port == 0 && !n->dead[ld.node]) {   /* two payloads: the last lambda is left over */
+    np = 2;
+    for (int k = 0; k < 3; k++) n->wire[ld.node * 3 + k] = (Port){-1, 0};   /* (cut from the holders, then reclaimed) */
+    net_drop(n, ld.node);
+  } else if (r.node == eh.h[4]) np = 3;
+  else return 0;
+  int64_t c = net_read_int(n, wire((Port){eh.h[0], 0}), LIN_ENC_NUM);
+  eff_erase(n, wire((Port){eh.h[0], 0}));
+  if (c < 0 || c >= EFF_N || eff_pay[c] != np) return 0;
+  for (int i = 0; i < np; i++) pay[i] = wire((Port){eh.h[i + 1], 0});
+  *code = (int)c; *npay = np;
+  return 1;
+}
+
+static int64_t swept_at;                          /* the live size after the loop's last sweep: it sweeps when that doubles */
+static int *loops, nloops, cloops;                /* the holders of the running loops' steps, innermost last */
+
+/* A TURN IS A FRESH INSTANCE OF THE STEP.  The turn is made the way a compiled call instantiates a function:
+   the step's net is copied, node for node, and the copy is applied to the state.  That is what a duplication of
+   the step would build once it had finished propagating (a copied fan keeps its label, as a commuted one does),
+   but built at once: a LAZY copy leaves the turn's body behind fans of its own until each application in it
+   fires, and the turn's operands -- a frame, a message -- are then reachable only ACROSS those fans, where a
+   reader cannot tell one copy from the other (measured: the loop's state read as the copy it came from, or not
+   at all).  The copy takes everything wired to the step -- what it shares with the rest of the net through fans
+   comes along, as structure nothing will ask for again -- unless that reaches a holder: then it stops at the
+   step's SHARES (a fan entered at an auxiliary port) and treats each by what the share leads to.  A share of
+   something the step USES (a definition, a value) gives the copy a share of its own, a fresh fan; a share the
+   step FEEDS (the argument or body of an application or abstraction still waiting) gets an eraser on the copy:
+   the step's own contribution is there already, and a copy adds nothing to it.  Returns the copy's root port,
+   or {-1} when the step is gone. */
+static int *cp_map, *cp_list; static size_t cp_cap;
+static int node_arity(const Net *n, int i) { int t = n->tag[i]; return t == ERA || t == ROOT ? 1 : 3; }
+static Port copy_closed(Net *n, int holder) {
+  Port top = wire((Port){holder, 0});
+  if (top.node < 0 || top.node >= n->nn || n->dead[top.node]) return (Port){-1, 0};
+  if (cp_cap < (size_t)n->nn) {
+    size_t old = cp_cap; cp_cap = (size_t)n->nn * 2;
+    cp_map = realloc(cp_map, cp_cap * sizeof *cp_map); cp_list = realloc(cp_list, cp_cap * sizeof *cp_list);
+    for (size_t i = old; i < cp_cap; i++) cp_map[i] = -1;
+  }
+  size_t m = 0; int closed = 0;
+  for (int edges = 0; edges < 2 && !closed; edges++) {      /* first all of it; then up to the shares */
+    for (size_t k = 0; k < m; k++) cp_map[cp_list[k]] = -1;
+    m = 0; closed = 1;
+    cp_list[m++] = top.node; cp_map[top.node] = -2;        /* (-2: in the set, not copied yet) */
+    for (size_t k = 0; k < m && closed; k++) {
+      int i = cp_list[k];
+      for (int p = 0; p < node_arity(n, i); p++) {
+        Port w = n->wire[i * 3 + p];
+        if (w.node == holder) continue;                       /* (the holder: what the copy hangs from) */
+        if (w.node < 0 || w.node >= n->nn || n->dead[w.node] || n->tag[w.node] == ROOT) { closed = 0; break; }
+        if (edges && n->tag[w.node] == DUP && w.port != 0) continue;   /* (a share: below) */
+        if (cp_map[w.node] == -1) { cp_map[w.node] = -2; cp_list[m++] = w.node; }
+      }
+    }
+  }
+  Port res = {-1, 0};
+  if (closed) {
+    for (size_t k = 0; k < m; k++) { int i = cp_list[k]; cp_map[i] = net_alloc(n, n->tag[i], n->scope[i]).node; }
+    for (size_t k = 0; k < m; k++) {
+      int i = cp_list[k];
+      for (int p = 0; p < node_arity(n, i); p++) {
+        Port w = n->wire[i * 3 + p];
+        if (w.node == holder) continue;
+        if (cp_map[w.node] == -1) {                           /* a share the copy did not take in */
+          Port x = w;
+          for (int k2 = 0; k2 < n->nn && x.node >= 0 && x.node < n->nn && !n->dead[x.node] && n->tag[x.node] == DUP && x.port != 0; k2++)
+            x = n->wire[x.node * 3];
+          if (x.node >= 0 && x.node < n->nn && !n->dead[x.node] && x.port == 2 && (n->tag[x.node] == APP || n->tag[x.node] == LAM)) {
+            net_link(n, (Port){cp_map[i], p}, net_alloc(n, ERA, scope_nil()), 1);   /* (fed: the copy adds nothing) */
+            continue;
+          }
+          Port d = net_alloc(n, DUP, net_fresh_label(n));    /* (used: a share of the copy's own) */
+          net_link(n, (Port){d.node, 0}, w, 1);
+          net_link(n, (Port){d.node, 1}, (Port){i, p}, 1);
+          net_link(n, (Port){d.node, 2}, (Port){cp_map[i], p}, 1);
+        } else if (i < w.node || (i == w.node && p < w.port))  /* (each inside wire once) */
+          net_link(n, (Port){cp_map[i], p}, (Port){cp_map[w.node], w.port}, 1);
+      }
+    }
+    res = (Port){cp_map[top.node], top.port};
+  }
+  for (size_t k = 0; k < m; k++) cp_map[cp_list[k]] = -1;
+  if (cp_cap < (size_t)n->nn) { size_t old = cp_cap; cp_cap = (size_t)n->nn * 2;   /* (the copy grew the net) */
+    cp_map = realloc(cp_map, cp_cap * sizeof *cp_map); cp_list = realloc(cp_list, cp_cap * sizeof *cp_list);
+    for (size_t i = old; i < cp_cap; i++) cp_map[i] = -1; }
+  return res;
+}
+/* A LOOP'S STATE IS FORCED TO DATA.  Under needed order a part of the state that no turn looks at is never
+   evaluated, so it grows by one suspended step per turn -- measured, a list of 40 numbers advanced each turn and
+   never read kept 186 nodes per turn, without end.  A loop's state is what the program carries on with, so
+   before the next turn it is evaluated as data: a value is forced, and if it is a constructor -- a chain of
+   abstractions whose body applies one of the chain's own variables (the Scott encoding every datatype, list,
+   number and boolean has) -- so is each field.  Anything else (a function) is left as it is: entering it could
+   unfold a recursion forever.  Each node is visited once, so shared data is forced once. */
+static Port *df_stk; static size_t df_cap; static unsigned *df_seen; static size_t df_seen_cap; static unsigned df_gen;
+static void force_data(Net *n, Port use) {   /* use: the consumer's end of the state's wire */
+  size_t sp = 0;
+  if (++df_gen == 0) { memset(df_seen, 0, df_seen_cap * sizeof *df_seen); df_gen = 1; }
+#define DF_PUSH(x) do { if (sp == df_cap) df_stk = realloc(df_stk, sizeof *df_stk * (df_cap = df_cap ? df_cap * 2 : 64)); \
+                        df_stk[sp++] = (x); } while (0)
+  /* the stack holds CONSUMER ends (a port whose wire leads to the term): forcing re-aims wires, and these stay */
+  DF_PUSH(use);
+  while (sp) {
+    Port at = df_stk[--sp];
+    if (at.node < 0 || at.node >= n->nn || n->dead[at.node]) continue;
+    Port v = net_force_val(n, wire(at));
+    if (v.node < 0 || v.node >= n->nn || n->dead[v.node] || n->tag[v.node] != LAM || v.port != 0) continue;
+    if (df_seen_cap < (size_t)n->nn) {
+      size_t o = df_seen_cap; df_seen_cap = (size_t)n->nn * 2;
+      df_seen = realloc(df_seen, df_seen_cap * sizeof *df_seen); memset(df_seen + o, 0, (df_seen_cap - o) * sizeof *df_seen);
+    }
+    if (df_seen[v.node] == df_gen) continue;
+    df_seen[v.node] = df_gen;
+    /* the chain of binders: each body forced in turn, while it is another abstraction */
+    int lam = v.node, nchain = 0, chain_top = lam;
+    Port body;
+    for (;;) {
+      nchain++;
+      /* a constructor's MARKER, `((\_c (d_i f1..fk)) ID)`, is how a value says which constructor it is (the fn
+         driver reads it to take data in; printing, to name it): forcing the body would fire it, so it is stepped
+         over, to the application inside */
+      { Port m = wire((Port){lam, 2});
+        if (m.node >= 0 && !n->dead[m.node] && n->tag[m.node] == APP && m.port == 1) {
+          Port fl = wire((Port){m.node, 0});
+          if (fl.node >= 0 && n->tag[fl.node] == LAM && fl.port == 0) {
+            Port bd = wire((Port){fl.node, 1});
+            if (bd.node >= 0 && n->tag[bd.node] == ERA) { body = net_force_val(n, wire((Port){fl.node, 2})); break; }
+          }
+        }
+      }
+      body = net_force_val(n, wire((Port){lam, 2}));
+      if (body.node < 0 || body.node >= n->nn || n->dead[body.node] || n->tag[body.node] != LAM || body.port != 0) break;
+      lam = body.node;
+      if (df_seen[lam] == df_gen) break;
+      df_seen[lam] = df_gen;
+    }
+    /* the body: a spine of applications whose head is one of the chain's variables, or that variable alone */
+    Port hd = body; int nargs = 0;
+    while (hd.node >= 0 && hd.node < n->nn && !n->dead[hd.node] && n->tag[hd.node] == APP && hd.port == 1) { nargs++; hd = wire((Port){hd.node, 0}); }
+    int is_ctor = 0;
+    if (hd.node >= 0 && hd.node < n->nn && !n->dead[hd.node] && n->tag[hd.node] == LAM && hd.port == 1) {
+      for (int x = chain_top, k = 0; k < nchain; k++) {
+        if (x == hd.node) { is_ctor = 1; break; }
+        Port b = wire((Port){x, 2});
+        if (b.node < 0 || n->tag[b.node] != LAM || b.port != 0) break;
+        x = b.node;
+      }
+    }
+    if (!is_ctor) continue;
+    for (Port a = body; nargs-- > 0; a = wire((Port){a.node, 0})) DF_PUSH(((Port){a.node, 2}));   /* (each field) */
+  }
+#undef DF_PUSH
+}
 static int64_t run_io_body(Net *n, int64_t step_limit) {
   N = n;
   int did_io = 0;
+  static Net *loops_net;                             /* (the loops are this net's: a resumed run keeps them, another net starts afresh) */
+  if (loops_net != n) { loops_net = n; nloops = 0; lin_io_looping = 0; swept_at = 0; }
   for (;;) {
     Port r = net_dup_hop(n, net_force_val(n, wire((Port){0, 0})));  /* an effect is only visible once reached */
     int code; Port pay[3]; int npay;
     if (!eff_dig(n, r, &code, pay, &npay)) break;
-    if (code == EFF_DONE) return 1;
+    if (!eff_open(n, step_limit, &code, pay, &npay)) break;
+
+    if (code == EFF_DONE) { for (int i = 0; i < npay; i++) eff_erase(n, eff_pay_now(n, i)); nloops = 0; lin_io_looping = 0; return 1; }
     if (code == EFF_PRINT || code == EFF_WRITE) {
       FILE *out_fp = stdout;
       Port msg_p, next_p;
@@ -517,13 +728,57 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
         if (!render_val(out_fp, mv)) print_struct(out_fp, msg_p, -1);
       }
       fflush(out_fp);
+      eff_erase(n, eff_pay_now(n, code == EFF_WRITE));   /* (printed: the message is consumed) */
+      if (code == EFF_WRITE) eff_erase(n, eff_pay_now(n, 0));
       /* The continuation is applied to a unit value unless it IS already an effect (a monadic
          chain): an effect value is what the program returns, so it must not be applied to one. */
+      next_p = eff_pay_now(n, code == EFF_WRITE ? 2 : 1);
       if (live(next_p) && n->tag[next_p.node] == LAM && !eff_shape(n, next_p))
         eff_apply(n, next_p, net_alloc_scott(n, 0));
       else net_link(n, (Port){0, 0}, next_p, 1);
-      net_reduce(n, step_limit);
+      io_reduce(n, step_limit);
       did_io = 1;
+      continue;
+    }
+    /* EFF_LOOP / EFF_NEXT: `io_loop s step` runs `step s`, and an `io_next s2` it ends with runs `step s2`.
+       THE RUNNER HOLDS `step` AND HANDS EACH TURN A COPY OF IT (a fan of a fresh label: aux 1 is this turn's,
+       aux 2 goes back to the holder).  That is the point of the effect: a loop written as a recursive
+       function shares its body with its own next call (the recursion's template), so what a turn computes --
+       the operands of a call to the world -- sits behind superpositions that only that recursion could
+       resolve, and a call that observes the world cannot be folded inside the reduction to resolve them.
+       Copied from outside, a turn's body is an ordinary copy: its values read as values. */
+    if (code == EFF_LOOP || code == EFF_NEXT) {
+      Port s_p = eff_pay_now(n, 0);
+      if (code == EFF_LOOP) {
+        if (nloops == cloops) loops = realloc(loops, sizeof *loops * (size_t)(cloops = cloops ? cloops * 2 : 4));
+        Port h = net_alloc(n, ROOT, scope_nil());
+        net_link(n, (Port){h.node, 0}, eff_pay_now(n, 1), 0);
+        loops[nloops++] = h.node;
+        lin_io_looping = 1;
+      } else {
+        eff_erase(n, eff_pay_now(n, 1));
+        if (nloops == 0) { eff_erase(n, s_p); break; }   /* (`io_next` outside any loop: nothing to continue) */
+      }
+      force_data(n, (Port){eh.h[1], 0});                  /* (the state, as data: see above) */
+      {                                                    /* (a safepoint: the runner holds only its holders) */
+        int64_t live = (int64_t)n->nn - n->nfree;
+        if (live > 2 * swept_at) { int pins = n->pins; n->pins = 0; net_sweep(n); n->pins = pins; swept_at = (int64_t)n->nn - n->nfree; }
+      }
+      s_p = eff_pay_now(n, 0);
+      int h = loops[nloops - 1];
+      Port app = net_alloc(n, APP, scope_nil());
+      Port inst = copy_closed(n, h);
+      net_link(n, (Port){app.node, 2}, s_p, 0);
+      net_link(n, (Port){0, 0}, (Port){app.node, 1}, 0);
+      if (inst.node >= 0) net_link(n, (Port){app.node, 0}, inst, 1);
+      else {                                                   /* (not closed: a lazy copy, with a fan of its own) */
+        Port f = wire((Port){h, 0});
+        Port d = net_alloc(n, DUP, net_fresh_label(n));
+        net_link(n, (Port){d.node, 2}, (Port){h, 0}, 0);
+        net_link(n, (Port){app.node, 0}, (Port){d.node, 1}, 0);
+        net_link(n, (Port){d.node, 0}, f, 1);
+      }
+      io_reduce(n, step_limit); did_io = 1;
       continue;
     }
     /* EFF_WAIT: `io_wait src cb`.  The source may be a descriptor, a command, a file, a timer or an
@@ -538,6 +793,7 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
       Val fv = (src_p.node >= 0) ? run_ffi(n, src_p) : (Val){0};
       if (fv.kind == 1) { res_int = fv.iv; is_int = 1; }
       else if (fv.kind == 3) is_int = 2;                      /* bool result */
+      else if (fv.kind == 4) is_int = 3;                      /* float result (its bits) */
       else if (fv.kind == 2) ib_add(&ib, fv.sv, strlen(fv.sv));
       else if (src_p.node < 0) read_stdin(&ib);
       else {
@@ -562,10 +818,15 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
       char *in_buf = ib.s;
       char *endptr = NULL;
       int64_t val = (!is_int && in_buf[0]) ? strtoll(in_buf, &endptr, 10) : -1;
-      Port arg = (is_int == 2) ? net_alloc_bool(n, (int)fv.iv) : is_int ? net_alloc_scott(n, res_int) : (in_buf[0] && endptr && !*endptr && val >= 0) ? net_alloc_scott(n, val) : net_alloc_string(n, in_buf);
+      double fd_; memcpy(&fd_, &fv.iv, 8);
+      Port arg = (is_int == 3) ? net_alloc_float(n, fd_) : (is_int == 2) ? net_alloc_bool(n, (int)fv.iv) : is_int ? net_alloc_scott(n, res_int) : (in_buf[0] && endptr && !*endptr && val >= 0) ? net_alloc_scott(n, val) : net_alloc_string(n, in_buf);
       free(ib.s);
+      if (pay[0].node >= 0) eff_erase(n, eff_pay_now(n, 0));   /* (observed: the source is consumed) */
+      cb = eff_pay_now(n, 1);
       eff_apply(n, cb, arg);
-      net_reduce(n, step_limit); did_io = 1; continue;
+      io_reduce(n, step_limit); did_io = 1;
+      if (lin_io_yield) { lin_io_yield = 0; return LIN_IO_SUSPENDED; }   /* the host's turn (lin.h) */
+      continue;
     }
   }
   return did_io;
@@ -1033,7 +1294,12 @@ static int rb_print(Net *n, void *st, int domain) {
 static int64_t rb_run_io(Net *n, void *st, int64_t limit) {
   (void)st;
   lin_pin(n);
+  eh.n = NULL;                                   /* (holders are this call's: a later net may reuse the address) */
   int64_t rc = run_io_body(n, limit);
+  if (eh.n == n)                                 /* a holder nothing points at any more goes back to the pool */
+    for (int i = 0; i < 5; i++) { Port w = n->wire[eh.h[i] * 3];
+      if (w.node < 0 || w.node >= n->nn || n->dead[w.node] || n->wire[w.node * 3 + w.port].node != eh.h[i]) { n->tag[eh.h[i]] = ERA; net_drop(n, eh.h[i]); } }
+  eh.n = NULL;
   lin_unpin(n);
   return rc;
 }

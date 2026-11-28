@@ -1,0 +1,184 @@
+; ==============================================================================
+; three.lin -- a 3D Linden scene: a linden tree of Gaussian splats on a checkered
+; ground, under a sky
+; ------------------------------------------------------------------------------
+; The camera orbits the tree until you steer: left/right turn, up/down walk.
+;
+;   Run (from the repository root):  make linden && ./lin examples/linden/three.lin
+;   Headless, for a check:           LINDEN_HEADLESS=1 LINDEN_FRAMES=60 LINDEN_PPM=three.ppm ./lin ...
+;
+; THE SHADER IS THIS FILE.  `shade` below is the colour of one pixel -- the ray's
+; background (sky, or the ground it meets) seen through every splat in front of
+; it, near to far -- and `tab` asks for it once per pixel.  Nothing marks it as a
+; shader: each pixel is a pure function of its index and of values the whole frame
+; shares, so the function compiler writes the loop as a compute kernel (GLSL, from
+; these definitions) and the gpu driver runs it on the device; with no device it
+; runs on the CPU's threads instead, and the picture is the same bit for bit.
+; Even `exp` is written here, in Lin: the kernel has only what the program says.
+;
+; Per frame, on the CPU: each splat is projected through the camera and the list
+; is sorted by depth (a merge sort), then laid out flat for the kernel to read.
+; ==============================================================================
+(load "std/std.lin")
+(load "linden.lin")
+
+(define W 160)
+(define H 120)
+(define N (mul W H))
+
+(define f (\s (float s)))
+(define ZERO (i2f 0))
+(define ONE (i2f 1))
+(define TWO (i2f 2))
+(define HALF (f "0.5"))
+(define FOCAL (f "120"))   ; the focal length, in pixels
+(define CX (f "80"))       ; the image centre
+(define CY (f "60"))
+(define EYE (f "1.6"))     ; the camera's height above the ground
+(define NEAR (f "0.2"))    ; a splat nearer than this is behind the eye
+(define TZ (f "6"))        ; the tree stands at x 0, z 6
+
+; --- the scene: splats in the world ----------------------------------------------
+; a splat is a soft round blob: a centre, a size (its standard deviation), a colour, an opacity
+(datatype Splat (splat (x float) (y float) (z float) (s float) (col num) (o float)))
+
+(define rnd (\s (mod (add (mul s 1103515245) 12345) 2147483648)))
+(define rf (\s (fdiv (i2f (band (shr s 8) 65535)) (f "65536"))))   ; a float in [0, 1)
+(define rs (\s (fsub (fmul (rf s) TWO) ONE)))                     ; a float in [-1, 1)
+
+(define trunk (\k (\acc (if (eq k 0) acc
+  (trunk (sub k 1) (cons (splat ZERO (fmul (i2f k) (f "0.17")) TZ (f "0.11") (linden.rgb 107 74 43) (f "0.95")) acc))))))
+
+(define leafcol (\s (linden.rgb (add 30 (mod (shr s 3) 50)) (add 110 (mod (shr s 9) 100)) (add 20 (mod (shr s 15) 40)))))
+(define canopy (\s (\k (\acc (if (eq k 0) acc
+  (let ((s1 (rnd s)))
+  (let ((s2 (rnd s1)))
+  (let ((s3 (rnd s2)))
+  (let ((s4 (rnd s3)))
+  (let ((u (rs s1)) (v (rs s2)) (w (rs s3)))
+    (if (flt ONE (fadd (fmul u u) (fadd (fmul v v) (fmul w w))))
+      (canopy s4 k acc)                                   ; (outside the ball: drawn again)
+      (canopy s4 (sub k 1)
+        (cons (splat (fmul u (f "1.4")) (fadd (f "2.7") (fmul v (f "1.1"))) (fadd TZ (fmul w (f "1.4")))
+                     (fadd (f "0.14") (fmul (rf s4) (f "0.16"))) (leafcol s4) (f "0.85"))
+              acc)))))))))))))
+
+(define orbcol (\k (if (eq k 1) (linden.rgb 255 90 80) (if (eq k 2) (linden.rgb 255 200 60) (if (eq k 3) (linden.rgb 120 255 120)
+                   (if (eq k 4) (linden.rgb 80 200 255) (if (eq k 5) (linden.rgb 160 110 255) (linden.rgb 255 120 220))))))))
+(define orbs (\k (\acc (if (eq k 0) acc
+  (let ((a (fmul (i2f k) (f "1.0471975511965976"))))
+    (orbs (sub k 1) (cons (splat (fmul (f "2.6") (fsin a)) (f "0.45") (fadd TZ (fmul (f "2.6") (fcos a))) (f "0.22") (orbcol k) (f "0.9")) acc)))))))
+
+(define SCENE (canopy 12345 140 (trunk 14 (orbs 6 nil))))
+
+; --- the frame's view of it: projected, sorted near to far, laid out flat ---------------
+; a projected splat: its depth, its centre on the screen, its falloff k (the exponent is -k * d^2), colour, opacity
+(datatype Proj (pj (d float) (sx float) (sy float) (k float) (r float) (g float) (b float) (o float)))
+
+(define chan (\c (\s (i2f (band (shr c s) 255)))))
+(define project (\cx (\cz (\sn (\cs (\l (match l
+  (nil nil)
+  ((cons sp r) (match sp ((splat x y z sz col o)
+    (let ((dx (fsub x cx)) (dz (fsub z cz)))
+    (let ((zc (fadd (fmul dx sn) (fmul dz cs))) (xc (fsub (fmul dx cs) (fmul dz sn))))
+      (if (flt zc NEAR)
+        (project cx cz sn cs r)
+        (let ((iz (fdiv FOCAL zc)))
+        (let ((sg (fmul sz iz)))
+          (cons (pj zc (fadd CX (fmul xc iz)) (fsub CY (fmul (fsub y EYE) iz)) (fdiv HALF (fmul sg sg))
+                    (chan col 16) (chan col 8) (chan col 0) o)
+                (project cx cz sn cs r)))))))))))))))))
+
+(define depth (\p (match p ((pj d sx sy k r g b o) d))))
+(define evens (\l (match l (nil nil) ((cons x r) (cons x (odds r))))))
+(define odds (\l (match l (nil nil) ((cons x r) (evens r)))))
+(define merge (\a (\b (match a
+  (nil b)
+  ((cons x ra) (match b
+    (nil a)
+    ((cons y rb) (if (fleq (depth x) (depth y)) (cons x (merge ra b)) (cons y (merge a rb))))))))))
+(define msort (\l (match l
+  (nil nil)
+  ((cons x r) (match r
+    (nil l)
+    ((cons y rr) (merge (msort (evens l)) (msort (odds l)))))))))
+
+; seven floats a splat: sx sy k r g b o
+(define pack (\l (\v (match l
+  (nil v)
+  ((cons p r) (match p ((pj d sx sy k cr cg cb o)
+    (pack r (apush (apush (apush (apush (apush (apush (apush v sx) sy) k) cr) cg) cb) o)))))))))
+
+; --- THE SHADER: one pixel ------------------------------------------------------------
+; e^x for x <= 0, all a Gaussian needs: (e^(x/8))^8, e^(x/8) by its Taylor series to x^5
+(define fexp (\x (let ((y (fmul x (f "0.125"))))
+  (let ((p (fadd ONE (fmul y (fadd ONE (fmul y (fadd HALF (fmul y (fadd (f "0.16666666666666666")
+             (fmul y (fadd (f "0.041666666666666664") (fmul y (f "0.008333333333333333")))))))))))))
+  (let ((p2 (fmul p p)))
+  (let ((p4 (fmul p2 p2)))
+    (fmul p4 p4)))))))
+
+(define byte (\x (let ((i (f2i x))) (if (lt i 0) 0 (if (gt i 255) 255 i)))))
+(define rgbf (\r (\g (\b (linden.rgb (byte r) (byte g) (byte b))))))
+(define mix (\a (\b (\t (fadd a (fmul t (fsub b a)))))))
+
+; what the ray sees past every splat: the ground (a checkerboard, fading into the haze) or the sky
+(define background (\u (\v (\dx (\dz (\cx (\cz
+  (if (flt v (f "-0.002"))
+    (let ((t (fdiv EYE (fsub ZERO v))))
+    (let ((hx (fadd cx (fmul t dx))) (hz (fadd cz (fmul t dz))))
+    (let ((odd (eq (band (add (f2i hx) (f2i hz)) 1) 1)) (fog (fmin ONE (fdiv t (f "40")))))
+      (if odd
+        (rgbf (mix (f "70") (f "190") fog) (mix (f "120") (f "210") fog) (mix (f "60") (f "235") fog))
+        (rgbf (mix (f "40") (f "190") fog) (mix (f "85") (f "210") fog) (mix (f "40") (f "235") fog))))))
+    (let ((s (fmin ONE (fmul v (f "2.5")))))
+      (rgbf (mix (f "190") (f "60") s) (mix (f "210") (f "110") s) (mix (f "235") (f "200") s)))))))))))
+
+; the splats in front of it, near to far: each takes its share of what light is left (t)
+(define finish (\r (\g (\b (\t (\bg
+  (rgbf (fadd r (fmul t (chan bg 16))) (fadd g (fmul t (chan bg 8))) (fadd b (fmul t (chan bg 0))))))))))
+(define splats (\sv (\j (\n (\px (\py (\t (\r (\g (\b (\bg
+  (if (or (geq j n) (flt t (f "0.004")))
+    (finish r g b t bg)
+    (let ((ddx (fsub px (aget sv j))) (ddy (fsub py (aget sv (add j 1)))))
+    (let ((e (fmul (aget sv (add j 2)) (fadd (fmul ddx ddx) (fmul ddy ddy)))))
+      (if (flt (f "4.5") e)
+        (splats sv (add j 7) n px py t r g b bg)              ; (beyond three deviations: nothing)
+        (let ((a (fmul (aget sv (add j 6)) (fexp (fsub ZERO e)))))
+        (let ((w (fmul t a)))
+          (splats sv (add j 7) n px py (fmul t (fsub ONE a))
+                  (fadd r (fmul w (aget sv (add j 3)))) (fadd g (fmul w (aget sv (add j 4)))) (fadd b (fmul w (aget sv (add j 5))))
+                  bg))))))))))))))))))
+
+(define shade (\sv (\cx (\cz (\sn (\cs (\i
+  (let ((px (i2f (mod i W))) (py (i2f (div i W))))
+  (let ((u (fdiv (fsub px CX) FOCAL)) (v (fdiv (fsub CY py) FOCAL)))
+  (let ((bg (background u v (fadd (fmul u cs) sn) (fsub cs (fmul u sn)) cx cz)))
+    (splats sv 0 (alen sv) px py ONE ZERO ZERO ZERO bg)))))))))))
+
+; every pixel, in order: the loop the compiler writes as the kernel
+(define tab (\sv (\cx (\cz (\sn (\cs (\i (\n (\acc
+  (if (eq i n) acc (tab sv cx cz sn cs (add i 1) n (apush acc (shade sv cx cz sn cs i)))))))))))))
+
+; --- the game: a camera ------------------------------------------------------------------
+; where it stands, where it looks (yaw: 0 is +z), the frame count, and whether it is still orbiting
+(datatype Cam (cam (x float) (z float) (yaw float) (t num) (auto num)))
+
+(define orbit (\t (let ((a (fmul (i2f t) (f "0.012"))))
+  (cam (fsub ZERO (fmul (f "6") (fsin a))) (fsub TZ (fmul (f "6") (fcos a))) a t 1))))
+
+(define update (\c (\keys (match c ((cam x z yaw t auto)
+  (if (and (eq auto 1) (eq (band keys 15) 0))
+    (orbit (add t 1))
+    (let ((ny (fadd yaw (fsub (if (linden.down keys linden.key_right) (f "0.05") ZERO) (if (linden.down keys linden.key_left) (f "0.05") ZERO)))))
+    (let ((step (fsub (if (linden.down keys linden.key_up) (f "0.12") ZERO) (if (linden.down keys linden.key_down) (f "0.12") ZERO))))
+      (cam (fadd x (fmul step (fsin ny))) (fadd z (fmul step (fcos ny))) ny (add t 1) 0)))))))))
+
+(define draw (\c (match c ((cam x z yaw t auto)
+  (let ((sn (fsin yaw)) (cs (fcos yaw)))
+  (let ((sv (pack (msort (project x z sn cs SCENE)) (array 0 0))))
+    (linden.frame W H
+      (linden.image 0 0 W H (tab sv x z sn cs 0 N (array 0 0))
+        (linden.number 2 2 t 1 16777215 nil)))))))))
+
+(linden.game draw update (orbit 0))

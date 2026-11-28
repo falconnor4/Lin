@@ -1,0 +1,116 @@
+; ==============================================================================
+; linden.lin -- the Lin side of Linden, a small game engine (examples/linden/linden.c)
+; ------------------------------------------------------------------------------
+; A GAME IS A LOOP OVER A VALUE.  The state is any Lin value; two pure functions
+; say what it looks like and what it becomes:
+;
+;     (define draw   (\s <a picture>))
+;     (define update (\s (\keys <the next state>)))
+;     (game draw update start)
+;
+; `game` shows `draw s`, hands the input of that moment to `update`, and goes on
+; with what it returns -- until the window is closed (or Escape).  Linden keeps none
+; of the state: a frame is a function of the value, which is what lets the per-frame
+; work compile (std/drivers/fn) and run in parallel where it can.
+;
+; The loop is std/io.lin's `io_loop`, and a game that wants more than one effect per
+; frame writes its own turn with `run`: a turn is any effect that ends in `io_next`
+; (the next state) or `io_done` (stop), and `play pic k` is one frame:
+;
+;     (define turn (\s (play (draw s) (\keys
+;       (if (down keys key_quit) io_done (io_print (score s) (io_next (update s keys))))))))
+;     (run turn start)
+;
+; A FRAME is a list of drawing commands, and every command takes the rest of the
+; frame as its last argument: a picture is DRAWN ONTO what comes after it, so a scene
+; is commands nested in drawing order, ended by nil, and a part of it is a function
+; that takes the rest too:
+;
+;     (define ball (\b (\r (disc (bx b) (by b) 3 white r))))
+;     (frame W H (clear sky (ball b (number 4 4 score 1 white nil))))
+;
+;     (frame W H cmds)             the frame: its size in pixels and what is on it
+;     (clear c r)                  the whole frame one colour
+;     (rect x y w h c r) (box x y w h c r)   filled / outlined rectangle
+;     (line x0 y0 x1 y1 c r) (disc x y rad c r) (tri x0 y0 x1 y1 x2 y2 c r)
+;     (number x y n s c r) (text x y "str" s c r) (glyph x y ch s c r)   s: pixels per dot
+;     (image x y w h pixels r)     w*h colours (a vector), row by row: a rendered view
+;
+; (That shape is what keeps a frame cheap: every command is a call the compiler
+; turns into code (std/drivers/fn) -- measured, a hundred rectangles built this way
+; cost ~140 reduction steps a frame, and built from pictures passed around as
+; closures, 57 thousand.)
+;
+; Coordinates and sizes are integers (f2i turns a float into one); colours 0xRRGGBB,
+; written as numbers (rgb r g b builds one).  `draw` returns a whole frame.
+;
+; INPUT.  `keys` holds the buttons down now and, shifted by 8, the ones pressed since
+; the last frame:  (down keys key_left)  (pressed keys key_a).
+;     key_left key_right key_up key_down   arrows (and WASD)
+;     key_a (space, z)  key_b (x, shift)  key_start (enter)  key_quit (Escape, closing)
+; (mouse) and (ticks) are effects too: (io_wait (mouse) (\m ...)) with
+; mouse_x/mouse_y/mouse_buttons, and (io_wait (ticks) (\ms ...)) for milliseconds.
+;
+; Run from the repository root: the plugin is loaded by that path (linden.plugin).
+;     make linden && ./lin examples/linden/leaves.lin
+; See examples/linden/README.md for headless runs, screenshots and the browser.
+; ==============================================================================
+
+(namespace linden)
+
+; --- starting --------------------------------------------------------------------
+; Opening the plugin is itself an effect, so it happens when the game starts, not when
+; this file is read: `(run turn start)` loads it and then loops `turn` from `start`.
+(define plugin "examples/linden/linden.so")
+
+; --- the frame ---------------------------------------------------------------
+(define frame (\w (\h (\cmds (cons w (cons h cmds))))))
+(define play (\fr (\k (io_wait (ccall "linden_frame" fr) k))))
+(define mouse (\_ (ccall "linden_mouse" nil)))
+(define ticks (\_ (ccall "linden_ticks" nil)))
+
+; --- drawing: each command onto the rest (r) ---------------------------------------
+(define clear (\c (\r (cons 0 (cons c r)))))
+(define rect (\x (\y (\w (\h (\c (\r (cons 1 (cons x (cons y (cons w (cons h (cons c r)))))))))))))
+(define line (\x0 (\y0 (\x1 (\y1 (\c (\r (cons 2 (cons x0 (cons y0 (cons x1 (cons y1 (cons c r)))))))))))))
+(define disc (\x (\y (\rd (\c (\r (cons 3 (cons x (cons y (cons rd (cons c r)))))))))))
+(define tri (\x0 (\y0 (\x1 (\y1 (\x2 (\y2 (\c (\r (cons 4 (cons x0 (cons y0 (cons x1 (cons y1 (cons x2 (cons y2 (cons c r)))))))))))))))))
+(define number (\x (\y (\n (\s (\c (\r (cons 5 (cons x (cons y (cons n (cons s (cons c r)))))))))))))
+(define glyph (\x (\y (\ch (\s (\c (\r (cons 6 (cons x (cons y (cons ch (cons s (cons c r)))))))))))))
+(define box (\x (\y (\w (\h (\c (\r (cons 7 (cons x (cons y (cons w (cons h (cons c r)))))))))))))
+(define text (\x (\y (\str (\s (\c (\r (match str
+  ((cons ch rest) (cons 6 (cons x (cons y (cons ch (cons s (cons c (linden.text (add x (mul 4 s)) y rest s c r))))))))
+  (nil r)))))))))
+
+; an image: w*h pixels (a vector of colours, row by row) at x y, under what comes after.
+; This is how a game draws what it renders itself -- a 3D view (examples/linden/three.lin).
+; The pixels reach the plugin without being built in the net one by one: the call that
+; lists them is compiled (std/drivers/fn), and its words are handed to the frame flat.
+(define image (\x (\y (\w (\h (\pix (\r (cons 8 (cons x (cons y (cons w (cons h (linden.pixels pix (alen pix) r)))))))))))))
+(define pixels (\v (\i (\r (if (eq i 0) r (linden.pixels v (sub i 1) (cons (aget v (sub i 1)) r)))))))
+
+; --- colours ---------------------------------------------------------------------
+(define rgb (\r (\g (\b (add (mul r 65536) (add (mul g 256) b))))))
+
+; --- input ---------------------------------------------------------------------
+(define key_left 1)
+(define key_right 2)
+(define key_up 4)
+(define key_down 8)
+(define key_a 16)
+(define key_b 32)
+(define key_start 64)
+(define key_quit 128)
+(define down (\keys (\k (not (eq (band keys k) 0)))))
+(define pressed (\keys (\k (not (eq (band (shr keys 8) k) 0)))))
+(define mouse_x (\m (band m 65535)))
+(define mouse_y (\m (band (shr m 16) 65535)))
+(define mouse_buttons (\m (shr m 32)))
+
+; --- the loop ------------------------------------------------------------------------
+(define run (\turn (\s (io_wait (load_lib linden.plugin) (\_ (io_loop s turn))))))
+(define game (\draw (\update (\s (linden.run (\w (linden.play (draw w) (\keys
+  (if (linden.down keys linden.key_quit) io_done (io_next (update w keys)))))) s)))))
+
+(namespace _)
+(export linden)

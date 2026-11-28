@@ -671,9 +671,12 @@ int net_load_line(Net *n, const char *path) {
     lin_driver_carry_read(n, f, cnt);
   }
   fclose(f);
-  /* seed the self-collecting activation queue: the active-redex list is not serialized, so a freshly loaded net has an empty queue; reconstruct all live principal pairs (including ROOT) so it actually reduces */
+  /* seed the self-collecting activation queue: the active-redex list is not serialized, so a freshly loaded net has an
+     empty queue; reconstruct every live principal pair so it actually reduces.  NOT a pair with ROOT, which is no redex
+     (net_link never queues one): a queued entry is a node's only one, so a stale ROOT entry kept the root's value from
+     ever being queued against anything else -- measured: an artifact's effect could not be applied by the io runner. */
   for (int i = 0; i < n->nn; i++)
-    if (n->wire[i * 3].port == 0 && n->wire[i * 3].node > i)
+    if (!n->dead[i] && n->wire[i * 3].port == 0 && n->wire[i * 3].node > i && n->tag[i] != ROOT && n->tag[n->wire[i * 3].node] != ROOT)
       lin_enqueue(n, (Port){i, 0}, n->wire[i * 3]);
   return 1;
 }

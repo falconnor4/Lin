@@ -27,7 +27,11 @@
   static inline int64_t lin_i64_shr(int64_t a, int64_t k) { return k < 0 ? 0 : (k >= (int64_t)(sizeof(int64_t) * 8) ? (a < 0 ? -1 : 0) : (a >> k)); }
 LIN_I64_DEFS
 /* FLOATS: IEEE-754 doubles carried as their 64-bit patterns (a float travels in an `int64_t` like every value), with
-   the undefined cases defined: x / 0.0 = 0.0, sqrt of a negative = 0.0, floor gives an INTEGER.  (Needs <math.h>.) */
+   the undefined cases defined: x / 0.0 = 0.0, sqrt of a negative = 0.0, floor gives an INTEGER.  (Needs <math.h>.)
+   SINE AND COSINE are computed here, not by the C library: every target computes them with these operations in this
+   order -- the GPU's kernels too (std/drivers/fn.c, THE GPU), whose text is this one in GLSL -- so a float is the
+   same bits wherever it was computed.  (A quadrant reduction by pi/2 in three parts and fdlibm's kernels: within an
+   ulp or two of the true value for |x| up to about a million; past 1e15, where no bit of the angle is left, 0 and 1.) */
 #define LIN_F64_DEFS \
   static inline double lin_d(int64_t x) { double d; __builtin_memcpy(&d, &x, 8); return d; } \
   static inline int64_t lin_l(double d) { int64_t x; __builtin_memcpy(&x, &d, 8); return x; } \
@@ -40,8 +44,16 @@ LIN_I64_DEFS
   static inline int64_t lin_f64_min(int64_t a, int64_t b) { return lin_d(a) < lin_d(b) ? a : b; } \
   static inline int64_t lin_f64_max(int64_t a, int64_t b) { return lin_d(a) > lin_d(b) ? a : b; } \
   static inline int64_t lin_f64_sqrt(int64_t a) { return lin_l(lin_d(a) >= 0.0 ? sqrt(lin_d(a)) : 0.0); } \
-  static inline int64_t lin_f64_sin(int64_t a) { return lin_l(sin(lin_d(a))); } \
-  static inline int64_t lin_f64_cos(int64_t a) { return lin_l(cos(lin_d(a))); } \
+  static inline double lin_trig(double x, int64_t c) { \
+    if (!(fabs(x) <= 1e15)) return c ? (x - x) + 1.0 : x - x; \
+    double n = floor(x * 6.36619772367581382433e-01 + 0.5); \
+    double r = ((x - n * 1.57079632673412561417e+00) - n * 6.07710050630396597660e-11) - n * 2.02226624871116645580e-21; \
+    int64_t q = ((int64_t)n + c) & 3; double z = r * r; \
+    double s = r + r * z * (-1.66666666666666324348e-01 + z * (8.33333333332248946124e-03 + z * (-1.98412698298579493134e-04 + z * (2.75573137070700676789e-06 + z * (-2.50507602534068634195e-08 + z * 1.58969099521155010221e-10))))); \
+    double k = (1.0 - 0.5 * z) + z * z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03 + z * (2.48015872894767294178e-05 + z * (-2.75573143513906633035e-07 + z * (2.08757232129817482790e-09 + z * -1.13596475577881948265e-11))))); \
+    return q == 0 ? s : q == 1 ? k : q == 2 ? -s : -k; } \
+  static inline int64_t lin_f64_sin(int64_t a) { return lin_l(lin_trig(lin_d(a), 0)); } \
+  static inline int64_t lin_f64_cos(int64_t a) { return lin_l(lin_trig(lin_d(a), 1)); } \
   static inline int64_t lin_f64_tan(int64_t a) { return lin_l(tan(lin_d(a))); } \
   static inline int64_t lin_f64_abs(int64_t a) { return lin_l(fabs(lin_d(a))); } \
   static inline int64_t lin_f64_sign(int64_t a) { return lin_l(lin_d(a) >= 0.0 ? 1.0 : -1.0); } \

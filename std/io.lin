@@ -16,6 +16,13 @@
 ; is a LIST CELL — so a payload-poor effect encoding makes `(pair true false)` read as
 ; a finished effect.  Two units for `io_done` is what keeps the two apart.
 ;
+;
+; THE TYPE `io` (a builtin nominal, src/io.c) is what every effect is.  Structurally an effect's continuation
+; is an effect again, so without a name the type of any loop through effects is infinite and the checker
+; refuses it; named, `(define loop (\s (io_print s (loop (add s 1)))))` is `num -> io`.  The encodings are
+; defined untyped under `_` names and the public ones state the type, so the checker sees `io` and the
+; reducer sees exactly the encoding it always did.
+;
 ; Every public member below carries the globally-safe `io_*` name (never bare
 ; `wait`/`read`/`file`/`write_to`/`print`/`done`/`prompt`/`call`), so
 ; `(export io)` re-exports exactly those safe names bare without colliding with
@@ -39,7 +46,8 @@
 ;   - "!cmd" or "cmd:...": process output
 ;   - "file:...": disk file contents
 ;   - "sleep:ms": timer delay
-(define io_wait (\src (\cb (\_eff (((_eff 3) src) cb)))))
+(define _wait (\src (\cb (\_eff (((_eff 3) src) cb)))))
+(define! io_wait (a -> (b -> c) -> io) io._wait)
 (define io_read (\cb (io.io_wait 0 cb)))
 ; all of standard input, as one string
 (define io_read_all (\cb (io.io_wait "stdin:all" cb)))
@@ -48,9 +56,22 @@
 ; --- Destination-Directed Output ---
 ;   - 1 or omitted: standard output
 ;   - 2: standard error
-(define io_write_to (\dst (\msg (\next (\_eff ((((_eff 2) dst) msg) next))))))
-(define io_print    (\msg (\next (\_eff (((_eff 1) msg) next)))))
-(define io_done     (\_eff (((_eff 0) 0) 0)))
+(define _write_to (\dst (\msg (\next (\_eff ((((_eff 2) dst) msg) next))))))
+(define! io_write_to (num -> a -> b -> io) io._write_to)
+(define _print (\msg (\next (\_eff (((_eff 1) msg) next)))))
+(define! io_print (a -> b -> io) io._print)
+(define _done (\_eff (((_eff 0) 0) 0)))
+(define! io_done io io._done)
+
+; --- Loops ---
+; (io_loop s step): run (step s); a turn that ends in (io_next s2) runs (step s2), and one that ends in
+; io_done ends the program.  Write a long-running loop -- a game's frames, a server's requests -- this way
+; rather than as a recursive function: the runner hands each turn a fresh copy of `step`, so what a turn
+; computes reads as plain values when it reaches a call to the world (std/drivers/readback.c, EFF_LOOP).
+(define _loop (\s (\step (\_eff (((_eff 4) s) step)))))
+(define! io_loop (a -> (a -> io) -> io) io._loop)
+(define _next (\s (\_eff (((_eff 5) s) 0))))
+(define! io_next (a -> io) io._next)
 
 ; --- Interactive Utilities ---
 (define io_prompt   (\p (\cb (io.io_print p (io.io_read cb)))))

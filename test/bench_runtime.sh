@@ -5,7 +5,7 @@
 # test/bench_runtime.lin reads N from the environment, so the build CANNOT decide
 # it.  That makes it the one workload here where a driver's run-time recognition
 # actually runs at run time: the rest of the corpus is closed, `lin build`
-# evaluates it all, and the artifact ships at ~1 reduce step (this harness
+# evaluates it all, and the artifact ships at <= 1 reduce step (this harness
 # measures the contrast -- see `numbers` below).
 #
 # WHAT THIS PINS
@@ -96,7 +96,8 @@ echo "  open benchmark (test/bench_runtime)  artifact runtime: ${open_steps:--} 
 # number for the same reason in reverse -- needed order stops at the observation, so the *reported*
 # figure counts only what happens before it.  What the artifact then does is measured by (2) above,
 # which no bake can fake.
-if [ "${closed_steps:-x}" = "1" ]; then ok; else fail "numbers.lin artifact ran ${closed_steps:-?} steps; the contrast this harness reports is gone"; fi
+# (0 since the loader stopped queueing the ROOT pair, src/compile.c: a folded artifact has no redex left)
+if [ -n "${closed_steps}" ] && [ "${closed_steps}" -le 1 ]; then ok; else fail "numbers.lin artifact ran ${closed_steps:-?} steps; the contrast this harness reports is gone"; fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "bench_runtime: OK ($PASS checks: interpreter and artifact agree on N(N+1)/2 for 6 sizes," 
