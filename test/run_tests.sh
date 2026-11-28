@@ -173,6 +173,16 @@ else
 fi
 rm -f "$L3_LOG"
 
+# Tier 2.797: a game's frame compiled whole -- a turn that waits, its parts compiled once and run around the
+# frame's call -- draws what the net draws (test/linden_turn.sh).
+LT_LOG=$(mktemp)
+if bash test/linden_turn.sh "$LIN_BIN" >"$LT_LOG" 2>&1; then
+  pass=$((pass+1)); total_checks=$((total_checks + 4)); echo "PASS test/linden_turn.sh ($(tail -1 "$LT_LOG"))"
+else
+  fail=$((fail+1)); echo "FAIL test/linden_turn.sh"; cat "$LT_LOG"
+fi
+rm -f "$LT_LOG"
+
 # Tier 2.795: effects that loop, their state read into compiled units each turn (test/io_loop.sh).
 # ----------------------------------------------------------------------------
 IL_LOG=$(mktemp)

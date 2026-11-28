@@ -40,6 +40,7 @@ DECLARED = {
     ("std/drivers/fn.c", ">= 4096"): "a parallel reduction's threshold: below a few thousand iterations a thread costs more than it saves (measured: a 4096-step loop is ~10 us)",
     ("std/drivers/fn.c", "params[sizeof(unsigned) * 8]"): "a compiled function's parameters: one bit each of the strictness set",
     ("std/drivers/fn.c", ">= 9223372036854775808"): "2^63 in the GPU kernels' copy of i64.h's floor (THE GPU): the same definition, in GLSL",
+    ("std/drivers/fn.c", "> 255"): "a byte: a compiled wait's call name is read as a string of bytes, and a word outside one is no name (the runner makes that call)",
     ("std/drivers/gpu.c", "vk_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE]"): "the device's name, at Vulkan's own size for it (a diagnostic)",
     ("std/drivers/fn.c", "kts[64]"): "one C statement naming an int (\" lin_kt = a + %d;\"): bounded by the format",
     ("std/drivers/fn.c", "< 12"): "an element written in place runs on threads only when it is at least a dozen operations: less costs more to hand out than to compute -- a policy, never a refusal",

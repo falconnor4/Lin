@@ -754,6 +754,7 @@ static int64_t run_io_body(Net *n, int64_t step_limit) {
           eff_erase(n, eff_pay_now(n, 0));                /* (read in: the turn's state is consumed) */
           net_link(n, (Port){0, 0}, ev, 1);
           io_reduce(n, step_limit); did_io = 1;           /* (unpinned: what the turn discarded is reclaimed) */
+          if (lin_io_yield) { lin_io_yield = 0; return LIN_IO_SUSPENDED; }   /* (a turn that waited: its call may hand the host its turn) */
           continue;
         }
       }

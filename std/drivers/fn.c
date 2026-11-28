@@ -5402,6 +5402,14 @@ static Shape td_shape(const char *d, Shape dflt) {   /* what a descriptor says t
     if (td_args(d, ta, 1) == 1) { Shape ed = (dflt.k == 5 && dflt.dt == VEC_DT && dflt.a && dflt.a->n) ? dflt.a->s[0] : es; es = td_shape(ta[0], ed); }
     return es.k ? sh_mk(VEC_DT, 1, &es) : dflt;
   }
+  if (*d == 'L') {                                  /* a list: of what its element's descriptor says */
+    cells_init();
+    if (cells_dt) {
+      if (dflt.k == 5 && dflt.dt == cells_dt && dflt.a) return dflt;
+      Shape es = td_shape(d + 1, (Shape){ 0, NULL, NULL });
+      return sh_mk(cells_dt, 1, &es);
+    }
+  }
   if (*d == 'D') {
     const char *dt = td_dt(d);
     /* (the analysis's shape of the same datatype says what its parameters hold where the declaration may not:
@@ -6033,11 +6041,19 @@ static int fn_reduce_body(Net *n, Port *rx, int nred, int64_t limit, int *change
    builds it as it builds any structure.  A turn is then: read the state in, run, build the effect back -- not the
    step's whole body reduced on the net (measured: a counter at ~240 us a turn on the net).
 
-   The step is a closed function `\s. body`, not a recursive call, so the unit's function is the step under a self
-   binder nothing names (fun_params skips it), built for the compile and taken away after.  Whatever the compile
-   reads but the turn's state -- inputs met inside the step (a vector it closes over), the entry's constant table --
-   is the step's own and the same every turn: kept with the unit, read in again each turn. */
-typedef struct { Compiled *c; int an; int64_t *kt; int nkt; Port *inp; int ninp; } FnStep;
+   The step is a closed function `\s. body`, not a recursive call, so a unit's function is built for the compile around
+   it -- `\self.\s. ...`, the self binder named by nothing (fun_params skips it) -- and taken away after.  Whatever the
+   compile reads but the turn's state -- inputs met inside the step (a vector it closes over), the entry's constant
+   table -- is the step's own and the same every turn: kept with the unit, read in again each turn.
+
+   A TURN THAT WAITS -- a game's frame, `io_wait (ccall "linden_frame" cmds) (\keys. next)` -- ends in a continuation,
+   a closure over the state, which no unit can return.  So that step is compiled as the turn's PARTS, each a unit of
+   the state applying the step's effect to handlers built for it: which effect it is (a number); the call's argument
+   list and its name; and, given the call's answer too, the effect the continuation returns.  A turn is then those
+   units around the call itself, made here (lin_scalar_ops_run, as the runner would), and the net sees only the next
+   effect.  A call nobody here can make -- or an effect that is not a wait -- is the runner's, as before. */
+typedef struct { Compiled *c; int64_t *kt; int nkt; Port *inp; int ninp; } StepPart;
+typedef struct { int an, wait; StepPart whole, code, args, name, cont; } FnStep;
 typedef struct { Entry f; const int64_t *a; int th; int64_t r; } StepCall;
 static void step_call(void *u) { StepCall *k = u; k->r = k->f(k->a, k->th); }
 static int arg_kind(Net *n, Port a) {
@@ -6046,59 +6062,182 @@ static int arg_kind(Net *n, Port a) {
   if (data_value(n, a) && !list_end(n, a)) return 2;
   return 0;
 }
+/* (the wrappers' pieces: plain nodes, linked without queueing -- nothing reduces them, the compile only reads them) */
+static Port sw_lam(Net *n, Port *binder) { Port l = net_alloc(n, LAM, scope_nil()); if (binder) *binder = (Port){l.node, 1}; else net_link(n, (Port){l.node, 1}, net_alloc(n, ERA, scope_nil()), 0); return l; }
+static Port sw_app(Net *n, Port f, Port a) { Port p = net_alloc(n, APP, scope_nil()); net_link(n, (Port){p.node, 0}, f, 0); net_link(n, (Port){p.node, 2}, a, 0); return (Port){p.node, 1}; }
+/* `\f1..fk. body(fields)`: body is given the fields' binder ports (k of them) and returns the body's port */
+typedef Port (*SwBody)(Net *n, Port *f, int k, void *u);
+static Port sw_fields(Net *n, int k, SwBody body, void *u) {
+  Port lam[3], f[3];
+  for (int j = 0; j < k; j++) lam[j] = sw_lam(n, &f[j]);
+  for (int j = 0; j + 1 < k; j++) net_link(n, (Port){lam[j].node, 2}, (Port){lam[j + 1].node, 0}, 0);
+  Port b = body(n, f, k, u);
+  net_link(n, (Port){lam[k - 1].node, 2}, b, 0);
+  return (Port){lam[0].node, 0};
+}
+static void sw_drop(Net *n, Port *f, int k) { for (int j = 0; j < k; j++) net_link(n, f[j], net_alloc(n, ERA, scope_nil()), 0); }
+static Port sw_num(Net *n, Port *f, int k, void *u) { sw_drop(n, f, k); return net_alloc_scott(n, (int64_t)(intptr_t)u); }
+/* the eff_done value, `\d0..d5. ((\_c (d0 0)) ID)`: the continuation unit's answer where the effect is not a wait */
+static int64_t io_ctor(int i) { for (int64_t k = 1; lin_ctor_info(k); k++) { const LinCtor *c = lin_ctor_info(k); if (!strcmp(c->dt, "_Io") && c->i == i && c->m == 6) return k; } return 0; }
+static Port sw_done(Net *n, Port *f, int k, void *u) {
+  (void)u; sw_drop(n, f, k);
+  Port d[6], dl[6];
+  for (int j = 0; j < 6; j++) dl[j] = sw_lam(n, j == 0 ? &d[0] : NULL);
+  for (int j = 0; j + 1 < 6; j++) net_link(n, (Port){dl[j].node, 2}, (Port){dl[j + 1].node, 0}, 0);
+  Port m = sw_lam(n, NULL);
+  net_link(n, (Port){m.node, 2}, sw_app(n, d[0], net_alloc_scott(n, 0)), 0);
+  net_link(n, (Port){dl[5].node, 2}, sw_app(n, (Port){m.node, 0}, net_alloc_scott(n, io_ctor(0))), 0);
+  return (Port){dl[0].node, 0};
+}
+/* the wait's own handler, for each part: its source applied to a projection of `\name.\args.` (the call's shape,
+   `\_ffi.\_ret.((_ffi name) args)`), or its continuation applied to the answer */
+typedef struct { int part; Port x; } SwWait;
+static Port sw_wait(Net *n, Port *f, int k, void *u) {
+  (void)k; SwWait *w = u;
+  if (w->part == 3) { net_link(n, f[0], net_alloc(n, ERA, scope_nil()), 0); return sw_app(n, f[1], w->x); }
+  net_link(n, f[1], net_alloc(n, ERA, scope_nil()), 0);
+  Port nm, as; Port l1 = sw_lam(n, &nm), l2 = sw_lam(n, &as);
+  net_link(n, (Port){l1.node, 2}, (Port){l2.node, 0}, 0);
+  if (w->part == 1) { net_link(n, nm, net_alloc(n, ERA, scope_nil()), 0); net_link(n, (Port){l2.node, 2}, as, 0); }
+  else { net_link(n, as, net_alloc(n, ERA, scope_nil()), 0); net_link(n, (Port){l2.node, 2}, nm, 0); }
+  return sw_app(n, sw_app(n, f[0], (Port){l1.node, 0}), net_alloc_scott(n, 0));
+}
+enum { SP_WHOLE = -1, SP_CODE = 0, SP_ARGS = 1, SP_NAME = 2, SP_CONT = 3 };
+static int step_part(Net *n, int holder, Port arg, int an, int part, StepPart *out, int want_kind) {
+  Port step = W(n, (Port){holder, 0});
+  Port G = sw_lam(n, NULL), wv, xv = {-1, 0};
+  Port Lw = sw_lam(n, &wv), Lx = part == SP_CONT ? sw_lam(n, &xv) : (Port){-1, 0};
+  net_link(n, (Port){G.node, 2}, (Port){Lw.node, 0}, 0);
+  if (Lx.node >= 0) net_link(n, (Port){Lw.node, 2}, (Port){Lx.node, 0}, 0);
+  Port inner = Lx.node >= 0 ? (Port){Lx.node, 2} : (Port){Lw.node, 2};
+  Port As = net_alloc(n, APP, scope_nil());
+  net_link(n, (Port){As.node, 0}, step, 0);               /* (the step, moved here for the compile) */
+  net_link(n, (Port){As.node, 2}, wv, 0);
+  Port body = (Port){As.node, 1};
+  if (part != SP_WHOLE) {
+    static const int npay[6] = { 1, 2, 3, 2, 2, 1 };    /* (std/io.lin's fields, as readback counts them) */
+    for (int i = 0; i < 6; i++) {
+      Port h;
+      if (i == 3 && part != SP_CODE) { SwWait w = { part, xv }; h = sw_fields(n, 2, sw_wait, &w); }
+      else if (part == SP_CODE) h = sw_fields(n, npay[i], sw_num, (void *)(intptr_t)i);
+      else if (part == SP_CONT) h = sw_fields(n, npay[i], sw_done, NULL);
+      else h = sw_fields(n, npay[i], sw_num, (void *)0);   /* (not a wait: the code part says so first) */
+      body = sw_app(n, body, h);
+    }
+  }
+  net_link(n, inner, body, 0);
+  int rm = root_mode; root_mode = 0; cx_n = 0;
+  Port ap[2] = { arg, arg }; int ann[2] = { an, 1 }, car = part == SP_CONT ? 2 : 1;
+  failed = 0; fuel = 1000000;                           /* (the arity reads a returned constructor's marker: an evaluation) */
+  Compiled *c = fun_arity(G.node) == car ? compile_pref(n, G.node, ap, ann, car) : NULL;
+  root_mode = rm;
+  net_link(n, (Port){holder, 0}, W(n, (Port){As.node, 0}), 0);   /* (the step back on its holder) */
+  n->wire[As.node * 3] = NONE;                          /* (the wrapper is garbage now: the sweep takes it) */
+  if (!c || ann[0] != an || (want_kind == 5 ? c->kind != 5 || c->res.k != 5 : c->kind == 5 && c->res.k != 1)) { DBG("step: part %d declined (%s, the state read as %d, kind %d, result %d)\n", part, c ? "compiled" : "no unit", ann[0], c ? c->kind : -1, c ? c->res.k : -1); if (c && c->res.k == 5) DBG("step: (its result: %s)\n", c->res.dt ? c->res.dt : "?"); return 0; }
+  memset(out, 0, sizeof *out); out->c = c;
+  out->nkt = kt_n; if (kt_n) { out->kt = malloc(sizeof *out->kt * (size_t)kt_n); memcpy(out->kt, kt_val, sizeof *out->kt * (size_t)kt_n); }
+  out->ninp = n_inp; if (n_inp) { out->inp = malloc(sizeof *out->inp * (size_t)n_inp); memcpy(out->inp, inp_port, sizeof *out->inp * (size_t)n_inp); }
+  return 1;
+}
 void *lin_fn_step_compile(Net *n, int holder, Port arg) {
   N = n;
   if (fn_off < 0) fn_off = getenv("LIN_FN_OFF") != NULL;
   if (fn_off || getenv("LIN_STEP_OFF")) return NULL;
-  Port step = W(n, (Port){holder, 0});
-  if (!is(n, step, LAM, 0)) return NULL;
+  if (!is(n, W(n, (Port){holder, 0}), LAM, 0)) return NULL;
   int an = arg_kind(n, arg);
   if (!an) { DBG("step: the state is neither a number nor data\n"); return NULL; }
-  Port G = net_alloc(n, LAM, n->scope[step.node]), e = net_alloc(n, ERA, n->scope[step.node]);
-  net_link(n, (Port){G.node, 1}, e, 0);
-  net_link(n, (Port){G.node, 2}, step, 0);
-  int rm = root_mode; root_mode = 0; cx_n = 0;
-  Port ap[1] = { arg }; int ann[1] = { an };
+  FnStep *u = calloc(1, sizeof *u); u->an = an;
   DBG("step: compiling the loop's step (the state %s)\n", an == 1 ? "a number" : "data");
-  failed = 0; fuel = 1000000;                        /* (the arity reads a returned constructor's marker: an evaluation) */
-  Compiled *c = fun_arity(G.node) == 1 ? compile_pref(n, G.node, ap, ann, 1) : NULL;
-  root_mode = rm;
-  net_link(n, (Port){holder, 0}, W(n, (Port){G.node, 2}), 0);   /* (the step back on its holder; the wrapper goes) */
-  for (int k = 0; k < 3; k++) n->wire[G.node * 3 + k] = NONE;
-  n->wire[e.node * 3] = NONE;
-  net_drop(n, G.node); net_drop(n, e.node);
-  if (!c || ann[0] != an || c->kind != 5) { DBG("step: declined%s\n", c ? " (the unit is not the effect)" : ""); return NULL; }
-  FnStep *u = calloc(1, sizeof *u);
-  u->c = c; u->an = an;
-  u->nkt = kt_n; if (kt_n) { u->kt = malloc(sizeof *u->kt * (size_t)kt_n); memcpy(u->kt, kt_val, sizeof *u->kt * (size_t)kt_n); }
-  u->ninp = n_inp; if (n_inp) { u->inp = malloc(sizeof *u->inp * (size_t)n_inp); memcpy(u->inp, inp_port, sizeof *u->inp * (size_t)n_inp); }
-  DBG("step: compiled (%d constant%s, %d input%s)\n", u->nkt, u->nkt == 1 ? "" : "s", u->ninp, u->ninp == 1 ? "" : "s");
-  return u;
-}
-/* one turn: 1 and the effect built at *val, or 0 -- the net runs this turn (the state changed kind, a guard fired) */
-int lin_fn_step_run(Net *n, void *h, Port arg, Port *val) {
-  FnStep *u = h; Compiled *c = u->c;
-  N = n;
-  if (arg_kind(n, arg) != u->an) return 0;
-  int64_t *xa = malloc(sizeof *xa * (size_t)(2 + u->ninp + u->nkt)); int nn = 0, pi = 0;
-  Marsh M; memset(&M, 0, sizeof M); M.n = n; M.c = c; M.steps0 = n->steps;
-  if (u->an == 1) { net_read_i64(n, arg, &xa[nn++]); pi++; }
-  else if (!c->npsh || c->psh[0].k == 0) { xa[nn++] = 0; pi++; }
-  else { xa[nn++] = marshal(&M, arg, c->psh[0]); pi++; }
-  for (int i = 0; i < u->ninp && !M.bad; i++, pi++) {
-    if (pi >= c->npsh) { M.bad = 1; break; }
-    xa[nn++] = marshal(&M, u->inp[i], c->psh[pi]);
+  if (step_part(n, holder, arg, an, SP_WHOLE, &u->whole, 5)) { DBG("step: compiled\n"); return u; }
+  if (!getenv("LIN_STEP_WAIT_OFF") && io_ctor(0)) {
+    DBG("step: as a turn that waits\n");
+    if (step_part(n, holder, arg, an, SP_CODE, &u->code, 1) && step_part(n, holder, arg, an, SP_ARGS, &u->args, 5) &&
+        step_part(n, holder, arg, an, SP_NAME, &u->name, 5) && step_part(n, holder, arg, an, SP_CONT, &u->cont, 5)) {
+      u->wait = 1; DBG("step: compiled as its parts\n"); return u;
+    }
   }
-  if (M.bad) { ms_free(&M); free(xa); DBG("step: the state could not be read in\n"); return 0; }
-  for (int i = 0; i < u->nkt; i++) xa[nn++] = u->kt[i];
+  DBG("step: declined\n");
+  free(u);
+  return NULL;
+}
+/* one part's call: 1 and its word at *r, or 0 (the state could not be read in, or the guard fired) */
+static int part_run(Net *n, StepPart *p, int an, Port arg, int nx, int64_t x, int64_t *r, Marsh *M) {
+  Compiled *c = p->c;
+  int64_t *xa = malloc(sizeof *xa * (size_t)(3 + p->ninp + p->nkt)); int nn = 0, pi = 0;
+  memset(M, 0, sizeof *M); M->n = n; M->c = c; M->steps0 = n->steps;
+  if (an == 1) { net_read_i64(n, arg, &xa[nn++]); pi++; }
+  else if (!c->npsh || c->psh[0].k == 0) { xa[nn++] = 0; pi++; }
+  else { xa[nn++] = marshal(M, arg, c->psh[0]); pi++; }
+  if (nx) { xa[nn++] = x; pi++; }
+  for (int i = 0; i < p->ninp && !M->bad; i++, pi++) {
+    if (pi >= c->npsh) { M->bad = 1; break; }
+    xa[nn++] = marshal(M, p->inp[i], c->psh[pi]);
+  }
+  if (M->bad) { ms_free(M); free(xa); DBG("step: the state could not be read in (%d inputs, %d shapes, state shape %d)\n", p->ninp, c->npsh, c->npsh ? c->psh[0].k : -1); return 0; }
+  for (int i = 0; i < p->nkt; i++) xa[nn++] = p->kt[i];
   extern int lin_threads;
   int th = lin_threads > 0 ? lin_threads : (int)sysconf(_SC_NPROCESSORS_ONLN);
-  int64_t r;
   StepCall sc = { c->here, xa, th, 0 };
-  if (c->here && big_call(step_call, &sc)) r = sc.r; else r = c->fn(xa, th);
+  if (c->here && big_call(step_call, &sc)) *r = sc.r; else *r = c->fn(xa, th);
   free(xa);
-  if (c->aborted && *c->aborted) { ms_free(&M); DBG("step: the guard fired\n"); return 0; }
-  Port v = result_port(n, c, r);
+  if (c->aborted && *c->aborted) { ms_free(M); DBG("step: the guard fired\n"); return 0; }
+  return 1;
+}
+/* a list-of-words result, as words (malloc'd); its arena released */
+static int64_t *part_words(StepPart *p, int64_t r, int64_t *len) {
+  Compiled *c = p->c; Shape s = c->res;
+  cells_init();
+  int64_t cap = 64, k = 0, *v = NULL;
+  if (s.k == 5 && cells_dt && s.dt == cells_dt) {
+    v = malloc(sizeof *v * (size_t)cap);
+    for (int64_t w = r;;) {
+      const int64_t *f; const LinCtor *ci = rd_word(cells_dt, w, &f);
+      if (!ci || (ci->k != 0 && ci->k != 2)) { free(v); v = NULL; break; }
+      if (ci->k == 0) break;
+      if (k == cap) v = realloc(v, sizeof *v * (size_t)(cap *= 2));
+      v[k++] = f[0]; w = f[1];
+    }
+  }
+  if (c->release) c->release();
+  *len = k;
+  return v;
+}
+/* one turn: 1 and the effect built at *val, or 0 -- the net runs this turn (the state changed kind, a guard fired,
+   a wait this driver cannot make) */
+int lin_fn_step_run(Net *n, void *h, Port arg, Port *val) {
+  FnStep *u = h; Marsh M;
+  N = n;
+  if (arg_kind(n, arg) != u->an) return 0;
+  int64_t r;
+  if (!u->wait) {
+    if (!part_run(n, &u->whole, u->an, arg, 0, 0, &r, &M)) return 0;
+    Port v = result_port(n, u->whole.c, r);
+    ms_free(&M);
+    if (v.node < 0) return 0;
+    *val = v; return 1;
+  }
+  if (!part_run(n, &u->code, u->an, arg, 0, 0, &r, &M)) return 0;
+  if (u->code.c->kind == 5 && u->code.c->release) u->code.c->release();
+  ms_free(&M);
+  if (r != 3) return 0;                                 /* (not a wait this turn: the runner's) */
+  int64_t na, nl;
+  if (!part_run(n, &u->args, u->an, arg, 0, 0, &r, &M)) return 0;
+  int64_t *av = part_words(&u->args, r, &na); ms_free(&M);
+  if (!av) return 0;
+  if (!part_run(n, &u->name, u->an, arg, 0, 0, &r, &M)) { free(av); return 0; }
+  int64_t *nv = part_words(&u->name, r, &nl); ms_free(&M);
+  if (!nv) { free(av); return 0; }
+  char *nm = malloc((size_t)nl + 1); int okn = nl > 0;
+  for (int64_t i = 0; i < nl; i++) { if (nv[i] <= 0 || nv[i] > 255) okn = 0; nm[i] = (char)nv[i]; }
+  nm[nl] = 0; free(nv);
+  int64_t ans = 0; int ak = 0;
+  int made = okn && lin_scalar_ops_run(nm, (int)na, av, &ans, &ak) && (ak == 1 || ak == 4);
+  if (!made) DBG("step: the wait's call `%s` is not one this driver makes\n", nm);
+  free(nm); free(av);
+  if (!made) return 0;
+  /* the call is made: the turn is the continuation's from here (a guard firing now would make the call twice) */
+  if (!part_run(n, &u->cont, u->an, arg, 1, ans, &r, &M)) { fprintf(stderr, "lin: a loop turn's continuation could not run compiled after its call was made\n"); return 0; }
+  Port v = result_port(n, u->cont.c, r);
   ms_free(&M);
   if (v.node < 0) return 0;
   *val = v;

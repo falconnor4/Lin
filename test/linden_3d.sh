@@ -39,11 +39,19 @@ fi
 grep -q "elements are a GPU kernel" "$TMP/dflt.log" || { echo "FAIL: the pixel loop was not written as a kernel"; fail=1; }
 folds=$(grep -c "folded a call" "$TMP/dflt.log")
 units=$(ls "$TMP/cache-dflt"/fn-*.so 2>/dev/null | wc -l)
-[ "$folds" -ge "$FRAMES" ] || { echo "FAIL: $folds frames compiled, of $FRAMES"; fail=1; }
-# (frame 0's camera has values that coincide -- a zero angle, a zero length -- so its table is shaped apart: two units;
-#  and the scene is a constant, evaluated once before the first frame (main.c, def_precompile): a third, of its own)
-[ "$units" -le 3 ] || { echo "FAIL: $units units compiled for $FRAMES frames: the frame is compiled again every frame"; fail=1; }
+# The loop's turn is compiled whole (std/drivers/fn.c, A LOOP'S STEP): a turn that waits is four units -- which
+# effect, the call's arguments, its name, the continuation -- compiled once for the run, and no frame folds a call
+# of its own.  Without it (LIN_STEP_OFF) each frame's picture is a call folded, and frame 0's camera has values
+# that coincide -- a zero angle, a zero length -- so its table is shaped apart: two units.  The scene is a constant,
+# evaluated once before the first frame (main.c, def_precompile): one more, of its own.
+if grep -q "step: compiled as its parts" "$TMP/dflt.log"; then
+  allow=6; what="the loop's turn compiled"
+else
+  allow=3; what="each frame a call folded"
+  [ "$folds" -ge "$FRAMES" ] || { echo "FAIL: $folds frames compiled, of $FRAMES"; fail=1; }
+fi
+[ "$units" -le $allow ] || { echo "FAIL: $units units compiled for $FRAMES frames: the frame is compiled again every frame"; fail=1; }
 where="the CPU's threads (no Vulkan device)"
 grep -q "kernels run on" "$TMP/dflt.log" && where="the GPU ($(sed -n 's/.*kernels run on \(.*\)/\1/p' "$TMP/dflt.log" | head -1))"
 [ $fail = 0 ] || exit 1
-echo "linden_3d: OK ($FRAMES frames identical on $where, on the CPU threads, and with the constants compiled in; $units units for the run)"
+echo "linden_3d: OK ($FRAMES frames identical on $where, on the CPU threads, and with the constants compiled in; $what, $units units for the run)"
