@@ -1183,20 +1183,6 @@ static const Net *res_net; static Port res_at;
    cells, 878k steps in 32 s, quadratic).  It is found from the top: inner forces' roots are gone when it runs. */
 static const Net *floor_net; static Port floor_port;
 static int64_t walk_steps;   /* demand-walk steps, for LIN_WAVE_STATS (`walked=`): what test/net_walk.sh holds down */
-/* What a variable of `lam` waits on: `lam` itself if it is applied, or the abstraction whose body it is, outward,
-   until one is -- its principal port, for the walk to fire -- or the application an abstraction on the way is the
-   argument of (the walk goes on from its result); {-1} when none is (a function's own body). */
-static Port applied_binder(const Net *n, int lam) {
-  for (int k = 0; k < 64; k++) {
-    Port q = WIRE(n, ((Port){lam, 0}));
-    if (q.node < 0 || q.node >= n->nn || n->dead[q.node]) break;
-    if (q.port == 0 && (n->tag[q.node] == APP || n->tag[q.node] == DUP)) return (Port){lam, 0};   /* (applied, or being copied) */
-    if (q.port == 2 && n->tag[q.node] == LAM) { lam = q.node; continue; }
-    if (q.port == 2 && n->tag[q.node] == APP) return (Port){q.node, 1};   /* an argument: the application it waits in */
-    break;
-  }
-  return (Port){-1, 0};
-}
 static void net_mark_demand(Net *n) {
   int first = -1;
   if (floor_net == n) {
@@ -1229,12 +1215,7 @@ static void net_mark_demand(Net *n) {
       int t = n->tag[u];
       if (t == ROOT) { p = WIRE(n, p); continue; }
       if (t == ERA) break;
-      /* binder / body: a thunk until applied -- unless it IS applied.  A walk up a spine whose head is a
-         variable arrives at its binder, and a shared net can reach the body of an abstraction without passing the
-         application that binds it (through fans: measured, an io loop's float state stuck on a variable of a
-         soft-float meaning whose β was never demanded).  That β is what the head is waiting for. */
-      if (t == LAM && p.port == 1) { p = applied_binder(n, u); if (p.node < 0) break; continue; }
-      if (t == LAM && p.port != 0) break;
+      if (t == LAM && p.port != 0) break;               /* binder / body: a thunk until applied */
       if (t == APP && p.port != 0) { p = WIRE(n, ((Port){u, 0})); continue; }  /* result -> function */
       if (t == DUP && p.port != 0) { p = WIRE(n, ((Port){u, 0})); continue; }  /* aux -> sharing point */
       /* At a principal port: WHNF if nothing faces it, a redex pair if a principal does.  Marking
@@ -1242,7 +1223,7 @@ static void net_mark_demand(Net *n) {
       Port q = WIRE(n, p);
       if (q.node >= 0 && q.node < n->nn && q.port == 0 && !n->dead[q.node]) {
         int qt = n->tag[q.node];
-        if ((t == LAM && (qt == APP || qt == DUP)) || (t != LAM && (qt == LAM || qt == DUP)) || (t == DUP && qt == APP)) {
+        if ((t == LAM && (qt == APP || qt == DUP)) || (t != LAM && (qt == LAM || qt == DUP))) {
           if (n->dem[q.node] != stamp) { n->vport[q.node] = 0; if (n->act_of[q.node] >= 0) dem_put(n, q.node); }
           n->dem[q.node] = stamp;
           if (r == first) {                                /* the walk's tip: remember where to resume */
@@ -1282,7 +1263,6 @@ static int walk_reaches_redex(Net *n, Port p) {
     int t = n->tag[u];
     if (t == ROOT) { p = WIRE(n, p); continue; }
     if (t == ERA) return 1;                          /* (the walk marks it, and a queued pair of marked ends fires) */
-    if (t == LAM && p.port == 1) return applied_binder(n, u).node >= 0;   /* (see net_mark_demand) */
     if (t == LAM && p.port != 0) return 0;
     if ((t == APP || t == DUP) && p.port != 0) { p = WIRE(n, ((Port){u, 0})); continue; }
     Port q = WIRE(n, p);
@@ -1509,7 +1489,6 @@ static int64_t net_reduce_body(Net *n, int64_t limit) {
   memset(slices, 0, sizeof slices); memset(scaps, 0, sizeof scaps); memset(have, 0, sizeof have);
   Port *cand = NULL; int cand_cap = 0, cand_cnt = 0; int *owned = NULL; int own_cap = 0;   /* offered / per-pair ownership */
   LinClaim claimed[nsl];   /* a VLA like its neighbours: a force enters here once per observation (net_force), so a malloc/free per force is pure per-entry cost, and `have[]` already gates every read of it */
-  int handed = 0, retried = 0;
   while (n->steps < limit) {
     int changed = 0;
     era_drain(n);
@@ -1617,7 +1596,6 @@ static int64_t net_reduce_body(Net *n, int64_t limit) {
         }
       }
 
-      handed = 0; for (int di = 0; di < ndrv; di++) if (scnts[di]) handed = 1;
       int real_base = 0;
       for (int i = 0; i < base_cnt; i += 2)
         if (n->tag[base_rx[i].node] != ROOT && n->tag[base_rx[i+1].node] != ROOT) real_base++;
@@ -1642,12 +1620,7 @@ static int64_t net_reduce_body(Net *n, int64_t limit) {
       if (lin_wstats) { wv_waves++; wv_fired += base_cnt / 2; if (real_base > wv_max) wv_max = real_base; if (wtotal > wv_width) wv_width = wtotal; }
       /* The snapshot and slices are consumed; their slots become reusable only now. */
       if (!nested_reduce) net_flush_free(n);
-      /* A WAVE THAT MOVED NOTHING BUT HANDED PAIRS TO A DRIVER gets one more: a driver may leave a pair queued to
-         wait for the rest of the net (arith's not-ready fold, op_defer), and it decides that the wait is over by
-         seeing a wave in which nothing else moved -- without that wave the pair was stranded, and the force that
-         asked for it returned with its redex still there (measured: an io loop's float state, folded by nothing). */
-      if (changed == before) { if (handed && !retried) { retried = 1; continue; } break; }
-      retried = 0;
+      if (changed == before) break;
     }
     era_drain(n);
     if (changed == 0) break;
