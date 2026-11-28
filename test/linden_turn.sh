@@ -13,19 +13,28 @@ FRAMES=90
 if [ ! -f examples/linden/linden.so ]; then
   make -s examples/linden/linden.so >/dev/null 2>&1 || { echo "linden_turn: SKIP (examples/linden/linden.so cannot be built)"; exit 0; }
 fi
-render() {   # tag, env... -> $TMP/<tag>.ppm, the debug log in $TMP/<tag>.log
-  local tag=$1; shift
-  env "$@" LINDEN_HEADLESS=1 LINDEN_FRAMES=$FRAMES LINDEN_PPM="$TMP/$tag.ppm" LIN_NATIVE_CACHE="$TMP/cache-$tag" \
-    LIN_FN_DEBUG=1 timeout 600 "$LIN_BIN" examples/linden/leaves.lin >"$TMP/$tag.log" 2>&1
+render() {   # tag, game, frames, env... -> $TMP/<tag>.ppm, the debug log in $TMP/<tag>.log
+  local tag=$1 game=$2 frames=$3; shift 3
+  env "$@" LINDEN_HEADLESS=1 LINDEN_FRAMES=$frames LINDEN_PPM="$TMP/$tag.ppm" LIN_NATIVE_CACHE="$TMP/cache-$tag" \
+    LIN_FN_DEBUG=1 timeout 600 "$LIN_BIN" examples/linden/$game.lin >"$TMP/$tag.log" 2>&1
 }
 fail=0
-render turn X=1
-render net LIN_STEP_WAIT_OFF=1
-for t in turn net; do
+render turn leaves $FRAMES X=1
+render net leaves $FRAMES LIN_STEP_WAIT_OFF=1
+# wisps.lin: its world holds floats and a list of wisps, its picture a rendered view.  On the net its turns are
+# too slow to run far, so the two agree over a couple of frames (walking and turning: LINDEN_KEYS), and the
+# compiled turn then runs a long game of its own.
+render wturn wisps 2 LINDEN_KEYS=6,6
+render wnet wisps 2 LINDEN_KEYS=6,6 LIN_STEP_WAIT_OFF=1
+render wlong wisps 240 LINDEN_KEYS=6,6,6,4,4,4,2,16,4100,4
+for t in turn net wturn wnet wlong; do
   [ -s "$TMP/$t.ppm" ] || { echo "FAIL: the $t run drew no picture"; tail -5 "$TMP/$t.log"; fail=1; }
 done
 [ $fail = 0 ] && { cmp -s "$TMP/turn.ppm" "$TMP/net.ppm" || { echo "FAIL: the compiled turn's picture differs from the net's"; fail=1; }; }
-grep -q "step: compiled as its parts" "$TMP/turn.log" || { echo "FAIL: the frame's turn was not compiled"; grep "step:" "$TMP/turn.log"; fail=1; }
+[ $fail = 0 ] && { cmp -s "$TMP/wturn.ppm" "$TMP/wnet.ppm" || { echo "FAIL: wisps' compiled turn draws something else than the net"; fail=1; }; }
+for t in turn wturn wlong; do
+  grep -q "step: compiled as its parts" "$TMP/$t.log" || { echo "FAIL: the $t run's turn was not compiled"; grep "step:" "$TMP/$t.log"; fail=1; }
+done
 grep -q "step: compiled as its parts" "$TMP/net.log" && { echo "FAIL: LIN_STEP_WAIT_OFF still compiled the turn"; fail=1; }
 [ $fail = 0 ] || exit 1
-echo "linden_turn: OK ($FRAMES frames of leaves.lin: the compiled turn draws what the net draws)"
+echo "linden_turn: OK ($FRAMES frames of leaves.lin and 2 of wisps.lin: the compiled turn draws what the net draws; 240 frames of wisps compiled)"

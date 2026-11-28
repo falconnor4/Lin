@@ -3707,6 +3707,15 @@ static Shape field_shape(Shape **fld, int64_t nctor, const LinCtor *c, int64_t i
     Shape s = desc_shape(&d, v.a->s, v.a->n);
     if (s.k) return s;
   }
+  /* a datatype of no parameters says all its fields hold in its declaration -- a world's `(ws list Wisp)` is a list
+     of wisps wherever the unit stores lists of other things too (the analysis's table joins every list's head) */
+  if (v.k == 5 && c && v.dt == c->dt && c->fdesc && !dt_nparams(c->dt)) {
+    const char *d = c->fdesc; for (int i = 0; i < j && *d; i++) d = fd_skip(d);
+    Shape s = desc_shape(&d, NULL, 0);
+    int known = s.k == 1 || s.k == 3 || (s.k == 5 && s.dt);
+    if (known && s.k == 5 && s.a) for (int i = 0; i < s.a->n; i++) if (!s.a->s[i].k) known = 0;
+    if (known && (!g.k || g.k == s.k)) return s;
+  }
   return g;
 }
 static Shape **sh_par, *sh_fun; static unsigned char *sh_built; static int sh_changed, sh_bad, sh_optimistic, sh_guessed, sh_no_fallback;
@@ -4804,7 +4813,7 @@ static Compiled *compile_fn_ex1(Net *n, int F, const Port *aports, const int *an
     for (int k = 0; safe && k < nesh; k++)            /* a data argument is read in by its shape: it must be known */
       if (esh[k].k && !shape_closed(esh[k], 0)) {
         safe = 0; DBG("declined: argument %d's shape is not known (%d %s)\n", k, esh[k].k, esh[k].dt ? esh[k].dt : "");
-        if (dbg > 1) for (int64_t c = 1; c <= sh_nctor; c++) { const LinCtor *ci = lin_ctor_info(c); if (!sh_built[c]) continue; DBG("  %s built:", ci->name); for (int jj = 0; jj < ci->k; jj++) fprintf(stderr, " %d", sh_fld[c][jj].k); fprintf(stderr, "\n"); }
+        if (dbg > 1) for (int64_t c = 1; c <= sh_nctor; c++) { const LinCtor *ci = lin_ctor_info(c); if (!sh_built[c]) continue; DBG("  %s built:", ci->name); for (int jj = 0; jj < ci->k; jj++) { fprintf(stderr, " "); sh_print(sh_fld[c][jj]); } fprintf(stderr, "\n"); }
       }
     int numeric = safe && (result_numeric(entry) || rshape.k == 1 || rshape.k == 3);   /* (a field read the shapes prove a number) */
     int rbool = rshape.k == 3 || (rshape.k != 1 && entry->kind == 3);
@@ -6188,12 +6197,17 @@ static int64_t *part_words(StepPart *p, int64_t r, int64_t *len) {
   Compiled *c = p->c; Shape s = c->res;
   cells_init();
   int64_t cap = 64, k = 0, *v = NULL;
-  if (s.k == 5 && cells_dt && s.dt == cells_dt) {
+  if (s.k == 5 && cells_dt && s.dt == cells_dt && cell_cons && cell_nil) {
+    /* (the list's layout read once, not per cell: a frame's picture is tens of thousands of them) */
+    int box = 0, untag = dt_boxed(cells_dt, &box) == 1;
     v = malloc(sizeof *v * (size_t)cap);
     for (int64_t w = r;;) {
-      const int64_t *f; const LinCtor *ci = rd_word(cells_dt, w, &f);
-      if (!ci || (ci->k != 0 && ci->k != 2)) { free(v); v = NULL; break; }
-      if (ci->k == 0) break;
+      const int64_t *f;
+      if (w & 1) { if ((w >> 1) != cell_nil->i) { free(v); v = NULL; } break; }
+      if (!w) { free(v); v = NULL; break; }
+      const int64_t *blk = (const int64_t *)w;
+      if (untag) { if (box != cell_cons->i) { free(v); v = NULL; break; } f = blk; }
+      else { if (blk[0] != cell_cons->i) { free(v); v = NULL; break; } f = blk + 1; }
       if (k == cap) v = realloc(v, sizeof *v * (size_t)(cap *= 2));
       v[k++] = f[0]; w = f[1];
     }
